@@ -13,7 +13,7 @@
 | 文档 | 内容 | 原章节 |
 |------|------|--------|
 | [01-overview.md](./docs/01-overview.md) | 总纲：背景、核心特性、架构图、职责划分、方案对比、未来扩展 | 1 + 2 + 7 + 8 |
-| [02-agent-package.md](./docs/02-agent-package.md) | Agent 打包格式：包结构、签名机制、manifest.json | 3.1 |
+| [02-agent-package.md](./docs/02-agent-package.md) | Agent 打包格式：包结构、签名机制、manifest.toml | 3.1 |
 | [03-agent-runtime.md](./docs/03-agent-runtime.md) | Agent Runtime：启动方式、内部结构、主循环 | 3.2 |
 | [04-gateway.md](./docs/04-gateway.md) | Gateway 组件：PackageManager、Lifecycle、IntentRouter、沙箱、Vault、Budget、Rate | 3.3 |
 | [05-memory.md](./docs/05-memory.md) | Memory 分层架构：工作记忆、私有 Grafeo、跨 Agent 知识共享 | 3.4 |
@@ -29,7 +29,7 @@
 
 **想了解整体架构？** → 从 [01-overview.md](./docs/01-overview.md) 开始
 
-**想开发 Agent 包？** → 看 [02-agent-package.md](./docs/02-agent-package.md) 的 manifest.json 和签名流程
+**想开发 Agent 包？** → 看 [02-agent-package.md](./docs/02-agent-package.md) 的 manifest.toml 和签名流程
 
 **想理解运行时机制？** → [03-agent-runtime.md](./docs/03-agent-runtime.md) 的主循环图
 

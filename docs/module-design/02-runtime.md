@@ -144,7 +144,7 @@ crates/rollball-runtime/
     │   └── rag.rs                 # RAG 检索管线
     ├── skills/
     │   ├── mod.rs
-    │   ├── loader.rs              # SKILL.toml + SKILL.md 解析
+    │   ├── loader.rs              # SKILL.md 解析（YAML frontmatter + Markdown body）
     │   └── registry.rs            # Skill 注册表
     ├── ipc/
     │   ├── mod.rs

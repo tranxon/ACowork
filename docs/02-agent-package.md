@@ -10,7 +10,7 @@
 
 ```
 <agent_id>.agent
-├── manifest.json          # 必需，元数据 + LLM 配置 + 权限 + 工具声明
+├── manifest.toml          # 必需，元数据 + LLM 配置 + 权限 + 工具声明
 ├── prompts/               # System prompt 模板
 │   ├── system.md          # 主系统提示词
 │   ├── tools.md           # 工具使用说明
@@ -18,10 +18,11 @@
 ├── config/                # 默认配置文件（用户可覆盖）
 │   └── settings.toml
 ├── data/                  # 初始数据（如空 Grafeo 快照）
-├── skills/                # Skill 定义
+├── skills/                # Skill 定义（兼容 Agent Skills 开放标准）
 │   └── weather-query/
-│       ├── SKILL.toml
-│       └── SKILL.md
+│       ├── SKILL.md       # YAML frontmatter（---）+ Markdown body
+│       ├── scripts/       # 可选：Skill 脚本
+│       └── references/    # 可选：补充文档
 ├── tools/                 # 自定义工具（WASM，可选）
 │   └── image_filter.wasm
 └── resources/             # 图标、本地化等
@@ -39,7 +40,7 @@
 .agent ZIP 结构：
 ┌──────────────────────┐
 │   ZIP Local Files    │  ← 被签名覆盖
-│   (manifest.json,    │
+│   (manifest.toml,    │
 │    prompts/, skills/)│
 ├──────────────────────┤
 │   Signing Block      │  ← 签名数据（在 Central Dir 之前）
@@ -156,97 +157,105 @@ rollball-verify --verbose ./build/com.example.weather.agent
 #       Valid from: 2026-01-01 to 2027-01-01
 ```
 
-## 3. manifest.json 架构
+## 3. manifest.toml 架构
 
-```json
-{
-  "agent_id": "com.example.weather",
-  "version": "1.0.0",
-  "name": "Weather Agent",
-  "description": "查询实时天气并建议穿衣",
-  "author": "example@domain.com",
-  "runtime_version": "^1.0.0",
-  "permissions": [
+```toml
+agent_id = "com.example.weather"
+version = "1.0.0"
+name = "Weather Agent"
+description = "查询实时天气并建议穿衣"
+author = "example@domain.com"
+runtime_version = "^1.0.0"
+
+permissions = [
     "network:https://api.weather.com",
     "filesystem:read:~/Documents",
     "memory:read",
     "memory:write",
-    "intent:send:com.example.calendar"
-  ],
-  "triggers": [
-    {"type": "schedule", "cron": "0 7 * * *"},
-    {"type": "message", "pattern": "天气|weather"}
-  ],
-  "llm": {
-    "default_provider": "openai",
-    "providers": {
-      "openai": {
-        "model": "gpt-4o",
-        "api_key_ref": "vault:openai_key",
-        "base_url": "https://api.openai.com/v1",
-        "params": {"temperature": 0.7, "max_tokens": 4096}
-      },
-      "claude": {
-        "model": "claude-sonnet-4-20250514",
-        "api_key_ref": "vault:anthropic_key"
-      },
-      "fallback": {
-        "provider": "ollama",
-        "model": "qwen3:8b",
-        "base_url": "http://localhost:11434"
-      }
-    },
-    "routing": {
-      "strategy": "cost_priority",
-      "fallback_on_error": true,
-      "retry": {"max_attempts": 3, "backoff": "exponential"}
-    },
-    "budget": {
-      "daily_token_limit": 100000,
-      "daily_cost_limit_usd": 5.0,
-      "action_on_exhaust": "fallback_to_local"
-    }
-  },
-  "memory": {
-    "sync_mode": "auto",
-    "cache_ttl": 3600,
-    "required": false
-  },
-  "identity_deps": ["name", "city", "language", "timezone"],
-  "tools": [
-    {
-      "name": "http_get",
-      "type": "builtin",
-      "permissions": ["network:https://api.weather.com"]
-    },
-    {
-      "name": "image_filter",
-      "type": "wasm",
-      "binary": "./tools/image_filter.wasm",
-      "permissions": ["memory:read"],
-      "resource_limits": {
-        "max_memory_mb": 50,
-        "max_execution_time_ms": 5000
-      }
-    }
-  ],
-  "capabilities": {
-    "query_weather": {
-      "input": {"city": "string", "date": "date?"},
-      "output": {"temperature": "float", "condition": "string"}
-    }
-  },
-  "resources": {
-    "max_memory_mb": 200,
-    "max_cpu_percent": 50,
-    "network": true
-  },
-  "sandbox": {
-    "enable": true,
-    "allow_ptrace": false,
-    "read_only_root": true
-  }
-}
+    "intent:send:com.example.calendar",
+]
+
+[[triggers]]
+type = "schedule"
+cron = "0 7 * * *"
+
+[[triggers]]
+type = "message"
+pattern = "天气|weather"
+
+[llm]
+default_provider = "openai"
+
+[llm.providers.openai]
+model = "gpt-4o"
+api_key_ref = "vault:openai_key"
+base_url = "https://api.openai.com/v1"
+
+[llm.providers.openai.params]
+temperature = 0.7
+max_tokens = 4096
+
+[llm.providers.claude]
+model = "claude-sonnet-4-20250514"
+api_key_ref = "vault:anthropic_key"
+
+[llm.providers.fallback]
+provider = "ollama"
+model = "qwen3:8b"
+base_url = "http://localhost:11434"
+
+[llm.routing]
+strategy = "cost_priority"
+fallback_on_error = true
+
+[llm.routing.retry]
+max_attempts = 3
+backoff = "exponential"
+
+[llm.budget]
+daily_token_limit = 100000
+daily_cost_limit_usd = 5.0
+action_on_exhaust = "fallback_to_local"
+
+[memory]
+sync_mode = "auto"
+cache_ttl = 3600
+required = false
+
+identity_deps = ["name", "city", "language", "timezone"]
+
+[[tools]]
+name = "http_get"
+type = "builtin"
+permissions = ["network:https://api.weather.com"]
+
+[[tools]]
+name = "image_filter"
+type = "wasm"
+binary = "./tools/image_filter.wasm"
+permissions = ["memory:read"]
+
+[tools.resource_limits]
+max_memory_mb = 50
+max_execution_time_ms = 5000
+
+[capabilities.query_weather.input]
+city = "string"
+date = "date?"
+
+[capabilities.query_weather.output]
+temperature = "float"
+condition = "string"
+
+[resources]
+max_memory_mb = 200
+max_cpu_percent = 50
+network = true
+
+[sandbox]
+enable = true
+allow_ptrace = false
+read_only_root = true
 ```
 
 **关键字段说明：**

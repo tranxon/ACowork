@@ -19,7 +19,7 @@
 | Binder IPC | Gateway Service API | 进程间通信（传输层由平台实现） |
 | ContentProvider | 系统 Agent (com.rollball.system) | 系统级数据服务（身份、偏好等） |
 | PackageManagerService | Package Manager | 安装/卸载 |
-| AndroidManifest.xml | manifest.json | 权限声明 |
+| AndroidManifest.xml | manifest.toml | 权限声明 |
 
 ## 2. 核心特性
 
@@ -129,7 +129,7 @@
 ---
 
 > 详细设计见各子文档：
-> - [02-agent-package.md](./02-agent-package.md) — Agent 打包格式、签名机制、manifest.json
+> - [02-agent-package.md](./02-agent-package.md) — Agent 打包格式、签名机制、manifest.toml
 > - [03-agent-runtime.md](./03-agent-runtime.md) — Agent Runtime 内部结构与主循环
 > - [04-gateway.md](./04-gateway.md) — Gateway 组件详细设计
 > - [05-memory.md](./05-memory.md) — Memory 分层架构

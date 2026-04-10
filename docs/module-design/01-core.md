@@ -11,7 +11,7 @@ crates/rollball-core/
 ├── Cargo.toml
 └── src/
     ├── lib.rs                 # crate 入口 + re-exports
-    ├── manifest.rs            # manifest.json 数据结构
+    ├── manifest.rs            # manifest.toml 数据结构
     ├── protocol.rs            # Gateway Service API 消息定义
     ├── intent.rs              # Intent 消息结构
     ├── permission.rs          # 权限声明与校验类型
@@ -37,7 +37,7 @@ crates/rollball-core/
 ### manifest.rs
 
 ```rust
-/// .agent 包的 manifest.json 完整数据结构
+/// .agent 包的 manifest.toml 完整数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
     pub agent_id: String,

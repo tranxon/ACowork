@@ -16,7 +16,7 @@ Rollball 不只是 Agent 运行时，更是 Agent 全生命周期平台——从
 │  │ Agent    │  │ 对话调试  │  │ Skill    │  │ 发布向导     │  │
 │  │ 管理器   │  │ 面板     │  │ 编辑器   │  │              │  │
 │  │          │  │          │  │          │  │ · 配置检查   │  │
-│  │ · 克隆   │  │ · 消息流  │  │ · TOML   │  │ · 签名打包   │  │
+│  │ · 克隆   │  │ · 消息流  │  │ · SKILL  │  │ · 签名打包   │  │
 │  │ · 安装   │  │ · 断点    │  │ · Prompt │  │ · 仓库上传   │  │
 │  │ · 删除   │  │ · 编辑    │  │ · 测试   │  │ · 本地安装   │  │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────────┘  │
@@ -71,7 +71,7 @@ Desktop App 调用 Gateway API: AgentClone { source_id, mode, new_id }
 Gateway:
   ├─ 读取源 Agent 工作区
   ├─ 按模式复制文件:
-  │   ├─ 骨架: manifest.json (清除 agent_id, 置为 new_id)
+  │   ├─ 骨架: manifest.toml (清除 agent_id, 置为 new_id)
   │   │         prompts/ (完整复制)
   │   │         config/ (完整复制)
   │   │         tools/ (完整复制)
@@ -478,7 +478,7 @@ Desktop App 发送 DebuggerReloadSkills { skill_name: Some("weather-query") }
        ▼
 Agent Runtime:
   ├─ 重新扫描 skills/ 目录
-  ├─ 解析更新后的 SKILL.toml + SKILL.md
+  ├─ 解析更新后的 SKILL.md（YAML frontmatter + Markdown body）
   ├─ 更新 Prompt Builder 中的 skill 描述
   └─ 下一次迭代生效
 ```
@@ -492,17 +492,15 @@ Desktop App 内置 Skill 编辑器，提供结构化编辑和预览：
 │                                                       │
 │  Skill: weather-query                                 │
 │                                                       │
-│  ┌─ SKILL.toml ─────────────────────────────────┐    │
-│  │ [skill]                                      │    │
-│  │ name = "weather-query"                       │    │
-│  │ description = "查询城市天气"                   │    │
-│  │ trigger = { pattern = "天气|weather" }       │    │
+│  ┌─ SKILL.md ───────────────────────────────────┐    │
+│  │ ---                                          │    │
+│  │ name: weather-query                          │    │
+│  │ description: 查询城市天气并给出建议            │    │
+│  │ allowed-tools: Bash(http:*) Read             │    │
+│  │ ---                                          │    │
 │  │                                              │    │
-│  │ [skill.tools]                                │    │
-│  │ required = ["http_get"]                      │    │
-│  └──────────────────────────────────────────────┘    │
-│                                                       │
-│  ┌─ SKILL.md (Prompt) ──────────────────────────┐    │
+│  │ # Weather Query Skill                        │    │
+│  │                                              │    │
 │  │ 当用户询问天气时：                              │    │
 │  │ 1. 使用 http_get 调用天气 API                  │    │
 │  │ 2. 解析返回的 JSON 数据                        │    │
@@ -523,9 +521,9 @@ Desktop App 内置 Skill 编辑器，提供结构化编辑和预览：
 
 ```
 Step 1: 检查
-  ├─ manifest.json 完整性校验
+  ├─ manifest.toml 完整性校验
   ├─ 必填字段检查（agent_id, version, name, runtime_version）
-  ├─ skills/ 目录下每个 SKILL.toml 格式校验
+  ├─ skills/ 目录下每个 SKILL.md 格式校验（YAML frontmatter 完整性）
   ├─ prompts/ 目录下文件存在性检查
   └─ 权限声明合理性检查
 
