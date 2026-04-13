@@ -1,6 +1,6 @@
 # AGENTS.md — RollBall.AI
 
-This is a **design and research repository** for RollBall.AI — an AI agent platform architecture. The implementation lives in separate repositories (e.g., `zeroclaw`).
+This is a **design and research repository** for RollBall.AI — an AI agent platform architecture. The implementation is not ready yet, because the design documents are still being discussed. 'zeroclaw' is a reference implementation only, and is not the source of truth for RollBall.AI design.
 
 ## Repository Contents
 
@@ -40,3 +40,4 @@ RollBall.AI is an agent platform modeled after Android:
 - Agent packages are **declarative only** — no executable code in `.agent` bundles
 - ZeroClaw is a **reference implementation**, not the source of truth for RollBall design
 - Documents use version v3.x — do not mix terminology from older versions
+- Code reviews should follow [.opencode/style-guide.md](./.opencode/style-guide.md) — Rust security best practices, memory safety, and ZeroClaw project standards
