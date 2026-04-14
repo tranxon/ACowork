@@ -16,7 +16,8 @@ crates/rollball-grafeo/
     ├── semantic/
     │   ├── mod.rs                 # 语义记忆（知识图谱）
     │   ├── graph.rs               # LPG 图操作（节点/边/属性）
-    │   └── inference.rs           # 知识推理与合并
+    │   ├── inference.rs           # 知识推理与合并
+    │   └── skill.rs               # Skill 经验节点（Draft/Iteration/Execution/Experience）
     ├── fulltext/
     │   ├── mod.rs                 # 全文检索
     │   └── bm25.rs                # BM25 倒排索引
@@ -57,6 +58,30 @@ impl Grafeo {
     
     /// 语义记忆：图查询
     pub fn query_knowledge(&self, query: &str) -> Result<Vec<KnowledgeNode>>;
+    
+    /// Skill 经验：获取已发布 Skill 的经验数据
+    pub fn get_skill_experience(&self, skill_id: &str) -> Result<Option<SkillExperience>>;
+    
+    /// Skill 经验：写入/更新经验数据
+    pub fn update_skill_experience(&self, experience: &SkillExperience) -> Result<()>;
+    
+    /// Skill 草稿：创建/更新调试草稿
+    pub fn store_skill_draft(&self, draft: &SkillDraft) -> Result<()>;
+    
+    /// Skill 草稿：追加迭代版本
+    pub fn store_skill_iteration(&self, iteration: &SkillIteration) -> Result<()>;
+    
+    /// Skill 草稿：记录执行结果
+    pub fn store_skill_execution(&self, execution: &SkillExecution) -> Result<()>;
+    
+    /// Skill 草稿：获取草稿及其完整迭代历史
+    pub fn get_skill_draft(&self, draft_id: &str) -> Result<SkillDraft>;
+    
+    /// Skill 草稿：获取草稿的所有迭代版本
+    pub fn get_skill_iterations(&self, draft_id: &str) -> Result<Vec<SkillIteration>>;
+    
+    /// Skill 草稿：获取迭代版本的执行记录
+    pub fn get_skill_executions(&self, iteration_id: &str) -> Result<Vec<SkillExecution>>;
     
     /// 混合搜索：融合向量 + 全文检索
     pub fn hybrid_search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;

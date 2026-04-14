@@ -252,6 +252,12 @@ author = "example@domain.com"
 runtime_version = "^1.0.0"
 system = false                   # true = 系统 Agent，必须 Platform Key 签名
 
+# 平台兼容性声明（可选，默认全平台）
+# 采用 Android uses-feature 的 required/optional 模式
+[target_platforms]
+desktop = true                   # 或 "required"（等同 true）
+mobile = "optional"              # true / false / "required" / "optional"
+
 permissions = [
     "network:https://api.weather.com",
     "filesystem:read:~/Documents",
@@ -351,6 +357,7 @@ read_only_root = true
 - `manifest_version`：包格式版本号，用于未来格式演进时的兼容性判断。当前为 `1`。
 - `platform.runtime_version`：声明兼容的 Agent Runtime 版本（语义版本约束）。
 - `platform.system`：是否为系统 Agent。`true` 时必须由 Platform Key 签名，否则拒绝安装。独立于普通元数据，因为它是安全敏感的平台属性。
+- `target_platforms`：平台兼容性声明。采用 Android uses-feature 的 required/optional 模式。不声明时默认全平台支持。值：`true` / `"required"` = 必需（移动端安装被拒绝）、`false` = 不支持、`"optional"` = 可选（移动端行为降级）。详见 12-tool-system.md 第 2.1-2.2 节。
 - `llm.providers`：支持配置多个 LLM Provider，每个引用 Vault 中的密钥。
 - `llm.routing.strategy`：LLM 路由策略（cost_priority / quality_priority / latency_priority）。
 - `llm.budget`：Token 和费用预算，超限后的动作（stop / fallback_to_local / warn）。
@@ -368,6 +375,8 @@ read_only_root = true
 | `system` 字段位置 | `[platform]` 节 | 安全敏感属性与普通元数据隔离，减少误操作风险 |
 | 包大小上限 | 50 MB | 防止包含过大 Grafeo 快照或 WASM 工具导致安装问题 |
 | capabilities 语法 | 映射（非数组） | action 名称天然唯一，映射比数组更直观 |
+| 平台兼容性模型 | Android uses-feature（required/optional） | shell 在移动端不可用、文件操作受限，需要声明式降级机制 |
+| target_platforms 默认 | 全平台 | 不声明的 Agent 假设全平台兼容，由运行时检测实际可用性 |
 
 ## 5. 未来扩展（Phase 5+）
 
