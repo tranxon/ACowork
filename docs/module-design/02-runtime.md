@@ -221,24 +221,26 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 | Agent 协作 | `delegate` / `swarm` 在同一进程内 | `delegate` 可跨进程（通过 Gateway Intent） |
 | 第三方集成 | 运行时配置决定 | manifest 声明 + 运行时配置双重控制 |
 
-**完整工具分类与 ZeroClaw 对应关系**：
+**工具分类参考（完整设计空间，实际激活取决于 manifest 声明）**：
 
-| 分类 | Rollball 目录 | 工具数 | ZeroClaw 对应 |
-|------|-------------|--------|-------------|
-| 核心 Builtin | `builtin/` | 17 | shell, file_read/write/edit, glob_search, content_search, calculator, http_request, web_fetch, web_search, weather, git_operations, pdf_read, screenshot, image_info, image_gen, llm_task |
-| Memory | `memory/` | 5 | memory_store, memory_recall, memory_forget, memory_export, memory_purge（后端从 SQLite 换成 Grafeo） |
-| 定时任务 | `schedule/` | 7 | schedule, cron_add/list/remove/update/run/runs |
-| 第三方集成 | `integration/` | 8 | notion, jira, google_workspace, microsoft365, linkedin, discord_search, pushover, composio |
-| Agent 协作 | `agent/` | 6 | delegate, swarm（增强跨进程） + intent_send, intent_receive, ask_user, escalate（新增） |
-| 浏览器 | `browser/` | 3 | browser_open, browser, browser_delegate |
-| 开发者 | `dev/` | 4 | claude_code, codex_cli, gemini_cli, opencode_cli |
-| Skill 动态 | `skill/` | 2 | skill_tool, skill_http |
-| MCP 协议 | `mcp/` | 5 | mcp_client, mcp_tool, mcp_transport, mcp_protocol, mcp_deferred |
-| WASM 沙箱 | `wasm/` | 2 | sandbox 封装（Phase 3） |
-| SOP 流程 | `sop/` | 5 | sop_list/execute/advance/approve/status |
-| 其他工具 | 根级 | ~14 | pipeline, knowledge, canvas, poll, reaction, model_switch, model_routing, proxy_config, backup, data_management, security_ops, cloud_ops/patterns, project_intel, report_template, workspace, verifiable_intent, tool_search, node |
+> ⚠️ 以下表格是参考 ZeroClaw 的完整工具池设计，描述的是 Rollball 工具系统的**完整设计空间**。Rollball **Phase 1 仅实现 13 个内置工具**（memory×2, network×2, web×2, shell, file×4, intent×1, search×1）和 WASM 工具。其余类别（Notion/Jira 集成、browser、dev tools、MCP、SOP 等）为 Phase 2+ 按需实现。
 
-**总计**：~78 个核心工具 + 动态工具（MCP/Skill/WASM/Node 实例数取决于配置）
+| 分类 | Rollball 目录 | 工具数 | ZeroClaw 对应 | Phase 1 实现 |
+|------|-------------|--------|-------------|------------|
+| 核心 Builtin | `builtin/` | 17 | shell, file_read/write/edit, glob_search, content_search, calculator, http_request, web_fetch, web_search, weather, git_operations, pdf_read, screenshot, image_info, image_gen, llm_task | ✅ 13 个（weather/git/pdf/screenshot/image 系移到 WASM 或 Agent 内置） |
+| Memory | `memory/` | 5 | memory_store/recall/forget/export/purge | ✅ 已实现（Grafeo 后端） |
+| 定时任务 | `schedule/` | 7 | schedule, cron 系列 | ❌ Phase 2 |
+| 第三方集成 | `integration/` | 8 | notion, jira, google_workspace 等 | ❌ 由独立 Agent 提供 |
+| Agent 协作 | `agent/` | 6 | delegate, swarm + intent_send, intent_receive, ask_user, escalate | ✅ intent_send/receive 已实现，其余 Phase 2 |
+| 浏览器 | `browser/` | 3 | browser 系列 | ❌ Phase 2+ |
+| 开发者 | `dev/` | 4 | claude_code, codex_cli 等 | ❌ Phase 2+ |
+| Skill 动态 | `skill/` | 2 | skill_tool, skill_http | ✅ Phase 1 |
+| MCP 协议 | `mcp/` | 5 | mcp_client 系列 | ❌ Phase 2 |
+| WASM 沙箱 | `wasm/` | 2 | sandbox 封装 | ✅ Phase 1 |
+| SOP 流程 | `sop/` | 5 | sop_list/execute 等 | ❌ Phase 2+ |
+| 其他工具 | 根级 | ~14 | pipeline, knowledge 等 | ❌ Phase 2+ |
+
+**Phase 1 工具策略**：内置工具仅限平台基础设施级，SaaS 集成由独立 Agent 提供（不内置）。详见 [12-tool-system.md](../12-tool-system.md)。
 
 ### `ipc/transport.rs` — 传输层抽象
 

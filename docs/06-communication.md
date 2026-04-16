@@ -40,7 +40,9 @@ Rollball 平台有三条独立的通信通道，各司其职：
 | **HTTP API** | Desktop App / CLI | REST + WebSocket | Agent 管理、对话、Vault、配置 |
 | **Debug Protocol** | Desktop App (DevMode) | JSON-RPC 2.0 over WebSocket | 步进调试、录制回放、Skill 热加载 |
 
-Socket API 的详细定义见第 1-2 节；HTTP API 的详细定义见 [04-gateway.md](./04-gateway.md) 第 9 节。Debug Protocol 详见 [10-debug-protocol.md](./10-debug-protocol.md)。
+Socket API（第 1-2 节）：Agent Runtime 与 Gateway 之间的二进制帧 IPC。
+HTTP API（[04-gateway.md](./04-gateway.md) §9）：Desktop App / CLI 对 Gateway 的 REST/WebSocket 调用。
+Debug Protocol（[10-debug-protocol.md](./10-debug-protocol.md)）：Desktop App DevMode 对 Agent Runtime 的 JSON-RPC 2.0 WebSocket 调试通道。
 
 ## 1. Gateway Service API（Socket API）
 

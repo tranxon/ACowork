@@ -49,9 +49,10 @@
 
 ## 7. WASM 工具沙箱
 
-- 自定义工具以 WASM 形式运行在 Wasmtime 沙箱中。
-- 天然内存隔离、系统调用限制、资源限制（max_memory_mb, max_execution_time_ms）。
-- 无法访问宿主进程内存、文件系统、网络。
+- 自定义工具以 WASM 形式运行在 **Wasmtime** 沙箱中（WASI Preview 2，Linux/macOS/Windows 均使用 Wasmtime，详见 [12-tool-system.md](../12-tool-system.md)）。
+- WASM 工具**无法访问**宿主进程内存、文件系统、网络。
+- 天然内存隔离，Wasmtime 强制限制系统调用和资源（max_memory_mb、max_execution_time_ms、fuel metering 防死循环）。
+- WASM 工具也不可见 API Key（Gateway 通过 `secrecy::SecretString` 注入，WASM 无权读取）。
 
 ## 8. 沙箱强化
 
