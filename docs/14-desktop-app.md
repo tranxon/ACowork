@@ -1,6 +1,6 @@
 # Desktop App（桌面应用）
 
-> 版本：v3.1 | 更新日期：2026-04-14
+> 版本：v3.4 | 更新日期：2026-04-16
 
 ---
 
@@ -223,7 +223,7 @@ Step 1: 欢迎
 
 Step 2: Gateway 连接
   ├─ 自动检测本地 Gateway（尝试连接默认地址）
-  ├─ 检测成功 → 跳到 Step 4
+  ├─ 检测成功 → 跳到 Step 3
   └─ 检测失败 → 提示启动 Gateway 或配置地址
 
 Step 3: API Key 配置
@@ -231,13 +231,20 @@ Step 3: API Key 配置
   ├─ 手动输入（Provider + Key）
   └─ 后续在 Settings 中管理
 
-Step 4: 安装第一个 Agent
+Step 4: 身份信息采集（必填 → 选填）
+  ├─ 必填：称谓 / 语言 / 时区
+  ├─ 选填：城市 / 职业 / 沟通偏好
+  └─ 完成后调用 Gateway HTTP API 写入系统 Agent
+
+Step 5: 安装第一个 Agent
   ├─ 从本地仓库选择
   ├─ 拖放 .agent 文件安装
   └─ 跳过（之后手动安装）
 
 → 进入主界面
 ```
+
+> Step 4 的数据流向：Desktop App → `POST /api/system/identity` → Gateway → 系统 Agent → `identity_store` → 写入系统 Agent 私有 Grafeo。详见 07-system-agent.md §4。
 
 ### 4.2 Agent 管理
 
@@ -493,8 +500,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tokio-tungstenite = "0.26"    # WebSocket (Debug Protocol)
 anyhow = "1"
 directories = "6"
-
-rollball-core = { path = "../../crates/rollball-core" }
+# Desktop App 不依赖 rollball 内部 crate —— 通过 Gateway HTTP API / Debug WebSocket 与平台通信，
+# 所有数据结构按 API 契约独立定义，保持 UI 层与平台核心的解耦。
 
 [features]
 default = ["custom-protocol"]

@@ -1,6 +1,6 @@
 # 安全设计
 
-> 版本：v3.0 | 更新日期：2026-04-09
+> 版本：v3.4 | 更新日期：2026-04-16
 
 ---
 
@@ -44,7 +44,7 @@
 
 - Key 集中存储在 Gateway Vault（加密）。
 - 不通过环境变量分发（避免 ps/procfs 泄露）。
-- Agent Runtime 启动后通过 Unix Socket 一次性获取，存于进程内存。
+- Agent Runtime 启动后通过 Socket API（Unix Socket / Named Pipe，见 06-communication.md §1.1）一次性获取，存于进程内存。
 - Agent Runtime 是可信二进制，.agent 包无可执行代码，WASM 工具在沙箱内无法读取宿主内存。
 
 ## 7. WASM 工具沙箱

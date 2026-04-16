@@ -1,6 +1,6 @@
 # 系统 Agent（com.rollball.system）
 
-> 版本：v3.0 | 更新日期：2026-04-09
+> 版本：v3.4 | 更新日期：2026-04-16
 
 ---
 
@@ -86,44 +86,96 @@
 
 ## 3. 冷启动身份注入
 
-新安装的 Agent 首次运行时，如果 manifest 中声明了 `identity_deps`：
+新安装的 Agent 首次运行时，如果 manifest 中声明了 `identity_deps`，Gateway 通过握手协议的 `identity_delivery` 消息将身份信息注入 Agent Runtime：
+
+```
+Agent manifest 声明 identity_deps
+        │
+        ▼
+Gateway 启动前，向系统 Agent 发送 identity:query Intent
+        │
+        ▼
+系统 Agent 从私有 Grafeo 查询，返回字段值和 confidence
+        │
+        ▼
+Gateway 启动 Agent Runtime，建立 Socket 连接
+        │
+        ▼
+握手 step ④：identity_delivery 消息推送身份数据
+        │（消息类型已在 06-communication.md §1.2 定义）
+        ▼
+Agent Runtime 将身份数据写入工作记忆，进入主循环
+```
+
+manifest 声明示例：
 
 ```json
 {
-  "identity_deps": ["name", "city", "language", "timezone"]
+  "identity_deps": ["display_name", "city", "language", "timezone"]
 }
 ```
 
-Gateway 在启动该 Agent 之前，先向系统 Agent 查询这些字段，把结果作为启动上下文注入，Agent 开箱即有用户信息：
+`identity_delivery` 消息格式（见 06-communication.md §1.2）：
 
-```bash
-agent-runtime /path/to/agent-package \
-    --socket /tmp/gateway.sock \
-    --agent-id com.example.weather \
-    --identity '{"name":"张三","city":"Shanghai","language":"zh-CN","timezone":"Asia/Shanghai"}'
+```json
+{
+  "type": "identity_delivery",
+  "identity": {
+    "display_name": "张三",
+    "city": "Shanghai",
+    "language": "zh-CN",
+    "timezone": "Asia/Shanghai"
+  },
+  "confidence": {
+    "display_name": 1.0,
+    "city": 1.0,
+    "language": 1.0,
+    "timezone": 1.0
+  }
+}
 ```
 
-## 4. 身份信息的获取与更新
+> 注意：用户身份信息**不通过命令行参数传入**（避免 `/proc/<pid>/cmdline` 泄露）。Runtime 启动后通过握手消息获取。
 
-系统 Agent 获取用户身份信息有两条路径：
+## 4. 身份信息的来源
 
-**路径 1：直接对话（默认入口）**
+系统 Agent 获取用户身份信息有三条路径，分层补充而非互斥：
 
-当没有安装任何第三方 Agent 时，系统 Agent 就是用户的交互入口。用户直接和系统 Agent 聊天，系统 Agent 的 LLM 自然地识别并提取身份信息，存入私有 Grafeo。
+### 渠道一：Onboarding 注册（主要，高确定性）
+
+首次启动 Desktop App 或 CLI 时强制采集，采集完成后写入系统 Agent：
 
 ```
-用户: "你好，我叫张三，住北京"
-          │
-          ▼
-系统 Agent LLM:
-  - 识别到身份信息
-  - 调用内置工具 identity_store(name="张三", city="北京", confidence=0.95)
-  - 写入私有 Grafeo 语义记忆
+Desktop App Onboarding → Gateway HTTP API → 系统 Agent
+                                              │
+                                              ▼
+                                    identity_store(
+                                      field = "display_name",
+                                      value = "张三",
+                                      confidence = 1.0,
+                                      source = "onboarding"
+                                    )
 ```
 
-**路径 2：从其他 Agent 的对话中学习**
+**采集字段分级：**
 
-用户身份信息往往在和具体 Agent 聊天时自然透露。其他 Agent 判断有身份信息变更时，向系统 Agent 发送轻量的身份更新 Intent：
+| 级别 | 字段 | 说明 |
+|------|------|------|
+| 必填 | `display_name` | 称谓（用户希望怎么被称呼） |
+| 必填 | `language` | 语言偏好（如 zh-CN、en-US），影响 LLM prompt 语言 |
+| 必填 | `timezone` | 时区（如 Asia/Shanghai），影响时间显示 |
+| 选填 | `city` | 所在城市 |
+| 选填 | `occupation` | 职业/领域 |
+| 选填 | `communication_style` | 沟通偏好（简洁/详细/正式） |
+| 选填 | `custom` | 开放扩展字段（如编辑器偏好等） |
+
+Onboarding 采集的数据 confidence = 1.0（用户主动声明，确定性最高）。
+
+Desktop App 的 Onboarding 流程见 14-desktop-app.md §4.1。
+
+### 渠道二：Agent 主动询问（补充，中确定性）
+
+Agent 在运行时识别到缺失关键身份字段（如"你在哪个城市？"），向系统 Agent 发送 `identity:update` Intent：
 
 ```json
 {
@@ -131,16 +183,45 @@ agent-runtime /path/to/agent-package \
   "target": "com.rollball.system",
   "action": "identity:update",
   "params": {
-    "updates": { "city": "Shanghai" },
-    "evidence": "用户说'我刚搬到上海'",
-    "confidence": 0.9
+    "field": "city",
+    "value": "Shanghai",
+    "evidence": "用户说'我住在北京'",
+    "confidence": 0.85,
+    "source": "agent_question"
   }
 }
 ```
 
-**关键设计：系统 Agent 用 LLM 做二次判断，而非用户仲裁。**
+### 渠道三：自然对话沉淀（辅助，低确定性）
 
-系统 Agent 收到提报后，用自己的 LLM 判断信息的语义——区分"搬家"和"出差"，判断信息是否值得更新。这是用 LLM 推理替代用户确认弹窗，不打扰用户体验：
+Agent 在日常对话中自动提取用户透露的身份信息，通过 `identity:update` Intent 汇报：
+
+```json
+{
+  "type": "intent",
+  "target": "com.rollball.system",
+  "action": "identity:update",
+  "params": {
+    "field": "occupation",
+    "value": "软件工程师",
+    "evidence": "用户提到'我是做后端开发的'",
+    "confidence": 0.7,
+    "source": "conversation"
+  }
+}
+```
+
+### 统一写入：identity_store 工具
+
+三条路径最终都调用 `identity_store` 工具（系统 Agent 专用，第 14 个内置工具，见 12-tool-system.md §2.3），由系统 Agent 的 LLM 做二次质量判断：
+
+```
+来源提报 → 系统 Agent LLM 判断 → identity_store 写入
+  ├─ 语义有效 → 写入 Grafeo
+  └─ 语义模糊 → 拿不准就不更新
+```
+
+**LLM 二次判断示例：**
 
 ```
 提报: city = "Shanghai", evidence = "我刚搬到上海", confidence = 0.9
@@ -153,8 +234,6 @@ agent-runtime /path/to/agent-package \
           ▼
 系统 Agent LLM: "出差" → 临时行程，非居住地变更 → 不更新 user.city
 ```
-
-系统 Agent 的 prompt 被设定为保守策略——拿不准就不更新，而不是错误更新。
 
 ## 5. 变更通知（observe 机制）
 

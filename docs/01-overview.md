@@ -1,6 +1,6 @@
 # Agent as APP：平台设计总纲
 
-> 版本：v3.0 | 更新日期：2026-04-09
+> 版本：v3.4 | 更新日期：2026-04-16
 
 ---
 
@@ -27,7 +27,7 @@
 - **统一执行引擎**：Agent Runtime 是平台提供的唯一二进制，负责加载 .agent 包并执行 Agent 逻辑（LLM 交互、工具调度、记忆读写）。
 - **进程级隔离**：每个 Agent 由 Gateway 启动为独立 Agent Runtime 进程，拥有独立工作区、私有 Grafeo 数据库、文件系统隔离、可选资源限制（cgroups/容器）。
 - **Agent 自治**：Agent 进程内直连 LLM API、自主执行工具、自主管理权限校验，不依赖 Gateway 代理业务逻辑。
-- **三层五类仿生 Memory**：每个 Agent 内嵌私有 Grafeo，分瞬态层（工作记忆/LLM 上下文）、经历层（情景记忆）、沉淀层（语义+程序+自传体记忆）。系统 Agent 提供身份与偏好等系统级数据服务。云端同步采用 Zone-Based 差异化策略（identity/preferences 强制本地，knowledge/enterprise 允许同步）。
+- **仿生 Memory 系统**：每个 Agent 内嵌私有 Grafeo，采用三层五类仿生分层（瞬态层/经历层/沉淀层），包含遗忘机制（三因子衰减）、隐私分级（PrivacyLevel）、关联扩散检索、记忆生命周期（Retrieve/Inject/Record/Consolidate/Decay/Compact）和内容分类压缩。系统 Agent 提供身份与偏好等系统级数据服务。云端同步全部 Zone 明文同步，平台托管（PrivacyLevel 仅控制打包分享时是否剥离，与同步策略解耦）。
 - **权限声明与授权**：Agent 在清单中声明所需权限（网络、文件、调用其他 Agent 等），Gateway 在启动时配置沙箱，Agent 在运行时自主校验。
 - **跨平台支持**：.agent 包格式和 Gateway Service API 合同跨平台统一，各平台运行时机制（进程模型、传输层、沙箱）可按平台特性适配。
 
@@ -79,9 +79,8 @@
                     ┌─────────────────────────┐
                     │  Memory Sync Service     │
                     │  (云端同步/跨设备)        │
-                    │  - Zone-Based 差异化同步  │
-                    │  - identity/pref: LocalOnly│
-                    │  - knowledge: CloudSync   │
+                    │  - 全部 Zone 明文同步     │
+                    │  - PrivacyLevel 控制打包  │
                     └─────────────────────────┘
 ```
 
@@ -111,7 +110,7 @@
 | 隔离级别 | 进程 + 沙箱 + WASM | 单进程内逻辑隔离 | 单进程内逻辑隔离 | 操作系统容器 |
 | 执行模型 | 统一 Runtime + 声明式包 | 单体二进制 | Node.js 进程 | 容器镜像 |
 | 资源开销 | 极低（空闲可杀死） | 低（常驻 ~5MB） | 中（Node.js 常驻） | 较高 |
-| Memory | 三层五类仿生 Grafeo（瞬态/经历/沉淀 + Zone-Based 同步） | SQLite/PG/Markdown | ContextEngine | 外部数据库 |
+| Memory | 三层五类仿生 Grafeo（遗忘+隐私+生命周期+同步） | SQLite/PG/Markdown | ContextEngine | 外部数据库 |
 | LLM 集成 | Agent 直连 + Gateway 协调 | 内置 Provider | 内置 Provider | 各服务自连 |
 | 分发模型 | 应用商店式 .agent 包 | 代码库/配置 | 代码库/配置 | 镜像仓库 |
 | 跨Agent通信 | Intent + Capability Registry | 无（单 Agent） | 无（单 Agent） | HTTP/gRPC |
