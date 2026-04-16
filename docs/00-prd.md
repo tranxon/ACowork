@@ -473,3 +473,50 @@ PKG-01~05, FMT-01~03, RUN-01~03, RUN-07~09, MEM-01~03, TOL-01, TOL-05, SKL-01~02
 - 得：Runtime 稳定性大幅提升（记忆迭代不影响 Runtime）、存储可替换、可测试性增强（InMemoryStore mock）、扩展通过中间件而非改源码
 - 失：引入一层间接调用（trait dispatch，但 Rust monomorphization 零成本）、概念增加（MemoryManager / MemoryStore / MemoryMiddleware）
 - Phase 1 额外成本：低——trait 定义 + GrafeoStore 实现即可，中间件管线推迟到 Phase 2
+
+### ADR-004：硬件传感器访问架构（远期规划）
+
+**状态**：提议（Phase 5+）
+
+**上下文**：
+
+Rollball 的长期愿景包括支持基于硬件传感器的 Agent（如机器人、IoT 设备）。当前 Tool 系统基于 WASM 沙箱，天然隔离硬件访问，无法满足硬件传感器的适配需求。传感器访问的延迟需求横跨多个数量级（GPS 0.1Hz → IMU 1000Hz+），单一机制无法覆盖。
+
+**决策**：采用分层混合模型，按传感器频率和延迟需求选择不同路径：
+
+1. **低频传感器**（GPS/温度/气压，<1Hz）：**Driver Agent + Intent** 模式。为每类硬件开发专属 Driver Agent，普通 Agent 通过 Intent 请求硬件数据。复用现有 Intent 机制，零新概念。
+
+2. **中频传感器**（摄像头/麦克风，15~60Hz）：**Gateway Hardware Service + IPC** 模式。传感器不是 Agent 自己去读，而是通过 Gateway（可信二进制）作为硬件服务代理。Gateway 管的是"谁能访问"（资源管理），不是"怎么用"（业务逻辑），与 Key Vault 管理 API Key 访问是同一类职责。
+
+3. **高频传感器/执行器**（IMU/电机控制，100Hz+）：**Direct Channel + Shared Memory** 模式。Gateway 只负责授权，授权通过后 Agent Runtime 与硬件建立共享内存通道，后续数据流不经过 Gateway，零 IPC 开销。借鉴 Android Camera2 BufferQueue 和 Audio FAST_TRACK 的零拷贝直通设计。
+
+**manifest 声明扩展**：
+
+```toml
+[hardware]
+requires = [
+    { sensor = "gps", freq = "low" },            # → Intent 模式
+    { sensor = "camera", freq = "mid" },          # → IPC 模式
+    { sensor = "imu", freq = "high", hz = 200 },  # → Direct Channel
+    { actuator = "motor", latency = "realtime" }  # → Direct Channel
+]
+```
+
+**安全机制**：
+
+- 新增签名身份：**Hardware Driver**（Phase 5+），比 Developer 更高权限，Gateway 只允许 Hardware Driver 签名的 Agent 声明 `requires_hardware`
+- Direct Channel 建立前 Gateway 授权，通道建立后 Gateway 不再介入
+- Agent 崩溃时通道由操作系统自动回收（fd 关闭 / shared memory unmap）
+- Agent 行为异常时 Gateway 可主动断开通道
+
+**渐进策略**：
+
+- Phase 1~3：不涉及硬件，当前 WASM 沙箱 + 13 内置工具足够
+- Phase 4：引入 Gateway Hardware Service + 低频 Driver Agent（GPS/蓝牙等）
+- Phase 5+：引入 Direct Channel + Hardware Driver 签名身份 + 高频传感器/执行器
+
+**权衡**：
+
+- 得：统一框架覆盖从纯软件 Agent 到机器人 Agent 的全频谱；分层设计让每层复杂度可控；Gateway 保留资源管理权不失控
+- 失：架构复杂度显著增加（三层硬件访问路径）；Hardware Driver 签名身份引入新的信任链管理；Direct Channel 打破了 Gateway 介入所有交互的一致性
+- 替代方案否决：纯 WASM 扩展（WASI 无法满足实时性）、Native Plugin（打破"无可执行代码"核心原则 + 跨平台噩梦）、纯 Intent 模式（两跳 IPC 延迟不可接受）
