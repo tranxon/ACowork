@@ -26,7 +26,7 @@ Rollball **同时服务于两类用户**：开发者用声明式包（manifest +
 - **开箱即用** — 从仓库安装 Agent，配置 API Key，直接使用。
 - **隐私安全分享** — Agent 可自由分享，Personal/Sensitive 节点自动剥离，只带走"Agent 能力"而非"用户记忆"。
 - **多 Agent 协作** — 通过 Intent 机制，日历 Agent 和天气 Agent 可以协同工作。
-- **跨设备一致** — Grafeo Zone-Based Cloud Sync，身份/偏好跨设备同步。
+- **跨设备一致** — Grafeo 全 Zone 跨设备同步，身份/偏好等私密数据由平台托管（明文存储，与主流互联网平台一致）。Zone 只控制打包分享时的边界，不影响跨设备同步范围。
 
 ## 核心架构
 
@@ -46,7 +46,7 @@ Rollball **同时服务于两类用户**：开发者用声明式包（manifest +
 - **统一执行引擎** — Agent Runtime 是平台提供的唯一二进制，负责加载 `.agent` 包并执行 LLM 交互、工具调度、记忆读写。Agent 直连 LLM API，不经 Gateway 代理。
 - **进程级隔离** — 每个 Agent 由 Gateway 启动为独立进程，拥有独立工作区、私有 Grafeo 数据库、文件系统隔离、可选资源限制。
 - **Agent 自治** — Agent 进程内直连 LLM、自主执行工具、自主管理权限校验。Gateway 只管必须集中化的事（Key 分发、Intent 路由、预算协调）。
-- **仿生 Memory** — 每个 Agent 内嵌私有 Grafeo，三层五类仿生分层（瞬态/经历/沉淀 + 工作记忆/情景/语义/程序/自传体），系统 Agent 提供身份与偏好等系统级数据服务，Zone-Based 差异化云端同步。
+- **仿生 Memory** — 每个 Agent 内嵌私有 Grafeo，三层五类仿生分层（瞬态/经历/沉淀 + 工作记忆/情景/语义/程序/自传体），系统 Agent 提供身份与偏好等系统级数据服务，全部 Zone 跨设备完整同步，Zone 语义仅作用于打包分享边界。
 - **用户间隐私安全分享** — Agent 可自由分享给其他用户，Personal/Sensitive 节点在打包时自动剥离，只带走"Agent 能力"（Skill、行事风格、知识）而非"用户记忆"（偏好、历史、私密信息）。
 - **Intent 通信** — 跨 Agent 通信通过 Gateway 的 Intent Router，支持 Capability Registry、同步/异步模式、变更订阅（observe）。
 - **权限声明与授权** — Agent 在 manifest 中声明所需权限，Gateway 在启动时配置沙箱，Agent 运行时自主校验。
@@ -144,7 +144,7 @@ Rollball **同时服务于两类用户**：开发者用声明式包（manifest +
 | 经历层 | 情景记忆 | 持久化 | Episode 节点、关联扩散检索、内容分类压缩 |
 | 沉淀层 | 语义记忆 + 程序记忆 + 自传体记忆 | 长期 | 知识图谱、跨 Skill 通用行为、六维度自我认知 |
 
-每个 Agent 拥有完全独立的私有 Grafeo，不存在公共数据库。跨 Agent 数据共享通过 Intent 查询和系统 Agent 服务实现。云端同步采用 Zone-Based 策略：identity/preferences Zone 强制本地，knowledge/work Zone 允许云端。
+每个 Agent 拥有完全独立的私有 Grafeo，不存在公共数据库。跨 Agent 数据共享通过 Intent 查询和系统 Agent 服务实现。Grafeo Zone 是打包边界的标记（控制分享时 Personal/Sensitive 数据是否剥离），跨设备同步不受 Zone 影响——全部 Zone 均完整同步。
 
 ## 设计文档
 

@@ -98,7 +98,7 @@ Rollball 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent 
 | MEM-07 | 程序记忆：跨 Skill 的通用行为模式 | P2 | 自学习能力 |
 | MEM-08 | 隐私分级：PrivacyLevel（Public/Personal/Sensitive），LLM 自动判断。控制的是"数据打包分享时是否包含该节点"——Personal/Sensitive 节点在 Agent 分享导出时剥离，Public 节点保留。LLM 上下文中的数据无法从技术上访问控制，只能通过 prompt 约定约束 | P1 | 打包边界隐私保护 |
 | MEM-09 | 离线巩固：空闲时触发专用 LLM 调用，将经历层提炼到沉淀层 | P2 | 记忆质量提升 |
-| MEM-10 | Grafeo Zone-Based Cloud Sync：identity / preferences / knowledge / work 四区均可同步（平台明文托管，多设备体验一致）。enterprise Zone 改名为 work Zone（个人工作记忆，与企业 RAG 无关）。隐私分级与同步策略解耦——PrivacyLevel 控制打包边界，Zone 控制同步分区 | P1 | 多设备同步 |
+| MEM-10 | Grafeo 全 Zone 跨设备完整同步（平台明文托管，多设备体验一致）。enterprise Zone 改名为 work Zone（个人工作记忆，与企业 RAG 无关）。隐私分级与同步策略完全解耦——PrivacyLevel 控制打包边界（分享时 Personal/Sensitive 数据是否剥离），Zone 仅作为打包边界的语义标记，不影响同步范围 | P1 | 多设备同步 |
 | MEM-11 | 内容分类压缩：工件性内容（代码/文件/命令输出）仅存摘要 + ArtifactRef 引用 | P1 | 防 Grafeo 膨胀 |
 | MEM-12 | Embedding 本地生成（ONNX Runtime），离线可用 | P1 | 向量检索前提 |
 
