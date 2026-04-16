@@ -1,6 +1,6 @@
 # Memory 仿生分层架构
 
-> 版本：v3.3 | 更新日期：2026-04-14
+> 版本：v3.4 | 更新日期：2026-04-16
 
 ---
 
@@ -1045,3 +1045,326 @@ Phase 3 增强后：
 | **自我认知** | Manifest 派生 Autobiographical | 自我评估更新 Limitation | HypothesisNode 主动假设验证 |
 | **云端同步** | 无 | 无 | Zone-Based 差异化同步 |
 | **困境覆盖** | 困境二、困境四（完整） | 困境三（部分补全） | 困境三（假设验证）、困境五（情感信号补充） |
+| **可扩展性** | MemoryStore trait + 生命周期阶段定义 | 中间件管线 | 存储后端可替换 |
+
+## 10. 记忆生命周期架构
+
+### 10.1 设计动机
+
+记忆系统是 Rollball Agent 的核心差异化能力——推理能力依赖 LLM，操作能力依赖 Tools，只有记忆系统是 Rollball 自主掌控的。随着平台演进，记忆系统必然经历大量迭代（新检索策略、新遗忘模型、新巩固方式、新存储引擎……）。如果记忆触发点硬编码在 Runtime 主循环里，每次记忆迭代都要改 Runtime 源码，这违反了"Runtime 是稳定执行引擎"的定位。
+
+因此引入**记忆生命周期（Memory Lifecycle）**作为 Runtime 和 Memory 系统之间的标准化接口。Runtime 只负责在固定位置触发生命周期阶段，Memory 系统通过注册 handler 和中间件响应，两者解耦。
+
+### 10.2 生命周期阶段定义
+
+#### 10.2.1 主循环内阶段（同步，由 Runtime 在每轮迭代中触发）
+
+| 阶段 | 触发点 | 输入 | 输出 | 说明 |
+|------|--------|------|------|------|
+| `Retrieve` | 步骤 ② 构建上下文 | 用户消息 + 当前上下文摘要 | `Vec<MemoryContext>` | 记忆检索：hybrid_search + graph_expand |
+| `Inject` | 步骤 ② 构建上下文（Retrieve 之后） | `Vec<MemoryContext>` + Token 预算 | 格式化字符串 | 决定如何将记忆注入 LLM 上下文 |
+| `Record` | 步骤 ⑥ 结果追加历史（异步） | 本轮 user_msg + assistant_reply + tool_results | `()` | 记录本轮交互到经历层 |
+
+#### 10.2.2 后台阶段（异步，由 MemoryManager 独立调度）
+
+| 阶段 | 触发条件 | 输入 | 输出 | 说明 |
+|------|---------|------|------|------|
+| `Consolidate` | 即时提取（每轮 Record 后检查）+ 离线巩固（空闲/阈值） | 未巩固 episode 列表 | 新建/更新的 KnowledgeNode | 巩固管道（§4） |
+| `Decay` | 定时扫描（每小时，可配置） | 当前时间 | `DecayScanResult` | 遗忘衰减（§5） |
+| `Compact` | 存储维护（启动时 + 空闲时） | 存储统计 | 清理数量 | 索引优化、旧 episode 清理、VACUUM |
+
+### 10.3 MemoryStore trait（存储后端抽象）
+
+Runtime 和上层记忆逻辑不直接依赖任何具体存储引擎（rusqlite / Sled / LMDB / 远程服务），而是通过 `MemoryStore` trait 交互。这确保存储方案可替换——Phase 1 用 GrafeoStore（rusqlite），未来可无缝切换。
+
+```rust
+/// 记忆查询参数（替代裸 &str，支持扩展）
+pub struct MemoryQuery {
+    pub query_text: String,
+    pub filters: MemoryFilters,
+    pub limit: usize,
+    pub expand_hops: u8,          // 关联扩散跳数（0 = 不扩散）
+    pub min_score: Option<f32>,   // 最低分数阈值
+}
+
+pub struct MemoryFilters {
+    pub node_types: Vec<NodeTypeFilter>,  // 按节点类型过滤
+    pub privacy_levels: Vec<PrivacyLevel>,// 按隐私级别过滤
+    pub time_range: Option<(DateTime, DateTime)>, // 时间范围
+    pub session_id: Option<String>,       // 按会话过滤
+}
+
+/// 检索结果（统一经历层和沉淀层）
+pub struct SearchResult {
+    pub node: MemoryNode,         // Episode 或 KnowledgeNode
+    pub score: f32,               // 相关性分数
+    pub source: ResultSource,     // DirectMatch / GraphExpansion
+    pub context_tokens: usize,    // 预估 token 数（用于裁剪预算计算）
+}
+
+/// 记忆上下文（Retrieve 阶段的输出、Inject 阶段的输入）
+pub struct MemoryContext {
+    pub content: String,          // 格式化后的记忆内容
+    pub priority: u8,             // 注入优先级（0 = 最高，7 = 最低）
+    pub source: ContextSource,    // 来自哪个认知层
+    pub estimated_tokens: usize,  // 预估 token 数
+}
+
+pub enum ContextSource {
+    Autobiographical,   // 自传体记忆（绝不裁剪）
+    SemanticCore,       // 语义记忆核心事实
+    Procedural,         // 程序记忆
+    UserPreference,     // 用户偏好
+    FailureLesson,      // 失败教训
+    GraphExpansion,     // 关联扩散结果
+    Episodic,           // 经历层情景
+}
+
+/// 记忆存储后端的标准化接口
+/// 实现者可以是 rusqlite / Sled / LMDB / 远程服务 / 内存 mock
+pub trait MemoryStore: Send + Sync {
+    // ── 经历层 ──
+
+    /// 写入交互片段（自动分类内容类型、工件性压缩）
+    fn store_episode(&self, episode: &Episode) -> Result<()>;
+
+    /// 检索情景记忆
+    fn search_episodes(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>>;
+
+    /// 标记情景已巩固
+    fn mark_consolidated(&self, ids: &[String]) -> Result<()>;
+
+    /// 清理已巩固且过期的情景
+    fn cleanup_episodes(&self, older_than: Duration) -> Result<u64>;
+
+    // ── 沉淀层 ──
+
+    /// 写入/更新知识节点（Fact 自动语义去重）
+    fn store_knowledge(&self, node: &KnowledgeNode) -> Result<()>;
+
+    /// 写入/更新程序记忆节点
+    fn store_procedural(&self, node: &ProceduralNode) -> Result<()>;
+
+    /// 写入/更新自传体记忆节点
+    fn store_autobiographical(&self, node: &AutobiographicalNode) -> Result<()>;
+
+    // ── 统一检索 ──
+
+    /// 混合搜索：向量 + 全文 + RRF 融合
+    fn hybrid_search(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>>;
+
+    /// 关联扩散：从种子节点出发，沿图边扩展
+    fn graph_expand(&self, seeds: &[SearchResult], hops: u8) -> Result<Vec<SearchResult>>;
+
+    // ── 遗忘 ──
+
+    /// 衰减扫描（使用传入的配置，支持按 Agent 定制）
+    fn run_decay_scan(&self, config: &DecayConfig) -> Result<DecayScanResult>;
+
+    /// 恢复 Dormant 节点为 Active
+    fn reactivate_node(&self, node_id: &str) -> Result<()>;
+
+    /// 清理过期 Dormant 节点
+    fn purge_expired(&self, max_dormant_age: Duration) -> Result<PurgeResult>;
+
+    // ── 生命周期 ──
+
+    /// 存储健康检查（用于监控和诊断）
+    fn health_check(&self) -> Result<StoreHealth>;
+
+    /// 存储统计信息（节点数、存储大小、索引状态等）
+    fn stats(&self) -> Result<StoreStats>;
+
+    /// 关闭存储（释放资源、刷写 WAL）
+    fn close(&self) -> Result<()>;
+}
+
+/// 存储健康状态
+pub struct StoreHealth {
+    pub is_healthy: bool,
+    pub latency_ms: u64,          // 最近一次操作的延迟
+    pub error_count: u32,         // 最近 N 分钟的错误数
+    pub details: Option<String>,  // 错误详情（仅不健康时有值）
+}
+
+/// 存储统计
+pub struct StoreStats {
+    pub episode_count: u64,
+    pub node_count: u64,          // Active + Dormant
+    pub active_node_count: u64,
+    pub dormant_node_count: u64,
+    pub edge_count: u64,
+    pub storage_size_bytes: u64,
+    pub index_count: usize,       // 向量索引 + 全文索引数量
+}
+
+/// 遗忘配置（支持按 Agent 定制）
+pub struct DecayConfig {
+    pub lambda: f32,              // 衰减速率（默认 0.03）
+    pub floor: f32,               // 最低活跃度（默认 0.05）
+    pub access_per_hit: f32,      // 每次访问增量（默认 0.1）
+    pub boost_cap: f32,           // 历史访问上限（默认 0.5）
+    pub dormant_threshold: f32,   // Active → Dormant 阈值（默认 0.3）
+    pub purge_after: Duration,    // Dormant → Purge 时长（默认 90 天）
+}
+```
+
+**设计要点：**
+
+- `MemoryQuery` 替代裸 `&str`：未来扩展只需加字段（如 `temperature` 控制检索创造性、`recency_boost` 控制时间偏好），不破坏已有实现
+- `MemoryContext` 带 `priority` 和 `estimated_tokens`：Inject 阶段可以直接按优先级和 token 预算裁剪，无需 Runtime 了解记忆内部结构
+- `DecayConfig` 参数化：不同 Agent 可以有不同的遗忘策略（"学习型 Agent"遗忘慢，"工具型 Agent"遗忘快），通过 manifest 配置注入
+- `health_check` + `stats`：为 Desktop App 的记忆管理面板和运维监控提供标准数据接口
+- trait 中不包含任何 rusqlite 类型，实现完全隔离
+
+### 10.4 MemoryManager（中间层）
+
+Runtime 不直接调用 `MemoryStore`，而是通过 `MemoryManager` 这个中间层。`MemoryManager` 是记忆系统的"大脑"——它协调生命周期阶段、管理中间件链、注入配置。
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Agent Runtime 主循环                                         │
+│                                                              │
+│  ② 构建上下文                                                │
+│     └─ memory_manager.retrieve(query) → Vec<MemoryContext>   │
+│     └─ memory_manager.inject(contexts, budget) → String      │
+│  ⑥ 结果追加历史                                              │
+│     └─ memory_manager.record(episode) → ()  [异步]           │
+│                                                              │
+│  后台任务（MemoryManager 内部调度）：                          │
+│     └─ memory_manager.consolidate() → ()                     │
+│     └─ memory_manager.decay() → DecayScanResult              │
+│     └─ memory_manager.compact() → ()                         │
+└──────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│  MemoryManager                                               │
+│                                                              │
+│  ├── Lifecycle Handler Registry                              │
+│  │   └─ 每个阶段可注册多个 handler，按优先级执行              │
+│  │                                                           │
+│  ├── MemoryMiddleware Chain                                  │
+│  │   └─ Record 前后可插入中间件（情感标注/内容过滤/审计）     │
+│  │                                                           │
+│  ├── Config Provider                                         │
+│  │   └─ 从 manifest + 系统默认读取配置，注入到各阶段           │
+│  │                                                           │
+│  └── Event Bus                                               │
+│      └─ 发布 MemoryEvent（记忆写入/遗忘/巩固），供 Desktop App  │
+│         订阅展示或日志系统记录                                 │
+└──────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│  MemoryStore trait                                           │
+│  └─ GrafeoStore (rusqlite，Phase 1 唯一实现)                │
+│     └─ episodic/ + semantic/ + forgetting/ + retrieval/      │
+│  └─ (未来) RemoteMemoryStore (云端分布式存储)                │
+│  └─ (未来) InMemoryStore (测试用 mock)                       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**MemoryManager 核心方法：**
+
+```rust
+pub struct MemoryManager {
+    store: Box<dyn MemoryStore>,
+    middlewares: Vec<Box<dyn MemoryMiddleware>>,
+    config: MemoryConfig,
+    event_bus: MemoryEventBus,
+}
+
+impl MemoryManager {
+    /// 检索记忆（Retrieve 阶段）
+    /// 内部调用 store.hybrid_search + store.graph_expand
+    /// 将 SearchResult 转换为 MemoryContext（带优先级和 token 预估）
+    pub async fn retrieve(&self, query: &str, context: &RetrieveContext) -> Result<Vec<MemoryContext>>;
+
+    /// 注入记忆到上下文（Inject 阶段）
+    /// 按 priority 排序，在 token 预算内从低到高裁剪
+    /// 返回格式化字符串，供 Prompt Builder 插入上下文
+    pub fn inject(&self, contexts: Vec<MemoryContext>, budget: &TokenBudget) -> String;
+
+    /// 记录交互（Record 阶段，异步）
+    /// 执行中间件链（pre_record → store_episode → post_record）
+    /// 自动分类内容类型、工件性压缩
+    pub async fn record(&self, episode: Episode) -> Result<()>;
+
+    /// 即时巩固（Consolidate 阶段的即时部分）
+    /// 检查本轮是否触发了 memory_store tool call
+    /// 如果有，执行知识去重 + 写入沉淀层 + 标记 episode consolidated
+    pub fn consolidate_immediate(&self, store_call: Option<&MemoryStoreCall>) -> Result<()>;
+
+    /// 离线巩固（Consolidate 阶段的离线部分，Phase 3）
+    pub async fn consolidate_offline(&self) -> Result<()>;
+
+    /// 遗忘扫描（Decay 阶段）
+    pub fn decay(&self) -> Result<DecayScanResult>;
+
+    /// 存储维护（Compact 阶段）
+    pub fn compact(&self) -> Result<()>;
+}
+```
+
+### 10.5 MemoryMiddleware trait（中间件接口）
+
+中间件可以在记忆管线的 Record/Retrieve 阶段前后插入自定义逻辑，无需修改 Runtime 或 Grafeo 代码。
+
+```rust
+pub trait MemoryMiddleware: Send + Sync {
+    /// 中间件名称（用于日志和调试）
+    fn name(&self) -> &str;
+
+    /// 执行优先级（数字越小越先执行）
+    fn priority(&self) -> i32;
+
+    /// Record 阶段前处理（episode 写入前）
+    /// 例如：情感标注、内容过滤、审计日志
+    fn pre_record(&self, episode: &mut Episode, ctx: &MiddlewareContext) -> Result<()>;
+
+    /// Record 阶段后处理（episode 写入后）
+    /// 例如：触发关联索引更新、事件通知
+    fn post_record(&self, episode: &Episode, ctx: &MiddlewareContext) -> Result<()>;
+
+    /// Retrieve 阶段后处理（检索结果返回前）
+    /// 例如：个性化重排序、合规过滤、结果增强
+    fn post_retrieve(&self, results: &mut Vec<SearchResult>, ctx: &MiddlewareContext) -> Result<()>;
+}
+```
+
+**中间件注册方式：**
+
+```toml
+# manifest.toml 中声明中间件（Phase 2+）
+[memory.middlewares]
+# 内置中间件（按名称引用）
+emotion_tag = { priority = 10 }
+audit_log = { priority = 100 }
+
+# 自定义 WASM 中间件（Phase 3+）
+custom_filter = { type = "wasm", path = "filters/content_filter.wasm", priority = 50 }
+```
+
+**中间件执行顺序：** 按 `priority` 从小到大排列，`pre_record` 正序执行，`post_record` 逆序执行（洋葱模型，类似 Tower middleware）。任一中间件返回 Err 时，该阶段中止并向上传播错误。
+
+### 10.6 分阶段实现路线
+
+| 阶段 | 内容 | 说明 |
+|------|------|------|
+| Phase 1 | `MemoryStore` trait 定义 + `MemoryQuery` / `SearchResult` / `MemoryContext` 等数据类型 + `GrafeoStore` 实现 | trait 定义先行，GrafeoStore 作为唯一实现，Runtime 改为通过 trait 调用 |
+| Phase 1 | `MemoryManager` 基础结构 + 生命周期阶段触发 | Manager 直接转发给 GrafeoStore，不引入中间件机制 |
+| Phase 1 | `DecayConfig` 参数化 | 遗忘参数从硬编码改为可配置，通过 manifest 注入 |
+| Phase 2 | `MemoryMiddleware` trait + 注册机制 + 内置中间件（emotion_tag / audit_log） | 打开中间件扩展能力 |
+| Phase 3 | `InMemoryStore` mock 实现（用于测试） | 替代当前的集成测试方案 |
+| Phase 3 | `RemoteMemoryStore` 探索（云端分布式存储） | 如果跨设备实时同步需求明确 |
+
+### 10.7 设计决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 存储抽象方式 | trait + impl | Rust 生态标准做法，零成本抽象（monomorphization），编译期检查 |
+| 中间件模型 | 洋葱模型（Tower 风格） | 业界验证过的模式，支持前/后处理，错误传播自然 |
+| 配置注入 | manifest.toml + 系统默认 | manifest 声明 Agent 级定制，系统默认兜底 |
+| 事件通知 | Event Bus（发布/订阅） | Desktop App 和日志系统可订阅 MemoryEvent，不影响核心管线性能 |
+| Retrieve/Inject 拆分为两个阶段 | 是 | Retrieve 关注"查什么"，Inject 关注"怎么放"，职责分离有利于未来 Inject 策略的独立演化（如 RAG 结果和本地记忆的混合排序） |

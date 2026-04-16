@@ -1,6 +1,6 @@
 # Rollball-AI 模块设计 — 总览
 
-> 版本：v1.1 | 更新日期：2026-04-14
+> 版本：v1.2 | 更新日期：2026-04-16
 
 ---
 
@@ -13,7 +13,7 @@
 | Crate 结构 | 单 crate + 2 个辅助 crate | **多 crate workspace** | Rollball 有 Gateway 和 Agent Runtime 两个独立二进制，且需要严格的进程级代码隔离；多 crate 天然强制边界 |
 | Provider 模式 | 工厂函数 + trait 动态分发 | **借鉴** | Provider trait + 工厂模式成熟可靠，直接复用 |
 | Tool 模式 | 每个工具一个文件 + Tool trait + 工厂注册 | **全面借鉴** | 核心 Tool trait 保留，完整复用 ZeroClaw 工具池，分为 builtin / memory / schedule / integration / agent / browser / dev / skill / mcp / wasm / sop 等类别，manifest 声明驱动按需激活 |
-| Memory 模式 | SQLite/Qdrant/Markdown 多后端 + Memory trait | **替换为 Grafeo** | 设计文档指定 Grafeo 图数据库，需要全新 Memory 抽象层 |
+| Memory 模式 | SQLite/Qdrant/Markdown 多后端 + Memory trait | **替换为 MemoryStore trait + GrafeoStore** | MemoryStore trait 定义在独立 crate（rollball-memory），Grafeo 作为 trait 实现，存储可替换 |
 | Config | 单一巨型 schema.rs（572KB） | **按 crate 拆分** | 每个 crate 只有自己的配置结构，避免巨型配置文件 |
 | Gateway | Axum HTTP 服务器 | **借鉴** | Axum 成熟可靠；Rollball Gateway 同时提供 Socket API（Agent Runtime 用）和 HTTP API（Desktop App / CLI 用） |
 | 安全 | SecurityPolicy + sandbox 多后端 | **借鉴** | 保留安全策略模式，增加权限声明驱动 |
@@ -35,9 +35,10 @@ rollball-ai/
 ├── Cargo.toml                    # workspace root
 ├── crates/
 │   ├── rollball-core/            # 共享类型、协议、工具 trait
+│   ├── rollball-memory/          # MemoryStore trait + 共享记忆类型（v3.4 新增）
 │   ├── rollball-runtime/         # Agent Runtime 二进制 + 库
 │   ├── rollball-gateway/         # Gateway 二进制 + 库
-│   ├── rollball-grafeo/          # Grafeo 图数据库引擎
+│   ├── rollball-grafeo/          # Grafeo 图数据库引擎（实现 MemoryStore trait）
 │   ├── rollball-vault/           # 密钥加密存储
 │   └── rollball-sign/            # .agent 包签名/验签工具
 ├── apps/
@@ -55,6 +56,7 @@ rollball-ai/
 [workspace]
 members = [
     "crates/rollball-core",
+    "crates/rollball-memory",
     "crates/rollball-runtime",
     "crates/rollball-gateway",
     "crates/rollball-grafeo",

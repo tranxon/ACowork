@@ -28,7 +28,7 @@ agent-study/
 | Package format | `docs/02-agent-package.md` | `.agent` structure, signing |
 | Runtime internals | `docs/03-agent-runtime.md` | Main loop, tool dispatch |
 | Gateway design | `docs/04-gateway.md` + `docs/module-design/03-gateway.md` | Lifecycle, IntentRouter, Vault |
-| Memory architecture | `docs/05-memory.md` + `docs/module-design/04-grafeo.md` | Grafeo, layered memory |
+| Memory architecture | `docs/05-memory.md` + `docs/module-design/04-grafeo.md` | Grafeo, layered memory, MemoryStore trait, lifecycle |
 | Security design | `docs/08-security.md` + `docs/module-design/05-vault-sign.md` | Isolation, signing, permissions |
 | Debug protocol | `docs/10-debug-protocol.md` | DevMode, breakpoints, recording/replay |
 | Tool system | `docs/12-tool-system.md` | Built-in / WASM / Gateway tools |
