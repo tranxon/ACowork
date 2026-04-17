@@ -520,3 +520,34 @@ requires = [
 - 得：统一框架覆盖从纯软件 Agent 到机器人 Agent 的全频谱；分层设计让每层复杂度可控；Gateway 保留资源管理权不失控
 - 失：架构复杂度显著增加（三层硬件访问路径）；Hardware Driver 签名身份引入新的信任链管理；Direct Channel 打破了 Gateway 介入所有交互的一致性
 - 替代方案否决：纯 WASM 扩展（WASI 无法满足实时性）、Native Plugin（打破"无可执行代码"核心原则 + 跨平台噩梦）、纯 Intent 模式（两跳 IPC 延迟不可接受）
+
+### ADR-005：Shell 安全与文件来源追踪
+
+**状态**：已接受
+
+**上下文**：
+
+当前文件系统隔离是策略级的——Runtime 检查 file_read/file_write 的路径参数是否在工作区内。但 shell 工具启动的子进程继承用户进程的全部 OS 权限，可以读写工作区外的任意文件。典型攻击路径：Agent 通过 network_fetch 下载恶意脚本 → file_write 保存到工作区 → shell 执行该脚本 → 脚本越权读取 ~/.ssh/id_rsa 并上传。OS 级沙箱（bwrap / Seatbelt / AppContainer）可以从内核层阻止，但跨平台覆盖需要时间（Phase 2+），Phase 1 需要在 Runtime 层建立可检测、可拦截的安全防线。
+
+**决策**：
+
+Phase 1 在 Runtime 层实施三层防御：
+
+1. **文件来源追踪（FileProvenance）**：Runtime 维护工作区内每个文件的来源记录（CreatedByTool / Downloaded / PreExisting / Unknown）。当 shell 命令试图执行 Downloaded 或 Unknown 来源的文件时，自动升级为高风险。
+
+2. **Shell 命令风险分级**：将 shell 命令分为 Low / Medium / High / Blocked 四级。基础文件操作命令直接执行；可能下载/执行代码的命令需 approval gate；执行下载文件为 High（强制用户确认）；破坏性操作直接拒绝。
+
+3. **工作区文件系统监控**：使用 inotify / FSEvents / ReadDirectoryChangesW 监控工作区文件变化，检测异常模式（新可执行文件出现、权限变更、符号链接指向工作区外）。
+
+**分阶段策略**：
+
+- Phase 1：Shell 风险分级 + 文件来源追踪 + approval gate + 审计日志（可检测 + 可拦截已知攻击模式）
+- Phase 2：Linux bwrap 文件系统隔离 + macOS Seatbelt（内核级强制）
+- Phase 3：Windows AppContainer + 全平台 FS 监控完善
+- Phase 4：独立用户 / 容器（嵌入式/企业场景）
+
+**权衡**：
+
+- 得：Phase 1 无需 OS 特定 API，纯 Rust 逻辑，覆盖 80% 的攻击场景；为 Phase 2+ OS 沙箱提供审计基线
+- 失：Phase 1 不能阻止所有攻击——复杂 shell 管道 / 变量替换 / base64 编码的 payload 可能绕过命令风险评级；子进程链追踪困难（子进程再启动子进程）
+- 替代方案否决：Phase 1 直接上 OS 沙箱（跨平台覆盖不够）、禁止 shell 工具（丧失核心能力）、仅靠 approval gate 无来源追踪（无法区分"执行自己写的脚本"和"执行下载的脚本"）
