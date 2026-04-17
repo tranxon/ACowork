@@ -14,6 +14,7 @@ RollBall.AI is a decentralized, high-security, scalable AI Agent runtime platfor
 agent-study/
 ├── docs/                    # Architecture design docs (Chinese, v3.x)
 ├── docs/module-design/      # Detailed module specs (crate structure)
+├── docs/plan/               # planning docs (Chinese)
 ├── ref-doc/                 # Reference materials (ZeroClaw, memory research)
 ├── zeroclaw/                # Reference implementation ONLY (not source of truth)
 ├── .opencode/               # OpenCode config (style-guide.md)
