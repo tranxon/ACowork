@@ -3,7 +3,10 @@
 use clap::Parser;
 use rollball_gateway::cli::Cli;
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let cli = Cli::parse();
-    cli.run()
+    if let Err(e) = cli.run() {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
 }

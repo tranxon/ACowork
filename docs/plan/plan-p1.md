@@ -249,41 +249,33 @@ rollball-core (S1)
 
 ### S3.5 任务：内置工具（Phase 1 范围）
 
-**目标**：实现 13 个内置工具。
+**目标**：实现 13 个内置工具（按 12-tool-system.md 清单）。
 
 #### S3.5.1 核心 Builtin（Phase 1 必做）
 
 | 工具 | 文件 | 验收标准 |
 |------|------|---------|
+| `memory_recall` | `memory_recall.rs` | 关键词检索记忆 |
+| `memory_store` | `memory_store.rs` | 存储单条记忆（key + category + JSON payload） |
+| `http_request` | `http_request.rs` | HTTP GET/POST/PUT/DELETE |
+| `web_fetch` | `web_fetch.rs` | 网页抓取转纯文本 |
+| `web_search` | `web_search.rs` | DuckDuckGo HTML 搜索 |
 | `shell` | `shell.rs` | 命令执行，权限校验 |
 | `file_read` | `file_read.rs` | 工作区内文件读取 |
 | `file_write` | `file_write.rs` | 工作区内文件写入 |
 | `file_edit` | `file_edit.rs` | 精确字符串替换 |
 | `glob_search` | `glob_search.rs` | glob 模式搜索 |
 | `content_search` | `content_search.rs` | 正则搜索文件内容 |
-| `calculator` | `calculator.rs` | 算术计算 |
-| `http_request` | `http_request.rs` | HTTP GET/POST |
-| `web_fetch` | `web_fetch.rs` | 网页抓取转纯文本 |
-| `web_search` | `web_search.rs` | Brave/SearXNG 搜索 |
-| `weather` | `weather.rs` | wttr.in 天气查询 |
-| `identity_query` | `identity_query.rs` | 向系统 Agent 查询身份（IPC） |
+| `intent_send` | `intent_send.rs` | 发送 Intent 到其他 Agent（IPC） |
+| `identity_store` | `identity_store.rs` | 写入用户身份信息（系统 Agent 专用） |
 
-#### S3.5.2 Memory 工具（Phase 1 简化版）
-
-| 工具 | 文件 | 验收标准 |
-|------|------|---------|
-| `memory_store` | `memory_store.rs` | 存储单条记忆（JSON payload） |
-| `memory_recall` | `memory_recall.rs` | 关键词检索记忆 |
-
-**说明**：Phase 1 Grafeo 后端用 SQLite mock 替代（图数据库 + 遗忘机制在 Phase 2）。`memory_store` 写入 SQLite，`memory_recall` 做 LIKE 搜索。Phase 2 再迁移到真正的 Grafeo 图数据库。
-
-#### S3.5.3 工具注册表 + 权限校验
+#### S3.5.2 工具注册表 + 权限校验
 
 | 任务 | 验收标准 |
 |------|---------|
-| S3.5.3.1 工具池注册（按 manifest `tools[]` 过滤激活） | 权限外工具不可调用 |
-| S3.5.3.2 权限校验（PathGuardedTool / RateLimitedTool 装饰器） | 无权限工具调用被拒绝 |
-| S3.5.3.3 工具 JSON Schema 清洗（借鉴 ZeroClaw） | Schema 格式兼容 LLM |
+| S3.5.2.1 工具池注册（按 manifest `tools[]` 过滤激活） | 权限外工具不可调用 |
+| S3.5.2.2 权限校验（PathGuardedTool / RateLimitedTool / PermissionCheckedTool 装饰器） | 无权限工具调用被拒绝 |
+| S3.5.2.3 工具 JSON Schema 清洗（借鉴 ZeroClaw） | Schema 格式兼容 LLM |
 
 ---
 
@@ -439,22 +431,22 @@ rollball-core (S1)
 
 | ID | 任务 | 模块 | 阶段 | 状态 | 备注 |
 |----|------|------|------|------|------|
-| S1.1 | Workspace 骨架 | - | S1 | 待开始 | |
-| S1.2 | rollball-core 类型定义 | rollball-core | S1 | 待开始 | |
-| S1.3 | rollball-sign 签名工具链 | rollball-sign | S1 | 待开始 | |
-| S1.4 | rollball-vault 密钥存储 | rollball-vault | S1 | 待开始 | |
-| S3.1 | Runtime CLI + 配置 | rollball-runtime | S2 | 待开始 | |
-| S3.2 | .agent 包加载器 | rollball-runtime | S2 | 待开始 | |
-| S3.3 | LLM Provider 实现 | rollball-runtime | S2 | 待开始 | |
-| S3.4 | Agent 主循环 | rollball-runtime | S2 | 待开始 | |
-| S3.5 | 内置工具（13个） | rollball-runtime | S2 | 待开始 | |
-| S3.6 | History Manager | rollball-runtime | S2 | 待开始 | |
-| S3.7 | IPC 客户端 | rollball-runtime | S2 | 待开始 | |
-| S4.1 | Gateway CLI | rollball-gateway | S3 | 待开始 | |
-| S4.2 | IPC 服务端 | rollball-gateway | S3 | 待开始 | |
-| S4.3 | 包管理器 | rollball-gateway | S3 | 待开始 | |
-| S4.4 | 生命周期管理器 | rollball-gateway | S3 | 待开始 | |
-| S4.5 | Key Vault 集成 | rollball-gateway | S3 | 待开始 | |
+| S1.1 | Workspace 骨架 | - | S1 | 完成 | 7-crate workspace |
+| S1.2 | rollball-core 类型定义 | rollball-core | S1 | 完成 | 33 tests |
+| S1.3 | rollball-sign 签名工具链 | rollball-sign | S1 | 完成 | 21 tests |
+| S1.4 | rollball-vault 密钥存储 | rollball-vault | S1 | 完成 | 20 tests |
+| S3.1 | Runtime CLI + 配置 | rollball-runtime | S2 | 完成 | |
+| S3.2 | .agent 包加载器 | rollball-runtime | S2 | 完成 | |
+| S3.3 | LLM Provider 实现 | rollball-runtime | S2 | 完成 | OpenAI + Ollama + Router + Reliable |
+| S3.4 | Agent 主循环 | rollball-runtime | S2 | 完成 | 9步循环 + BudgetGuard + LoopDetector |
+| S3.5 | 内置工具（13个） | rollball-runtime | S2 | 完成 | 合并http_get/http_post→http_request |
+| S3.6 | History Manager | rollball-runtime | S2 | 完成 | FIFO裁剪+ToolResult折叠+PreemptiveTrim |
+| S3.7 | IPC 客户端 | rollball-runtime | S2 | 完成 | UnixSocket + NamedPipe + GatewayClient |
+| S4.1 | Gateway CLI | rollball-gateway | S3 | 完成 | clap子命令+daemon模式+配置加载 |
+| S4.2 | IPC 服务端 | rollball-gateway | S3 | 完成 | UnixSocket+NamedPipe+Session+6种Handler |
+| S4.3 | 包管理器 | rollball-gateway | S3 | 完成 | install+uninstall+upgrade |
+| S4.4 | 生命周期管理器 | rollball-gateway | S3 | 完成 | process spawn/kill/health+idle timeout |
+| S4.5 | Key Vault 集成 | rollball-gateway | S3 | 完成 | VaultFacade+KeyRelease分发 |
 | S5.1 | 示例天气 Agent | examples/ | S4 | 待开始 | |
 | S5.2 | 端到端测试套件 | tests/ | S4 | 待开始 | |
 
@@ -524,10 +516,10 @@ Scope: core / sign / vault / runtime / gateway / cli / docs
 
 | 里程碑 | 完成标志 |
 |--------|---------|
-| **M1: 基础就绪** | S1 全部完成；`cargo check --all` 通过 |
-| **M2: Runtime 可运行** | S2 全部完成；Runtime 可加载 manifest 并调用 mock LLM |
-| **M3: Gateway 可管理** | S3 全部完成；Gateway 可 install/start/stop Agent |
-| **M4: MVP 交付** | S4 全部完成；天气 Agent 端到端运行 |
+| **M1: 基础就绪** | S1 全部完成；`cargo check --all` 通过 | ✅ 完成 |
+| **M2: Runtime 可运行** | S2 全部完成；Runtime 可加载 manifest 并调用 mock LLM | ✅ 完成 |
+| **M3: Gateway 可管理** | S3 全部完成；Gateway 可 install/start/stop Agent | ✅ 完成 |
+| **M4: MVP 交付** | S4 全部完成；天气 Agent 端到端运行 | 待开始 |
 
 ---
 

@@ -21,6 +21,24 @@ pub enum GatewayError {
 
     #[error("Lifecycle error: {0}")]
     Lifecycle(String),
+
+    #[error("Package error: {0}")]
+    Package(String),
+
+    #[error("Config error: {0}")]
+    Config(String),
+
+    #[error("Agent not found: {0}")]
+    AgentNotFound(String),
+
+    #[error("Agent already running: {0}")]
+    AgentAlreadyRunning(String),
+
+    #[error("Agent not running: {0}")]
+    AgentNotRunning(String),
+
+    #[error("Signature verification failed: {0}")]
+    SignatureFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, GatewayError>;
