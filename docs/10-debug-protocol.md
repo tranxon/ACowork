@@ -302,9 +302,9 @@ messages: [msg0, msg1, msg2, msg3, msg4, msg5]
 {"type":"recording_header","agent_id":"com.example.weather-dev","timestamp":"2026-04-09T12:00:00Z","provider":"openai","model":"gpt-4o"}
 {"type":"user_input","content":"北京今天天气怎么样","iteration":0}
 {"type":"llm_request","messages_count":2,"iteration":0}
-{"type":"llm_response","content":"tool_call(http_get,...)","usage":{"prompt_tokens":150,"completion_tokens":30},"iteration":0}
-{"type":"tool_call","name":"http_get","params":{"url":"https://api.weather.com/v1?city=Beijing"},"iteration":0}
-{"type":"tool_result","name":"http_get","result":{"temp":25,"condition":"晴"},"iteration":0}
+{"type":"llm_response","content":"tool_call(http_request,...)","usage":{"prompt_tokens":150,"completion_tokens":30},"iteration":0}
+{"type":"tool_call","name":"http_request","params":{"method":"GET","url":"https://api.weather.com/v1?city=Beijing"},"iteration":0}
+{"type":"tool_result","name":"http_request","result":{"temp":25,"condition":"晴"},"iteration":0}
 {"type":"llm_request","messages_count":4,"iteration":1}
 {"type":"llm_response","content":"北京今天25度，晴天","usage":{"prompt_tokens":200,"completion_tokens":20},"iteration":1}
 ```

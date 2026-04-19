@@ -33,8 +33,7 @@ Tool Dispatcher
 |--------|------|---------|------|
 | `memory_recall` | 语义检索私有 Grafeo | `memory:read` | 混合检索（HNSW + BM25）+ 关联扩散（1-2 跳图扩展），返回相关记忆片段 |
 | `memory_store` | 写入私有 Grafeo | `memory:write` | 即时提取 Tool Call 机制：LLM 自主判断是否调用，支持 Fact/Preference/Relation/Procedural/Autobiographical 五种类型，带 importance（0-1）和 privacy（Public/Personal/Sensitive）参数。Fact 按 (subject, predicate) 语义去重 |
-| `http_get` | HTTP GET 请求 | `network:<url_pattern>` | 支持 JSON 响应自动解析 |
-| `http_post` | HTTP POST 请求 | `network:<url_pattern>` | 支持 JSON body 和表单 |
+| `http_request` | HTTP 请求（GET/POST/PUT/DELETE） | `network:<url_pattern>` | 支持 method 参数选择 HTTP 方法，JSON 响应自动解析，JSON body 和表单 |
 | `web_fetch` | 获取网页内容 | `network:<url_pattern>` | HTML → Markdown 转换，Agent 直接获得可读文本 |
 | `web_search` | 网页搜索 | `search:web` | 调用搜索引擎 API，返回结构化结果；API Key 由 Vault 分发 |
 | `shell` | 执行 shell 命令 | `filesystem:exec` | 受沙箱限制，超时可中断 |
@@ -52,8 +51,7 @@ Tool Dispatcher
 |--------|:-------:|:-----:|:-----:|:-------:|:---:|-----------|
 | `memory_recall` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
 | `memory_store` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
-| `http_get` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
-| `http_post` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
+| `http_request` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
 | `web_fetch` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
 | `web_search` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
 | `shell` | ✅ | ✅ | ✅ | ❌ | ❌ | 仅桌面端 |
@@ -114,7 +112,7 @@ Runtime 启动
 
 ```toml
 [[tools]]
-name = "http_get"
+name = "http_request"
 type = "builtin"
 permissions = ["network:https://api.weather.com"]
 

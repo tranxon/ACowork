@@ -3,10 +3,10 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, RollballError};
+use crate::error::Result;
 
 /// Chat message role
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     System,

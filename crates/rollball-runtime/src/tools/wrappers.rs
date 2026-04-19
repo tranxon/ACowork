@@ -1,3 +1,311 @@
-//! Tool security wrappers (RateLimitedTool / PathGuardedTool)
+//! Tool security wrappers — decorator pattern for tool security
+//!
+//! Adapted from ZeroClaw's RateLimitedTool + PathGuardedTool pattern.
+//! Rollball deviation: uses manifest-driven permission checking
+//! instead of ZeroClaw's config-driven security policy.
 
-// TODO: Implement decorator pattern for tool security
+use async_trait::async_trait;
+use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use rollball_core::AgentManifest;
+use serde_json::Value;
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::tools::permission::validate_permission;
+
+/// Rate-limited tool wrapper
+///
+/// Enforces a maximum number of calls per minute for a tool.
+/// Returns an error when the rate limit is exceeded.
+pub struct RateLimitedTool {
+    inner: Arc<dyn Tool>,
+    max_calls_per_minute: u32,
+    call_times: parking_lot::Mutex<Vec<Instant>>,
+}
+
+impl RateLimitedTool {
+    pub fn new(inner: Arc<dyn Tool>, max_calls_per_minute: u32) -> Self {
+        Self {
+            inner,
+            max_calls_per_minute,
+            call_times: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn check_rate_limit(&self) -> Result<(), String> {
+        let now = Instant::now();
+        let cutoff = now - std::time::Duration::from_secs(60);
+        let mut times = self.call_times.lock();
+        times.retain(|t| *t > cutoff);
+
+        if times.len() >= self.max_calls_per_minute as usize {
+            return Err(format!(
+                "Rate limit exceeded for tool '{}': max {} calls/minute",
+                self.inner.name(),
+                self.max_calls_per_minute
+            ));
+        }
+
+        times.push(now);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Tool for RateLimitedTool {
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+
+    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+        if let Err(e) = self.check_rate_limit() {
+            return Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some(e),
+                token_usage: None,
+            });
+        }
+        self.inner.execute(params).await
+    }
+}
+
+/// Path-guarded tool wrapper
+///
+/// Restricts filesystem tool access to paths within the agent's
+/// allowed working directory. Validates path parameters before
+/// executing the inner tool.
+pub struct PathGuardedTool {
+    inner: Arc<dyn Tool>,
+    allowed_dir: String,
+}
+
+impl PathGuardedTool {
+    pub fn new(inner: Arc<dyn Tool>, allowed_dir: &str) -> Self {
+        Self {
+            inner,
+            allowed_dir: allowed_dir.to_string(),
+        }
+    }
+
+    /// Validate that a path is within the allowed directory
+    fn validate_path(&self, path: &str) -> Result<(), String> {
+        let allowed = std::path::Path::new(&self.allowed_dir);
+        let target = std::path::Path::new(path);
+
+        // Canonicalize both paths for comparison (best-effort)
+        let target_normalized = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            allowed.join(target)
+        };
+
+        // Simple prefix check
+        let target_str = target_normalized.to_string_lossy();
+        let allowed_str = allowed.to_string_lossy();
+
+        if !target_str.starts_with(allowed_str.as_ref()) {
+            return Err(format!(
+                "Path '{}' is outside allowed directory '{}'",
+                path, self.allowed_dir
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Check if the wrapped tool is a filesystem tool that needs path validation
+    fn is_filesystem_tool(&self) -> bool {
+        matches!(
+            self.inner.name().as_str(),
+            "file_read" | "file_write" | "file_edit" | "glob_search" | "content_search"
+        )
+    }
+}
+
+#[async_trait]
+impl Tool for PathGuardedTool {
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+
+    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+        if self.is_filesystem_tool() {
+            // Check path parameter
+            if let Some(path) = params["path"].as_str() {
+                if let Err(e) = self.validate_path(path) {
+                    return Ok(ToolResult {
+                        ok: false,
+                        content: String::new(),
+                        error: Some(e),
+                        token_usage: None,
+                    });
+                }
+            }
+            // file_edit uses "file_path" instead of "path"
+            if self.inner.name() == "file_edit" {
+                if let Some(file_path) = params["file_path"].as_str() {
+                    if let Err(e) = self.validate_path(file_path) {
+                        return Ok(ToolResult {
+                            ok: false,
+                            content: String::new(),
+                            error: Some(e),
+                            token_usage: None,
+                        });
+                    }
+                }
+            }
+        }
+        self.inner.execute(params).await
+    }
+}
+
+/// Permission-checked tool wrapper
+///
+/// Validates manifest permissions before executing the tool.
+pub struct PermissionCheckedTool {
+    inner: Arc<dyn Tool>,
+    manifest: AgentManifest,
+}
+
+impl PermissionCheckedTool {
+    pub fn new(inner: Arc<dyn Tool>, manifest: AgentManifest) -> Self {
+        Self { inner, manifest }
+    }
+}
+
+#[async_trait]
+impl Tool for PermissionCheckedTool {
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+
+    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+        if let Err(e) = validate_permission(&self.manifest, &self.inner.name()) {
+            return Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some(e),
+                token_usage: None,
+            });
+        }
+        self.inner.execute(params).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rollball_core::tools::traits::ToolSpec;
+
+    /// A simple test tool for testing wrappers
+    struct EchoTool;
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "echo".to_string(),
+                description: "Echo tool".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+            Ok(ToolResult {
+                ok: true,
+                content: params.to_string(),
+                error: None,
+                token_usage: None,
+            })
+        }
+    }
+
+    struct FileEchoTool;
+    #[async_trait]
+    impl Tool for FileEchoTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "file_read".to_string(),
+                description: "File read echo".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+            Ok(ToolResult {
+                ok: true,
+                content: format!("Read: {}", params["path"].as_str().unwrap_or("")),
+                error: None,
+                token_usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limited_allows_within_limit() {
+        let inner = Arc::new(EchoTool);
+        let tool = RateLimitedTool::new(inner, 3);
+        for _ in 0..3 {
+            let result = tool
+                .execute(serde_json::json!({"msg": "hi"}))
+                .await
+                .unwrap();
+            assert!(result.ok);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limited_blocks_over_limit() {
+        let inner = Arc::new(EchoTool);
+        let tool = RateLimitedTool::new(inner, 2);
+        let _ = tool.execute(serde_json::json!({})).await;
+        let _ = tool.execute(serde_json::json!({})).await;
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Rate limit"));
+    }
+
+    #[tokio::test]
+    async fn test_path_guarded_allows_within_dir() {
+        let inner = Arc::new(FileEchoTool);
+        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let result = tool
+            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/file.txt" }))
+            .await
+            .unwrap();
+        assert!(result.ok);
+    }
+
+    #[tokio::test]
+    async fn test_path_guarded_blocks_outside_dir() {
+        let inner = Arc::new(FileEchoTool);
+        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let result = tool
+            .execute(serde_json::json!({ "path": "/etc/passwd" }))
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("outside allowed directory"));
+    }
+
+    #[tokio::test]
+    async fn test_path_guarded_relative_path() {
+        let inner = Arc::new(FileEchoTool);
+        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let result = tool
+            .execute(serde_json::json!({ "path": "subdir/file.txt" }))
+            .await
+            .unwrap();
+        assert!(result.ok); // relative path resolved within allowed dir
+    }
+
+    #[tokio::test]
+    async fn test_path_guarded_non_filesystem_tool() {
+        let inner = Arc::new(EchoTool);
+        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        // echo is not a filesystem tool, so no path check
+        let result = tool
+            .execute(serde_json::json!({ "path": "/etc/passwd" }))
+            .await
+            .unwrap();
+        assert!(result.ok); // Not checked because not a filesystem tool
+    }
+}

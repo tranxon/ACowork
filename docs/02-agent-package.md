@@ -316,7 +316,7 @@ required = false
 identity_deps = ["name", "city", "language", "timezone"]
 
 [[tools]]
-name = "http_get"
+name = "http_request"
 type = "builtin"
 permissions = ["network:https://api.weather.com"]
 
@@ -483,7 +483,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 
 **权限检查流程**：
 
-1. Agent 发起工具调用（如 `http_get("https://api.weather.com/...")`)
+1. Agent 发起工具调用（如 `http_request({"method":"GET","url":"https://api.weather.com/..."})`)
 2. Runtime 构造请求权限字符串（如 `network:https://api.weather.com`）
 3. 遍历 manifest.permissions，调用 `matches_permission`
 4. 任一声明权限匹配 → 允许执行
@@ -493,7 +493,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 
 | 域 | 权限示例 | 对应工具 |
 |----|---------|---------|
-| network | `network:https://api.example.com` | http_get, http_post |
+| network | `network:https://api.example.com` | http_request |
 | filesystem | `filesystem:read:~/Documents`, `filesystem:write:~/Documents` | file_read, file_write |
 | filesystem | `filesystem:read:/tmp` | file_read |
 | memory | `memory:read`, `memory:write` | memory_query, memory_store |

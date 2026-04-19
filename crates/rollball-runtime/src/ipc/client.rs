@@ -1,25 +1,226 @@
 //! Gateway Service API client
+//!
+//! IPC client for communicating with the Gateway process.
+//! Supports KeyRelease, IntentSend, BudgetQuery, UsageReport,
+//! RateAcquire, and PermissionRequest.
 
-use rollball_core::protocol::{GatewayRequest, GatewayResponse};
+use rollball_core::protocol::{Frame, GatewayRequest, GatewayResponse};
 use crate::ipc::transport::Transport;
 
 /// IPC client for Gateway communication
 pub struct GatewayClient {
     transport: Box<dyn Transport>,
+    /// Request ID counter for correlating request/response
+    next_request_id: parking_lot::Mutex<u64>,
 }
 
 impl GatewayClient {
-    /// Create new client
+    /// Create new client with the given transport
     pub fn new(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            next_request_id: parking_lot::Mutex::new(1),
+        }
     }
 
-    /// Send request to Gateway
-    pub async fn send_request(
+    /// Create a client connected to the given endpoint
+    pub fn connect(endpoint: &str) -> Result<Self, String> {
+        let transport = crate::ipc::transport::create_transport(endpoint);
+        Ok(Self::new(transport))
+    }
+
+    /// Allocate a unique request ID
+    fn next_id(&self) -> u64 {
+        let mut id = self.next_request_id.lock();
+        let current = *id;
+        *id += 1;
+        current
+    }
+
+    /// Connect the underlying transport to the endpoint
+    pub async fn connect_transport(&self, endpoint: &str) -> Result<(), String> {
+        self.transport.connect(endpoint).await
+    }
+
+    /// Check if the client is connected
+    pub fn is_connected(&self) -> bool {
+        self.transport.is_connected()
+    }
+
+    /// Disconnect from the Gateway
+    pub async fn disconnect(&self) -> Result<(), String> {
+        self.transport.disconnect().await
+    }
+
+    /// Send a request to Gateway and receive a response
+    async fn send_and_recv(&self, request: GatewayRequest) -> Result<GatewayResponse, String> {
+        if !self.is_connected() {
+            return Err("Not connected to Gateway".to_string());
+        }
+
+        let _request_id = self.next_id();
+
+        // Create frame from request
+        let frame = Frame::from_message(Frame::TYPE_REQUEST, &request)
+            .map_err(|e| format!("Failed to encode request: {e}"))?;
+
+        // Send frame
+        self.transport.send_frame(&frame).await?;
+
+        // Receive response frame
+        let response_frame = self.transport.recv_frame().await?;
+
+        // Decode response
+        let response: GatewayResponse = response_frame
+            .to_message()
+            .map_err(|e| format!("Failed to decode response: {e}"))?;
+
+        Ok(response)
+    }
+
+    /// Request an API key for a specific provider (KeyRelease)
+    pub async fn request_key(&self, provider: &str) -> Result<String, String> {
+        let request = GatewayRequest::KeyRelease {
+            provider: provider.to_string(),
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::KeyReleaseResult { api_key }) => Ok(api_key),
+            Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Send an Intent to another Agent
+    pub async fn send_intent(
         &self,
-        _request: GatewayRequest,
-    ) -> Result<GatewayResponse, String> {
-        // TODO: Implement request/response
-        unimplemented!()
+        target: &str,
+        action: &str,
+        params: serde_json::Value,
+        async_: bool,
+    ) -> Result<String, String> {
+        let request = GatewayRequest::IntentSend {
+            target: target.to_string(),
+            action: action.to_string(),
+            params,
+            async_,
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::IntentDelivered { message_id }) => Ok(message_id),
+            Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Query remaining budget for a provider
+    pub async fn query_budget(
+        &self,
+        provider: &str,
+    ) -> Result<(u64, f64), String> {
+        let request = GatewayRequest::BudgetQuery {
+            provider: provider.to_string(),
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::BudgetInfo {
+                remaining_tokens,
+                remaining_cost_usd,
+            }) => Ok((remaining_tokens, remaining_cost_usd)),
+            Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Report token usage to Gateway
+    pub async fn report_usage(
+        &self,
+        report: rollball_core::budget::UsageReport,
+    ) -> Result<(), String> {
+        let request = GatewayRequest::UsageReport(report);
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::UsageReportAck {}) => Ok(()),
+            Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Acquire a rate limit token
+    pub async fn acquire_rate_token(
+        &self,
+        provider: &str,
+    ) -> Result<(bool, Option<u64>), String> {
+        let request = GatewayRequest::RateAcquire {
+            provider: provider.to_string(),
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::RateToken { granted, retry_after_ms }) => {
+                Ok((granted, retry_after_ms))
+            }
+            Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Request a runtime permission
+    pub async fn request_permission(
+        &self,
+        permission: &str,
+        reason: &str,
+    ) -> Result<(bool, Option<String>), String> {
+        let request = GatewayRequest::PermissionRequest {
+            permission: permission.to_string(),
+            reason: reason.to_string(),
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::PermissionResult { granted, reason }) => {
+                Ok((granted, reason))
+            }
+            Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gateway_client_next_id() {
+        let transport = crate::ipc::transport::create_transport("unix:///tmp/test.sock");
+        let client = GatewayClient::new(transport);
+        assert_eq!(client.next_id(), 1);
+        assert_eq!(client.next_id(), 2);
+        assert_eq!(client.next_id(), 3);
+    }
+
+    #[test]
+    fn test_gateway_client_connect() {
+        let result = GatewayClient::connect("unix:///tmp/test.sock");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_gateway_client_not_connected() {
+        let transport = crate::ipc::transport::create_transport("unix:///tmp/test.sock");
+        let client = GatewayClient::new(transport);
+        assert!(!client.is_connected());
+
+        let result = client.request_key("openai").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Not connected"));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_client_disconnect() {
+        let transport = crate::ipc::transport::create_transport("pipe://\\\\.\\pipe\\test");
+        let client = GatewayClient::new(transport);
+        // Even without connecting, disconnect should not error
+        let result = client.disconnect().await;
+        assert!(result.is_ok());
     }
 }

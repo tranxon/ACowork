@@ -111,7 +111,7 @@ Desktop App 和开发调试能力在同一阶段交付，因为它们共享 Debu
 1. Gateway 的 cron 触发器 spawn 天气 Agent 的 Agent Runtime 进程（若未运行）。启动前，Gateway 先向系统 Agent 查询 identity_deps，将用户身份信息注入启动参数。
 2. Agent Runtime 加载天气 Agent 的 .agent 包，从 Vault 获取 API Key，连接 Gateway Socket。
 3. 天气 Agent 从私有 Grafeo 读取用户上次保存的城市（情景记忆），调 LLM 规划查询天气。
-4. LLM 返回 tool_call: `http_get("https://api.weather.com/...?city=Beijing")`，权限校验通过，执行。
+4. LLM 返回 tool_call: `http_request({"method":"GET","url":"https://api.weather.com/...?city=Beijing"})`, 权限校验通过，执行。
 5. 天气 Agent 将结果写入私有 Grafeo（情景 + 语义记忆）。
 6. 天气 Agent 通过 Gateway 发送 Intent：
 

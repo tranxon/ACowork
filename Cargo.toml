@@ -47,7 +47,7 @@ directories = "6.0"
 chrono = { version = "0.4", features = ["clock", "std", "serde"] }
 
 # CLI
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 
 # 数据库
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -66,6 +66,9 @@ uuid = { version = "1.22", features = ["v4", "std"] }
 
 # Stream
 futures-core = "0.3"
+
+# 正则
+regex = "1.0"
 
 # 签名
 ed25519-dalek = { version = "2.1", features = ["std"] }
