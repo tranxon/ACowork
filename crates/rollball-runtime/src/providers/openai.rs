@@ -1,10 +1,595 @@
 //! OpenAI Compatible Provider
+//!
+//! Supports OpenAI API and compatible endpoints (e.g., Azure OpenAI,
+//! Together AI, Groq, DeepSeek, etc.) via configurable base_url.
+//!
+//! Adapted from zeroclaw/src/providers/openai.rs
+//! Rollball deviation: uses rollball-core Provider trait instead of ZeroClaw's;
+//! streaming uses futures_core::Stream instead of custom async stream.
 
-use rollball_core::providers::Provider;
+use async_trait::async_trait;
+use futures_core::Stream;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::sync::mpsc;
 
-/// OpenAI provider implementation
+use rollball_core::providers::traits::{
+    ChatMessage, ChatRequest, ChatResponse, FunctionCall,
+    MessageRole, Provider, StreamEvent, ToolCall, UsageInfo,
+};
+
+// ── Provider struct ──────────────────────────────────────────────────────
+
+/// OpenAI-compatible provider
 pub struct OpenAIProvider {
-    // TODO: Add API client
+    base_url: String,
+    api_key: Option<String>,
+    http_client: Client,
 }
 
-// TODO: Implement Provider trait
+impl OpenAIProvider {
+    /// Create a new OpenAI provider with default base URL
+    pub fn new(api_key: Option<&str>) -> Self {
+        Self::with_base_url(None, api_key)
+    }
+
+    /// Create a provider with a custom base URL
+    pub fn with_base_url(base_url: Option<&str>, api_key: Option<&str>) -> Self {
+        let http_client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self {
+            base_url: base_url
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+            api_key: api_key.map(ToString::to_string),
+            http_client,
+        }
+    }
+
+    /// Set API key after construction (e.g., from Vault KeyRelease)
+    pub fn set_api_key(&mut self, key: String) {
+        self.api_key = Some(key);
+    }
+}
+
+// ── OpenAI API types ─────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct NativeChatRequest {
+    model: String,
+    messages: Vec<NativeMessage>,
+    temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<NativeToolSpec>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<NativeToolCall>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NativeToolSpec {
+    #[serde(rename = "type")]
+    kind: String,
+    function: NativeToolFunctionSpec,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NativeToolFunctionSpec {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NativeToolCall {
+    id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    function: NativeFunctionCall,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NativeFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeChatResponse {
+    choices: Vec<NativeChoice>,
+    #[serde(default)]
+    usage: Option<NativeUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeChoice {
+    message: NativeResponseMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeResponseMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<NativeToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeUsage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+}
+
+// Streaming SSE types
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCallDelta {
+    index: Option<u64>,
+    id: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    function: Option<StreamFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+// ── Conversion helpers ──────────────────────────────────────────────────
+
+fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
+    messages
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                MessageRole::System => "system",
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+            };
+
+            // Handle tool messages
+            if matches!(m.role, MessageRole::Tool) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                    let tool_call_id = value
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    return NativeMessage {
+                        role: role.to_string(),
+                        content,
+                        tool_call_id,
+                        tool_calls: None,
+                    };
+                }
+            }
+
+            // Handle assistant messages with tool_calls
+            if matches!(m.role, MessageRole::Assistant) {
+                if let Some(ref tool_calls) = m.tool_calls {
+                    let native_calls: Vec<NativeToolCall> = tool_calls
+                        .iter()
+                        .map(|tc| NativeToolCall {
+                            id: Some(tc.id.clone()),
+                            kind: Some(tc.call_type.clone()),
+                            function: NativeFunctionCall {
+                                name: tc.function.name.clone(),
+                                arguments: tc.function.arguments.clone(),
+                            },
+                        })
+                        .collect();
+                    return NativeMessage {
+                        role: role.to_string(),
+                        content: if m.content.is_empty() {
+                            None
+                        } else {
+                            Some(m.content.clone())
+                        },
+                        tool_call_id: None,
+                        tool_calls: Some(native_calls),
+                    };
+                }
+            }
+
+            NativeMessage {
+                role: role.to_string(),
+                content: Some(m.content.clone()),
+                tool_call_id: None,
+                tool_calls: None,
+            }
+        })
+        .collect()
+}
+
+fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<NativeToolSpec>> {
+    tools.map(|items| {
+        items
+            .iter()
+            .map(|tool| {
+                let name = tool["name"].as_str().unwrap_or("unknown").to_string();
+                let description = tool
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let parameters = tool
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+
+                NativeToolSpec {
+                    kind: "function".to_string(),
+                    function: NativeToolFunctionSpec {
+                        name,
+                        description,
+                        parameters,
+                    },
+                }
+            })
+            .collect()
+    })
+}
+
+fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> ChatResponse {
+    let content = msg.content.unwrap_or_default();
+    let tool_calls = msg.tool_calls.unwrap_or_default().into_iter().map(|tc| {
+        ToolCall {
+            id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+            },
+        }
+    }).collect::<Vec<_>>();
+
+    let usage_info = usage.map(|u| UsageInfo {
+        prompt_tokens: u.prompt_tokens.unwrap_or(0),
+        completion_tokens: u.completion_tokens.unwrap_or(0),
+        total_tokens: u.prompt_tokens.unwrap_or(0) + u.completion_tokens.unwrap_or(0),
+    });
+
+    ChatResponse {
+        content,
+        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        usage: usage_info,
+    }
+}
+
+// ── Provider trait implementation ───────────────────────────────────────
+
+#[async_trait]
+impl Provider for OpenAIProvider {
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    async fn chat(&self, request: ChatRequest) -> rollball_core::error::Result<ChatResponse> {
+        let native_request = NativeChatRequest {
+            model: request.model,
+            messages: convert_messages(&request.messages),
+            temperature: request.temperature.unwrap_or(0.7),
+            max_tokens: request.max_tokens,
+            tools: convert_tools(request.tools.as_deref()),
+            stream: None,
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let mut req_builder = self.http_client.post(&url);
+
+        if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.bearer_auth(api_key);
+        }
+
+        let response = req_builder
+            .json(&native_request)
+            .send()
+            .await
+            .map_err(|e| rollball_core::RollballError::Provider(format!("OpenAI request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(rollball_core::RollballError::Provider(format!("OpenAI API error: {status} — {body}")));
+        }
+
+        let native_resp: NativeChatResponse = response
+            .json()
+            .await
+            .map_err(|e| rollball_core::RollballError::Provider(format!("Failed to parse OpenAI response: {e}")))?;
+
+        let choice = native_resp
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| rollball_core::RollballError::Provider("No choices in OpenAI response".to_string()))?;
+
+        Ok(parse_response(choice.message, native_resp.usage))
+    }
+
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> rollball_core::error::Result<Box<dyn Stream<Item = StreamEvent> + Send>> {
+        let native_request = NativeChatRequest {
+            model: request.model,
+            messages: convert_messages(&request.messages),
+            temperature: request.temperature.unwrap_or(0.7),
+            max_tokens: request.max_tokens,
+            tools: convert_tools(request.tools.as_deref()),
+            stream: Some(true),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let mut req_builder = self.http_client.post(&url);
+
+        if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.bearer_auth(api_key);
+        }
+
+        let response = req_builder
+            .json(&native_request)
+            .send()
+            .await
+            .map_err(|e| rollball_core::RollballError::Provider(format!("OpenAI streaming request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(rollball_core::RollballError::Provider(format!("OpenAI API error: {status} — {body}")));
+        }
+
+        // Spawn a task to read SSE lines and send events via channel
+        let (tx, rx) = mpsc::channel(32);
+        tokio::spawn(async move {
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            use futures_util::StreamExt;
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
+
+                            if line.trim() == "data: [DONE]" {
+                                let _ = tx.send(None).await;
+                                return;
+                            }
+
+                            if let Some(event) = parse_sse_line(&line) {
+                                if tx.send(Some(event)).await.is_err() {
+                                    return; // receiver dropped
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Some(StreamEvent::Error(format!("Stream error: {e}")))).await;
+                        return;
+                    }
+                }
+            }
+            let _ = tx.send(None).await;
+        });
+
+        Ok(Box::new(ChannelStream { rx }))
+    }
+
+    async fn chat_token_count(&self, messages: &[ChatMessage]) -> rollball_core::error::Result<u64> {
+        // Approximate token count: ~4 chars per token for English text
+        // This is a rough estimate; precise counting requires tiktoken
+        let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+        Ok((total_chars as f64 / 4.0).ceil() as u64)
+    }
+}
+
+// ── Streaming helpers ────────────────────────────────────────────────────
+
+/// Channel-based stream for SSE events
+struct ChannelStream {
+    rx: mpsc::Receiver<Option<StreamEvent>>,
+}
+
+impl Stream for ChannelStream {
+    type Item = StreamEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.rx.poll_recv(cx) {
+            Poll::Ready(Some(Some(event))) => Poll::Ready(Some(event)),
+            Poll::Ready(Some(None)) => Poll::Ready(None), // stream done
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Parse a single SSE line into a StreamEvent
+fn parse_sse_line(line: &str) -> Option<StreamEvent> {
+    let line = line.trim();
+    if line.is_empty() || line == ":" {
+        return None;
+    }
+
+    let data = line.strip_prefix("data: ")?;
+    if data == "[DONE]" {
+        return None;
+    }
+
+    let chunk: StreamChunk = serde_json::from_str(data).ok()?;
+
+    for choice in chunk.choices {
+        if let Some(content) = &choice.delta.content {
+            if !content.is_empty() {
+                return Some(StreamEvent::Content(content.clone()));
+            }
+        }
+
+        if let Some(tool_calls) = choice.delta.tool_calls {
+            for tc_delta in tool_calls {
+                if let Some(func) = tc_delta.function {
+                    if let Some(name) = func.name {
+                        return Some(StreamEvent::ToolCallStart(ToolCall {
+                            id: tc_delta
+                                .id
+                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                            call_type: "function".to_string(),
+                            function: FunctionCall {
+                                name,
+                                arguments: String::new(),
+                            },
+                        }));
+                    }
+                    if let Some(args) = func.arguments {
+                        return Some(StreamEvent::ToolCallChunk(args));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_messages_basic() {
+        let messages = vec![
+            ChatMessage {
+                role: MessageRole::System,
+                content: "You are helpful.".to_string(),
+                name: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "Hello".to_string(),
+                name: None,
+                tool_calls: None,
+            },
+        ];
+
+        let native = convert_messages(&messages);
+        assert_eq!(native.len(), 2);
+        assert_eq!(native[0].role, "system");
+        assert_eq!(native[1].role, "user");
+    }
+
+    #[test]
+    fn test_convert_messages_with_tool_calls() {
+        let messages = vec![ChatMessage {
+            role: MessageRole::Assistant,
+            content: "".to_string(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_123".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "weather".to_string(),
+                    arguments: "{\"city\":\"Shanghai\"}".to_string(),
+                },
+            }]),
+        }];
+
+        let native = convert_messages(&messages);
+        assert_eq!(native[0].role, "assistant");
+        assert!(native[0].tool_calls.is_some());
+    }
+
+    #[test]
+    fn test_provider_creation() {
+        let provider = OpenAIProvider::new(None);
+        assert_eq!(provider.name(), "openai");
+        assert_eq!(provider.base_url, "https://api.openai.com/v1");
+
+        let custom = OpenAIProvider::with_base_url(
+            Some("https://api.deepseek.com/v1"),
+            Some("sk-test"),
+        );
+        assert_eq!(custom.base_url, "https://api.deepseek.com/v1");
+    }
+
+    #[test]
+    fn test_parse_response() {
+        let msg = NativeResponseMessage {
+            content: Some("Hello!".to_string()),
+            reasoning_content: None,
+            tool_calls: None,
+        };
+        let resp = parse_response(msg, None);
+        assert_eq!(resp.content, "Hello!");
+        assert!(resp.tool_calls.is_none());
+
+        let msg_with_tc = NativeResponseMessage {
+            content: None,
+            reasoning_content: None,
+            tool_calls: Some(vec![NativeToolCall {
+                id: Some("call_1".to_string()),
+                kind: None,
+                function: NativeFunctionCall {
+                    name: "calculator".to_string(),
+                    arguments: "{\"expr\":\"2+2\"}".to_string(),
+                },
+            }]),
+        };
+        let resp = parse_response(msg_with_tc, Some(NativeUsage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+        }));
+        assert!(resp.tool_calls.is_some());
+        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
+    }
+}

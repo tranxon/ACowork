@@ -1,17 +1,15 @@
 //! Gateway Service API server (Unix Socket)
 
-use tokio::net::UnixListener;
-
 /// IPC server
 pub struct IpcServer {
-    listener: UnixListener,
+    // TODO: platform-specific listener (UnixListener on Linux, NamedPipe on Windows)
 }
 
 impl IpcServer {
     /// Create new IPC server
-    pub fn new(socket_path: &str) -> Result<Self, String> {
-        // TODO: Create Unix socket listener
-        unimplemented!()
+    pub fn new(_socket_path: &str) -> Result<Self, String> {
+        // TODO: Create platform-specific listener
+        Ok(Self {})
     }
 
     /// Start accepting connections

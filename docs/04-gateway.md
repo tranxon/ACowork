@@ -292,8 +292,8 @@ pub fn http_routes() -> Router<GatewayState> {
 // → Client sends: { "type": "message", "content": "..." }
 // ← Server pushes: { "type": "chunk", "delta": "今", "message_id": "msg-001" }
 // ← Server pushes: { "type": "chunk", "delta": "天", "message_id": "msg-001" }
-// ← Server pushes: { "type": "tool_call", "name": "http_get", "params": {...} }
-// ← Server pushes: { "type": "tool_result", "name": "http_get", "result": {...} }
+// ← Server pushes: { "type": "tool_call", "name": "http_request", "params": {...} }
+// ← Server pushes: { "type": "tool_result", "name": "http_request", "result": {...} }
 // ← Server pushes: { "type": "done", "message_id": "msg-001", "usage": {...} }
 ```
 

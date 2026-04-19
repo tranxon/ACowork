@@ -18,6 +18,30 @@ pub enum RuntimeError {
 
     #[error("IPC error: {0}")]
     Ipc(String),
+
+    #[error("Package error: {0}")]
+    Package(String),
+
+    #[error("Config error: {0}")]
+    Config(String),
+
+    #[error("Budget exceeded: {0}")]
+    BudgetExceeded(String),
+
+    #[error("Loop detected: {0}")]
+    LoopDetected(String),
+
+    #[error("Context overflow: {0}")]
+    ContextOverflow(String),
+
+    #[error("Manifest error: {0}")]
+    Manifest(#[from] rollball_core::manifest::ManifestError),
+
+    #[error("Sign error: {0}")]
+    Sign(String),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;

@@ -351,7 +351,7 @@ Reactive recovery 与步骤 ②.5 的 Preemptive Trim 互补：Preemptive 在调
        │
        ▼
 构造 error tool result:
-  { "error": true, "message": "工具执行超时", "tool_name": "http_get" }
+  { "error": true, "message": "工具执行超时", "tool_name": "http_request" }
        │
        ▼
 追加到对话历史 → LLM 在下一轮迭代看到错误信息并自主决策
