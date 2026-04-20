@@ -68,7 +68,8 @@ Agent Runtime (统一二进制)
 
 ## CONVENTIONS (THIS PROJECT)
 
-- Design docs in **Chinese** (中文)
+- Design docs in **Chinese** (中文); code comments (Rust `//`, `//!`, `///`) **MUST be in English**
+- Multi-language doc translations will be produced after project completion
 - `.agent` bundles are **declarative only** — no executable code
 - Version v3.x terminology only — no mixing with older versions
 - ZeroClaw is **reference only** — not source of truth for RollBall design

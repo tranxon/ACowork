@@ -140,3 +140,11 @@
 > - [12-tool-system.md](./12-tool-system.md) — 工具系统（Built-in / WASM / Gateway）
 > - [13-skill-system.md](./13-skill-system.md) — 技能系统（SKILL.md + Grafeo 经验层）
 > - [14-desktop-app.md](./14-desktop-app.md) — 桌面应用（Tauri、布局、系统托盘）
+
+---
+
+## 语言规则
+
+- **文档用中文**：所有设计文档（`docs/` 目录下的 `.md` 文件）使用中文撰写
+- **代码注释用英文**：所有 Rust 源码中的注释（`//`、`//!`、`///`）必须使用英文
+- **多语言文档**：等项目完全开发完毕后，再根据中文文档翻译其他多语言文档

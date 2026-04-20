@@ -1,6 +1,6 @@
 //! rollball-gateway — Gateway library
 //!
-//!常驻系统级进程，管理 Agent 生命周期、Intent 路由、密钥分发、预算协调。
+//! Long-running system process: manages Agent lifecycle, Intent routing, key distribution, budget coordination.
 
 pub mod gateway;
 pub mod package_manager;

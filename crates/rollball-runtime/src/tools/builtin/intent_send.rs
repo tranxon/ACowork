@@ -1,9 +1,9 @@
 //! Intent send tool — send Intent to other Agents via Gateway
 //!
 //! Per design doc (12-tool-system.md):
-//! - 通过 Gateway 路由到目标 Agent
-//! - 需要 intent:send:<target> 权限
-//! - Phase 1 使用 IPC 客户端发送，Phase 2+ 支持异步 Intent
+//! - Routed to target Agent via Gateway
+//! - Requires intent:send:<target> permission
+//! - Phase 1 uses IPC client; Phase 2+ supports async Intent
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};

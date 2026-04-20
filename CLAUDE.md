@@ -10,8 +10,8 @@ The platform serves two user roles:
 - **End users** — install Agents from repositories, configure API Keys, use directly
 - **Agent developers** — write manifest.toml + prompts + SKILL.md, sign and publish (zero executable code)
 
-- Design docs are written in **Chinese (中文)**
-- Code and code comments use **English**
+- Design docs are written in **Chinese (中文)**; code comments **MUST be in English**
+- Multi-language doc translations will be produced after project completion
 - Version: **v3.x** terminology only — never mix with v2.x
 
 ## Repository Structure
@@ -98,6 +98,7 @@ cargo fmt --all -- --check
 ## Conventions
 
 - Rust Edition 2024, MSRV 1.95+
+- **Language rule**: Documentation (`.md`) in Chinese; code comments (Rust `//`, `//!`, `///`) MUST be in English
 - Security-first: flag `unsafe` blocks, avoid `unwrap()`/`expect()` in production, validate all external input
 - Use `Result<T>` for fallible operations, propagate with `?`
 - Minimize unnecessary `.clone()` — prefer borrowing

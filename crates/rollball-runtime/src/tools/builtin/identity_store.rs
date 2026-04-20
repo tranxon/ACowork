@@ -5,10 +5,10 @@
 //! Triggers `identity:changed` notification.
 //!
 //! Per design doc (12-tool-system.md):
-//! - System Agent 专用，写入/更新用户身份字段
-//! - 支持 display_name/language/timezone/city 等
-//! - 带 confidence 和 source 标记
-//! - 触发 identity:changed 通知
+//! - System Agent exclusive: write/update user identity fields
+//! - Supports display_name, language, timezone, city, etc.
+//! - Tracks confidence and source metadata
+//! - Triggers identity:changed notification
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
