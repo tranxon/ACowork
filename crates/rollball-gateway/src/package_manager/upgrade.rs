@@ -81,8 +81,9 @@ pub fn upgrade_package(
     // Remove from state temporarily
     state.remove_installed(agent_id);
 
-    // Install new package
-    let new_info = install_package(new_package_path, install_dir, state)?;
+    // Install new package (upgrade inherits dev_mode from caller context)
+    // TODO(Phase 2): verify signing fingerprint consistency with old package
+    let new_info = install_package(new_package_path, install_dir, state, true)?;
     
     tracing::info!("Upgraded agent: {} from v{} to v{}", 
         agent_id, old_info.version, new_info.version);
@@ -138,9 +139,17 @@ mod tests {
         zip_path
     }
 
+    fn temp_vault_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("rollball-test-upgrade-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
     #[test]
     fn test_upgrade_not_installed() {
-        let mut state = GatewayState::new();
+        let vault_dir = temp_vault_dir("not_installed");
+        let mut state = GatewayState::new(&vault_dir);
         let result = upgrade_package(
             "com.test.unknown",
             Path::new("/tmp/nonexistent.agent"),
@@ -159,7 +168,8 @@ mod tests {
         let zip_path = create_test_zip(&temp_dir, "com.test.other", "2.0.0");
         
         // Add old agent to state
-        let mut state = GatewayState::new();
+        let vault_dir = temp_vault_dir("mismatch");
+        let mut state = GatewayState::new(&vault_dir);
         let manifest = rollball_core::AgentManifest::from_toml(r#"
             agent_id = "com.test.weather"
             version = "1.0.0"

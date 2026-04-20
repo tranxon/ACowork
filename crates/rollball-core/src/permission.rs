@@ -15,12 +15,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Permission {
     /// Network access with optional URL whitelist
+    /// None = full network access granted; Some(url) = restricted to that URL
     /// e.g., "network:https://api.weather.com"
     Network(Option<String>),
     /// Filesystem read access with optional path restriction
+    /// None = full filesystem read; Some(path) = restricted to that path
     /// e.g., "filesystem:read:~/Documents"
     FilesystemRead(Option<String>),
     /// Filesystem write access with optional path restriction
+    /// None = full filesystem write; Some(path) = restricted to that path
     /// e.g., "filesystem:write:~/workdir"
     FilesystemWrite(Option<String>),
     /// Memory read access
@@ -106,6 +109,10 @@ impl Permission {
     /// Check if this permission matches (covers) a requested permission.
     /// A broader permission (e.g., `Network(None)`) matches a narrower one
     /// (e.g., `Network(Some("https://api.weather.com"))`).
+    ///
+    /// Broad→narrow semantics: `Network(None)` = "all network access",
+    /// so it covers any `Network(Some(_))`. Conversely, `Network(Some(url))`
+    /// only covers the exact same URL or `Network(None)` is required for broader.
     pub fn matches(&self, requested: &Permission) -> bool {
         match (self, requested) {
             // Same type: broader scope (None) matches narrower scope (Some)

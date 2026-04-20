@@ -6,6 +6,16 @@
 
 ---
 
+## 审查决策标注说明
+
+| 标记 | 含义 |
+|------|------|
+| ✅ 采纳 | 同意修改，将在本次迭代中修复 |
+| ⏳ 延后 | 同意但不在 Phase 1 修复，标注 TODO(Phase X) |
+| ❌ 不采纳 | 不同意修改，保留现有实现 |
+
+---
+
 ## 一、总体评价
 
 Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate workspace 结构清晰，核心数据类型完整，单元测试覆盖了主要路径。代码风格统一，thiserror + ? 传播使用规范，ZeroClaw 借鉴标注到位。
@@ -40,9 +50,15 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
 
 1. **[P1] RollballError 过于宽泛** — 所有错误变体都是 `String` 类型，没有结构化错误码。Provider 的 `Provider(String)` 无法区分 429/401/500 等 HTTP 状态码，导致 ReliableProvider 不得不做字符串匹配判断是否可重试（`msg.contains("429")`），非常脆弱。建议 Provider 错误至少增加 `status_code: u16` 字段。
 
+   > **⏳ 延后** — 同意问题存在，但 Phase 1 的 Provider 实现已经用 `RollballError::RateLimited` 变体覆盖了 429 场景。字符串匹配部分确实脆弱但功能正确。结构化错误码是 Phase 2 的优化项，添加 `status_code` 字段需同步修改所有 Provider 实现，Phase 1 不值得引入此复杂度。当前加 `TODO(Phase 2)` 标注即可。
+
 2. **[P2] Permission::FilesystemRead/Write 缺少 None→Some 匹配注释** — `matches` 方法已正确实现宽→窄，但 `Permission::Network(None)` 匹配 `Permission::Network(Some("evil.com"))` 意味着声明了 `network` 权限就等于放行所有 URL。这是设计意图还是需要区分 URL 白名单？建议在代码注释中明确。
 
+   > **✅ 采纳** — 确实应在代码注释中明确宽→窄匹配的语义，这是安全关键路径的可读性问题。加注释说明 `Network(None)` = 授予全网络访问。
+
 3. **[P2] Identity 结构过于简单** — 仅有 6 个字段，设计文档 v3.4 中 Identity 的 Zone/PrivacyLevel 概念未体现。Phase 1 可接受，但建议加 `TODO(Phase 2)` 注释。
+
+   > **✅ 采纳** — 加 TODO 注释是低成本高可读性改进，应该做。
 
 ---
 
@@ -59,11 +75,19 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
 
 1. **[P0] 签名块存储方式与设计文档不一致** — 设计文档明确要求"Signing Block 插入在 Central Directory 之前"（APK v2 思路），但实际实现将签名块作为 ZIP entry `META-INF/SIGNING.BLOCK` 存储。这意味着签名块可以被轻易删除/替换而 ZIP 结构仍合法。虽然 verify 会检测缺失，但**设计文档的安全模型是基于二进制级别的不可分割性**，当前实现降低了篡改门槛。且安装流程中签名验证入口名大小写不一致（sign.rs 用 `META-INF/SIGNING.BLOCK`，install.rs 用 `META-INF/signing.block`）。
 
+   > **⏳ 延后（存储方式），✅ 采纳（大小写不一致）** — APK v2 式的二进制级签名嵌入是重大架构变更，需要修改 sign/verify/install 全链路，风险高且 Phase 1 当前方案在功能上完整（verify 能检测篡改和缺失）。将此列为 Phase 2 优先级。但**大小写不一致是 bug**，install.rs 使用小写 `signing.block` 与 sign.rs/verify.rs 的 `SIGNING.BLOCK` 不匹配，导致安装流程永远检测不到签名块，这是必须立即修复的。
+
 2. **[P1] 证书验证 verify_chain() 实质上全部通过** — `verify_chain` 对 Developer 和 Platform 证书都返回 `Ok(true)`，没有任何真实验证。Phase 1 文档要求"Developer 自签名验证"至少应该验证证书的公钥与签名中的公钥一致，而不是只要能 JSON 解析就通过。
+
+   > **⏳ 延后** — Phase 1 的安全模型是自签名信任模型，证书格式本身是简化 JSON 而非 X.509。要验证公钥一致性需要修改签名块格式（加入证书公钥引用），这是 Phase 2 X.509 迁移的工作。当前代码已标注 `Phase 2 will add proper root CA verification`，语义清晰。Phase 1 的自签名模型下，能 JSON 解析 = 格式合法 = 信任，是合理简化。
 
 3. **[P1] install.rs 签名验证未真正委托给 rollball-sign** — `install.rs` 第 23-29 行检查 `META-INF/signing.block` 存在后仅打日志，没有调用 `rollball_sign::verify::verify_package()`。设计文档明确要求"签名验证委托（调用 rollball-sign 验签）"，且 Phase 1 的核心安全主张是"未签名/无效包拒绝加载"。
 
+   > **✅ 采纳** — 这是核心安全主张的落地问题。install.rs 应调用 `rollball_sign::verify::verify_package()`，验证失败应拒绝安装。同时需修复 entry 名大小写不一致。
+
 4. **[P2] SelfSignedCert 使用 JSON 而非 X.509** — Cargo.toml 引入了 `x509-cert` 依赖但未使用。keygen.rs 注释提到"Full X.509 support in Phase 2"，但当前 JSON 格式没有防伪造保护（任何人都可以手写一个 JSON 证书声称是 Platform 类型）。
+
+   > **❌ 不采纳（移除 x509-cert 依赖），⏳ 延后（X.509）** — Phase 1 不需要 X.509，`x509-cert` 依赖应移除（减少攻击面和编译时间）。JSON 证书的防伪造问题在 verify_chain 中已有 Phase 2 标注。任何人手写 JSON 证书的问题在签名块包含公钥指纹后自然解决（Phase 2）。
 
 ---
 
@@ -86,9 +110,15 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
 
    rollball-gateway 的 Cargo.toml 已声明 `rollball-vault` 依赖，但代码中没有 `use rollball_vault`。
 
+   > **✅ 采纳** — 这是跨 crate 集成链路断裂，rollball-vault 已经完整实现但没被使用。VaultFacade 应委托给 rollball_vault::Vault 进行加密存储。这是 Phase 1 的核心安全功能。
+
 2. **[P2] master_key 用 Vec<u8> 而非 SecretString** — 设计文档要求 Key "不暴露在环境变量或命令行参数"，Vault::retrieve 正确返回 SecretString，但 Vault 内部的 `master_key: Option<Vec<u8>>` 未用 secrecy 保护。虽然 lock() 时做了零化，但 Vec 的零化不能保证编译器不会优化掉 dead store。建议使用 `zeroize::Zeroize` 或 `secrecy::Secret<Vec<u8>>`。
 
+   > **✅ 采纳** — 这是一个真实的安全隐患。编译器确实可能优化掉对 dead store 的零化。使用 `zeroize` crate 的 `Zeroize` trait 是标准做法，且 Vault 已依赖 `chacha20poly1305` 和 `secrecy`，加 `zeroize` 开销很小。
+
 3. **[P2] KeyRelease 响应中 api_key 是明文 String** — `GatewayResponse::KeyReleaseResult { api_key: String }` 将 Key 以明文 JSON 传输。设计文档说"一次性分发"，但 IPC Socket 传输中 Key 以 String 形式存在于 serde_json Value 中，无法保证消费后被零化。
+
+   > **⏳ 延后** — IPC Socket 是本地 Unix Socket / Named Pipe，非网络传输，安全边界在进程隔离层。Key 在传输后由 Runtime 进程持有，serde_json Value 的零化需要自定义 Deserializer，Phase 1 不值得。加 `TODO(Phase 3)` 标注。
 
 ---
 
@@ -112,19 +142,35 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
    
    修复建议：使用 `std::fs::canonicalize()` 或 `path-clean` crate 规范化后再比较，并拒绝包含 `..` 的路径。
 
+   > **✅ 采纳** — 路径遍历是真实安全漏洞，必须修复。但 `canonicalize()` 要求路径实际存在（否则 Err），对于还没创建的路径不适用。更好的方案：先拒绝包含 `..` 的路径，再对已存在的路径做 canonicalize 比较，对不存在的路径做字符串级规范化（去除多余 `/`、解析 `..`）。无需额外 crate，用 `std::path::Component` 过滤即可。
+
 2. **[P1] 主循环缺少流式处理（③ Streaming）** — 设计文档要求"检测到 tool_calls 立即中断 streaming"，但当前 `AgentLoop::run()` 仅调用 `provider.chat()` 非流式接口。虽然 OpenAI Provider 实现了 `chat_stream()`，但主循环未使用。这意味着用户无法看到逐步生成的文字，体验较差。
+
+   > **⏳ 延后** — 流式处理需要主循环架构重构（从同步 `chat()` 切换到异步 `chat_stream()` + 中断检测），同时影响 history 追加和 tool_calls 解析逻辑。Phase 1 的设计文档确实要求此功能，但重构风险高。Phase 2 优先级，当前加 `TODO(Phase 2)` 标注。
 
 3. **[P1] ⑦ Usage Report 未实际发送** — 第 246 行仅打日志 "Usage report would be sent here (Phase 1: log only)"。设计文档要求"用量上报 → ipc_client.send(UsageReport) // 异步不阻塞"。虽然 IPC 客户端已实现，但主循环没有持有 `GatewayClient` 引用。Phase 1 至少应该通过 IPC 发送一个简单的 UsageReport。
 
+   > **⏳ 延后** — 主循环未持有 GatewayClient 是架构决策：Phase 1 的 Runtime 以 CLI 模式运行，不经过 Gateway。IPC 集成需要在 AgentLoop 初始化时注入 GatewayClient，涉及 CLI 启动流程和配置变更。加 `TODO(Phase 2)` 标注。
+
 4. **[P1] ⑨ DevMode 控制未实现** — 设计文档要求主循环最后一步是 "DevMode 控制 → debug.step(iteration)"，当前完全跳过。虽然 Phase 1 暂不需要完整的 Debug Protocol，但步骤⑨的位置应该至少预留一个 `// TODO(Phase 5): DevMode step control` 占位。
+
+   > **✅ 采纳** — 加 TODO 占位注释是零成本改进，主循环步骤编号应与设计文档对应。
 
 5. **[P1] 主循环缺少 ③ Reactive Recovery** — 设计文档要求当 LLM 调用返回上下文溢出错误时触发 "Reactive Recovery（Emergency History Trim）"。当前 `loop_.rs` 第 115-121 行 LLM 错误直接返回 Err，没有尝试 `history.emergency_trim()` 后重试。
 
+   > **✅ 采纳** — Reactive Recovery 是容错关键路径，且 `emergency_trim()` 已实现。修复成本低：在 LLM 错误分支检测 context_overflow 类错误，调用 emergency_trim 后重试一次。
+
 6. **[P2] BudgetGuard 用 session_tokens 代替 daily_tokens** — BudgetGuard 用 `session_tokens` 累加，但检查的是 `daily_tokens` 限额。单次会话的 token 数不可能达到日限额（如 100K），导致预算检查形同虚设。Phase 1 应至少在 Gateway 侧维护真实的日/月累计用量。
+
+   > **⏳ 延后** — BudgetGuard 的 session_tokens 累加确实无法拦截日限额，但真实的日/月累计需要在 Gateway 侧持久化（Runtime 进程重启后计数归零）。这属于 Gateway→Runtime 的预算协调功能，Phase 2 实现。当前代码加 `TODO(Phase 2)` 标注。
 
 7. **[P2] Token 估算过于粗糙** — `estimate_tokens()` 使用 4 字符/token 的固定比例，对中文（约 1.5 字符/token）和代码（约 3 字符/token）误差较大。设计文档要求"Token 计数误差 < 5%"，当前可能达到 50%+。建议至少区分 CJK 字符。
 
+   > **⏳ 延后** — Token 精确计数需要 tiktoken 或类似库，引入额外依赖。Phase 1 的估算用于预算检查（已形同虚设见上条）和 history trim（有 preemptive_trim 保底），不关键。Phase 2 加 CJK 区分即可。
+
 8. **[P2] LoopDetector.check_exact_repeat() 重置后 count 归零** — 第 174-175 行检测到循环后重置 `count = 0, last_signature = None`，导致同一工具下次调用从 count=1 重新计数，需要再 3 次才触发。这意味着"三级渐进响应"实际上永远停在 Warning 级别（因为 hit_counts 虽然累加，但 state 每次重置后需要 3 次连续相同调用才触发下一次检测）。Escalation 测试通过是因为它用 9 次连续调用绕过了重置逻辑。
+
+   > **✅ 采纳** — 这是逻辑 bug。三级渐进响应的设计意图是升级而非重启，重置 count 导致 escalation 无法正常工作。修复：检测到循环后不重置 count 和 signature，仅更新 hit_counts，让后续连续调用继续升级。
 
 ---
 
@@ -143,13 +189,23 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
 
 1. **[P0] Gateway.run() 使用裸指针 unsafe** — 第 52 行 `let state_ptr = &mut self.state as *mut GatewayState;`，第 78 行 `let state = unsafe { &mut *state_ptr };`。这段 unsafe 完全不必要——`run()` 方法已有 `&mut self`，可以直接使用 `&mut self.state`。裸指针的唯一"理由"是 `ipc_server.run(state)` 需要 `&mut GatewayState`，但完全可以用 `self.state` 直接传递。这个 unsafe 在多线程环境下可能导致未定义行为。
 
+   > **✅ 采纳** — unsafe 确实不必要。`run(&mut self)` 已有独占可变引用，直接传 `&mut self.state` 即可。代码中也有 `// Safety: we have exclusive mutable access` 的注释承认了这一点，既然如此就不需要 unsafe。
+
 2. **[P1] GatewayState 无并发保护** — `GatewayState` 包含 `HashMap<String, AgentInfo>` 和 `VaultFacade`，在 IPC server 处理连接时被 `&mut` 引用，但 idle timeout checker 通过 `tokio::spawn` 在另一个 task 中运行，理论上需要访问 state。虽然当前 idle checker 只是打日志，但 Phase 2 真正实现时会遇到数据竞争。建议现在就用 `Arc<Mutex<GatewayState>>`。
+
+   > **⏳ 延后** — 当前 idle checker 确实不访问 state（只打日志），不存在数据竞争。改为 `Arc<Mutex<GatewayState>>` 需要重构 Gateway.run() 和所有 IPC handler 的签名，影响面大。Phase 2 实现 idle checker 实际逻辑时再改。加 `TODO(Phase 2)` 标注。
 
 3. **[P1] install.rs 未拒绝未签名包** — 第 27-29 行，当 ZIP 没有 signing block 时仅 `tracing::warn` 并继续安装。设计文档明确要求"签名无效拒绝安装"，Phase 1 至少应在非 dev-mode 下拒绝未签名包。
 
+   > **✅ 采纳** — 与 3.2 #3 同一问题链路。install.rs 应在验证签名失败时拒绝安装，未签名包也应拒绝（非 dev-mode）。修复时一并处理。
+
 4. **[P1] IPC Server 是同步阻塞的** — `IpcServer::run()` 是同步循环，一次只处理一个连接。设计文档要求"多 Runtime 并发连接"，当前实现是串行处理，第二个 Agent 必须等第一个断开。这对 Phase 1 的单 Agent 场景可接受，但需要在代码中明确标注限制。
 
+   > **✅ 采纳** — 加标注说明当前限制，属于低成本改进。
+
 5. **[P2] 升级缺少签名一致性校验** — `upgrade.rs` 应校验升级前后签名者指纹一致（设计文档："签名一致性校验：作者指纹必须一致"），但当前实现只是删除旧包再安装新包，没有指纹比对。
+
+   > **⏳ 延后** — 需要先完成签名验证集成（3.2 #3 + 3.5 #3），之后才能在 upgrade 流程中提取旧包指纹并比对。依赖链未就绪，Phase 2 实现。
 
 ---
 
@@ -161,7 +217,11 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
 
 1. **[P2] rollball-memory/store.rs 仅 107 字节** — `store.rs` 只有一行 `unimplemented!()` 占位，但 rollball-runtime 的 Cargo.toml 依赖了 `rollball-memory`。建议至少提供一个 InMemoryStore 的 Phase 1 实现，否则 memory_store/memory_recall 工具无法正常工作。
 
+   > **❌ 不采纳（"仅107字节"描述不准确），⏳ 延后（InMemoryStore）** — 实际 store.rs 是一行 re-export `pub use rollball_core::memory::traits::MemoryStore;`，不是 `unimplemented!()`。memory_store/memory_recall 工具在 Phase 1 使用的是内存 HashMap stub（在 builtin 工具实现内），不依赖 rollball-memory 的具体 store 实现。InMemoryStore 是 Phase 2 Grafeo 集成时的工作。
+
 2. **[P2] Grafeo 全部 unimplemented** — grafeo.rs/graph.rs/decay.rs/retrieval.rs 全部是占位符，这符合 Phase 2 规划，但 Runtime 的 memory 工具依赖 Grafeo 后端，Phase 1 至少需要一个 stub 实现。
+
+   > **⏳ 延后** — 符合 Phase 2 规划。Runtime 的 memory 工具当前使用内置 HashMap stub，不依赖 Grafeo crate。Phase 2 集成时再实现。
 
 ---
 
@@ -178,6 +238,8 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
 
 修复方案：install.rs 应调用 `rollball_sign::verify::verify_package()` 并在验证失败时拒绝安装。
 
+> **✅ 采纳** — 同 3.2 #3 和 3.5 #3，一并修复。
+
 ### 4.2 [P1] Vault 集成链路断裂
 
 1. `rollball-vault` 实现了完整的加密存储
@@ -186,11 +248,15 @@ Phase 1 代码完成度高，S1~S3 全部任务已标记"完成"，7-crate works
 
 修复方案：VaultFacade 应内部持有 `rollball_vault::Vault` 实例，unlock() 调用 `vault.unlock(password)`，store/get 委托给 vault。
 
+> **✅ 采纳** — 同 3.3 #1。
+
 ### 4.3 [P1] Runtime IPC 客户端未与主循环集成
 
 1. `rollball-runtime/src/ipc/client.rs` 实现了 GatewayClient
 2. 但 AgentLoop 没有持有 GatewayClient 引用
 3. KeyRelease、UsageReport、BudgetQuery 都未通过 IPC 实际调用
+
+> **⏳ 延后** — 同 3.4 #3。Phase 1 Runtime 以 CLI 模式运行，不经过 Gateway。Phase 2 实现。
 
 ---
 

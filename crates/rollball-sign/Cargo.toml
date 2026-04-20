@@ -22,7 +22,6 @@ path = "src/bin/verify.rs"
 [dependencies]
 rollball-core.workspace = true
 ed25519-dalek.workspace = true
-x509-cert.workspace = true
 sha2.workspace = true
 zip.workspace = true
 clap.workspace = true

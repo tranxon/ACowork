@@ -27,9 +27,10 @@ impl Gateway {
     /// Create a new Gateway instance with the given configuration
     pub fn new(config: GatewayConfig) -> Self {
         let idle_timeout = config.idle_timeout_secs;
+        let vault_dir = config.vault_dir.clone();
         Self {
             config,
-            state: GatewayState::new(),
+            state: GatewayState::new(&vault_dir),
             lifecycle: LifecycleManager::new(idle_timeout),
         }
     }
@@ -49,7 +50,6 @@ impl Gateway {
 
         // Start IPC server in a background task
         let socket_path = self.config.socket_path.clone();
-        let state_ptr = &mut self.state as *mut GatewayState;
 
         // Phase 1: run IPC server synchronously in the main task
         // Phase 2: run in a separate task and use channels for communication
@@ -73,10 +73,8 @@ impl Gateway {
         tracing::info!("Gateway entering IPC event loop");
 
         // Run the IPC server (blocking)
-        // Safety: we have exclusive mutable access to self.state
         // Phase 2 will use Arc<Mutex<GatewayState>> for true async
-        let state = unsafe { &mut *state_ptr };
-        ipc_server.run(state)?;
+        ipc_server.run(&mut self.state)?;
 
         Ok(())
     }
@@ -88,6 +86,7 @@ impl Gateway {
             std::path::Path::new(package_path),
             packages_dir,
             &mut self.state,
+            self.config.dev_mode,
         )?;
         Ok(format!("Package installed: {}", package_path))
     }
@@ -186,6 +185,7 @@ mod tests {
             idle_timeout_secs: 0,
             max_iterations: 20,
             iteration_timeout_ms: 30000,
+            dev_mode: true,
         }
     }
 

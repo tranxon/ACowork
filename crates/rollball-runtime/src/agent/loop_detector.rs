@@ -167,9 +167,8 @@ impl LoopDetector {
                 "Detected repeated call to [{tool_name}] with same parameters ({hit_val} consecutive hits)"
             );
 
-            // Reset state after detection
-            self.exact_repeat_state.count = 0;
-            self.exact_repeat_state.last_signature = None;
+            // Do NOT reset count and signature — escalation should continue
+            // on subsequent identical calls. Only increment hit_counts.
 
             return Some(LoopDetectionResult::LoopDetected {
                 pattern: LoopPattern::ExactRepeat,

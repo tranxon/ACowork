@@ -33,12 +33,12 @@ pub struct GatewayState {
 }
 
 impl GatewayState {
-    /// Create new empty state
-    pub fn new() -> Self {
+    /// Create new empty state with vault at the given directory
+    pub fn new(vault_dir: &str) -> Self {
         Self {
             installed_agents: HashMap::new(),
             running_agents: HashMap::new(),
-            vault: VaultFacade::new(),
+            vault: VaultFacade::new(vault_dir),
         }
     }
 
@@ -75,7 +75,7 @@ impl GatewayState {
 
 impl Default for GatewayState {
     fn default() -> Self {
-        Self::new()
+        Self::new("/tmp/rollball-vault-default")
     }
 }
 
@@ -83,17 +83,27 @@ impl Default for GatewayState {
 mod tests {
     use super::*;
 
+    fn temp_vault_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("rollball-test-state-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
     #[test]
     fn test_state_new() {
-        let state = GatewayState::new();
+        let dir = temp_vault_dir("new");
+        let state = GatewayState::new(&dir);
         assert!(state.installed_agents.is_empty());
         assert!(state.running_agents.is_empty());
         assert!(!state.vault.is_unlocked());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_state_install_and_check() {
-        let mut state = GatewayState::new();
+        let dir = temp_vault_dir("install");
+        let mut state = GatewayState::new(&dir);
         assert!(!state.is_installed("com.example.weather"));
         
         let toml_str = r#"
@@ -117,11 +127,13 @@ mod tests {
             manifest,
         });
         assert!(state.is_installed("com.example.weather"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_state_running() {
-        let mut state = GatewayState::new();
+        let dir = temp_vault_dir("running");
+        let mut state = GatewayState::new(&dir);
         state.add_running(RunningAgentInfo {
             agent_id: "com.example.weather".to_string(),
             pid: 1234,
@@ -132,5 +144,6 @@ mod tests {
         
         state.remove_running("com.example.weather");
         assert!(!state.is_running("com.example.weather"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

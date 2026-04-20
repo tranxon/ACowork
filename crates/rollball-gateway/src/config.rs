@@ -34,6 +34,9 @@ pub struct GatewayConfig {
     /// Default iteration timeout in milliseconds
     #[serde(default = "default_iteration_timeout_ms")]
     pub iteration_timeout_ms: u64,
+    /// Development mode: allows unsigned packages, relaxed security
+    #[serde(default)]
+    pub dev_mode: bool,
 }
 
 fn default_log_level() -> String { "info".to_string() }
@@ -108,6 +111,7 @@ impl GatewayConfig {
                 .unwrap_or_else(default_max_iterations),
             iteration_timeout_ms: file_config.as_ref().map(|c| c.iteration_timeout_ms)
                 .unwrap_or_else(default_iteration_timeout_ms),
+            dev_mode: file_config.as_ref().map(|c| c.dev_mode).unwrap_or(false),
         })
     }
 
@@ -150,6 +154,7 @@ impl Default for GatewayConfig {
             idle_timeout_secs: default_idle_timeout(),
             max_iterations: default_max_iterations(),
             iteration_timeout_ms: default_iteration_timeout_ms(),
+            dev_mode: false,
         }
     }
 }
@@ -198,6 +203,7 @@ mod tests {
             vault_dir: format!("/tmp/test-gw-{}", std::process::id()),
             packages_dir: format!("/tmp/test-gw-pkg-{}", std::process::id()),
             data_dir: format!("/tmp/test-gw-data-{}", std::process::id()),
+            dev_mode: false,
             ..Default::default()
         };
         config.ensure_dirs().unwrap();

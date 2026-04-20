@@ -14,6 +14,7 @@
 use secrecy::SecretString;
 #[cfg(test)]
 use secrecy::ExposeSecret;
+use zeroize::Zeroize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,11 +66,12 @@ impl Vault {
         Ok(())
     }
 
-    /// Lock the vault (clear master key from memory)
+    /// Lock the vault (zeroize master key from memory)
     pub fn lock(&mut self) {
         if let Some(mut key) = self.master_key.take() {
-            // Zero out the key material
-            key.fill(0);
+            // Zero out the key material using zeroize to prevent
+            // compiler optimization from removing the dead store
+            key.zeroize();
         }
     }
 

@@ -25,6 +25,11 @@ impl IpcServer {
     }
 
     /// Start the server (blocking)
+    ///
+    /// Phase 1 limitation: this is a synchronous, single-connection server.
+    /// Only one Agent Runtime can be connected at a time; the second must
+    /// wait for the first to disconnect. Phase 2 will use async I/O to
+    /// support multiple concurrent connections.
     pub fn run(&mut self, state: &mut GatewayState) -> Result<(), GatewayError> {
         let transport = create_transport(&self.socket_path)?;
         transport.listen()?;

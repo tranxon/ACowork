@@ -1,67 +1,70 @@
 //! Vault integration — facade for Key distribution
 //!
 //! Wraps rollball-vault crate and adds Gateway-specific key distribution logic.
+//! All API keys are stored encrypted on disk via rollball_vault::Vault.
 
 use crate::error::GatewayError;
+use secrecy::ExposeSecret;
 
 /// Vault facade for Gateway
+///
+/// Delegates to rollball_vault::Vault for encrypted storage.
 pub struct VaultFacade {
-    /// Whether the vault is unlocked
-    unlocked: bool,
-    /// Provider → API Key mappings (in-memory cache after unlock)
-    keys: std::collections::HashMap<String, String>,
+    /// Inner vault (encrypted on-disk storage)
+    vault: rollball_vault::Vault,
+    /// In-memory cache of provider names (not values) for fast listing
+    provider_names: Vec<String>,
 }
 
 impl VaultFacade {
-    /// Create a new locked vault facade
-    pub fn new() -> Self {
+    /// Create a new vault facade pointing at the given directory
+    ///
+    /// The vault starts in a locked state. Call `unlock()` with a password
+    /// to derive the master key and enable store/retrieve operations.
+    pub fn new(vault_dir: &str) -> Self {
+        let vault = rollball_vault::Vault::open(std::path::Path::new(vault_dir))
+            .expect("Failed to open vault directory");
         Self {
-            unlocked: false,
-            keys: std::collections::HashMap::new(),
+            vault,
+            provider_names: Vec::new(),
         }
     }
 
-    /// Unlock the vault with a password
-    pub fn unlock(&mut self, _password: &str) -> Result<(), GatewayError> {
-        // Phase 1: simple in-memory store
-        // Phase 2: delegate to rollball-vault crate
-        self.unlocked = true;
+    /// Unlock the vault with a password (delegates to rollball_vault)
+    pub fn unlock(&mut self, password: &str) -> Result<(), GatewayError> {
+        self.vault.unlock(password)
+            .map_err(|e| GatewayError::Vault(format!("Failed to unlock vault: {}", e)))?;
+        // Refresh provider list after unlock
+        self.provider_names = self.vault.list()
+            .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {}", e)))?;
         Ok(())
     }
 
     /// Check if vault is unlocked
     pub fn is_unlocked(&self) -> bool {
-        self.unlocked
+        self.vault.is_unlocked()
     }
 
-    /// Store an API key for a provider
+    /// Store an API key for a provider (encrypted on disk)
     pub fn store_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
-        if !self.unlocked {
-            return Err(GatewayError::Vault("Vault is locked".to_string()));
+        self.vault.store(provider, api_key)
+            .map_err(|e| GatewayError::Vault(format!("Failed to store key: {}", e)))?;
+        if !self.provider_names.contains(&provider.to_string()) {
+            self.provider_names.push(provider.to_string());
         }
-        self.keys.insert(provider.to_string(), api_key.to_string());
         Ok(())
     }
 
-    /// Get an API key for a provider (one-time distribution)
+    /// Get an API key for a provider (one-time distribution, decrypted)
     pub fn get_key(&self, provider: &str) -> Result<String, GatewayError> {
-        if !self.unlocked {
-            return Err(GatewayError::Vault("Vault is locked".to_string()));
-        }
-        self.keys.get(provider)
-            .cloned()
-            .ok_or_else(|| GatewayError::Vault(format!("No key found for provider '{}'", provider)))
+        let secret = self.vault.retrieve(provider)
+            .map_err(|e| GatewayError::Vault(format!("Failed to retrieve key for '{}': {}", provider, e)))?;
+        Ok(secret.expose_secret().to_string())
     }
 
     /// List all providers with stored keys (no values returned)
     pub fn list_providers(&self) -> Vec<String> {
-        self.keys.keys().cloned().collect()
-    }
-}
-
-impl Default for VaultFacade {
-    fn default() -> Self {
-        Self::new()
+        self.provider_names.clone()
     }
 }
 
@@ -69,57 +72,78 @@ impl Default for VaultFacade {
 mod tests {
     use super::*;
 
+    fn temp_vault_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("rollball-test-vaultfacade-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
     #[test]
     fn test_vault_locked_by_default() {
-        let vault = VaultFacade::new();
+        let dir = temp_vault_dir("locked");
+        let vault = VaultFacade::new(&dir);
         assert!(!vault.is_unlocked());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_vault_unlock() {
-        let mut vault = VaultFacade::new();
+        let dir = temp_vault_dir("unlock");
+        let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
         assert!(vault.is_unlocked());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_vault_store_and_get() {
-        let mut vault = VaultFacade::new();
+        let dir = temp_vault_dir("store_get");
+        let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
         vault.store_key("openai", "sk-test-key").unwrap();
         let key = vault.get_key("openai").unwrap();
         assert_eq!(key, "sk-test-key");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_vault_get_locked_fails() {
-        let vault = VaultFacade::new();
+        let dir = temp_vault_dir("get_locked");
+        let vault = VaultFacade::new(&dir);
         let result = vault.get_key("openai");
         assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_vault_store_locked_fails() {
-        let mut vault = VaultFacade::new();
+        let dir = temp_vault_dir("store_locked");
+        let mut vault = VaultFacade::new(&dir);
         let result = vault.store_key("openai", "sk-test-key");
         assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_vault_get_missing_provider() {
-        let mut vault = VaultFacade::new();
+        let dir = temp_vault_dir("missing");
+        let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
         let result = vault.get_key("anthropic");
         assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_vault_list_providers() {
-        let mut vault = VaultFacade::new();
+        let dir = temp_vault_dir("list");
+        let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
         vault.store_key("openai", "sk-key1").unwrap();
         vault.store_key("ollama", "").unwrap();
         let providers = vault.list_providers();
         assert_eq!(providers.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

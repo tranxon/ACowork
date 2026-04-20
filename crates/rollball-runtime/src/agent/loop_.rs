@@ -115,8 +115,32 @@ impl AgentLoop {
             let response = match self.provider.chat(chat_request).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    tracing::error!(error = %e, "LLM call failed");
-                    return Err(RuntimeError::Provider(e.to_string()));
+                    let err_msg = e.to_string();
+                    // ③ Reactive Recovery: if context overflow, emergency trim and retry
+                    if err_msg.contains("context_length_exceeded")
+                        || err_msg.contains("max_tokens")
+                        || err_msg.contains("token limit")
+                    {
+                        tracing::warn!("Context overflow detected, attempting emergency trim");
+                        let removed = self.history.emergency_trim();
+                        if removed > 0 {
+                            tracing::info!("Emergency trim removed {} messages, retrying", removed);
+                            let chat_request = context_builder.build(&self.manifest, &self.history);
+                            match self.provider.chat(chat_request).await {
+                                Ok(resp) => resp,
+                                Err(e2) => {
+                                    tracing::error!(error = %e2, "LLM call failed after emergency trim");
+                                    return Err(RuntimeError::Provider(e2.to_string()));
+                                }
+                            }
+                        } else {
+                            tracing::error!(error = %e, "LLM call failed: context overflow, no trimmable history");
+                            return Err(RuntimeError::Provider(err_msg));
+                        }
+                    } else {
+                        tracing::error!(error = %e, "LLM call failed");
+                        return Err(RuntimeError::Provider(err_msg));
+                    }
                 }
             };
 
@@ -243,7 +267,11 @@ impl AgentLoop {
             }
 
             // ⑦ Usage report (async, non-blocking) — Phase 1: just log
+            // TODO(Phase 2): send UsageReport via IPC client
             tracing::debug!(iteration, "Usage report would be sent here (Phase 1: log only)");
+
+            // ⑨ DevMode control
+            // TODO(Phase 5): DevMode step control — debug.step(iteration)
 
             // Continue to next iteration
             tracing::debug!(iteration, "Loop iteration complete, continuing");

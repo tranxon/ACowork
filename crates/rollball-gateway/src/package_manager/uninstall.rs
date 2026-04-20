@@ -38,9 +38,17 @@ mod tests {
     use super::*;
     use crate::gateway::state::GatewayState;
 
+    fn temp_vault_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("rollball-test-uninstall-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
     #[test]
     fn test_uninstall_not_installed() {
-        let mut state = GatewayState::new();
+        let vault_dir = temp_vault_dir("not_installed");
+        let mut state = GatewayState::new(&vault_dir);
         let install_dir = Path::new("/tmp/nonexistent");
         let result = uninstall_package("com.test.unknown", install_dir, &mut state);
         assert!(result.is_err());

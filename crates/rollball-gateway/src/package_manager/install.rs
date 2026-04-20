@@ -8,10 +8,14 @@ use crate::error::GatewayError;
 use crate::gateway::state::{AgentInfo, GatewayState};
 
 /// Install a .agent package
+///
+/// When `dev_mode` is true, unsigned packages are allowed (for local development).
+/// In production mode, packages must have a valid signature.
 pub fn install_package(
     package_path: &Path,
     install_dir: &Path,
     state: &mut GatewayState,
+    dev_mode: bool,
 ) -> Result<AgentInfo, GatewayError> {
     // 1. Open ZIP file
     let file = std::fs::File::open(package_path)
@@ -19,13 +23,36 @@ pub fn install_package(
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| GatewayError::Package(format!("Failed to read ZIP '{}': {}", package_path.display(), e)))?;
 
-    // 2. Check for signing block
-    if archive.by_name("META-INF/signing.block").is_ok() {
-        tracing::info!("Package has signing block — verifying signature");
-        // TODO: Delegate to rollball-sign for verification
+    // 2. Verify package signature (delegate to rollball-sign)
+    if dev_mode {
+        // Dev mode: attempt verification but allow unsigned packages
+        match rollball_sign::verify::verify_package(package_path) {
+            Ok(result) => {
+                tracing::info!(
+                    "Package signature verified: signer={}, fingerprint={}, sections={}",
+                    result.signer, result.certificate_fingerprint, result.sections_count
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Package signature verification failed (dev mode, continuing): {}", e);
+            }
+        }
     } else {
-        tracing::warn!("Package has no signing block — unsigned package");
-        // Phase 1: allow unsigned packages in dev mode
+        // Production mode: reject unsigned or invalid packages
+        match rollball_sign::verify::verify_package(package_path) {
+            Ok(result) => {
+                tracing::info!(
+                    "Package signature verified: signer={}, fingerprint={}, sections={}",
+                    result.signer, result.certificate_fingerprint, result.sections_count
+                );
+            }
+            Err(e) => {
+                tracing::error!("Package signature verification failed: {}", e);
+                return Err(GatewayError::Package(format!(
+                    "Signature verification failed: {}", e
+                )));
+            }
+        }
     }
 
     // 3. Extract and parse manifest.toml
@@ -117,6 +144,13 @@ mod tests {
         zip_path
     }
 
+    fn temp_vault_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("rollball-test-install-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
     #[test]
     fn test_install_package_success() {
         let temp_dir = std::env::temp_dir().join(format!("rollball-test-install-{}", std::process::id()));
@@ -136,9 +170,10 @@ mod tests {
         
         let zip_path = create_test_zip(&temp_dir, manifest_toml);
         let install_dir = temp_dir.join("installed");
-        let mut state = GatewayState::new();
+        let vault_dir = temp_vault_dir("success");
+        let mut state = GatewayState::new(&vault_dir);
         
-        let result = install_package(&zip_path, &install_dir, &mut state);
+        let result = install_package(&zip_path, &install_dir, &mut state, true);
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.agent_id, "com.test.weather");
@@ -168,13 +203,14 @@ mod tests {
         
         let zip_path = create_test_zip(&temp_dir, manifest_toml);
         let install_dir = temp_dir.join("installed");
-        let mut state = GatewayState::new();
+        let vault_dir = temp_vault_dir("dup");
+        let mut state = GatewayState::new(&vault_dir);
         
         // First install should succeed
-        install_package(&zip_path, &install_dir, &mut state).unwrap();
+        install_package(&zip_path, &install_dir, &mut state, true).unwrap();
         
         // Second install should fail
-        let result = install_package(&zip_path, &install_dir, &mut state);
+        let result = install_package(&zip_path, &install_dir, &mut state, true);
         assert!(result.is_err());
         
         // Cleanup
@@ -196,9 +232,10 @@ mod tests {
         zip.finish().unwrap();
         
         let install_dir = temp_dir.join("installed");
-        let mut state = GatewayState::new();
+        let vault_dir = temp_vault_dir("nomanifest");
+        let mut state = GatewayState::new(&vault_dir);
         
-        let result = install_package(&zip_path, &install_dir, &mut state);
+        let result = install_package(&zip_path, &install_dir, &mut state, true);
         assert!(result.is_err());
         
         // Cleanup

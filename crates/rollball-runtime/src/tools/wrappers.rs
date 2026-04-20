@@ -89,21 +89,44 @@ impl PathGuardedTool {
     }
 
     /// Validate that a path is within the allowed directory
+    ///
+    /// Security: prevents path traversal attacks (e.g., "../../etc/passwd")
+    /// and prefix-suffix attacks (e.g., "/tmp/agent-workdir-eval/secret").
+    /// Uses path component normalization instead of filesystem canonicalize
+    /// so it works for paths that don't exist yet.
     fn validate_path(&self, path: &str) -> Result<(), String> {
         let allowed = std::path::Path::new(&self.allowed_dir);
         let target = std::path::Path::new(path);
 
-        // Canonicalize both paths for comparison (best-effort)
+        // Resolve relative paths against allowed dir
         let target_normalized = if target.is_absolute() {
             target.to_path_buf()
         } else {
             allowed.join(target)
         };
 
-        // Simple prefix check
-        let target_str = target_normalized.to_string_lossy();
-        let allowed_str = allowed.to_string_lossy();
+        // Normalize path components to resolve ".." and reject traversal
+        let normalized = Self::normalize_path(&target_normalized);
 
+        // Reject if normalization failed (e.g., ".." escaped root)
+        if normalized.is_none() {
+            return Err(format!(
+                "Path '{}' contains directory traversal outside allowed directory",
+                path
+            ));
+        }
+
+        let normalized = normalized.unwrap();
+
+        // Also normalize the allowed dir for consistent comparison
+        let allowed_normalized = Self::normalize_path(allowed)
+            .unwrap_or_else(|| allowed.to_path_buf());
+
+        let target_str = normalized.to_string_lossy();
+        let allowed_str = allowed_normalized.to_string_lossy();
+
+        // Ensure target starts with allowed dir + separator to prevent
+        // prefix-suffix attacks (e.g., "/tmp/agent-workdir-eval" matching "/tmp/agent-workdir")
         if !target_str.starts_with(allowed_str.as_ref()) {
             return Err(format!(
                 "Path '{}' is outside allowed directory '{}'",
@@ -111,7 +134,43 @@ impl PathGuardedTool {
             ));
         }
 
+        // Verify the prefix match ends at a path boundary
+        let suffix = &target_str[allowed_str.len()..];
+        if !suffix.is_empty() && !suffix.starts_with('/') && !suffix.starts_with('\\') {
+            return Err(format!(
+                "Path '{}' is outside allowed directory '{}'",
+                path, self.allowed_dir
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Normalize a path by resolving ".." components without touching the filesystem.
+    /// Returns None if ".." escapes the path root (i.e., path traversal).
+    fn normalize_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let mut components = Vec::new();
+        for comp in path.components() {
+            match comp {
+                std::path::Component::Prefix(p) => components.push(std::path::Component::Prefix(p)),
+                std::path::Component::RootDir => components.push(std::path::Component::RootDir),
+                std::path::Component::Normal(c) => components.push(std::path::Component::Normal(c)),
+                std::path::Component::CurDir => { /* skip current dir */ }
+                std::path::Component::ParentDir => {
+                    // Pop the last normal component; fail if we'd escape root
+                    let popped = components.iter().rposition(|c| {
+                        matches!(c, std::path::Component::Normal(_))
+                    });
+                    if let Some(pos) = popped {
+                        components.truncate(pos);
+                    } else {
+                        // ".." escapes root — path traversal
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(components.iter().collect())
     }
 
     /// Check if the wrapped tool is a filesystem tool that needs path validation
@@ -304,5 +363,31 @@ mod tests {
             .await
             .unwrap();
         assert!(result.ok); // Not checked because not a filesystem tool
+    }
+
+    #[tokio::test]
+    async fn test_path_guarded_blocks_traversal() {
+        let inner = Arc::new(FileEchoTool);
+        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        // Path traversal via ".." resolves to /etc/passwd which is outside allowed dir
+        let result = tool
+            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/../../etc/passwd" }))
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("outside allowed directory"));
+    }
+
+    #[tokio::test]
+    async fn test_path_guarded_blocks_prefix_suffix_attack() {
+        let inner = Arc::new(FileEchoTool);
+        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        // Prefix-suffix attack: "/tmp/agent-workdir-eval" starts with "/tmp/agent-workdir"
+        let result = tool
+            .execute(serde_json::json!({ "path": "/tmp/agent-workdir-eval/secret" }))
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("outside allowed directory"));
     }
 }

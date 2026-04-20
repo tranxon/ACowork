@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// User identity information
+///
+/// TODO(Phase 2): add Zone and PrivacyLevel fields per design doc v3.4.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
     /// Unique user identifier

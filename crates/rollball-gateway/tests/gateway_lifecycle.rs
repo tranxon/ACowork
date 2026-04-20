@@ -90,6 +90,7 @@ fn test_gateway_config(temp_dir: &Path) -> GatewayConfig {
         idle_timeout_secs: 0,
         max_iterations: 20,
         iteration_timeout_ms: 30000,
+        dev_mode: true, // tests use unsigned packages
     }
 }
 

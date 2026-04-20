@@ -99,6 +99,13 @@ impl LifecycleManager {
 mod tests {
     use super::*;
 
+    fn temp_vault_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("rollball-test-lifecycle-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
     #[test]
     fn test_lifecycle_manager_new() {
         let mgr = LifecycleManager::new(300);
@@ -108,7 +115,8 @@ mod tests {
     #[test]
     fn test_lifecycle_manager_zero_timeout() {
         let mgr = LifecycleManager::new(0);
-        let state = GatewayState::new();
+        let dir = temp_vault_dir("zero");
+        let state = GatewayState::new(&dir);
         let result = mgr.check_idle_timeouts(&state);
         assert!(result.is_empty());
     }
@@ -116,7 +124,8 @@ mod tests {
     #[tokio::test]
     async fn test_start_agent_not_installed() {
         let mut mgr = LifecycleManager::new(300);
-        let mut state = GatewayState::new();
+        let dir = temp_vault_dir("start");
+        let mut state = GatewayState::new(&dir);
         let result = mgr.start_agent("com.test.unknown", &mut state).await;
         assert!(result.is_err());
     }
@@ -124,7 +133,8 @@ mod tests {
     #[tokio::test]
     async fn test_stop_agent_not_running() {
         let mut mgr = LifecycleManager::new(300);
-        let mut state = GatewayState::new();
+        let dir = temp_vault_dir("stop");
+        let mut state = GatewayState::new(&dir);
         let result = mgr.stop_agent("com.test.unknown", &mut state).await;
         assert!(result.is_err());
     }
