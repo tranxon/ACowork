@@ -19,6 +19,7 @@ The platform serves two user roles:
 - `docs/` — Architecture design documents (17 files, Chinese, v3.x)
 - `docs/module-design/` — Detailed module/crate specifications (7 files)
 - `docs/plan/` — planning documents (1 file)
+- `docs/review/` — Review reports: design review (`01-design-review.md` 等) and code review (`01-code-review.md` 等)
 - `ref-doc/` — Reference materials (ZeroClaw analysis, memory research)
 - `zeroclaw/` — Reference implementation (independent project, do NOT edit from this root)
 - `.opencode/style-guide.md` — Code review style guide (security, memory safety, error handling)

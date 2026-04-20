@@ -46,6 +46,7 @@ rollball-ai/
 │       ├── src-tauri/            # Rust backend (Gateway/Debug 客户端 + 托盘)
 │       └── web/                  # React 前端 (四栏布局 UI)
 ├── docs/                         # 设计文档
+├── docs/review/                  # Review 报告（design review + code review，按编号区分）
 ├── tests/                        # 集成测试
 └── examples/                     # 示例 Agent 包
 ```

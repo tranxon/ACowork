@@ -15,6 +15,7 @@ agent-study/
 ├── docs/                    # Architecture design docs (Chinese, v3.x)
 ├── docs/module-design/      # Detailed module specs (crate structure)
 ├── docs/plan/               # planning docs (Chinese)
+├── docs/review/             # Review reports (design review + code review, numbered)
 ├── ref-doc/                 # Reference materials (ZeroClaw, memory research)
 ├── zeroclaw/                # Reference implementation ONLY (not source of truth)
 ├── .opencode/               # OpenCode config (style-guide.md)
@@ -37,6 +38,8 @@ agent-study/
 | Desktop app | `docs/14-desktop-app.md` | Tauri layout, tray, Gateway HTTP API |
 | Module workspace plan | `docs/module-design/00-overview.md` | 7-crate workspace structure |
 | Implementation roadmap | `docs/09-roadmap-and-scenarios.md` | 7-phase plan |
+| Design review reports | `docs/review/` | Design doc reviews, numbered |
+| Code review reports | `docs/review/` | Source code reviews, numbered |
 
 ## ARCHITECTURE MAP
 
