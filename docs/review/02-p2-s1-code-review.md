@@ -1,8 +1,201 @@
 # P2 S1 Code Review — `d5a69cf`
 
 > 提交: `d5a69cf feat(S1): architecture improvements and infrastructure`
-> 审查日期: 2026-04-21
-> 范围: 25 files, +2971/-396 lines
+> 复查日期: 2026-04-21
+> 复查提交: `68b0cb2 fix(S1): address code review findings from P2 S1 review`
+> 范围: 7 files, +991/-96 lines
+
+---
+
+# 复查：P0 问题修复验证
+
+## P0 #1 — execute_tools_parallel 用 join_all 而非 spawn+select
+
+**原问题**：代码使用 `futures::future::join_all` + 每工具独立 `tokio::time::timeout`，但 `iteration_timeout_ms` 同时作为单工具超时，两者未分层；且缺少迭代整体超时机制。
+
+**修复状态：✅ 已正确修复**
+
+修复后的 `execute_tools_parallel`（loop_.rs 436-565 行）：
+
+```rust
+// Phase 1: 批量权限检查，每工具独立
+let permission_results: Vec<Option<String>> = ...;
+
+// Phase 3: spawn + select + deadline
+let (tx, mut rx) = mpsc::channel::<(usize, String)>(tool_calls.len());
+let handles: Vec<_> = allowed_indices.iter().map(|&idx| {
+    tokio::spawn(async move {
+        let result = tokio::time::timeout(tool_timeout, execute_single_tool(...)).await
+            .unwrap_or_else(|_| "Error: timed out".into());
+        let _ = tx.send((idx, result)).await;
+    })
+}).collect();
+
+drop(tx); // 让 rx.recv() 在所有 sender drop 后返回 None
+
+// select! 循环：接收结果 OR 迭代超时
+while collected.len() < total {
+    tokio::select! {
+        entry = rx.recv() => { ... }
+        _ = tokio::time::sleep_until(deadline) => {
+            for handle in &handles { handle.abort(); }
+            break;
+        }
+    }
+}
+```
+
+符合设计文档 §3.5 spawn+select+channel 方案。额外加分项：分离了 `tool_timeout_ms`（默认 10000ms）和 `iteration_timeout_ms`（默认 30000ms），两层超时独立配置。
+
+---
+
+## P0 #2 — 权限检查拒绝一个工具时全部失败
+
+**原问题**：`validate_permission` 返回错误时，`all_tools_failed` flag 导致全部工具标记为失败。
+
+**修复状态：✅ 已正确修复**
+
+修复后的逻辑（loop_.rs 441-465 行）：
+
+```rust
+let mut permission_results: Vec<Option<String>> = Vec::with_capacity(tool_calls.len());
+for tool_call in tool_calls {
+    match validate_permission(&self.manifest, &tool_call.function.name) {
+        Ok(()) => permission_results.push(None),  // 有权限
+        Err(e) => permission_results.push(Some(format!("Error: Permission denied — {}", e))),
+    }
+}
+
+let allowed_indices: Vec<usize> = permission_results
+    .iter()
+    .enumerate()
+    .filter_map(|(i, result)| if result.is_none() { Some(i) } else { None })
+    .collect();
+
+if allowed_indices.is_empty() {
+    return permission_results.into_iter().map(|r| r.unwrap_or_default()).collect();
+}
+```
+
+权限拒绝的工具直接写入 `permission_results[Some(err)]`，不参与并行执行；最终结果按原顺序组装，未完成的 slot 填超时错误。逻辑正确，干净利落。
+
+**新增测试**：`test_permission_partial_denial`（loop_.rs 1661 行），mock `echo`（有权限）和 `shell`（无权限）两个工具，验证 echo 结果存在、shell 返回 "Permission denied"。
+
+---
+
+## P0 #3 — recompute_digests 用 zip crate 读 V2 签名 ZIP
+
+**原问题**：签名后用 `zip::ZipArchive` 读取文件计算摘要，但 V2 签名块不在标准 ZIP 结构内，`zip` crate 行为未定义。
+
+**修复状态：✅ 已移除原有问题代码**
+
+`recompute_digests` 函数已删除，不再有签名后重新读取文件计算摘要的逻辑。
+
+新增的防御性措施：
+
+**zip_utils.rs**：`insert_block_before_cd` 新增 CD offset 一致性校验（+21 行）——在插入签名块后验证 `cd_offset + cd_size == eocd_offset`，以及 CD offset 边界检查。如果签名块插入导致结构损坏，`zip_utils::insert_block_before_cd` 会返回错误而非静默生成坏文件。
+
+**sign.rs**：新增 5 个 ZIP 边界测试（`test_sign_verify_with_many_files`、`test_sign_verify_with_large_file`、`test_sign_verify_with_nested_dirs`、`test_sign_verify_with_empty_files`、`test_signed_zip_readable_by_zip_crate`），覆盖 25 文件、1.5MB 大文件、嵌套目录、空文件、空文件+普通文件混合场景。每个测试调用 `sign_verify_and_check_zip` helper，后者用 `zip::ZipArchive::new(reader)` 验证签名后 ZIP 可被 `zip` crate 重新打开并读取所有 entry。
+
+---
+
+## P1 问题修复验证
+
+### P1 #4 — streaming 代码重复（call_llm_streaming）
+
+**修复状态：✅ 已正确修复**
+
+引入 `call_llm_streaming_inner` 作为统一实现，`call_llm_streaming` 和 `call_llm_streaming_no_retry` 都是一层 thin wrapper：
+
+```rust
+async fn call_llm_streaming(&mut self, ..., context_builder: &ContextBuilder) -> Result<ChatResponse> {
+    self.call_llm_streaming_inner(chat_request, Some(context_builder)).await
+}
+
+fn call_llm_streaming_no_retry<'a>(...) -> Pin<Box<dyn Future<...> + 'a>> {
+    Box::pin(async move {
+        self.call_llm_streaming_inner(chat_request, None).await
+    })
+}
+```
+
+`inner` 通过 `Option<&ContextBuilder>` 参数区分是否启用 context overflow 恢复。零重复。
+
+### P1 #5 — ToolCallChunk 被忽略
+
+**修复状态：✅ 已合理处理**
+
+`_tool_call_buffer` 仍存在（有注释说明限制），但对 `ToolCallChunk` 事件的处理有清晰的 TODO 注释（358-363 行），明确指出当前 `ToolCallChunk` 无 ID 字段无法关联，后续 API 补充 ID 后再更新。不再是无说明的静默忽略。
+
+### P1 #6 — gateway_socket 优先级不明确
+
+**修复状态：✅ 已明确处理**
+
+`config.rs` 新增 `get_gateway_address()` 方法（+13 行），明确优先 socket > endpoint，两者均 deprecated：
+
+```rust
+pub fn get_gateway_address(&self) -> Option<&str> {
+    if let Some(ref socket) = self.gateway_socket {
+        return Some(socket.as_str());
+    }
+    if let Some(ref endpoint) = self.gateway_endpoint {
+        return Some(endpoint.as_str());
+    }
+    None
+}
+```
+
+### P1 #7 — InboundMessage 无大小限制
+
+**修复状态：✅ 已正确修复**
+
+`inbound.rs` 新增 `enforce_size_limit()` 方法（+26 行），各变体分别处理：
+- `UserMessage`：截断到 4096 字节（UTF-8 安全截断，不拆分多字节字符）
+- `SystemNotification`：JSON 序列化后截断
+- `IntentMessage`：params 序列化后截断
+
+`drain_inbound_queue` 中调用 `msg.enforce_size_limit()` 后注入历史，防止 token 爆炸。
+
+**新增测试**：4 个单元测试覆盖正常消息、超大消息（+1000 bytes）、UTF-8 多字节安全、大 JSON payload 场景。
+
+### P1 #8 — CD offset 校验缺失
+
+**修复状态：✅ 已在 zip_utils.rs 中修复**
+
+见 P0 #3。
+
+---
+
+## 新增但未在原 review 报告中提及的问题
+
+### 新增问题 #9（建议级）— inbound.rs 的 `_truncated` 忽略
+
+`drain_inbound_queue` 调用 `let (msg, _truncated) = msg.enforce_size_limit();`，但 `_truncated` 被忽略。如果消息被截断，没有日志记录或通知。
+
+**建议**：至少在 `truncated == true` 时打一条 `tracing::debug!` 日志。
+
+### 新增问题 #10（建议级）— `call_llm_streaming_inner` 的 `_tool_call_buffer` 未使用
+
+`_tool_call_buffer` 在 364 行声明并在 `ToolCallStart` 事件中填充（`tool_calls.get_or_insert_with(Vec::new).push(tc)`），但从未读取使用。这个 buffer 本意是积累 chunk，但因 `ToolCallChunk` 无法关联而被搁置。
+
+**建议**：要么移除这个变量（表明这是已知限制），要么保留但加一个 `#[allow(dead_code)]` 注释说明这是为未来 API 扩展预留。
+
+---
+
+## 复查总结
+
+| 问题 | 原严重度 | 修复状态 | 备注 |
+|------|---------|---------|------|
+| P0 #1 spawn+select 实现 | P0 | ✅ 已修复 | 分离 tool_timeout/iteration_timeout，逻辑正确 |
+| P0 #2 权限检查全部失败 | P0 | ✅ 已修复 | 批量独立检查 + 测试验证 |
+| P0 #3 zip crate 读签名 | P0 | ✅ 已解决 | 删除 recompute_digests，改为结构校验 + 测试覆盖 |
+| P1 #4 streaming 代码重复 | P1 | ✅ 已修复 | inner/wrapper 模式，无重复 |
+| P1 #5 ToolCallChunk 忽略 | P1 | ✅ 已改善 | 有注释说明，不静默 |
+| P1 #6 gateway_socket 优先级 | P1 | ✅ 已修复 | 显式 get_gateway_address() |
+| P1 #7 InboundMessage 大小限制 | P1 | ✅ 已修复 | 4096 字节 + UTF-8 安全截断 |
+| P1 #8 CD offset 校验 | P1 | ✅ 已修复 | 已在 P0 #3 中处理 |
+
+**结论**：所有 3 个 P0 和 5 个 P1 问题均已正确修复或合理处理。新增 2 个建议级问题，供参考。
 > 编译状态: 本地 rustc 1.93.1 不满足 MSRV 1.95 要求，未通过编译验证
 
 ---
