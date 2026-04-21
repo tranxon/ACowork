@@ -102,6 +102,27 @@ pub fn insert_block_before_cd(zip_data: &[u8], block: &[u8]) -> Result<Vec<u8>> 
     adjust_eocd_cd_offset(&mut eocd_data, delta)?;
     result.extend_from_slice(&eocd_data);
 
+    // Validate the new ZIP structure after insertion
+    let new_cd_offset = cd_offset + block.len();
+    let new_eocd_offset = result.len() - eocd_data.len();
+
+    // Verify CD offset + CD size == EOCD offset
+    if new_cd_offset + cd_size != new_eocd_offset {
+        return Err(SignError::InvalidPackage(
+            format!(
+                "ZIP structure validation failed after block insertion: cd_offset({}) + cd_size({}) != eocd_offset({})",
+                new_cd_offset, cd_size, new_eocd_offset
+            ),
+        ));
+    }
+
+    // Verify CD offset is within bounds
+    if new_cd_offset >= result.len() {
+        return Err(SignError::InvalidPackage(
+            "CD offset out of bounds after block insertion".into(),
+        ));
+    }
+
     Ok(result)
 }
 
@@ -280,5 +301,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found, block);
+    }
+
+    #[test]
+    fn test_insert_block_validates_structure() {
+        // Normal insertion should pass structural validation
+        let data = create_test_zip_data();
+        let block = b"VALIDATION_TEST_BLOCK";
+        let result = insert_block_before_cd(&data, block).unwrap();
+
+        // Verify the resulting ZIP is structurally valid
+        let reader = Cursor::new(&result);
+        let archive = zip::ZipArchive::new(reader).unwrap();
+        assert_eq!(archive.len(), 2);
+
+        // Verify CD offset consistency
+        let eocd_offset = find_eocd(&result).unwrap();
+        let cd_offset = get_cd_offset(&result, eocd_offset).unwrap();
+        let cd_size = get_cd_size(&result, eocd_offset).unwrap();
+        assert_eq!(cd_offset + cd_size, eocd_offset,
+            "CD offset + CD size should equal EOCD offset after insertion");
     }
 }

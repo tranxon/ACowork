@@ -253,6 +253,9 @@ async fn handle_intent_send(
 
 fn handle_budget_query(_provider: &str) -> GatewayResponse {
     // Phase 1: return placeholder budget
+    tracing::warn!(
+        "Budget query returns placeholder data (Phase 1 stub — not real usage data)"
+    );
     GatewayResponse::BudgetInfo {
         remaining_tokens: 100_000,
         remaining_cost_usd: 10.0,

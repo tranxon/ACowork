@@ -123,8 +123,8 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     use crate::providers::router::create_provider;
 
     // Step 0: Connect to Gateway if socket path is provided
-    let ipc_client = if let Some(ref socket) = config.gateway_socket {
-        connect_gateway_client(socket).await
+    let ipc_client = if let Some(socket_path) = config.get_gateway_address() {
+        connect_gateway_client(socket_path).await
     } else {
         None
     };
