@@ -281,14 +281,64 @@ let results = futures::future::join_all(futures).await;
 
 **权限检查与 Approval Gate：** 仍然串行执行于并行执行**之前**——先对所有 tool_calls 批量做 permission check，需要用户确认（`requires_approval: true`）的工具先通过 Approval Gate，全部确认后再并行执行。这样避免在等待用户确认时浪费时间串行执行其他工具。
 
-**并发安全：** 每个工具调用获取独立的资源句柄，不共享可变状态：
-- Built-in Tool：无状态函数，天然安全
+**并发安全（设计约束）：** 每个工具调用获取独立的资源句柄，不共享可变状态。设计约束如下：
+- Built-in Tool：必须设计为可安全并发调用（若引入缓存/连接池需额外同步）
 - WASM Tool：每次调用创建独立的 Wasmtime Instance
 - Gateway Tool：每次 IPC 请求携带独立 `call_id`，Gateway 侧无状态路由
 
 **失败处理：** `join_all` 等待所有工具完成（不短路），单个工具失败不影响其他工具的执行结果，失败的 tool_call 返回包含错误信息的 `ToolResult`，让 LLM 在下一轮决定如何处理。
 
-### 3.5 循环退出条件
+### 3.5 工具并行 + 超时/取消语义
+
+并行执行引入了三层超时/取消的交互语义，需要明确定义各层职责，避免实现分歧：
+
+**三层超时定义：**
+
+| 层级 | 控制点 | 触发时机 | 行为 |
+|------|--------|---------|------|
+| 迭代整体超时 | 主循环层（步骤⑨）| `iteration_timeout_ms` 到达 | drop所有未完成的 tool future，返回已收集的结果，迭代终止 |
+| 单工具超时 | 工具执行层（步骤⑤内部）| 单个 `execute_tool` 调用超时 | 该工具返回 `ToolResult { ok: false, error: "timed out" }`，其他工具继续 |
+| LLM 调用超时 | 步骤③ | LLM 响应超过 timeout | 整个步骤③ abort，该迭代终止（不进入步骤⑤） |
+
+**迭代整体超时时 join_all 的行为：**
+
+当迭代整体超时触发时，主循环通过 `tokio::time::timeout` 或 `tokio::spawn` 的 abort handle 取消步骤⑤的 future。此时 join_all 内部会产生 `JoinError`（未被 await 的 future 被 drop），处理策略为：
+- 超时前已完成执行的工具：结果正常收集（符合预期）
+- 超时前已启动但未完成的工具：被 drop，结果丢失，不写入 History
+- 超时触发前已经收集到一部分结果：这些结果仍然有效
+
+> **注意**：这是 join_all "等待所有工具完成" 与 "迭代超时直接 drop future" 之间的语义边界。设计上选择**不等待未完成工具**——因为超时意味着本次迭代已经超出预期时间，继续等待会进一步延迟响应给用户。
+
+**实现约束：**
+
+```rust
+// 步骤⑤ 伪代码（超时语义）
+let futures: Vec<_> = deduped_calls.iter()
+    .map(|call| async move {
+        // 单工具超时：execute_tool 内部使用 tokio::time::timeout
+        tokio::time::timeout(
+            Duration::from_millis(TOOL_TIMEOUT_MS),
+            execute_tool(call)
+        ).await
+        .unwrap_or_else(|_| ToolResult { ok: false, error: "tool execution timed out" })
+    })
+    .collect();
+
+let results = tokio::time::timeout(
+    Duration::from_millis(iteration_timeout_ms - elapsed),  // 减去步骤①②③④已消耗时间
+    futures::future::join_all(futures)
+).await;
+
+// 超时：返回已收集的部分结果；未超时：返回全部结果
+```
+
+**关键约束：**
+- 单工具超时由 `execute_tool` 内部负责，不泄漏到上层
+- 迭代整体超时在 join_all 外层控制，使用 `tokio::time::timeout`，而非在每个工具内独立处理
+- 被 drop 的工具调用不返回任何结果——History 中不记录该次调用
+- 迭代超时时，应在 History 中记录一条系统消息：`"[iteration timed out after N ms, N tool(s) not completed]"`
+
+### 3.6 循环退出条件
 
 | 条件 | 触发时机 | 行为 |
 |------|---------|------|

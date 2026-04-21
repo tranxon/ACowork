@@ -1,8 +1,8 @@
 # Rollball Phase 2 开发计划
 
-> 版本：v1.1 | 更新日期：2026-04-21
+> 版本：v1.2 | 更新日期：2026-04-21
 >
-> 本计划基于 `docs/09-roadmap-and-scenarios.md` v3.1 和 `docs/review/01-code-review.md` 遗留问题，涵盖 Phase 2 所有任务的分解、排期和进度追踪。v1.1 新增 S1.6 InboundQueue 和 S1.7 工具并行执行两个任务（AgentLoop 架构改进讨论后决定纳入）。
+> 本计划基于 `docs/09-roadmap-and-scenarios.md` v3.1 和 `docs/review/01-code-review.md` 遗留问题，涵盖 Phase 2 所有任务的分解、排期和进度追踪。v1.1 新增 S1.6 InboundQueue 和 S1.7 工具并行执行两个任务。v1.2 新增超时/取消语义设计文档（03-agent-runtime.md §3.5）和对应的 S1.7.5、S1.6.5 验收标准（qoder review 建议）。
 
 ---
 
@@ -105,6 +105,7 @@
 | S1.6.2 主循环步骤⓪实现 drain 逻辑（非阻塞 `try_recv`）| 无消息时零延迟跳过 |
 | S1.6.3 `inbound_tx` 通过 Runtime IPC 层公开，Gateway push 可注入 `SystemNotification` | Gateway capability_update 可到达正在运行的 Agent |
 | S1.6.4 单元测试：并发 send + 循环 drain 不丢消息 | 100 条并发注入全部命中 |
+| S1.6.5 队列容量/背压验收：满队列（64条）时 sender 阻塞不 panic，drain 后恢复正常 | 测试脚本验证满队列背压 + 恢复后仍可正常收发 |
 
 #### S1.7 任务：工具调度改并行执行
 
@@ -114,6 +115,7 @@
 | S1.7.2 permission check 和 approval gate 保持串行（并行执行前执行）| 权限校验逻辑不变 |
 | S1.7.3 单个工具失败不短路其他工具 | join_all 收集全部结果（含错误） |
 | S1.7.4 并行执行性能测试：3 个独立工具并行执行 vs 串行，耗时降低 50%+ | 有效并行 |
+| S1.7.5 超时/取消语义：每个工具调用内部包 `tokio::time::timeout`；迭代整体由 `iteration_timeout_ms` 控制；超时工具返回明确错误 `ToolResult`；迭代超时时 History/日志中有可追踪信息 | 集成测试：设置短超时，验证超时后 History 中有 `"[iteration timed out after N ms, N tool(s) not completed]"` 系统消息 |
 
 ---
 
@@ -433,7 +435,7 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 | S5.5 | 端到端集成测试 | tests/ | S5 | S1~S4 | 10 | ⬚ |
 | S5.6 | 多 Agent 协作示例 | examples/ | S5 | S3,S4 | 4 | ⬚ |
 
-**总计：31 个任务，预期 260+ 测试**
+**总计：33 个任务，预期 270+ 测试**
 
 ---
 

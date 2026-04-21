@@ -176,10 +176,17 @@ crates/rollball-runtime/
 ③ 调用 LLM → provider.chat_stream(request)  // 流式
 ④ 解析响应 → 解析 text / tool_calls
 ④.5 Tool Call 去重 → dedup (tool_name, params)
-⑤ 工具调度（并行） → futures::future::join_all(tool_calls)
-   ├─ builtin → 直接执行
+⑤ 权限检查 → tool_permissions.check_batch(all_calls)
+   ├─ 无权限 → 构造错误 ToolResult，继续
+   └─ 有权限 → 进入审批门控
+⑤' 审批门控（串行等待） → approval_gate.wait_for_pending()
+   ├─ requires_approval: false → 直接通过
+   └─ requires_approval: true → 等待用户确认（Desktop App / CLI 通知）
+⑤'' 工具调度（并行） → futures::future::join_all(tool_calls)
+   ├─ builtin → 直接执行（execute_tool 内部含单工具超时）
    ├─ wasm → wasmtime 沙箱执行
    └─ gateway → ipc_client.send(request)
+   迭代整体超时 → tokio::time::timeout 控制 join_all，被 drop 的工具不记录 History
 ⑥ 结果追加历史 → history.append(tool_results)
 ⑦ 用量上报 → ipc_client.send(UsageReport) // 异步不阻塞
 ⑧ 循环检测 → loop_detector.check(history)
@@ -211,9 +218,11 @@ pub enum InboundMessage {
 与 ZeroClaw 的差异：
 - ZeroClaw 是单进程内循环，Rollball 需要考虑 IPC 通信开销
 - 增加 DevMode 步进控制层
-- 权限校验在工具调度前执行，而非在安全策略层
+- 权限校验在工具调度前执行（步骤⑤→⑤'），而非在安全策略层；Approval Gate 单独作为步骤⑤' 串行等待
 - **新增** `inbound_tx/rx` 消息队列，支持循环间隙注入消息
 - **新增** 步骤⑤改为并行执行（`join_all`），而非串行 `for` 循环
+
+**Channel 生命周期：** `inbound_rx` 由 Runtime 创建时一并创建（`mpsc::channel(64)`），属于 AgentLoop 内部字段；`inbound_tx` 通过 `AgentLoop::new()` 参数传入，由 Runtime 的 IPC 层持有。Gateway 的 push 消息通过 IPC response 携带 `InboundMessage` 发送至 Runtime IPC 层，IPC 层调用 `inbound_tx.send()` 注入消息，不持有 Runtime 对象本身。
 
 ### `tools/` — 工具系统
 
