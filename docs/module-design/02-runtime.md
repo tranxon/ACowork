@@ -164,28 +164,56 @@ crates/rollball-runtime/
 
 ### `agent/loop_.rs` — 主循环
 
-参考 ZeroClaw 的 `agent/loop_.rs`（342KB 的核心文件），但做以下简化：
+参考 ZeroClaw 的 `agent/loop_.rs`（342KB 的核心文件），但做以下改进：
 
 ```
 主循环流程：
+⓪ 消息合并 → inbound_queue.drain() → history.append(pending_messages)
+   ├─ UserMessage / SystemNotification / IntentMessage 三类
+   └─ 无新消息时跳过
 ① 预算预检 → budget_guard.check()
 ② 构建上下文 → context.build(manifest, history, memory, identity, skills)
-③ 调用 LLM → provider.chat(request)
+③ 调用 LLM → provider.chat_stream(request)  // 流式
 ④ 解析响应 → 解析 text / tool_calls
-⑤ 工具调度 → tool_dispatcher.dispatch(tool_calls)
+④.5 Tool Call 去重 → dedup (tool_name, params)
+⑤ 工具调度（并行） → futures::future::join_all(tool_calls)
    ├─ builtin → 直接执行
    ├─ wasm → wasmtime 沙箱执行
    └─ gateway → ipc_client.send(request)
 ⑥ 结果追加历史 → history.append(tool_results)
 ⑦ 用量上报 → ipc_client.send(UsageReport) // 异步不阻塞
 ⑧ 循环检测 → loop_detector.check(history)
-⑨ DevMode 控制 → debug.step(iteration)
+⑨ 迭代计数检查 → max_iterations 强制终止
+```
+
+AgentLoop 结构体签名（关键字段）：
+
+```rust
+pub struct AgentLoop {
+    manifest: AgentManifest,
+    history: HistoryManager,
+    provider: Arc<dyn Provider>,
+    tools: Vec<Arc<dyn Tool>>,
+    budget_guard: BudgetGuard,
+    loop_detector: LoopDetector,
+    ipc_client: Option<GatewayClient>,
+    inbound_tx: mpsc::Sender<InboundMessage>,   // 外部注入消息的入口
+    inbound_rx: mpsc::Receiver<InboundMessage>, // 循环内消费
+}
+
+pub enum InboundMessage {
+    UserMessage(String),
+    SystemNotification(SystemEvent),  // identity_update / capability_update
+    IntentMessage(IntentPayload),
+}
 ```
 
 与 ZeroClaw 的差异：
 - ZeroClaw 是单进程内循环，Rollball 需要考虑 IPC 通信开销
 - 增加 DevMode 步进控制层
 - 权限校验在工具调度前执行，而非在安全策略层
+- **新增** `inbound_tx/rx` 消息队列，支持循环间隙注入消息
+- **新增** 步骤⑤改为并行执行（`join_all`），而非串行 `for` 循环
 
 ### `tools/` — 工具系统
 
