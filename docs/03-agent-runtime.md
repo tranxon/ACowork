@@ -309,34 +309,81 @@ let results = futures::future::join_all(futures).await;
 
 > **注意**：这是 join_all "等待所有工具完成" 与 "迭代超时直接 drop future" 之间的语义边界。设计上选择**不等待未完成工具**——因为超时意味着本次迭代已经超出预期时间，继续等待会进一步延迟响应给用户。
 
-**实现约束：**
+**实现约束（spawn + select 方案）：**
+
+要实现"迭代超时时部分工具结果仍可用"的语义，不能用 `timeout(join_all(...))`（Rust 中该组合要么全返回要么全 drop），需要改用 `tokio::spawn` 每工具独立运行 + `tokio::select!` 轮询：
 
 ```rust
-// 步骤⑤ 伪代码（超时语义）
-let futures: Vec<_> = deduped_calls.iter()
-    .map(|call| async move {
-        // 单工具超时：execute_tool 内部使用 tokio::time::timeout
-        tokio::time::timeout(
-            Duration::from_millis(TOOL_TIMEOUT_MS),
-            execute_tool(call)
-        ).await
-        .unwrap_or_else(|_| ToolResult { ok: false, error: "tool execution timed out" })
+use tokio::sync::mpsc;
+
+let (tx, mut rx) = mpsc::channel::<(usize, ToolResult)>(deduped_calls.len());
+
+// ① 为每个 tool_call spawn 一个独立 task
+let handles: Vec<tokio::task::JoinHandle<()>> = deduped_calls
+    .iter()
+    .enumerate()
+    .map(|(idx, call)| {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_millis(TOOL_TIMEOUT_MS),  // 单工具超时
+                execute_tool(call)
+            ).await.unwrap_or_else(|_| ToolResult {
+                ok: false,
+                error: "tool execution timed out"
+            });
+            let _ = tx.send((idx, result)).await;  // 结果写入 channel
+        })
+    })
+    .collect::<Vec<_>>();
+
+// ② 迭代整体超时控制：减去步骤①②③④已消耗时间
+let deadline = Instant::now() + Duration::from_millis(iteration_timeout_ms - elapsed);
+let mut results: Vec<(usize, ToolResult)> = Vec::with_capacity(deduped_calls.len());
+let total = deduped_calls.len();
+
+while results.len() < total {
+    tokio::select! {
+        // 有结果到达则收集
+        entry = rx.recv() => {
+            if let Some((idx, result)) = entry {
+                results.push((idx, result));
+            }
+        }
+        // 迭代整体超时：abort 未完成 task，停止等待
+        _ = tokio::time::sleep_until(deadline.into()) => {
+            for handle in handles {
+                handle.abort();  // 不等待，立即取消
+            }
+            break;
+        }
+    }
+}
+
+// ③ 按原顺序组装结果，未完成的 slot 填入超时错误
+results.sort_by_key(|(idx, _)| *idx);
+let tool_results: Vec<ToolResult> = (0..total)
+    .map(|i| {
+        results.iter()
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, r)| r.clone())
+            .unwrap_or_else(|| ToolResult {
+                ok: false,
+                error: format!(
+                    "iteration timed out, tool {} not completed",
+                    deduped_calls[i].name
+                )
+            })
     })
     .collect();
-
-let results = tokio::time::timeout(
-    Duration::from_millis(iteration_timeout_ms - elapsed),  // 减去步骤①②③④已消耗时间
-    futures::future::join_all(futures)
-).await;
-
-// 超时：返回已收集的部分结果；未超时：返回全部结果
 ```
 
 **关键约束：**
-- 单工具超时由 `execute_tool` 内部负责，不泄漏到上层
-- 迭代整体超时在 join_all 外层控制，使用 `tokio::time::timeout`，而非在每个工具内独立处理
-- 被 drop 的工具调用不返回任何结果——History 中不记录该次调用
-- 迭代超时时，应在 History 中记录一条系统消息：`"[iteration timed out after N ms, N tool(s) not completed]"`
+- 单工具超时在每个 spawn 内独立处理（`tokio::time::timeout`），独立于迭代整体超时
+- 迭代整体超时通过 `tokio::select!` + `deadline` 控制，超时后调用所有 `handle.abort()`，不等待 join
+- `handle.abort()` 后该 slot 在结果 Vec 中填充明确的超时错误，不记 History（等 LLM 下一轮决定如何处理）
+- 迭代超时时，应在 History 中记录一条系统消息：`"[iteration timed out after N ms, N tool(s) not completed]"`，其中 N 为未完成的工具数
+- `rx.recv()` 循环中通过 `while results.len() < total` 防止 select 空转，确保在收集到全部结果后立即退出循环
 
 ### 3.6 循环退出条件
 
