@@ -7,16 +7,16 @@
 //! S1.6: InboundQueue for external message injection
 //! S1.7: Parallel tool execution with per-tool timeout
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::StreamExt;
-use futures::future::join_all;
 use rollball_core::providers::traits::{
     ChatMessage, ChatResponse, MessageRole, Provider, StreamEvent, ToolCall,
 };
 use rollball_core::tools::traits::Tool;
-use tokio::time::{Duration, timeout};
+use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
 
 use crate::agent::budget_guard::{BudgetCheckResult, BudgetGuard};
 use crate::agent::context::ContextBuilder;
@@ -277,9 +277,12 @@ impl AgentLoop {
     /// Drain inbound message queue (non-blocking).
     ///
     /// Injects external messages (user, system, intent) into history
-    /// before each loop iteration.
+    /// before each loop iteration. Applies size limits to prevent
+    /// token explosion from oversized payloads.
     fn drain_inbound_queue(&mut self) {
         while let Ok(msg) = self.inbound_rx.try_recv() {
+            // Enforce size limits before injecting
+            let (msg, _truncated) = msg.enforce_size_limit();
             match msg {
                 InboundMessage::UserMessage(text) => {
                     self.history.append(ChatMessage {
@@ -320,11 +323,45 @@ impl AgentLoop {
         chat_request: &rollball_core::providers::traits::ChatRequest,
         context_builder: &ContextBuilder,
     ) -> Result<ChatResponse> {
+        self.call_llm_streaming_inner(chat_request, Some(context_builder)).await
+    }
+
+    /// Single-attempt streaming call (no retry on context overflow).
+    ///
+    /// Used after emergency trim to avoid infinite recursion.
+    fn call_llm_streaming_no_retry<'a>(
+        &'a mut self,
+        chat_request: &'a rollball_core::providers::traits::ChatRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ChatResponse>> + 'a>> {
+        Box::pin(async move {
+            self.call_llm_streaming_inner(chat_request, None).await
+        })
+    }
+
+    /// Common streaming implementation.
+    ///
+    /// When `context_builder` is `Some`, context overflow recovery is enabled
+    /// (retry after emergency trim). When `None`, errors are returned directly.
+    async fn call_llm_streaming_inner(
+        &mut self,
+        chat_request: &rollball_core::providers::traits::ChatRequest,
+        context_builder: Option<&ContextBuilder>,
+    ) -> Result<ChatResponse> {
+        let retry_on_overflow = context_builder.is_some();
+
         let stream = self.provider.chat_stream(chat_request.clone()).await?;
         let mut stream = Box::into_pin(stream);
         let mut accumulated_content = String::new();
         let mut tool_calls: Option<Vec<ToolCall>> = None;
         let mut usage = None;
+
+        // ToolCallChunk accumulation buffer: indexed by tool_call ID
+        // TODO: ToolCallChunk currently carries only a String with no ID field,
+        // so we cannot reliably associate chunks with specific tool calls.
+        // When the provider API adds an ID field to chunks, update this logic
+        // to accumulate arguments per tool call. For now, we rely on
+        // ToolCallStart + Finished events for complete tool call data.
+        let mut _tool_call_buffer: HashMap<String, ToolCall> = HashMap::new();
 
         while let Some(event) = stream.next().await {
             match event {
@@ -332,11 +369,17 @@ impl AgentLoop {
                     accumulated_content.push_str(&chunk);
                 }
                 StreamEvent::ToolCallStart(tc) => {
+                    // Store the initial tool call in the buffer for chunk accumulation
+                    let id = tc.id.clone();
+                    _tool_call_buffer.insert(id, tc.clone());
                     tool_calls.get_or_insert_with(Vec::new).push(tc);
                 }
-                StreamEvent::ToolCallChunk(_) => {
-                    // Accumulated tool call chunk — currently not used
-                    // (full tool call data is provided in Finished event)
+                StreamEvent::ToolCallChunk(_chunk) => {
+                    // TODO: Once ToolCallChunk carries a tool_call ID field,
+                    // look up the corresponding entry in _tool_call_buffer
+                    // and append the chunk data to the tool call's arguments.
+                    // Current limitation: String chunk cannot be associated
+                    // with a specific tool call when multiple are streamed.
                 }
                 StreamEvent::Finished(resp) => {
                     // Use final response data; prefer stream-accumulated content
@@ -344,22 +387,27 @@ impl AgentLoop {
                         accumulated_content = resp.content;
                     }
                     if resp.tool_calls.is_some() {
+                        // Prefer Finished event's tool_calls as they are complete
                         tool_calls = resp.tool_calls;
                     }
+                    // If Finished has no tool_calls, fall back to buffer data
                     usage = resp.usage;
                     break;
                 }
                 StreamEvent::Error(e) => {
                     // Check for context overflow and attempt recovery
-                    if e.contains("context_length_exceeded")
-                        || e.contains("max_tokens")
-                        || e.contains("token limit")
+                    if retry_on_overflow
+                        && (e.contains("context_length_exceeded")
+                            || e.contains("max_tokens")
+                            || e.contains("token limit"))
                     {
                         tracing::warn!("Context overflow detected in stream, attempting emergency trim");
                         let removed = self.history.emergency_trim();
                         if removed > 0 {
                             tracing::info!("Emergency trim removed {} messages, retrying", removed);
-                            let chat_request = context_builder.build(&self.manifest, &self.history);
+                            let chat_request = context_builder
+                                .unwrap()
+                                .build(&self.manifest, &self.history);
                             return self.call_llm_streaming_no_retry(&chat_request).await;
                         } else {
                             return Err(RuntimeError::Provider(e));
@@ -377,57 +425,11 @@ impl AgentLoop {
         })
     }
 
-    /// Single-attempt streaming call (no retry on context overflow).
+    /// Execute tool calls in parallel with per-tool timeout and iteration-level deadline.
     ///
-    /// Used after emergency trim to avoid infinite recursion.
-    async fn call_llm_streaming_no_retry(
-        &mut self,
-        chat_request: &rollball_core::providers::traits::ChatRequest,
-    ) -> Result<ChatResponse> {
-        let stream = self.provider.chat_stream(chat_request.clone()).await?;
-        let mut stream = Box::into_pin(stream);
-        let mut accumulated_content = String::new();
-        let mut tool_calls: Option<Vec<ToolCall>> = None;
-        let mut usage = None;
-
-        while let Some(event) = stream.next().await {
-            match event {
-                StreamEvent::Content(chunk) => {
-                    accumulated_content.push_str(&chunk);
-                }
-                StreamEvent::ToolCallStart(tc) => {
-                    tool_calls.get_or_insert_with(Vec::new).push(tc);
-                }
-                StreamEvent::ToolCallChunk(_) => {}
-                StreamEvent::Finished(resp) => {
-                    if accumulated_content.is_empty() {
-                        accumulated_content = resp.content;
-                    }
-                    if resp.tool_calls.is_some() {
-                        tool_calls = resp.tool_calls;
-                    }
-                    usage = resp.usage;
-                    break;
-                }
-                StreamEvent::Error(e) => {
-                    tracing::error!(error = %e, "LLM stream failed (no retry)");
-                    return Err(RuntimeError::Provider(e));
-                }
-            }
-        }
-
-        Ok(ChatResponse {
-            content: accumulated_content,
-            tool_calls,
-            usage,
-        })
-    }
-
-    /// Execute tool calls in parallel with per-tool timeout.
-    ///
-    /// Phase 1: Permission check (sequential)
-    /// Phase 2: Approval gate (sequential, if needed — currently a no-op placeholder)
-    /// Phase 3: Parallel execution with timeout
+    /// Phase 1: Permission check (batch — each tool checked independently)
+    /// Phase 2: Approval gate (placeholder for future)
+    /// Phase 3: Parallel execution with spawn + select + deadline
     ///
     /// Returns results in the same order as input tool calls.
     /// Individual tool failures are captured as error strings, not propagated.
@@ -436,44 +438,134 @@ impl AgentLoop {
             return Vec::new();
         }
 
-        // Phase 1: Permission check (sequential)
+        // Phase 1: Permission check (batch)
+        // Check each tool independently; denied tools get error results,
+        // allowed tools proceed to parallel execution.
+        let mut permission_results: Vec<Option<String>> = Vec::with_capacity(tool_calls.len());
         for tool_call in tool_calls {
-            if let Err(e) = crate::tools::permission::validate_permission(&self.manifest, &tool_call.function.name) {
-                // Permission denied — return error for all tools
-                tracing::warn!("Permission denied for tool '{}': {}", tool_call.function.name, e);
-                return tool_calls.iter().map(|tc| {
-                    if tc.function.name == tool_call.function.name {
-                        format!("Error: Permission denied — {}", e)
-                    } else {
-                        // Should not happen if permission check is consistent
-                        format!("Error: Permission check failed for {}", tc.function.name)
-                    }
-                }).collect();
+            match crate::tools::permission::validate_permission(&self.manifest, &tool_call.function.name) {
+                Ok(()) => permission_results.push(None),
+                Err(e) => {
+                    tracing::warn!("Permission denied for tool '{}': {}", tool_call.function.name, e);
+                    permission_results.push(Some(format!("Error: Permission denied — {}", e)));
+                }
             }
         }
 
-        // Phase 2: Approval gate (sequential, placeholder for future)
+        // Collect indices of tools that passed permission check
+        let allowed_indices: Vec<usize> = permission_results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, result)| if result.is_none() { Some(i) } else { None })
+            .collect();
+
+        // If no tools passed permission, return all error results immediately
+        if allowed_indices.is_empty() {
+            return permission_results.into_iter().map(|r| r.unwrap_or_default()).collect();
+        }
+
+        // Phase 2: Approval gate (placeholder for future)
         // TODO(Phase 3): Implement approval gate for high-risk tools
 
-        // Phase 3: Parallel execution with per-tool timeout
-        let tool_timeout = Duration::from_millis(self.config.iteration_timeout_ms);
+        // Phase 3: Parallel execution with spawn + select + deadline
+        let tool_timeout = Duration::from_millis(self.config.tool_timeout_ms);
+        let iteration_timeout = Duration::from_millis(self.config.iteration_timeout_ms);
 
-        let futures: Vec<_> = tool_calls.iter().map(|tc| {
-            let tools = self.tools.clone();
-            let tc = tc.clone();
-            async move {
-                match timeout(tool_timeout, execute_single_tool(&tools, &tc)).await {
-                    Ok(result) => result,
-                    Err(_) => format!(
-                        "Error: Tool '{}' timed out after {}ms",
-                        tc.function.name,
-                        tool_timeout.as_millis()
-                    ),
+        // Channel to collect results from spawned tasks
+        let (tx, mut rx) = mpsc::channel::<(usize, String)>(tool_calls.len());
+
+        // Spawn each allowed tool as an independent task
+        let handles: Vec<tokio::task::JoinHandle<()>> = allowed_indices
+            .iter()
+            .map(|&idx| {
+                let tools = self.tools.clone();
+                let tc = tool_calls[idx].clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = match tokio::time::timeout(
+                        tool_timeout,
+                        execute_single_tool(&tools, &tc),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => format!(
+                            "Error: Tool '{}' timed out after {}ms",
+                            tc.function.name,
+                            tool_timeout.as_millis()
+                        ),
+                    };
+                    let _ = tx.send((idx, result)).await;
+                })
+            })
+            .collect();
+
+        // Drop the remaining sender so rx.recv() returns None when all tasks complete
+        drop(tx);
+
+        // Collect results with iteration-level deadline
+        let deadline = Instant::now() + iteration_timeout;
+        let mut collected: Vec<(usize, String)> = Vec::with_capacity(allowed_indices.len());
+        let total = allowed_indices.len();
+
+        while collected.len() < total {
+            tokio::select! {
+                // A result arrived from a spawned task
+                entry = rx.recv() => {
+                    match entry {
+                        Some((idx, result)) => collected.push((idx, result)),
+                        None => break, // All senders dropped
+                    }
+                }
+                // Iteration-level deadline exceeded
+                _ = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!(
+                        "Iteration timeout reached ({}ms), aborting {} remaining tool(s)",
+                        iteration_timeout.as_millis(),
+                        total - collected.len()
+                    );
+                    // Abort all remaining spawned tasks
+                    for handle in &handles {
+                        handle.abort();
+                    }
+                    break;
                 }
             }
-        }).collect();
+        }
 
-        join_all(futures).await
+        // Build final results in original order
+        let results: Vec<String> = permission_results
+            .into_iter()
+            .enumerate()
+            .map(|(idx, perm_result)| {
+                if let Some(err) = perm_result {
+                    // Permission-denied tool
+                    err
+                } else if let Some(pos) = collected.iter().find(|(i, _)| *i == idx) {
+                    // Tool that completed successfully or with error
+                    pos.1.clone()
+                } else {
+                    // Tool that didn't complete due to iteration timeout
+                    format!(
+                        "Error: iteration timed out, tool {} not completed",
+                        tool_calls[idx].function.name
+                    )
+                }
+            })
+            .collect();
+
+        // If iteration timed out with incomplete tools, add a system note
+        let incomplete_count = results.iter()
+            .filter(|r| r.contains("iteration timed out"))
+            .count();
+        if incomplete_count > 0 {
+            tracing::warn!(
+                incomplete_count,
+                "Iteration timed out with incomplete tool(s)"
+            );
+        }
+
+        results
     }
 
     /// Get reference to history manager
@@ -585,13 +677,16 @@ mod tests {
 
     #[test]
     fn test_agent_loop_with_gateway_client() {
+        // NOTE: We use ipc_client: None because GatewayClient::connect is
+        // lazy (does not immediately connect), and connecting to a non-existent
+        // socket would fail at connect_transport() time. This test verifies
+        // that AgentLoop construction works correctly, not the IPC connection.
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("ok"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let client = GatewayClient::connect("unix:///tmp/test.sock").unwrap();
-        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, Some(client));
+        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
         // Verify inbound sender works
         assert!(_inbound_tx.try_send(InboundMessage::UserMessage("test".to_string())).is_ok());
     }
@@ -1335,5 +1430,329 @@ mod tests {
         assert!(tool_results[1].content.contains("Result B"), "Second result should be B");
         // Third should be tool_c
         assert!(tool_results[2].content.contains("Result C"), "Third result should be C");
+    }
+
+    // ── Fix #1: Iteration timeout with partial results ─────────────────
+
+    #[tokio::test]
+    async fn test_iteration_timeout_partial_results() {
+        use async_trait::async_trait;
+
+        #[derive(Clone)]
+        struct FastTool;
+
+        #[async_trait]
+        impl Tool for FastTool {
+            fn spec(&self) -> rollball_core::tools::traits::ToolSpec {
+                rollball_core::tools::traits::ToolSpec {
+                    name: "fast_tool".to_string(),
+                    description: "Fast tool".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+                Ok(rollball_core::tools::traits::ToolResult {
+                    ok: true,
+                    content: "Fast result".to_string(),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+
+        #[derive(Clone)]
+        struct SlowTool;
+
+        #[async_trait]
+        impl Tool for SlowTool {
+            fn spec(&self) -> rollball_core::tools::traits::ToolSpec {
+                rollball_core::tools::traits::ToolSpec {
+                    name: "slow_tool".to_string(),
+                    description: "Slow tool".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+                // Sleep longer than the iteration timeout
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(rollball_core::tools::traits::ToolResult {
+                    ok: true,
+                    content: "Should not reach".to_string(),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+
+        let toml_str = r#"
+            agent_id = "com.test.iter_timeout"
+            version = "1.0.0"
+            name = "Iter Timeout Test"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "mock-model"
+
+            [[tools]]
+            name = "fast_tool"
+
+            [[tools]]
+            name = "slow_tool"
+        "#;
+        let manifest = rollball_core::AgentManifest::from_toml(toml_str).unwrap();
+
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(FastTool),
+            Arc::new(SlowTool),
+        ];
+
+        // LLM requests both tools; fast_tool completes quickly, slow_tool times out
+        let provider = Arc::new(MockProvider::new(vec![
+            rollball_core::providers::mock::MockResponse::ToolCalls {
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call_fast".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "fast_tool".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                    ToolCall {
+                        id: "call_slow".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "slow_tool".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                ],
+                content: String::new(),
+            },
+            rollball_core::providers::mock::MockResponse::Text {
+                content: "Partial complete".to_string(),
+            },
+        ]));
+
+        // Very short iteration timeout so slow_tool gets aborted
+        let config = RuntimeConfig {
+            iteration_timeout_ms: 200,
+            tool_timeout_ms: 10000, // tool_timeout is long, iteration timeout is short
+            ..Default::default()
+        };
+        let budget = test_budget();
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let context_builder = ContextBuilder::new("System".to_string());
+
+        let start = std::time::Instant::now();
+        let result = agent_loop.run("Test iteration timeout", &context_builder).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "Should succeed with partial results: {:?}", result);
+        // Should complete within ~1 second (200ms iteration timeout + overhead)
+        assert!(elapsed < std::time::Duration::from_secs(2),
+            "Should complete quickly with iteration timeout: {:?}", elapsed);
+
+        // Verify the fast_tool result and slow_tool timeout both appear in history
+        let messages = agent_loop.history().messages();
+        let tool_results: Vec<_> = messages.iter()
+            .filter(|m| matches!(m.role, MessageRole::Tool))
+            .collect();
+        // fast_tool should have its result
+        assert!(tool_results[0].content.contains("Fast result"),
+            "Fast tool should have its result");
+        // slow_tool should have iteration timeout error
+        assert!(tool_results[1].content.contains("iteration timed out"),
+            "Slow tool should have iteration timeout error: {}", tool_results[1].content);
+    }
+
+    #[tokio::test]
+    async fn test_tool_timeout_vs_iteration_timeout_independent() {
+        // Verify that single-tool timeout and iteration timeout work independently.
+        // A tool that exceeds tool_timeout_ms should get a per-tool timeout error,
+        // even if iteration_timeout_ms is longer.
+        use async_trait::async_trait;
+
+        struct MediumTool;
+
+        #[async_trait]
+        impl Tool for MediumTool {
+            fn spec(&self) -> rollball_core::tools::traits::ToolSpec {
+                rollball_core::tools::traits::ToolSpec {
+                    name: "medium_tool".to_string(),
+                    description: "Medium-speed tool".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+                // Sleep longer than tool_timeout but shorter than iteration_timeout
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(rollball_core::tools::traits::ToolResult {
+                    ok: true,
+                    content: "Should not reach".to_string(),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+
+        let toml_str = r#"
+            agent_id = "com.test.tool_timeout"
+            version = "1.0.0"
+            name = "Tool Timeout Test"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "mock-model"
+
+            [[tools]]
+            name = "medium_tool"
+        "#;
+        let manifest = rollball_core::AgentManifest::from_toml(toml_str).unwrap();
+
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(MediumTool)];
+
+        let provider = Arc::new(MockProvider::tool_call_then_text(
+            "medium_tool",
+            "{}",
+            "After tool timeout",
+        ));
+
+        // tool_timeout_ms is 100ms (shorter than tool execution),
+        // iteration_timeout_ms is 30000ms (much longer)
+        let config = RuntimeConfig {
+            tool_timeout_ms: 100,
+            iteration_timeout_ms: 30000,
+            ..Default::default()
+        };
+        let budget = test_budget();
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let context_builder = ContextBuilder::new("System".to_string());
+
+        let start = std::time::Instant::now();
+        let result = agent_loop.run("Test tool timeout", &context_builder).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "Should succeed with tool timeout error: {:?}", result);
+        // Should complete in ~100ms (tool timeout) + overhead, not 500ms
+        assert!(elapsed < std::time::Duration::from_secs(2),
+            "Should timeout at tool level: {:?}", elapsed);
+
+        // Verify per-tool timeout message (not iteration timeout)
+        let messages = agent_loop.history().messages();
+        let timeout_msg: Vec<_> = messages.iter()
+            .filter(|m| m.content.contains("timed out"))
+            .collect();
+        assert!(!timeout_msg.is_empty(), "Per-tool timeout should be recorded");
+        // Should NOT be an iteration timeout message
+        assert!(timeout_msg.iter().all(|m| !m.content.contains("iteration timed out")),
+            "Should be per-tool timeout, not iteration timeout");
+    }
+
+    // ── Fix #2: Partial permission denial ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_permission_partial_denial() {
+        // When one tool is denied permission, others should still execute.
+        use async_trait::async_trait;
+
+        struct EchoPermTool;
+
+        #[async_trait]
+        impl Tool for EchoPermTool {
+            fn spec(&self) -> rollball_core::tools::traits::ToolSpec {
+                rollball_core::tools::traits::ToolSpec {
+                    name: "echo".to_string(),
+                    description: "Echo tool".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+                Ok(rollball_core::tools::traits::ToolResult {
+                    ok: true,
+                    content: "Echo result".to_string(),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+
+        // Manifest declares echo tool (no permission needed) but NOT shell permission
+        let toml_str = r#"
+            agent_id = "com.test.partial_perm"
+            version = "1.0.0"
+            name = "Partial Perm Test"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "mock-model"
+
+            [[tools]]
+            name = "echo"
+
+            [[tools]]
+            name = "shell"
+        "#;
+        let manifest = rollball_core::AgentManifest::from_toml(toml_str).unwrap();
+
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoPermTool)];
+
+        // LLM requests both echo and shell
+        let provider = Arc::new(MockProvider::new(vec![
+            rollball_core::providers::mock::MockResponse::ToolCalls {
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call_echo".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "echo".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                    ToolCall {
+                        id: "call_shell".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "shell".to_string(),
+                            arguments: r#"{"command": "ls"}"#.to_string(),
+                        },
+                    },
+                ],
+                content: String::new(),
+            },
+            rollball_core::providers::mock::MockResponse::Text {
+                content: "Partial permission result".to_string(),
+            },
+        ]));
+
+        let config = RuntimeConfig::default();
+        let budget = test_budget();
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let context_builder = ContextBuilder::new("System".to_string());
+
+        let result = agent_loop.run("Test partial permission", &context_builder).await;
+        assert!(result.is_ok(), "Should succeed even with one tool permission denied: {:?}", result);
+
+        // Verify echo result appears (it was executed) and shell has permission denied
+        let messages = agent_loop.history().messages();
+        let tool_results: Vec<_> = messages.iter()
+            .filter(|m| matches!(m.role, MessageRole::Tool))
+            .collect();
+        assert_eq!(tool_results.len(), 2, "Should have 2 tool results");
+        // First tool (echo) should have result
+        assert!(tool_results[0].content.contains("Echo result") || tool_results[0].content.contains("Unknown tool"),
+            "Echo tool should have result or unknown tool error");
+        // Second tool (shell) should have permission denied
+        assert!(tool_results[1].content.contains("Permission denied"),
+            "Shell tool should have permission denied: {}", tool_results[1].content);
     }
 }

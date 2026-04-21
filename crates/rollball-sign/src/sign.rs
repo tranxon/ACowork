@@ -505,4 +505,218 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
+
+    // ------------------------------------------------------------------
+    // Boundary / edge-case tests (review fix #3)
+    // ------------------------------------------------------------------
+
+    /// Helper: generate keypair, sign, verify, and check ZIP integrity
+    fn sign_verify_and_check_zip(zip_path: &Path, tmp_dir: &Path, expected_file_count: usize) {
+        crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
+
+        let signed_path = tmp_dir.join("signed.agent");
+        sign_package(
+            zip_path,
+            &signed_path,
+            &tmp_dir.join("keys"),
+            KeyType::Developer,
+        )
+        .unwrap();
+
+        // Verify signature
+        let result = crate::verify::verify_package(&signed_path).unwrap();
+        assert!(result.valid, "Signature should be valid");
+        assert_eq!(result.signer, "developer");
+        assert_eq!(result.sections_count, expected_file_count);
+
+        // Verify ZIP structural integrity with zip crate
+        let signed_data = fs::read(&signed_path).unwrap();
+        let reader = Cursor::new(&signed_data);
+        let archive = zip::ZipArchive::new(reader).unwrap();
+        assert_eq!(archive.len(), expected_file_count);
+    }
+
+    #[test]
+    fn test_sign_verify_with_many_files() {
+        let tmp_dir = std::env::temp_dir().join("rollball-test-many-files");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Create ZIP with 25 files
+        let zip_path = tmp_dir.join("test.agent");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        for i in 0..25 {
+            let name = format!("file_{:02}.txt", i);
+            writer.start_file(&name, options).unwrap();
+            writer.write_all(format!("Content of file {}", i).as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+
+        sign_verify_and_check_zip(&zip_path, &tmp_dir, 25);
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_sign_verify_with_large_file() {
+        let tmp_dir = std::env::temp_dir().join("rollball-test-large-file");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Create ZIP with one 1MB+ file
+        let zip_path = tmp_dir.join("test.agent");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        writer.start_file("large.bin", options).unwrap();
+        // Write 1.5 MB of data
+        let chunk = vec![0xAB_u8; 1024];
+        for _ in 0..1536 {
+            writer.write_all(&chunk).unwrap();
+        }
+        writer.finish().unwrap();
+
+        sign_verify_and_check_zip(&zip_path, &tmp_dir, 1);
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_sign_verify_with_nested_dirs() {
+        let tmp_dir = std::env::temp_dir().join("rollball-test-nested-dirs");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Create ZIP with deeply nested directory structure
+        let zip_path = tmp_dir.join("test.agent");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        let nested_files = [
+            "manifest.toml",
+            "prompts/system.md",
+            "prompts/default.md",
+            "skills/search/skill.md",
+            "skills/search/prompts/query.md",
+            "skills/code/skill.md",
+            "skills/code/prompts/review.md",
+            "config/settings.toml",
+            "config/defaults/profile.toml",
+        ];
+
+        for name in &nested_files {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(format!("Content of {}", name).as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+
+        sign_verify_and_check_zip(&zip_path, &tmp_dir, nested_files.len());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_sign_verify_with_empty_files() {
+        let tmp_dir = std::env::temp_dir().join("rollball-test-empty-files");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Create ZIP with empty files alongside non-empty ones
+        let zip_path = tmp_dir.join("test.agent");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        writer.start_file("manifest.toml", options).unwrap();
+        writer.write_all(b"agent_id = \"com.test\"").unwrap();
+
+        writer.start_file("empty.txt", options).unwrap();
+        // Write nothing — empty file
+
+        writer.start_file("prompts/system.md", options).unwrap();
+        writer.write_all(b"You are a test agent.").unwrap();
+
+        writer.start_file("also_empty.toml", options).unwrap();
+        // Another empty file
+
+        writer.finish().unwrap();
+
+        sign_verify_and_check_zip(&zip_path, &tmp_dir, 4);
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_signed_zip_readable_by_zip_crate() {
+        let tmp_dir = std::env::temp_dir().join("rollball-test-zip-crate-readable");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Create ZIP with multiple entries
+        let zip_path = tmp_dir.join("test.agent");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        let entries: Vec<(&str, &[u8])> = vec![
+            ("manifest.toml", b"agent_id = \"com.zipcrate\""),
+            ("prompts/system.md", b"System prompt."),
+            ("skills/test/skill.md", b"A test skill."),
+        ];
+
+        for (name, content) in &entries {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap();
+
+        // Sign
+        crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
+        let signed_path = tmp_dir.join("signed.agent");
+        sign_package(
+            &zip_path,
+            &signed_path,
+            &tmp_dir.join("keys"),
+            KeyType::Developer,
+        )
+        .unwrap();
+
+        // Verify the signed ZIP can be opened by zip::ZipArchive
+        let signed_data = fs::read(&signed_path).unwrap();
+        let reader = Cursor::new(&signed_data);
+        let mut archive = zip::ZipArchive::new(reader)
+            .expect("Signed ZIP should be openable by zip crate");
+
+        // All original entries should be readable
+        assert_eq!(archive.len(), entries.len());
+
+        // Verify each entry's content matches
+        let mut found_names = Vec::new();
+        for i in 0..archive.len() {
+            let mut f = archive.by_index(i).unwrap();
+            let name = f.name().to_string();
+            let mut content = String::new();
+            f.read_to_string(&mut content).unwrap();
+            found_names.push(name.clone());
+
+            // Find expected content
+            let expected = entries.iter().find(|(n, _)| *n == name).unwrap();
+            assert_eq!(content.as_bytes(), expected.1,
+                "Content mismatch for entry '{}'", name);
+        }
+        found_names.sort();
+
+        // Verify CD offset is correct by checking the archive can be re-read
+        let reader2 = Cursor::new(&signed_data);
+        let archive2 = zip::ZipArchive::new(reader2)
+            .expect("Re-reading signed ZIP should succeed (CD offset valid)");
+        assert_eq!(archive2.len(), entries.len());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
 }
