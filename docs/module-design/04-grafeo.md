@@ -95,7 +95,16 @@ pub struct GrafeoConfig {
     pub graph_expand_max_nodes: usize,  // 扩展节点总数上限（默认 20）
     pub early_stop_thresholds: Vec<f32>, // 早期终止阈值（默认 [0.1, 0.15, 0.2]）
     pub max_storage_mb: u64,            // 最大存储容量（默认 5000MB）
-    pub backup_enabled: bool,           // 自动备份开关（默认 true）
+    pub backup: BackupConfig,            // 自动备份配置
+}
+
+/// 备份配置（可从 manifest.toml [memory.backup] 注入）
+pub struct BackupConfig {
+    pub enabled: bool,                   // 备份开关（默认 true）
+    pub schedule_hour: u8,              // 每日备份时间（默认 3，即凌晨 3:00）
+    pub daily_retention_days: u8,        // 日备份保留天数（默认 7）
+    pub weekly_retention_weeks: u8,      // 周备份保留周数（默认 4）
+    pub backup_dir: Option<PathBuf>,    // 备份目录（None=默认路径 <db_path>/../backups/）
 }
 
 impl GrafeoStore {

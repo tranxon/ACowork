@@ -266,7 +266,7 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.10.1 ConflictDetector 模块 | `consolidation/conflict.rs` | embedding 相似度 > 0.85 触发候选冲突标记 |
+| S2.10.1 ConflictDetector 模块 | `semantic/conflict.rs` | embedding 相似度 > 0.85 触发候选冲突标记 |
 | S2.10.2 冲突分类（离线 LLM）| `consolidation/offline.rs` | evolution/correction/ambiguous 三类 |
 | S2.10.3 自动解决策略 | `consolidation/offline.rs` | evolution→新值Active旧值Dormant；correction→替换；ambiguous→标记待确认 |
 | S2.10.4 冲突报告生成 | `consolidation/offline.rs` | ambiguous 累计 3+ 时触发用户确认 |
@@ -299,6 +299,11 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 |------|------|---------|
 | S2.12.1 可观测指标 | `memory/stats.rs` | 节点分布/检索统计/冲突统计/衰减统计 |
 | S2.12.2 SLA 定义 | `memory/stats.rs` | hybrid_search P99 < 100ms (1K nodes)，P99 < 500ms (10K nodes) |
+
+**Phase 3 对接开源 Benchmark：**
+
+| 任务 | 文件 | 验收标准 |
+|------|------|---------|
 | S2.12.3 LongMemEval 集成测试 | `tests/` | 5 维评估（IE/MR/TR/KU/Abs）|
 
 **质量评估设计**：
