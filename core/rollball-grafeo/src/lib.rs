@@ -6,8 +6,12 @@
 //! - Associative diffusion retrieval
 //! - Privacy level filtering
 
+pub mod decay;
+pub mod error;
 pub mod grafeo;
 pub mod graph;
-pub mod decay;
 pub mod retrieval;
-pub mod error;
+
+pub use decay::DecayConfig;
+pub use error::{GrafeoError, Result};
+pub use grafeo::GrafeoStore;

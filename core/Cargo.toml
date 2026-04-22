@@ -51,6 +51,20 @@ clap = { version = "4.5", features = ["derive", "env"] }
 
 # Database
 rusqlite = { version = "0.37", features = ["bundled"] }
+grafeo-engine = { version = "0.5.39", features = [
+    "lpg",
+    "gql",
+    "vector-index",
+    "text-index",
+    "hybrid-search",
+    "wal",
+    "grafeo-file",
+    "algos",
+    "cdc",
+    "parallel",
+] }
+grafeo-common = "0.5.40"
+grafeo-core = "0.5.40"
 
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

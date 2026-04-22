@@ -13,62 +13,65 @@
 - 新增 embedding/fallback.rs（降级链路）
 - 新增 vector/hnsw.rs（HNSW 参数定义：M=16, ef_construction=100, ef_search=64）
 
+**v3.6 变更（当前）**：
+- 存储后端从 `rusqlite` 全面迁移至 `grafeo-engine`（v0.5.39，crates.io）
+- 删除自研 HNSW / BM25 / RRF 模块，复用 Grafeo 原生索引
+- 删除 `embedding/` 目录，Embedding 生成上移至 Runtime 层
+- 数据模型从关系型表结构迁移至 Grafeo LPG（标签属性图）
+- 引入 PageRank、CDC/History、topology_boost、社区检测等图原生能力
+
+---
+
 ## Crate 结构
 
 ```
 crates/rollball-grafeo/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs                     # 导出 GrafeoStore + 公共类型
-    ├── store.rs                   # GrafeoStore 结构（实现 MemoryStore trait）
-    ├── schema.rs                  # 数据库表结构定义 + 迁移
-    ├── types.rs                   # Episode / KnowledgeNode / ProceduralNode / AutobiographicalNode / PendingKnowledgeNode
-    │                              # 等数据类型
+    ├── lib.rs              # Export GrafeoStore + public types
+    ├── grafeo.rs           # GrafeoStore init, GrafeoDB connection management
+    ├── store.rs            # MemoryStore trait implementation for GrafeoStore
+    ├── graph.rs            # LPG graph operations (CRUD based on grafeo-engine API)
+    ├── retrieval.rs        # Retrieval entry point (calls grafeo-engine search APIs)
+    ├── decay.rs            # Decay calculation (leverages CDC history API)
+    ├── types.rs            # Episode / KnowledgeNode / ProceduralNode / AutobiographicalNode
+    │                       # and other data types
     ├── episodic/
-    │   ├── mod.rs                 # 经历层
-    │   ├── store.rs               # 写入交互记录
-    │   ├── search.rs              # 语义相似性检索（HNSW）
-    │   └── consolidate.rs         # 巩固标记与清理
+    │   ├── mod.rs          # Episodic layer
+    │   ├── store.rs        # Write interaction records (LPG node creation)
+    │   ├── search.rs       # Semantic similarity retrieval (grafeo-engine vector_search)
+    │   └── consolidate.rs  # Consolidation flag and cleanup
     ├── semantic/
-    │   ├── mod.rs                 # 沉淀层
-    │   ├── knowledge.rs           # KnowledgeNode（事实/偏好/关系）
-    │   ├── procedural.rs          # ProceduralNode
-    │   ├── autobiographical.rs   # AutobiographicalNode（强制 Active）
-    │   ├── graph.rs               # LPG 图操作
-    │   ├── conflict.rs             # 冲突候选检测（Phase 2 新增）
-    │   ├── inference.rs           # 知识推理与合并
-    │   └── skill.rs               # Skill 经验节点
+    │   ├── mod.rs          # Semantic layer
+    │   ├── knowledge.rs    # KnowledgeNode (Fact/Preference/Relation)
+    │   ├── procedural.rs   # ProceduralNode
+    │   ├── autobiographical.rs  # AutobiographicalNode (forced Active)
+    │   ├── conflict.rs     # Conflict candidate detection (Phase 2)
+    │   ├── inference.rs    # Knowledge inference and merge
+    │   └── skill.rs        # Skill experience nodes
     ├── consolidation/
-    │   ├── mod.rs                 # 巩固管道
-    │   ├── instant.rs             # 即时提取执行层（PendingKnowledgeNode）
-    │   ├── offline.rs             # 离线巩固（Phase 3）
-    │   └── conflict.rs             # 冲突分类（Phase 3 新增）
+    │   ├── mod.rs          # Consolidation pipeline
+    │   ├── instant.rs      # Instant extraction executor (PendingKnowledgeNode)
+    │   ├── offline.rs      # Offline consolidation (Phase 3)
+    │   └── conflict.rs     # Conflict classification (Phase 3)
     ├── forgetting/
-    │   ├── mod.rs                 # 遗忘机制
-    │   ├── decay.rs               # 乘法衰减计算
-    │   ├── scan.rs                # 后台衰减扫描
-    │   └── purge_log.rs           # Purge 恢复机制（Phase 2 新增）
-    ├── retrieval/
-    │   ├── mod.rs                 # 检索入口
-    │   ├── hybrid_search.rs       # 混合搜索（向量 + 全文 + RRF）
-    │   ├── graph_expand.rs       # 关联扩散（1-3 跳，早期终止）
-    │   └── rrf.rs                 # Reciprocal Rank Fusion
-    ├── fulltext/
-    │   ├── mod.rs                 # 全文检索
-    │   └── bm25.rs                # BM25 倒排索引
-    ├── embedding/
-    │   ├── mod.rs                 # Embedding 生成 trait + 实现
-    │   ├── local.rs               # ONNX Runtime 本地生成
-    │   ├── remote.rs             # 远程 embedding API
-    │   └── fallback.rs             # 降级链路（Phase 2 新增）
-    ├── vector/
-    │   ├── mod.rs                 # 向量索引 trait + 实现
-    │   └── hnsw.rs               # HNSW（M=16, ef_construction=100, ef_search=64）
-    ├── backup.rs                   # 自动备份（Phase 2 新增）
-    ├── recovery.rs                 # 故障恢复（Phase 2 新增）
-    ├── migration.rs               # 数据库版本迁移框架
-    └── error.rs                   # 错误类型
+    │   ├── mod.rs          # Forgetting mechanism
+    │   ├── scan.rs         # Background decay scan
+    │   └── purge_log.rs    # Purge recovery mechanism (Phase 2)
+    └── error.rs            # Error types
 ```
+
+**已删除模块**（Grafeo 原生提供，无需自研）：
+- ~~`vector/hnsw.rs`~~ — 替换为 grafeo-engine 原生 HNSW 向量索引
+- ~~`fulltext/bm25.rs`~~ — 替换为 grafeo-engine 原生 BM25 全文索引
+- ~~`retrieval/rrf.rs`~~ — 替换为 grafeo-engine `hybrid_search()` 内置 RRF
+- ~~`retrieval/hybrid_search.rs`~~ — 逻辑并入 `retrieval.rs`，直接调用 `db.hybrid_search()`
+- ~~`embedding/`~~ — Embedding 生成移至 `rollball-runtime` 层
+- ~~`backup.rs` / `recovery.rs`~~ — 替换为 grafeo-engine WAL + `grafeo-file` 原生持久化
+- ~~`migration.rs`~~ — Grafeo LPG 无版本化 Schema 迁移概念，索引通过 API 动态创建
+- ~~`schema.rs`~~ — 关系型表结构定义已废弃
+
+---
 
 ## GrafeoStore（MemoryStore trait 实现）
 
@@ -77,63 +80,79 @@ use rollball_memory::MemoryStore;
 use rollball_memory::{MemoryQuery, SearchResult, DecayConfig, StoreHealth, StoreStats};
 use rollball_memory::{Episode, KnowledgeNode, ProceduralNode, AutobiographicalNode};
 use rollball_memory::MemoryFilters;
+use grafeo_engine::GrafeoDB;
 
-/// Grafeo — 基于 rusqlite 的 MemoryStore 实现
-/// 每个 Agent Runtime 进程内嵌一个实例，存储在独立文件中
+/// Grafeo — MemoryStore implementation backed by grafeo-engine
+/// One instance per Agent Runtime process, persisted as a single .grafeo file
 pub struct GrafeoStore {
-    db: rusqlite::Connection,
-    embedding: Box<dyn EmbeddingProvider>,
+    db: GrafeoDB,
     config: GrafeoConfig,
 }
 
 pub struct GrafeoConfig {
     pub db_path: PathBuf,
-    pub decay: DecayConfig,              // 遗忘参数（可从 manifest 注入）
-    pub episode_retention_days: u32,     // 情景记忆默认保留期（默认 14 天）
-    pub graph_expand_hops: u8,          // 关联扩散最大跳数（默认 3，通过早期终止实际大多在 1-2 跳停止）
-    pub graph_expand_per_hop: usize,    // 每跳最大扩展边数（默认 5）
-    pub graph_expand_max_nodes: usize,  // 扩展节点总数上限（默认 20）
-    pub early_stop_thresholds: Vec<f32>, // 早期终止阈值（默认 [0.1, 0.15, 0.2]）
-    pub max_storage_mb: u64,            // 最大存储容量（默认 5000MB）
-    pub backup: BackupConfig,            // 自动备份配置
+    pub decay: DecayConfig,              // Forgetting params (injected from manifest)
+    pub episode_retention_days: u32,     // Default episodic retention (14 days)
+    pub graph_expand_hops: u8,          // Max graph expansion hops (default 3)
+    pub graph_expand_per_hop: usize,    // Max edges per hop (default 5)
+    pub graph_expand_max_nodes: usize,  // Max total expanded nodes (default 20)
+    pub early_stop_thresholds: Vec<f32>, // Early stop thresholds (default [0.1, 0.15, 0.2])
+    pub max_storage_mb: u64,            // Max storage capacity (default 5000MB)
+    pub backup: BackupConfig,            // Auto backup config
 }
 
-/// 备份配置（可从 manifest.toml [memory.backup] 注入）
+/// Backup config (injected from manifest.toml [memory.backup])
 pub struct BackupConfig {
-    pub enabled: bool,                   // 备份开关（默认 true）
-    pub schedule_hour: u8,              // 每日备份时间（默认 3，即凌晨 3:00）
-    pub daily_retention_days: u8,        // 日备份保留天数（默认 7）
-    pub weekly_retention_weeks: u8,      // 周备份保留周数（默认 4）
-    pub backup_dir: Option<PathBuf>,    // 备份目录（None=默认路径 <db_path>/../backups/）
+    pub enabled: bool,                   // Backup switch (default true)
+    pub schedule_hour: u8,              // Daily backup hour (default 3, i.e. 03:00)
+    pub daily_retention_days: u8,        // Daily backup retention (default 7)
+    pub weekly_retention_weeks: u8,      // Weekly backup retention (default 4)
+    pub backup_dir: Option<PathBuf>,    // Backup dir (None = default <db_path>/../backups/)
 }
 
 impl GrafeoStore {
-    /// 打开 GrafeoStore 实例（每个 Agent 独立文件）
-    /// 自动执行数据库迁移（如果需要）
-    pub fn open(config: GrafeoConfig, embedding: Box<dyn EmbeddingProvider>) -> Result<Self> {
-        let db = Connection::open(&config.db_path)?;
-        migration::run(&db)?;
-        // ... 初始化索引
-        Ok(Self { db, embedding, config })
+    /// Open a GrafeoStore instance (one independent .grafeo file per Agent)
+    /// Auto-creates indexes if they do not exist
+    pub fn open(config: GrafeoConfig) -> Result<Self> {
+        let db = GrafeoDB::open(&config.db_path)?;
+
+        // Initialize Grafeo native indexes on first open
+        Self::init_indexes(&db)?;
+
+        Ok(Self { db, config })
+    }
+
+    /// Create vector and text indexes for memory labels
+    fn init_indexes(db: &GrafeoDB) -> Result<()> {
+        // HNSW vector index for Episodic nodes
+        db.create_vector_index("Episodic", "embedding", Some(384), Some("cosine"), None, None, None)?;
+        // HNSW vector index for Knowledge nodes
+        db.create_vector_index("Knowledge", "embedding", Some(384), Some("cosine"), None, None, None)?;
+        // BM25 text index for Episodic content
+        db.create_text_index("Episodic", "content")?;
+        // BM25 text index for Knowledge content
+        db.create_text_index("Knowledge", "content")?;
+        Ok(())
     }
 }
 
 impl MemoryStore for GrafeoStore {
-    // ── 经历层 ──
+    // ── Episodic layer ──
 
     fn store_episode(&self, episode: &Episode) -> Result<()> {
-        // 自动分类内容类型（Informational / Artifact / Structural）
-        // 工件性内容压缩为摘要 + artifact_refs
-        // 生成 embedding（超时 200ms 则后台补生成）
-        episodic::store::write(&self.db, episode, &*self.embedding)
+        // Auto-classify content type (Informational / Artifact / Structural)
+        // Artifact content is compressed to summary + artifact_refs
+        // Embedding is generated by Runtime layer and passed in Episode.embedding
+        episodic::store::write(&self.db, episode)
     }
 
     fn search_episodes(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>> {
+        // Semantic search via grafeo-engine native HNSW
         let mut results = episodic::search::search(
-            &self.db, &*self.embedding, query.query_text.as_str(),
+            &self.db, query.embedding.as_slice(),
             query.filters.time_range.as_ref(), query.limit,
         )?;
-        // 按 MemoryQuery.filters 过滤
+        // Filter by MemoryQuery.filters
         apply_filters(&mut results, &query.filters);
         Ok(results)
     }
@@ -147,11 +166,12 @@ impl MemoryStore for GrafeoStore {
         episodic::consolidate::cleanup(&self.db, days as u32)
     }
 
-    // ── 沉淀层 ──
+    // ── Semantic layer ──
 
     fn store_knowledge(&self, node: &KnowledgeNode) -> Result<()> {
-        // 写入 PendingKnowledgeNode（Phase 2）或正式 KnowledgeNode（Phase 3）
-        // 即时阶段不做三元组提取和语义去重，移至离线巩固
+        // Write PendingKnowledgeNode (Phase 2) or formal KnowledgeNode (Phase 3)
+        // Instant phase does not do triplet extraction or semantic dedup;
+        // those are moved to offline consolidation
         semantic::knowledge::store(&self.db, node)
     }
 
@@ -160,16 +180,17 @@ impl MemoryStore for GrafeoStore {
     }
 
     fn store_autobiographical(&self, node: &AutobiographicalNode) -> Result<()> {
-        // 强制 status = Active（schema 约束）
+        // Force status = Active (enforced by LPG property constraint)
         semantic::autobiographical::store(&self.db, node)
     }
 
-    // ── 统一检索 ──
+    // ── Unified retrieval ──
 
     fn hybrid_search(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>> {
-        // 并行检索经历层 + 沉淀层，RRF 融合排序
-        let results = retrieval::hybrid_search::search(
-            &self.db, &*self.embedding, query,
+        // Parallel retrieval across Episodic + Knowledge labels,
+        // fused via grafeo-engine native hybrid_search (RRF + optional topology boost)
+        let results = retrieval::hybrid_search(
+            &self.db, query,
         )?;
         apply_filters(&mut results, &query.filters);
         Ok(results)
@@ -177,14 +198,14 @@ impl MemoryStore for GrafeoStore {
 
     fn graph_expand(&self, seeds: &[SearchResult], hops: u8) -> Result<Vec<SearchResult>> {
         let hops = hops.min(self.config.graph_expand_hops); // clamp
-        retrieval::graph_expand::expand(
+        retrieval::graph_expand(
             &self.db, seeds, hops,
             self.config.graph_expand_per_hop,
             self.config.graph_expand_max_nodes,
         )
     }
 
-    // ── 遗忘 ──
+    // ── Forgetting ──
 
     fn run_decay_scan(&self, config: &DecayConfig) -> Result<DecayScanResult> {
         forgetting::scan::run(&self.db, config)
@@ -198,11 +219,12 @@ impl MemoryStore for GrafeoStore {
         forgetting::scan::purge(&self.db, max_dormant_age)
     }
 
-    // ── 生命周期 ──
+    // ── Lifecycle ──
 
     fn health_check(&self) -> Result<StoreHealth> {
         let start = Instant::now();
-        let result = self.db.execute_batch("SELECT count(*) FROM memory_nodes WHERE status='Active'");
+        let result = self.db.session()
+            .execute("MATCH (n) RETURN count(n) AS cnt");
         let latency = start.elapsed().as_millis() as u64;
         Ok(StoreHealth {
             is_healthy: result.is_ok(),
@@ -213,31 +235,32 @@ impl MemoryStore for GrafeoStore {
     }
 
     fn stats(&self) -> Result<StoreStats> {
-        // 查询各表行数、文件大小
-        let episode_count: u64 = self.db.query_row(
-            "SELECT count(*) FROM episodes", [], |r| r.get(0),
-        )?;
-        let node_count: u64 = self.db.query_row(
-            "SELECT count(*) FROM memory_nodes", [], |r| r.get(0),
-        )?;
-        let active_count: u64 = self.db.query_row(
-            "SELECT count(*) FROM memory_nodes WHERE status='Active'", [], |r| r.get(0),
-        )?;
+        let session = self.db.session();
+        let episode_count: u64 = session.execute(
+            "MATCH (n:Episodic) RETURN count(n) AS cnt"
+        )?.rows().next().map(|r| r.get::<u64>("cnt")).unwrap_or(0);
+        let node_count: u64 = session.execute(
+            "MATCH (n) WHERE n:Knowledge OR n:Procedural OR n:Autobiographical RETURN count(n) AS cnt"
+        )?.rows().next().map(|r| r.get::<u64>("cnt")).unwrap_or(0);
+        let active_count: u64 = session.execute(
+            "MATCH (n) WHERE n.status = 'Active' RETURN count(n) AS cnt"
+        )?.rows().next().map(|r| r.get::<u64>("cnt")).unwrap_or(0);
         let dormant_count = node_count - active_count;
-        let edge_count: u64 = self.db.query_row(
-            "SELECT count(*) FROM memory_edges", [], |r| r.get(0),
-        )?;
+        let edge_count: u64 = session.execute(
+            "MATCH ()-[r]->() RETURN count(r) AS cnt"
+        )?.rows().next().map(|r| r.get::<u64>("cnt")).unwrap_or(0);
         let storage_size = std::fs::metadata(&self.config.db_path)
             .map(|m| m.len()).unwrap_or(0);
         Ok(StoreStats {
             episode_count, node_count, active_node_count: active_count,
             dormant_node_count: dormant_count, edge_count,
-            storage_size_bytes: storage_size, index_count: 3, // HNSW + BM25 + SQL
+            storage_size_bytes: storage_size,
+            index_count: 4, // HNSW(Episodic) + HNSW(Knowledge) + BM25(Episodic) + BM25(Knowledge)
         })
     }
 
     fn close(&self) -> Result<()> {
-        // 刷写 WAL，关闭连接
+        // GrafeoDB auto-flushes WAL on drop; explicit close is optional
         Ok(())
     }
 }
@@ -245,108 +268,366 @@ impl MemoryStore for GrafeoStore {
 
 **注意**：`MemoryStore` trait、`MemoryQuery`、`SearchResult`、`DecayConfig`、`StoreHealth`、`StoreStats`、`MemoryMiddleware` 等类型定义在独立的 `rollball-memory` crate 中（与 Runtime 共享），Grafeo crate 只实现 trait，不定义 trait。详见 05-memory.md §10。
 
-## 数据库 Schema（核心表）
+**Embedding 职责上移**：GrafeoStore 不再持有 `EmbeddingProvider`。Embedding 向量由 `rollball-runtime` 的 LLM Provider 生成，以 `Vec<f32>` 形式传入 `Episode` / `MemoryQuery`，GrafeoStore 仅负责存储和索引。
 
-```sql
--- 经历层：情景记忆
-CREATE TABLE episodes (
-    episode_id   TEXT PRIMARY KEY,
-    session_id   TEXT NOT NULL,
-    timestamp    DATETIME NOT NULL,
-    role         TEXT NOT NULL,          -- user / agent / tool
-    content      TEXT NOT NULL,         -- 信息性内容原样存储；工件性内容仅存摘要
-    content_type TEXT DEFAULT 'Informational',  -- Informational / Artifact / Structural
-    embedding    BLOB,                  -- f32 向量（基于 content 而非原始代码生成）
-    importance   REAL DEFAULT 0.5,
-    consolidated BOOLEAN DEFAULT FALSE,
-    metadata     TEXT,                  -- JSON
-    artifact_refs TEXT                  -- JSON Array，ArtifactRef[]（仅 Artifact 类型有值）
-);
+---
 
--- 经历层：工件引用（独立表便于查询）
-CREATE TABLE artifact_refs (
-    ref_id       TEXT PRIMARY KEY,
-    episode_id   TEXT NOT NULL REFERENCES episodes(episode_id),
-    path         TEXT NOT NULL,
-    hash         TEXT NOT NULL,         -- 内容 sha256
-    description  TEXT NOT NULL,
-    line_start   INTEGER,
-    line_end     INTEGER,
-    modified_at  DATETIME
-);
+## Grafeo LPG 数据模型
 
--- 沉淀层：统一节点表
-CREATE TABLE memory_nodes (
-    node_id      TEXT PRIMARY KEY,
-    node_type    TEXT NOT NULL,          -- Knowledge / Procedural / Autobiographical / SkillDraft / SkillIteration / SkillExecution / SkillExperience
-    sub_type     TEXT,                   -- Knowledge: Fact/Preference/Relation; Autobiographical: Identity/Capability/Limitation/Preference/History/Relationship
-    content      TEXT NOT NULL,          -- JSON，按 node_type 不同结构不同
-    created_at   DATETIME NOT NULL,
-    updated_at   DATETIME NOT NULL,
-    status       TEXT DEFAULT 'Active',  -- Active / Dormant / Purged（Autobiographical 强制 Active）
-    dormant_since DATETIME,
+Rollball 的记忆类型直接映射为 Grafeo 的 **Label**，利用 Label 隔离实现类型区分，无需额外的 `node_type` 枚举字段。
 
-    -- 遗忘字段（Autobiographical 不使用）
-    importance   REAL DEFAULT 0.5,
-    access_count INTEGER DEFAULT 0,
-    last_accessed DATETIME,
-    decay_score  REAL DEFAULT 1.0,
+### Node Labels
 
-    -- 隐私
-    privacy      TEXT DEFAULT 'Personal' -- Public / Personal / Sensitive（打包分享时过滤）
-);
+| Label | 含义 | 核心 Properties |
+|-------|------|-----------------|
+| `Episodic` | 经历层节点 | `content`, `embedding`, `importance`, `timestamp`, `session_id`, `role`, `content_type`, `consolidated`, `metadata`, `artifact_refs` |
+| `Knowledge` | 知识节点 | `content`, `embedding`, `sub_type` (Fact/Preference/Relation), `confidence`, `subject`, `predicate`, `object`, `status`, `privacy` |
+| `Procedural` | 程序记忆节点 | `content`, `embedding`, `procedure_id`, `success_rate`, `invocation_count`, `status` |
+| `Autobiographical` | 自传体记忆节点 | `content`, `embedding`, `sub_type` (Identity/Capability/Limitation/Preference/History/Relationship), `status` (forced Active) |
+| `SystemConfig` | 系统配置节点 | `config_key`, `config_value`, `updated_at` |
+| `ToolInvocation` | 工具调用记录 | `tool_name`, `input_hash`, `output_summary`, `timestamp`, `latency_ms` |
+| `Session` | 会话节点 | `session_id`, `started_at`, `ended_at`, `agent_id` |
 
--- 沉淀层：关系边
-CREATE TABLE memory_edges (
-    edge_id      TEXT PRIMARY KEY,
-    source_id    TEXT NOT NULL REFERENCES memory_nodes(node_id),
-    target_id    TEXT NOT NULL REFERENCES memory_nodes(node_id),
-    relation     TEXT NOT NULL,
-    weight       REAL DEFAULT 1.0,
-    created_at   DATETIME NOT NULL,
-    source_episode TEXT
-);
+### Edge Types
 
--- 向量索引（HNSW，由 rusqlite 扩展或自定义实现）
--- 全文索引（BM25，由 rusqlite FTS5 实现）
+| Edge Type | 起点 | 终点 | 含义 |
+|-----------|------|------|------|
+| `HAS_MEMORY` | `Session` | `Episodic` / `Knowledge` / ... | 会话拥有记忆 |
+| `REFERENCES` | `Knowledge` | `Knowledge` | 知识间引用关系 |
+| `SELF_REFERENCES` | `Autobiographical` | `Autobiographical` | 自传体自我引用（身份关联） |
+| `PRODUCED` | `ToolInvocation` | `Knowledge` / `Episodic` | 工具调用产生记忆 |
+| `DERIVED_FROM` | `Knowledge` | `Episodic` | 知识来源于某段经历 |
+
+### LPG 模型初始化示例
+
+```rust
+use grafeo_engine::GrafeoDB;
+
+let db = GrafeoDB::open("agent_memory.grafeo")?;
+
+// No explicit CREATE TABLE needed — LPG is schemaless
+// Indexes are created via API (see GrafeoStore::init_indexes)
+
+// Example: create an Episodic node
+let mut session = db.session();
+session.begin_transaction()?;
+session.execute(
+    "CREATE (e:Episodic { \
+        episode_id: $id, \
+        content: $content, \
+        embedding: $emb, \
+        importance: 0.5, \
+        timestamp: $ts, \
+        session_id: $sid, \
+        role: 'user', \
+        content_type: 'Informational', \
+        consolidated: false \
+    })",
+)?;
+session.commit()?;
 ```
+
+---
+
+## 检索能力（基于 grafeo-engine 原生 API）
+
+| 能力 | 旧描述 | 新描述 |
+|------|--------|--------|
+| 语义检索 | 自研 HNSW (M=16, ef_c=100) | `db.vector_search(label, "embedding", &vec, k, Some(ef), filters)` — Grafeo 原生 HNSW，支持余弦/欧几里得/点积距离，SIMD 加速 |
+| 关键词检索 | rusqlite FTS5 BM25 | `db.text_search(label, "content", query, k, filters)` — Grafeo 原生 BM25，内置 Unicode 分词器 |
+| 混合检索 | 自研 RRF 融合 | `db.hybrid_search(label, "content", "embedding", query, Some(&vec), k, filters)` — 内置 RRF 融合，可选 topology boost |
+| MMR 去重 | 无 | `db.mmr_search(label, "embedding", &vec, k, fetch_k, lambda, ef, filters)` — Maximal Marginal Relevance，保证结果多样性 |
+| 图遍历 | SQL 模拟 | GQL: `MATCH (m)-[r*1..3]-(other) WHERE id(m) = $id RETURN other` — 原生 LPG 遍历，有查询优化器支持 |
+
+### 代码示例
+
+```rust
+use grafeo_engine::GrafeoDB;
+
+let db = GrafeoDB::open("agent_memory.grafeo")?;
+
+// Semantic search — Episodic layer
+let results = db.vector_search(
+    "Episodic",           // label
+    "embedding",          // property name of the vector
+    &query_embedding,     // Vec<f32> generated by Runtime LLM Provider
+    10,                   // top-k
+    Some(64),             // ef_search
+    Some(filters),        // optional property filters
+)?;
+
+// Keyword search — Knowledge layer
+let results = db.text_search(
+    "Knowledge",
+    "content",
+    "user preference",
+    10,
+    Some(filters),
+)?;
+
+// Hybrid search (RRF fusion + optional topology boost)
+let results = db.hybrid_search(
+    "Knowledge",
+    "content",            // text property
+    "embedding",          // vector property
+    "dark mode setting",  // text query
+    Some(&query_embedding),
+    10,
+    Some(hybrid_filters),
+)?;
+
+// MMR search for diverse results
+let results = db.mmr_search(
+    "Knowledge",
+    "embedding",
+    &query_embedding,
+    5,                    // final k
+    20,                   // fetch_k (over-fetch then re-rank)
+    0.5,                  // lambda (relevance vs diversity balance)
+    Some(64),
+    Some(filters),
+)?;
+
+// Graph expansion via GQL
+let gql = format!(
+    "MATCH (m)-[r*1..{}]-(other) \
+     WHERE id(m) = $id \
+     RETURN other LIMIT {}",
+    hops, max_nodes
+);
+let mut session = db.session();
+let expanded = session.execute_with_params(&gql, [("id", seed_id.into())])?;
+```
+
+---
+
+## 图算法增强
+
+grafeo-engine 内置图算法过程（`algos` feature），Rollball 记忆系统可直接调用以提升记忆质量。
+
+### PageRank 集成
+
+Rollball 原有的 `importance_score` 是手调的 `f32`。Grafeo 的 PageRank 算法可以自动评估记忆节点的重要性——被更多边引用的节点 PageRank 更高，作为 `importance_score` 的补充或替代。
+
+```rust
+/// Compute PageRank scores for all memory nodes
+/// Used to automatically rank node importance based on graph connectivity
+pub fn compute_pagerank(&self) -> Result<HashMap<String, f64>> {
+    let mut session = self.db.session();
+    let result = session.execute(
+        "CALL grafeo.pagerank({damping: 0.85, max_iterations: 20}) \
+         YIELD node_id, score \
+         WHERE score > 0.001 \
+         RETURN node_id, score ORDER BY score DESC"
+    )?;
+    // Parse result rows into HashMap<node_id, score>
+    let mut scores = HashMap::new();
+    for row in result.rows() {
+        let id: String = row.get("node_id");
+        let score: f64 = row.get("score");
+        scores.insert(id, score);
+    }
+    Ok(scores)
+}
+```
+
+**使用场景**：
+- 检索排序：将 PageRank 分数作为 `topology_boost` 的输入权重
+- 遗忘保护：PageRank 高于阈值的节点跳过衰减扫描
+- 重要性校准：替代手调 `importance_score`，减少人工干预
+
+### CDC / History
+
+Grafeo 内置 CDC（Change Data Capture）记录每个节点的完整变更历史。通过 `db.history()` 可以追溯任何记忆节点的创建、修改、删除全过程。
+
+```rust
+use grafeo_engine::EntityId;
+
+/// Retrieve full change history of a memory node
+/// Enables experience backtracking after decay
+pub fn node_history(&self, node_id: &str) -> Result<Vec<ChangeEvent>> {
+    // Grafeo CDC tracks every create / update / delete as a ChangeEvent
+    let history = self.db.history(EntityId::Node(node_id))?;
+    Ok(history)
+}
+
+/// Example: restore a node to a previous state after decay
+pub fn restore_node_at_epoch(&self, node_id: &str, epoch: u64) -> Result<NodeSnapshot> {
+    let mut session = self.db.session();
+    let snapshot = session.execute_at_epoch(
+        "MATCH (n) WHERE id(n) = $id RETURN n",
+        epoch,
+    )?;
+    // Parse snapshot and optionally write back as a new node
+    Ok(snapshot)
+}
+```
+
+**使用场景**：
+- 经验回溯：每次 Decay 修改节点属性后，可通过 `history()` 查看原始状态
+- 冲突调解：对比同一节点在不同时间点的版本，辅助 LLM 判断合并策略
+- 审计追踪：追踪记忆从 Episodic → Knowledge 的完整演化链路
+
+### topology_boost
+
+Grafeo `hybrid_search()` 支持 `topology_boost` 选项——搜索结果按图连通性重新排序。被更多边引用的节点在检索中获得更高权重，这是图数据库的独特优势。
+
+```rust
+/// Hybrid search with topology boost enabled
+/// Nodes with more incoming edges are ranked higher
+pub fn search_with_topology_boost(
+    &self,
+    query_text: &str,
+    query_embedding: &[f32],
+    k: usize,
+) -> Result<Vec<SearchResult>> {
+    let mut filters = SearchFilters::default();
+    filters.topology_boost = true; // Enable graph connectivity re-ranking
+
+    let results = self.db.hybrid_search(
+        "Knowledge",
+        "content",
+        "embedding",
+        query_text,
+        Some(query_embedding),
+        k,
+        Some(filters),
+    )?;
+    Ok(results)
+}
+```
+
+**原理**：
+- 向量/文本检索返回候选集后，Grafeo 执行器计算每个候选节点的图中心性（degree、PageRank 等）
+- 最终排序 = RRF 分数 × topology_boost 系数
+- 高连通性节点通常是"枢纽记忆"（核心事实、高频工具调用模式），应当优先召回
+
+### 社区检测
+
+Grafeo 内置 Louvain 社区检测算法，可自动发现记忆间的隐性群组。
+
+```rust
+/// Detect memory communities via Louvain algorithm
+/// Identifies "capability blocks", "preference clusters", "relationship networks"
+pub fn detect_memory_communities(&self) -> Result<Vec<Community>> {
+    let mut session = self.db.session();
+    let result = session.execute(
+        "CALL grafeo.louvain() \
+         YIELD community_id, node_id \
+         RETURN community_id, collect(node_id) AS members"
+    )?;
+
+    let mut communities = Vec::new();
+    for row in result.rows() {
+        communities.push(Community {
+            id: row.get("community_id"),
+            members: row.get("members"),
+        });
+    }
+    Ok(communities)
+}
+```
+
+**使用场景**：
+- 能力块识别：发现围绕特定技能的程序记忆群组，辅助 Skill 系统升级
+- 偏好簇：发现用户偏好的隐性关联（如"暗色模式 + 快捷键 + 夜间勿扰"）
+- 关系网络：识别 Autobiographical 节点之间的社交/身份关系网络
+- graph_expand 优化：社区内节点在关联扩散时优先扩展，社区间延迟扩展
+
+---
+
+## 索引说明
+
+| 索引类型 | 旧实现 | 新实现 |
+|----------|--------|--------|
+| 向量索引 | 自研 HNSW (`vector/hnsw.rs`) | Grafeo 原生 HNSW 向量索引，通过 `db.create_vector_index()` 创建 |
+| 全文索引 | rusqlite FTS5 (`fulltext/bm25.rs`) | Grafeo 原生 BM25 全文索引，通过 `db.create_text_index()` 创建 |
+| 混合检索 | 自研 RRF (`retrieval/rrf.rs`) | Grafeo 原生 `hybrid_search()`，内置 RRF 融合 + topology boost |
+| 图遍历索引 | SQL JOIN 模拟 | Grafeo 原生邻接索引，O(degree) 遍历，查询优化器支持谓词下推 |
+| 事务隔离 | rusqlite WAL | Grafeo MVCC 快照隔离，原生多版本并发控制 |
+| 崩溃恢复 | 自研 `recovery.rs` | Grafeo WAL 重放机制，内置崩溃恢复 |
+| 备份 | 自研 `backup.rs` | `grafeo-file` 单文件格式 + 文件级备份 |
+
+---
 
 ## 设计决策
 
 - **MemoryStore trait 抽象**：GrafeoStore 实现 `rollball-memory` crate 定义的 `MemoryStore` trait，Runtime 和 MemoryManager 只依赖 trait。未来可无缝替换为其他存储后端（Sled / LMDB / 远程服务 / 内存 mock）
-- 基于 `rusqlite`（与 ZeroClaw 一致），避免额外数据库依赖
-- HNSW 向量索引：初期用纯 Rust 实现或 `instant-distance` crate，不依赖外部服务
-- ONNX Runtime 是可选依赖（feature flag `local-embeddings`），不可用时退化为远程 API
-- Embedding 已有 `EmbeddingProvider` trait 抽象（local / remote）
-- 数据库文件路径：`<agent_workspace>/memory/private.grafeo`
-- 遗忘参数通过 `DecayConfig` 注入（不再硬编码），支持按 Agent 定制
-- 遗忘扫描在 Agent 空闲时后台运行，不阻塞正常检索
-- 关联扩散参数可配置（hops / per_hop / max_nodes），带默认值
-- 巩固管道的即时提取通过 Tool Call 机制（memory_store 工具）实现，离线巩固 Phase 3 使用专用 LLM 调用
-- Fact 节点写入时自动语义去重（按 subject+predicate 匹配）
-- Episode 写入时自动分类内容类型，工件性内容压缩为摘要 + artifact_refs
+- **存储后端**：`grafeo-engine`（v0.5.39，crates.io），纯 Rust 图数据库，支持 LPG + GQL + HNSW + BM25 + WAL + MVCC
+- **向量索引**：Grafeo 原生 HNSW，M/ef/beam_width 全可配置，距离函数支持余弦/欧几里得/点积/曼哈顿，SIMD 加速
+- **全文索引**：Grafeo 原生 BM25，内置 Unicode 分词器
+- **混合检索**：Grafeo 原生 `hybrid_search()`，内置 RRF 融合，支持 `topology_boost` 图连通性重排序
+- **图遍历**：原生 GQL 查询，有 CBO/DPccp 优化器支持，替代 SQL 模拟
+- **Embedding 职责分离**：Embedding 由 Runtime LLM Provider 生成，以 `Vec<f32>` 传入 GrafeoStore。GrafeoStore 仅负责存储和索引，不持有 `EmbeddingProvider`
+- **数据库文件路径**：`<agent_workspace>/memory/private.grafeo`（单文件 `.grafeo` 格式）
+- **遗忘参数**通过 `DecayConfig` 注入（不再硬编码），支持按 Agent 定制
+- **遗忘扫描**在 Agent 空闲时后台运行，不阻塞正常检索
+- **关联扩散**参数可配置（hops / per_hop / max_nodes），带默认值
+- **巩固管道**的即时提取通过 Tool Call 机制（memory_store 工具）实现，离线巩固 Phase 3 使用专用 LLM 调用
+- **Fact 节点**写入时自动语义去重（按 subject+predicate 匹配）
+- **Episode 写入**时自动分类内容类型，工件性内容压缩为摘要 + artifact_refs
+- **PageRank 重要性**：替代或补充手调 `importance_score`，自动评估节点图重要性
+- **CDC 历史**：利用 `db.history()` 追踪记忆变更，支持经验回溯和审计
+- **社区检测**：Louvain 算法自动发现记忆群组，增强 graph_expand 语义质量
+
+---
 
 ## 依赖
 
-- `rollball-memory` — MemoryStore trait + 共享类型定义
-- `rusqlite` — 存储引擎
-- `serde`, `serde_json` — 数据序列化
-- `tokio` — 异步封装
-- `ort` (feature-gated) — ONNX Runtime
+```toml
+[dependencies]
+rollball-memory = { workspace = true }    # MemoryStore trait + shared types
+grafeo-engine = { workspace = true }      # v0.5.39, features: lpg, gql, vector-index, text-index, hybrid-search, wal, grafeo-file, algos, cdc, parallel
+grafeo-common = { workspace = true }      # Shared types from Grafeo ecosystem
+serde = { workspace = true }              # Serialization
+serde_json = { workspace = true }         # JSON handling
+thiserror = { workspace = true }          # Error definitions
+tokio = { workspace = true }              # Async runtime
+async-trait = { workspace = true }        # Async trait support
+chrono = { workspace = true }             # DateTime handling
+```
+
+**Workspace 声明**（`core/Cargo.toml`）：
+
+```toml
+[workspace.dependencies]
+grafeo-engine = { version = "0.5.39", features = [
+    "lpg",
+    "gql",
+    "vector-index",
+    "text-index",
+    "hybrid-search",
+    "wal",
+    "grafeo-file",
+    "algos",
+    "cdc",
+    "parallel",
+] }
+grafeo-common = { version = "0.5.39" }
+```
+
+---
 
 ## Feature Flags
+
+`rollball-grafeo` 本身 feature flags 极简 —— 复杂能力由 `grafeo-engine` 的 feature flags 控制：
 
 ```toml
 [features]
 default = []
-local-embeddings = ["dep:ort"]     # 本地 embedding（增加 ~50MB 编译体积）
 ```
+
+**注**：如需禁用 Grafeo 图算法以减小编译体积，可在 workspace 中移除 `"algos"` feature；如需禁用 CDC，移除 `"cdc"` feature。
+
+---
 
 ## 未来扩展方向
 
 | 方向 | 说明 | Phase |
 |------|------|-------|
-| Sled 后端 | 替换 rusqlite，获得更好的并发性能和 MVCC 支持 | Phase 3+ |
-| InMemoryStore | 用于单元测试和集成测试的 mock 实现 | Phase 3 |
-| RemoteMemoryStore | 云端分布式存储，支持多设备实时共享 | Phase 5+ |
-| WAL 增量同步 | 基于 SQLite WAL 的跨设备增量同步协议 | Phase 5+ |
+| InMemoryStore | 基于 `GrafeoDB::new_in_memory()` 的 mock 实现，用于单元测试和集成测试 | Phase 3 |
+| RemoteMemoryStore | 基于 Grafeo Server 的云端分布式存储，支持多设备实时共享 | Phase 5+ |
+| 增量同步 | 基于 Grafeo CDC + WAL 的跨设备增量同步协议 | Phase 5+ |
+| Temporal 版本化 | 启用 `grafeo-engine` `"temporal"` feature，支持记忆时间版本化查询 | Phase 4+ |
+| 加密存储 | 启用 `grafeo-engine` `"encryption"` feature（AES-256-GCM），与 Vault 密钥管理集成 | Phase 4+ |
+| MCP 暴露 | 通过 `grafeo-mcp` 将记忆 API 暴露给外部 Agent | Phase 4+ |

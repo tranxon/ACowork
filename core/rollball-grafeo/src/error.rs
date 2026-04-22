@@ -8,7 +8,7 @@ pub enum GrafeoError {
     Io(#[from] std::io::Error),
 
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(#[from] grafeo_common::Error),
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),

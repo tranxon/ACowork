@@ -10,7 +10,9 @@ description = "Grafeo graph database engine (Phase 2 implementation)"
 [dependencies]
 rollball-core.workspace = true
 rollball-memory.workspace = true
-rusqlite.workspace = true
+grafeo-engine.workspace = true
+grafeo-common.workspace = true
+grafeo-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

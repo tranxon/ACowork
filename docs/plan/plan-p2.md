@@ -1,8 +1,10 @@
 # Rollball Phase 2 开发计划
 
-> 版本：v1.3 | 更新日期：2026-04-21
+> 版本：v1.4 | 更新日期：2026-04-22
 >
-> 本计划基于 `docs/09-roadmap-and-scenarios.md` v3.1 和 `docs/review/04-p2-s2-design-review.md` S2 设计评审。v1.3 更新：S2.6 简化 memory_store 接口（自然语言替代三元组）、S2.7 完善 Purge 三条路径、S2.8 自适应 graph_expand、S5.4 分层 Token 计数方案；新增 S2.10-S2.14 任务（冲突检测、隐私访问控制、质量评估、工程约束、备份迁移）。
+> 本计划基于 `docs/09-roadmap-and-scenarios.md` v3.1 和 `docs/review/04-p2-s2-design-review.md` S2 设计评审。
+> v1.4 更新：S2 阶段全面迁移至 grafeo-engine（v0.5.39）— 存储后端从 rusqlite 切换为 GrafeoDB，数据模型从 SQL 表结构改为 LPG 标签属性图，向量/全文/混合检索复用 Grafeo 原生 HNSW/BM25/RRF，关联扩散引入 GQL 图遍历 + PageRank + topology_boost + 社区检测。
+> v1.3 更新：S2.6 简化 memory_store 接口（自然语言替代三元组）、S2.7 完善 Purge 三条路径、S2.8 自适应 graph_expand、S5.4 分层 Token 计数方案；新增 S2.10-S2.14 任务（冲突检测、隐私访问控制、质量评估、工程约束、备份迁移）。
 
 ---
 
@@ -123,30 +125,32 @@
 
 **目标**：实现完整的 Grafeo 三层五类仿生记忆系统。
 
-#### S2.0 任务：MemoryStore Trait 重设计与标准化
+#### S2.0 任务：grafeo-engine 依赖集成与 MemoryStore Trait 适配
 
 | 任务 | 涉及 crate | 验收标准 |
 |------|-----------|---------|
-| S2.0.1 重构 MemoryStore trait — 经历层 API | rollball-core | 增加 store_episode, search_episodes, mark_consolidated 方法 |
-| S2.0.2 重构 MemoryStore trait — 沉淀层 API | rollball-core | 增加 store_knowledge, store_procedural, store_autobiographical 方法 |
-| S2.0.3 重构 MemoryStore trait — 遗忘/检索 API | rollball-core | 增加 hybrid_search, graph_expand, run_decay_scan, reactivate_node, purge_expired 方法 |
-| S2.0.4 可选子 trait 拆分 | rollball-core | EpisodicStore, SemanticStore, ForgettingStore 等模块化 trait |
-| S2.0.5 更新 GrafeoStore 框架 | rollball-grafeo | 实现新 trait 方法签名（stub 实现） |
-| S2.0.6 单元测试框架 | rollball-grafeo | mock 测试覆盖各 trait 方法 |
+| S2.0.1 替换 Cargo.toml 依赖（rusqlite → grafeo-engine） | rollball-grafeo | 删除 rusqlite，引入 grafeo-engine v0.5.39（crates.io） |
+| S2.0.2 配置 grafeo-engine features | core/Cargo.toml | 启用 lpg, gql, vector-index, text-index, hybrid-search, wal, grafeo-file, algos, cdc, parallel |
+| S2.0.3 验证编译通过 | rollball-grafeo | `cargo check` 无错误；Workspace 依赖声明正确 |
+| S2.0.4 MemoryStore trait 适配 grafeo-engine API | rollball-core, rollball-grafeo | trait 方法签名与 GrafeoDB API 对齐；GrafeoStore stub 实现编译通过 |
+| S2.0.5 可选子 trait 拆分 | rollball-core | EpisodicStore, SemanticStore, ForgettingStore 等模块化 trait |
 
 预期测试数：8
 依赖：S1 完成
+状态：**✅ 已完成**（Task #2 已完成依赖替换、features 配置与编译验证）
 
-#### S2.1 任务：Grafeo 数据模型实现
+#### S2.1 任务：Grafeo LPG 数据模型实现
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.1.1 Episode 结构体完整实现 | `types.rs` | 所有字段可序列化 |
-| S2.1.2 KnowledgeNode 结构体完整实现 | `types.rs` | Fact/Preference/Relation 子类型 |
-| S2.1.3 ProceduralNode 结构体完整实现 | `types.rs` | trigger_condition/action_pattern |
-| S2.1.4 AutobiographicalNode 结构体完整实现 | `types.rs` | Identity/Capability/Limitation/Preference/History/Relationship |
+| S2.1.1 Episode 结构体完整实现 | `types.rs` | 所有字段可序列化；映射为 `Episodic` Label 节点 |
+| S2.1.2 KnowledgeNode 结构体完整实现 | `types.rs` | Fact/Preference/Relation 子类型；映射为 `Knowledge` Label 节点 |
+| S2.1.3 ProceduralNode 结构体完整实现 | `types.rs` | trigger_condition/action_pattern；映射为 `Procedural` Label 节点 |
+| S2.1.4 AutobiographicalNode 结构体完整实现 | `types.rs` | Identity/Capability/Limitation/Preference/History/Relationship；映射为 `Autobiographical` Label 节点 |
 | S2.1.5 ArtifactRef 结构体实现 | `types.rs` | path/hash/description/line_range |
-| S2.1.6 数据库 Schema 完整迁移 | `schema.rs` | episodes/memory_nodes/memory_edges 三张表 |
+| S2.1.6 LPG Node Label 定义（7 类） | `graph.rs` | `Episodic`, `Knowledge`, `Procedural`, `Autobiographical`, `SystemConfig`, `ToolInvocation`, `Session` |
+| S2.1.7 LPG Edge Type 定义（5 种） | `graph.rs` | `HAS_MEMORY`, `REFERENCES`, `SELF_REFERENCES`, `PRODUCED`, `DERIVED_FROM` |
+| S2.1.8 索引初始化（HNSW 向量 + BM25 全文） | `grafeo.rs` | `create_vector_index` + `create_text_index` 调用，Agent 首次打开时自动创建 |
 
 #### S2.2 任务：经历层（Episodic）实现
 
@@ -171,20 +175,21 @@
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.4.1 EmbeddingProvider trait 实现 | `embedding/mod.rs` | 抽象接口定义 |
-| S2.4.2 ONNX Runtime 本地生成（all-MiniLM-L6-v2）| `embedding/local.rs` | CPU 10-50ms 生成 |
-| S2.4.3 HNSW 索引实现 | `vector/hnsw.rs` | 向量相似度检索 |
-| S2.4.4 Embedding 超时降级 | `embedding/local.rs` | 200ms 超时后台补生成 |
-| S2.4.5 向量 Embedding 持久化 | rollball-grafeo | episode 写入时将向量 blob 存入数据库；批量查询恢复 |
-| S2.4.6 HNSW 索引从磁盘加载 | rollball-grafeo | Agent 重启后恢复索引；5000 条 episode 索引加载 < 2s |
+| S2.4.1 grafeo-engine 向量索引初始化 | `grafeo.rs` | `db.create_vector_index("Episodic", "embedding", Some(384), Some("cosine"), None, None, None)` 等调用 |
+| S2.4.2 grafeo-engine 向量检索 API 适配 | `episodic/search.rs`, `semantic/knowledge.rs` | `db.vector_search(label, "embedding", &vec, k, Some(ef), filters)` 正确返回 |
+| S2.4.3 HNSW 参数配置 | `grafeo.rs` | M=16, ef_construction=100, ef_search=64，通过 GrafeoDB API 传入 |
+| S2.4.4 向量 Embedding 存储 | rollball-grafeo | episode / knowledge 节点写入时，将 Runtime 层传入的 `Vec<f32>` 存入 `embedding` 属性 |
+| S2.4.5 索引自动恢复 | rollball-grafeo | Agent 重启后 GrafeoDB 自动恢复 HNSW 索引；5000 条 episode 向量检索 P99 < 100ms |
+
+**架构说明**：Embedding 向量由 Runtime LLM Provider 生成（见 S5.3），以 `Vec<f32>` 形式传入 GrafeoStore。GrafeoStore 仅负责存储和索引，不持有 EmbeddingProvider。
 
 #### S2.5 任务：全文索引（BM25）集成
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.5.1 rusqlite FTS5 配置 | `fulltext/bm25.rs` | 倒排索引建立 |
-| S2.5.2 BM25 评分实现 | `fulltext/bm25.rs` | 关键词匹配排序 |
-| S2.5.3 混合检索（向量 + 全文）| `retrieval/hybrid_search.rs` | RRF 融合排序 |
+| S2.5.1 grafeo-engine BM25 全文索引初始化 | `grafeo.rs` | `db.create_text_index("Episodic", "content")`、`db.create_text_index("Knowledge", "content")` 等调用 |
+| S2.5.2 grafeo-engine 文本检索 API 适配 | `retrieval.rs` | `db.text_search(label, "content", query, k, filters)` 正确返回，内置 Unicode 分词器 |
+| S2.5.3 混合检索（向量 + 全文）| `retrieval.rs` | `db.hybrid_search(label, "content", "embedding", query, Some(&vec), k, filters)` — Grafeo 原生 RRF 融合，可选 topology_boost |
 
 #### S2.6 任务：巩固管道（Consolidation Pipeline）
 
@@ -231,18 +236,22 @@
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.8.1 Graph Expand 实现（自适应深度）| `retrieval/graph_expand.rs` | max_hops 提高到 3，早期终止机制 |
-| S2.8.2 跨层关联（episode ↔ memory_nodes）| `retrieval/graph_expand.rs` | source_episode 反向查询 |
-| S2.8.3 扩展节点评分（PageRank 式加权）| `retrieval/graph_expand.rs` | 多路径节点获得额外权重加成 |
-| S2.8.4 扩展限制（3跳/早期终止/总数20）| `retrieval/graph_expand.rs` | 性能保障 |
+| S2.8.1 GQL 图遍历实现（自适应深度）| `retrieval/graph_expand.rs` | `MATCH (m)-[r*1..3]-(other)` 原生 LPG 遍历，max_hops=3，Grafeo 执行器自动优化 |
+| S2.8.2 跨层关联（episode ↔ knowledge）| `retrieval/graph_expand.rs` | `DERIVED_FROM` 边反向查询：`MATCH (k:Knowledge)-[:DERIVED_FROM]->(e:Episodic)` |
+| S2.8.3 PageRank 集成 | `retrieval/graph_expand.rs` | `CALL grafeo.pagerank({damping: 0.85, max_iterations: 20})` 获取节点重要性评分，高 PageRank 节点在扩散中优先召回 |
+| S2.8.4 topology_boost 图连通性排序 | `retrieval.rs` | `hybrid_search` 启用 `topology_boost` 选项，高连通性节点（被更多边引用）在检索结果中排名提升 |
+| S2.8.5 社区检测集成 | `semantic/graph.rs` | `CALL grafeo.louvain()` 发现记忆社区，辅助 graph_expand 优先扩展同一社区内节点 |
+| S2.8.6 扩展限制（3跳/早期终止/总数20）| `retrieval/graph_expand.rs` | 性能保障：本轮扩展最高分 < 阈值、累积结果已满足 token 预算、达到总节点上限（20）|
 
 **Graph Expand 更新设计**：
 - max_hops 从 2 提高到 3，但通过早期终止大多数查询在 1-2 跳停止
 - early_stop_threshold 随跳数递增（1跳: 0.1, 2跳: 0.15, 3跳: 0.2）
-- 扩散节点加入 PageRank 式加权：被多条路径经过的节点获得额外权重加成
+- **PageRank 权重**：调用 `grafeo.pagerank()` 获取节点全局重要性，扩散时高 PageRank 节点优先扩展
+- **topology_boost**：`hybrid_search` 结果按图连通性重排序，枢纽记忆（核心事实、高频工具模式）优先召回
+- **社区检测**：`grafeo.louvain()` 识别记忆社区，扩散时社区内优先、社区间延迟
 - 早期终止条件：本轮扩展最高分 < 阈值、累积结果已满足 token 预算、达到总节点上限（20）
 
-详见 docs/review/04-p2-s2-design-review.md §6.2
+详见 docs/review/04-p2-s2-design-review.md §6.2、docs/module-design/04-grafeo.md §图算法增强
 
 #### S2.9 任务：MemoryManager 集成
 
@@ -317,23 +326,25 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.13.1 存储容量规划 | `grafeo/config.rs` | 100K episode ≈ 2GB，含压缩和归档策略 |
-| S2.13.2 并发控制 | `grafeo/lock.rs` | RwLock 多读并行，写操作串行 |
-| S2.13.3 Embedding 降级链路 | `embedding/fallback.rs` | Local → Remote → Disabled 三级 |
-| S2.13.4 Grafeo 故障处理 | `grafeo/recovery.rs` | 健康检查+增量备份+自动恢复 |
-| S2.13.5 HNSW 参数定义 | `vector/hnsw.rs` | M=16, ef_construction=100, ef_search=64 |
+| S2.13.1 存储容量规划 | `grafeo.rs` | 100K episode ≈ 2GB（`.grafeo` 单文件），含压缩和归档策略 |
+| S2.13.2 并发控制 | rollball-grafeo | 利用 GrafeoDB MVCC 快照隔离，多 Session 并发读写；无需自研锁 |
+| S2.13.3 Embedding 降级链路 | rollball-runtime | Local → Remote → Disabled 三级（Runtime LLM Provider 职责，见 S5.3）|
+| S2.13.4 Grafeo 故障处理 | rollball-grafeo | 健康检查（`MATCH (n) RETURN count(n)`）+ `grafeo-file` 单文件备份 + Grafeo WAL 自动恢复 |
+| S2.13.5 HNSW 参数配置 | `grafeo.rs` | M=16, ef_construction=100, ef_search=64，通过 `create_vector_index` 参数传入 |
+| S2.13.6 MMR 多样性搜索适配 | `retrieval.rs` | `db.mmr_search(label, "embedding", &vec, k, fetch_k, lambda, ef, filters)` 集成，保证检索结果多样性 |
+| S2.13.7 CDC / History API 适配 | `forgetting/scan.rs`, `semantic/conflict.rs` | `db.history(node_id)` 追溯节点变更，辅助经验回溯与冲突调解 |
 
-详见 docs/review/04-p2-s2-design-review.md §6.12、§6.14
+详见 docs/review/04-p2-s2-design-review.md §6.12、§6.14、docs/module-design/04-grafeo.md §CDC / History
 
 #### S2.14 任务：备份与迁移
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.14.1 自动备份 | `grafeo/backup.rs` | 每天增量备份，保留 7 天日备份 + 4 周周备份 |
-| S2.14.2 Schema 版本迁移 | `grafeo/migration.rs` | 逐版本递进迁移，迁移前自动全量备份 |
-| S2.14.3 故障恢复 | `grafeo/recovery.rs` | 从最近备份自动恢复 |
+| S2.14.1 自动备份 | rollball-grafeo | 每天增量备份（`.grafeo` 单文件级），保留 7 天日备份 + 4 周周备份 |
+| S2.14.2 数据迁移 | rollball-grafeo | LPG 无 Schema 版本迁移概念；索引通过 API 动态创建；数据迁移通过 GQL 导出/导入实现 |
+| S2.14.3 故障恢复 | rollball-grafeo | Grafeo WAL 重放自动恢复；必要时从 `.grafeo` 备份文件还原 |
 
-详见 docs/review/04-p2-s2-design-review.md §6.16
+详见 docs/review/04-p2-s2-design-review.md §6.16、docs/module-design/04-grafeo.md §索引说明
 
 ---
 
@@ -520,20 +531,20 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 | S1.5 | 流式处理集成到主循环 | rollball-runtime | S1 | S1.1 | 8 | ⬚ |
 | S1.6 | AgentLoop InboundQueue | rollball-runtime | S1 | S1.1 | 6 | ⬚ |
 | S1.7 | 工具调度改并行执行 | rollball-runtime | S1 | S1.1 | 5 | ⬚ |
-| S2.0 | MemoryStore Trait 重设计与标准化 | rollball-core | S2 | S1 | 8 | ⬚ |
-| S2.1 | Grafeo 数据模型实现 | rollball-grafeo | S2 | S2.0 | 15 | ⬚ |
+| S2.0 | grafeo-engine 依赖集成与 MemoryStore Trait 适配 | rollball-core, rollball-grafeo | S2 | S1 | 8 | ✅ |
+| S2.1 | Grafeo LPG 数据模型实现 | rollball-grafeo | S2 | S2.0 | 16 | ⬚ |
 | S2.2 | 经历层（Episodic）实现 | rollball-grafeo | S2 | S2.1 | 12 | ⬚ |
 | S2.3 | 沉淀层（Semantic）实现 | rollball-grafeo | S2 | S2.1 | 15 | ⬚ |
-| S2.4 | 向量索引（HNSW）集成 | rollball-grafeo | S2 | S2.1 | 12 | ⬚ |
-| S2.5 | 全文索引（BM25）集成 | rollball-grafeo | S2 | S2.1 | 8 | ⬚ |
+| S2.4 | 向量索引（grafeo-engine HNSW）集成 | rollball-grafeo | S2 | S2.1 | 6 | ⬚ |
+| S2.5 | 全文索引（grafeo-engine BM25）集成 | rollball-grafeo | S2 | S2.1 | 4 | ⬚ |
 | S2.6 | 巩固管道（Consolidation）| rollball-grafeo | S2 | S2.2,S2.3 | 10 | ⬚ |
 | S2.7 | 遗忘衰减机制（Decay）| rollball-grafeo | S2 | S2.3 | 8 | ⬚ |
-| S2.8 | 关联扩散检索（Graph Expand）| rollball-grafeo | S2 | S2.3,S2.4,S2.5 | 10 | ⬚ |
+| S2.8 | 关联扩散检索（GQL + PageRank + topology_boost）| rollball-grafeo | S2 | S2.3,S2.4,S2.5 | 12 | ⬚ |
 | S2.9 | MemoryManager 集成 | rollball-runtime | S2 | S2.0~S2.8 | 12 | ⬚ |
 | S2.10 | 冲突检测与处理 | rollball-grafeo | S2 | S2.6 | 8 | ⬚ |
 | S2.11 | 隐私访问控制 | rollball-gateway | S2 | S2.10 | 6 | ⬚ |
 | S2.12 | 质量评估框架 | rollball-grafeo | S2 | S2.0~S2.11 | 5 | ⬚ |
-| S2.13 | 工程约束与降级策略 | rollball-grafeo | S2 | S2.4 | 8 | ⬚ |
+| S2.13 | 工程约束与降级策略 | rollball-grafeo | S2 | S2.4 | 10 | ⬚ |
 | S2.14 | 备份与迁移 | rollball-grafeo | S2 | S2.0 | 4 | ⬚ |
 | S3.1 | System Agent 包和清单 | examples/system-agent | S3 | - | 3 | ⬚ |
 | S3.2 | 身份信息系统 | rollball-core | S3 | - | 6 | ⬚ |
@@ -551,7 +562,7 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 | S5.5 | 端到端集成测试 | tests/ | S5 | S1~S4 | 10 | ⬚ |
 | S5.6 | 多 Agent 协作示例 | examples/ | S5 | S3,S4 | 4 | ⬚ |
 
-**总计：38 个任务，预期 330+ 测试**
+**总计：38 个任务，预期 325+ 测试**
 
 ---
 
@@ -569,20 +580,22 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 
 ## 5. 技术选型
 
-### 5.1 向量索引：HNSW 库评估
+### 5.1 向量索引：grafeo-engine 原生 HNSW
 
 | 方案 | 优点 | 缺点 | 选择 |
 |------|------|------|------|
-| instant-distance | 纯 Rust，无依赖 | 功能较简单 | ✅ 选用 |
-| hnsw-rs | 功能完整 | 依赖较多 | 备选 |
-| 自定义实现 | 可控性强 | 开发成本高 | Phase 3 考虑 |
+| grafeo-engine 原生 HNSW | 内置 SIMD 加速，支持余弦/欧几里得/点积/曼哈顿距离 | 无 | ✅ 选用 |
+| instant-distance | 纯 Rust，无依赖 | 功能较简单 | 已弃用（迁移至 grafeo-engine）|
+| hnsw-rs | 功能完整 | 依赖较多 | 已弃用（迁移至 grafeo-engine）|
+| 自定义实现 | 可控性强 | 开发成本高 | 已弃用（迁移至 grafeo-engine）|
 
-### 5.2 全文索引：tantivy 评估
+### 5.2 全文索引：grafeo-engine 原生 BM25
 
 | 方案 | 优点 | 缺点 | 选择 |
 |------|------|------|------|
-| rusqlite FTS5 | 无额外依赖，与 Grafeo 一致 | 功能较基础 | ✅ 选用 |
-| tantivy | 功能强大，BM25 标准 | 增加 ~10MB 体积 | Phase 3 考虑 |
+| grafeo-engine 原生 BM25 | 内置 Unicode 分词器，与 LPG 深度集成 | 无 | ✅ 选用 |
+| rusqlite FTS5 | 无额外依赖 | 功能较基础，非图原生 | 已弃用（迁移至 grafeo-engine）|
+| tantivy | 功能强大，BM25 标准 | 增加 ~10MB 体积 | 已弃用（迁移至 grafeo-engine）|
 
 ### 5.3 Embedding：ONNX Runtime + 模型选择
 
@@ -625,7 +638,7 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 | 风险 | 严重度 | 影响 | 缓解策略 |
 |------|--------|------|----------|
 | **ONNX Runtime 编译问题** | 中 | S2.4, S5.3 延迟 | 准备远程 Embedding API 备用方案；feature-gate 本地嵌入 |
-| **HNSW 性能不达标** | 中 | 检索延迟高 | 预留 tantivy 全文索引作为主要检索方式；向量检索降级 |
+| **grafeo-engine 编译体积** | 中 | 依赖体积增大 | feature-gate 控制；按需启用 algos/cdc/parallel；禁用不需要的 feature |
 | **System Agent LLM 判断准确性** | 中 | 身份更新误判 | 设计保守策略（低 confidence 不更新）；用户可手动修正 |
 | **多 Agent 并发资源竞争** | 中 | Gateway 性能下降 | 限制并发连接数；Rate Limiter 公平调度 |
 | **Intent 路由超时处理** | 低 | 用户体验差 | 合理设置超时（默认 30s）；异步 Intent 支持 |
