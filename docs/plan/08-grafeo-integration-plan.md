@@ -10,7 +10,7 @@
 
 06-grafeo-design-review.md 审查发现：rollball-grafeo 依赖 `rusqlite` 而非 Grafeo 数据库本体，`grafeo.rs` 全部为 `unimplemented!()`。用户已确认：**弃用 rusqlite，引入 grafeo-engine**。
 
-方向决策明确后，本文档给出具体的集成路径。
+grafeo 源码已在 `agent-study/grafeo/` 本地，通过 path 依赖引入即可，无外部阻塞。
 
 ---
 
@@ -50,8 +50,11 @@
 **Rollball 推荐 feature 配置**（`rollball-grafeo/Cargo.toml`）：
 
 ```toml
+# grafeo 作为本地 path dependency
+# grafeo/ 位于 agent-study/ 根目录，rollball-grafeo 位于 crates/rollball-grafeo/
+# 相对路径：../../../grafeo/crates/grafeo-engine
 [dependencies]
-grafeo-engine = { git = "https://github.com/zeroclaw/grafeo", tag = "v0.5.40", features = [
+grafeo-engine = { path = "../../../grafeo/crates/grafeo-engine", features = [
     "lpg",
     "gql",
     "vector-index",
@@ -206,8 +209,8 @@ Phase 3: 高级特性集成（持续）
 # 删除
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# 新增
-grafeo-engine = { git = "...", tag = "v0.5.40", features = ["lpg", "gql", "vector-index", "text-index", "hybrid-search", "wal", "grafeo-file", "algos", "cdc", "parallel"] }
+# 新增（path 引用本地 grafeo 仓库）
+grafeo-engine = { path = "../../../grafeo/crates/grafeo-engine", features = ["lpg", "gql", "vector-index", "text-index", "hybrid-search", "wal", "grafeo-file", "algos", "cdc", "parallel"] }
 ```
 
 **修改文件**：`crates/rollball-grafeo/src/lib.rs`
@@ -379,7 +382,7 @@ MemoryManager（Rollball 业务逻辑）
 
 | 优先级 | 行动 | 负责 | 预计工时 |
 |---|---|---|---|
-| P0 | 确认 grafeo-engine 的 git 源（ZeroClaw 仓库地址） | 用户 | — |
+| ~~P0~~ | ~~确认 grafeo-engine 的 git 源~~ → 已解决：本地 path 引用 | — | — |
 | P0 | 替换 rollball-grafeo/Cargo.toml 的 rusqlite → grafeo-engine | 实现 | 1h |
 | P0 | 重写 `GrafeoStore` 核心 API（CRUD + 索引） | 实现 | 2d |
 | P1 | 删除自研 HNSW / BM25 / RRF 模块 | 实现 | 1d |
