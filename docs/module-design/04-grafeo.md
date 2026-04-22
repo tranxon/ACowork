@@ -4,6 +4,15 @@
 
 **v3.4 变更**：从"直接被 Runtime 调用的存储模块"重构为"实现 MemoryStore trait 的可替换后端"。Runtime 和 MemoryManager 只依赖 trait，不依赖 Grafeo 的具体实现。
 
+**v3.5 变更**：
+- graph_expand_hops 默认值从 2 改为 3，支持早期终止机制
+- 新增 semantic/conflict.rs（冲突候选检测）
+- 新增 consolidation/conflict.rs（冲突分类）
+- 新增 forgetting/purge_log.rs（Purge 恢复机制）
+- 新增 backup.rs / recovery.rs（备份与恢复）
+- 新增 embedding/fallback.rs（降级链路）
+- 新增 vector/hnsw.rs（HNSW 参数定义：M=16, ef_construction=100, ef_search=64）
+
 ## Crate 结构
 
 ```
@@ -13,44 +22,50 @@ crates/rollball-grafeo/
     ├── lib.rs                     # 导出 GrafeoStore + 公共类型
     ├── store.rs                   # GrafeoStore 结构（实现 MemoryStore trait）
     ├── schema.rs                  # 数据库表结构定义 + 迁移
-    ├── types.rs                   # Episode / KnowledgeNode / ProceduralNode / AutobiographicalNode
-    │                              # 等数据类型（定义在此，供 MemoryStore trait 引用）
+    ├── types.rs                   # Episode / KnowledgeNode / ProceduralNode / AutobiographicalNode / PendingKnowledgeNode
+    │                              # 等数据类型
     ├── episodic/
-    │   ├── mod.rs                 # 经历层：情景记忆
-    │   ├── store.rs               # 写入交互记录（content_type 分类 + 工件压缩）
+    │   ├── mod.rs                 # 经历层
+    │   ├── store.rs               # 写入交互记录
     │   ├── search.rs              # 语义相似性检索（HNSW）
     │   └── consolidate.rs         # 巩固标记与清理
     ├── semantic/
-    │   ├── mod.rs                 # 沉淀层：长期记忆
-    │   ├── knowledge.rs           # KnowledgeNode（事实/偏好/关系）+ Fact 语义去重
-    │   ├── procedural.rs          # ProceduralNode（行为模式/操作规则）
-    │   ├── autobiographical.rs    # AutobiographicalNode（自我认知，强制 Active）
-    │   ├── graph.rs               # LPG 图操作（节点/边/属性）
+    │   ├── mod.rs                 # 沉淀层
+    │   ├── knowledge.rs           # KnowledgeNode（事实/偏好/关系）
+    │   ├── procedural.rs          # ProceduralNode
+    │   ├── autobiographical.rs   # AutobiographicalNode（强制 Active）
+    │   ├── graph.rs               # LPG 图操作
+    │   ├── conflict.rs             # 冲突候选检测（Phase 2 新增）
     │   ├── inference.rs           # 知识推理与合并
-    │   └── skill.rs               # Skill 经验节点（Draft/Iteration/Execution/Experience）
+    │   └── skill.rs               # Skill 经验节点
     ├── consolidation/
     │   ├── mod.rs                 # 巩固管道
-    │   ├── instant.rs             # 即时提取执行层（处理 memory_store 工具调用）
-    │   └── offline.rs             # 离线巩固（Phase 3）
+    │   ├── instant.rs             # 即时提取执行层（PendingKnowledgeNode）
+    │   ├── offline.rs             # 离线巩固（Phase 3）
+    │   └── conflict.rs             # 冲突分类（Phase 3 新增）
     ├── forgetting/
     │   ├── mod.rs                 # 遗忘机制
-    │   ├── decay.rs               # 乘法衰减计算（DecayConfig 参数化）
-    │   └── scan.rs                # 后台衰减扫描与状态转换
+    │   ├── decay.rs               # 乘法衰减计算
+    │   ├── scan.rs                # 后台衰减扫描
+    │   └── purge_log.rs           # Purge 恢复机制（Phase 2 新增）
     ├── retrieval/
     │   ├── mod.rs                 # 检索入口
     │   ├── hybrid_search.rs       # 混合搜索（向量 + 全文 + RRF）
-    │   ├── graph_expand.rs        # 关联扩散（LPG 图上 1-2 跳扩展）
-    │   └── rrf.rs                 # Reciprocal Rank Fusion 排序
+    │   ├── graph_expand.rs       # 关联扩散（1-3 跳，早期终止）
+    │   └── rrf.rs                 # Reciprocal Rank Fusion
     ├── fulltext/
     │   ├── mod.rs                 # 全文检索
-    │   └── bm25.rs                # BM25 倒排索引（rusqlite FTS5）
+    │   └── bm25.rs                # BM25 倒排索引
     ├── embedding/
     │   ├── mod.rs                 # Embedding 生成 trait + 实现
-    │   ├── local.rs               # ONNX Runtime 本地生成（all-MiniLM-L6-v2）
-    │   └── remote.rs              # 远程 embedding API（可选）
+    │   ├── local.rs               # ONNX Runtime 本地生成
+    │   ├── remote.rs             # 远程 embedding API
+    │   └── fallback.rs             # 降级链路（Phase 2 新增）
     ├── vector/
     │   ├── mod.rs                 # 向量索引 trait + 实现
-    │   └── hnsw.rs                # HNSW 索引实现（rusqlite + 自定义）
+    │   └── hnsw.rs               # HNSW（M=16, ef_construction=100, ef_search=64）
+    ├── backup.rs                   # 自动备份（Phase 2 新增）
+    ├── recovery.rs                 # 故障恢复（Phase 2 新增）
     ├── migration.rs               # 数据库版本迁移框架
     └── error.rs                   # 错误类型
 ```
@@ -73,11 +88,14 @@ pub struct GrafeoStore {
 
 pub struct GrafeoConfig {
     pub db_path: PathBuf,
-    pub decay: DecayConfig,          // 遗忘参数（可从 manifest 注入）
-    pub episode_retention_days: u32, // 情景记忆默认保留期（默认 14 天）
-    pub graph_expand_hops: u8,       // 关联扩散最大跳数（默认 2）
-    pub graph_expand_per_hop: usize, // 每跳最大扩展边数（默认 5）
-    pub graph_expand_max_nodes: usize,// 扩展节点总数上限（默认 20）
+    pub decay: DecayConfig,              // 遗忘参数（可从 manifest 注入）
+    pub episode_retention_days: u32,     // 情景记忆默认保留期（默认 14 天）
+    pub graph_expand_hops: u8,          // 关联扩散最大跳数（默认 3，通过早期终止实际大多在 1-2 跳停止）
+    pub graph_expand_per_hop: usize,    // 每跳最大扩展边数（默认 5）
+    pub graph_expand_max_nodes: usize,  // 扩展节点总数上限（默认 20）
+    pub early_stop_thresholds: Vec<f32>, // 早期终止阈值（默认 [0.1, 0.15, 0.2]）
+    pub max_storage_mb: u64,            // 最大存储容量（默认 5000MB）
+    pub backup_enabled: bool,           // 自动备份开关（默认 true）
 }
 
 impl GrafeoStore {
@@ -123,7 +141,8 @@ impl MemoryStore for GrafeoStore {
     // ── 沉淀层 ──
 
     fn store_knowledge(&self, node: &KnowledgeNode) -> Result<()> {
-        // Fact 自动语义去重（subject+predicate 匹配）
+        // 写入 PendingKnowledgeNode（Phase 2）或正式 KnowledgeNode（Phase 3）
+        // 即时阶段不做三元组提取和语义去重，移至离线巩固
         semantic::knowledge::store(&self.db, node)
     }
 

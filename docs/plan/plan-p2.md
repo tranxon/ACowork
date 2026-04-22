@@ -1,8 +1,8 @@
 # Rollball Phase 2 开发计划
 
-> 版本：v1.2 | 更新日期：2026-04-21
+> 版本：v1.3 | 更新日期：2026-04-21
 >
-> 本计划基于 `docs/09-roadmap-and-scenarios.md` v3.1 和 `docs/review/01-code-review.md` 遗留问题，涵盖 Phase 2 所有任务的分解、排期和进度追踪。v1.1 新增 S1.6 InboundQueue 和 S1.7 工具并行执行两个任务。v1.2 新增超时/取消语义设计文档（03-agent-runtime.md §3.5）和对应的 S1.7.5、S1.6.5 验收标准（qoder review 建议）。
+> 本计划基于 `docs/09-roadmap-and-scenarios.md` v3.1 和 `docs/review/04-p2-s2-design-review.md` S2 设计评审。v1.3 更新：S2.6 简化 memory_store 接口（自然语言替代三元组）、S2.7 完善 Purge 三条路径、S2.8 自适应 graph_expand、S5.4 分层 Token 计数方案；新增 S2.10-S2.14 任务（冲突检测、隐私访问控制、质量评估、工程约束、备份迁移）。
 
 ---
 
@@ -190,10 +190,17 @@
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.6.1 即时提取执行层 | `consolidation/instant.rs` | memory_store 工具调用处理 |
-| S2.6.2 Fact 语义去重逻辑 | `consolidation/instant.rs` | subject+predicate 匹配更新 |
-| S2.6.3 标记 episode consolidated | `consolidation/instant.rs` | source_episode 关联 |
-| S2.6.4 离线巩固占位（Phase 3）| `consolidation/offline.rs` | 结构预留 |
+| S2.6.1 即时提取执行层（简化接口）| `consolidation/instant.rs` | memory_store 工具接受自然语言 + 类型标签，不做三元组提取 |
+| S2.6.2 PendingKnowledgeNode 写入 | `consolidation/instant.rs` | 即时写入带 embedding 的 Pending 节点，支持向量和 BM25 检索 |
+| S2.6.3 冲突候选标记 | `consolidation/instant.rs` | 新节点 embedding 相似度 > 0.85 时标记候选冲突 |
+| S2.6.4 离线巩固占位（Phase 3）| `consolidation/offline.rs` | 三元组提取、冲突分类、证据验证 |
+
+**memory_store 新接口设计**：
+- 旧设计：三元组 `{subject, predicate, object}`，LLM 负担重且不可靠
+- 新设计：自然语言 `{content, category, confidence, keywords?}`
+  - LLM 不需要做三元组拆分，只需用自然语言描述要记住什么
+  - keywords 可复用同轮 memory_hint.e 的值，Runtime 自动合并
+- 详见 docs/review/04-p2-s2-design-review.md §6.9
 
 #### S2.7 任务：遗忘衰减机制（Decay）
 
@@ -202,23 +209,40 @@
 | S2.7.1 乘法衰减公式实现 | `forgetting/decay.rs` | decay_score = importance × activity_signal |
 | S2.7.2 后台衰减扫描 | `forgetting/scan.rs` | 每小时扫描（可配置）|
 | S2.7.3 Active → Dormant 状态转换 | `forgetting/scan.rs` | 参数化实现，从 DecayConfig 读取（默认 0.3） |
-| S2.7.4 Dormant → Purge 清理 | `forgetting/scan.rs` | 按 DecayConfig.purge_days 清理（默认 90 天） |
+| S2.7.4 Dormant → Purge 清理（三条路径）| `forgetting/scan.rs` | 路径1: Dormant>90天且importance<0.5；路径2: 容量压力按decay_score清理；路径3: 用户手动 |
 | S2.7.5 节点恢复激活 | `forgetting/scan.rs` | reactivate_node 接口 |
+| S2.7.6 purge_log 恢复机制 | `forgetting/purge_log.rs` | 30天内可一键恢复，含完整快照和边信息 |
 
-**DecayConfig 参数**：
+**DecayConfig 参数（更新）**：
 - dormant_threshold: f32（默认 0.3）— decay_score 低于此值进入 Dormant
+- purge_importance_threshold: f32（默认 0.5）— Dormant→Purge 路径1的 importance 下限
 - purge_days: u32（默认 90）— Dormant 节点保留天数
 - decay_lambda: f32（默认 0.03）— 衰减速率
-- 参数可通过 manifest.toml [memory] 表配置，支持按 Agent 定制
+- 参数可通过 manifest.toml [memory.decay] 表配置
+
+**Purge 三条路径**：
+1. 正常衰减：Dormant > 90天 AND importance < 0.5（Fact/Relation 永不 Purge）
+2. 容量压力：存储 > 90% 时按 decay_score 升序清理 Preference/Procedural Dormant 节点
+3. 用户手动：Desktop App Memory 管理面板触发
+
+详见 docs/review/04-p2-s2-design-review.md §6.15
 
 #### S2.8 任务：关联扩散检索（Associative Spreading）
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S2.8.1 Graph Expand 实现 | `retrieval/graph_expand.rs` | 1-2 跳扩展 |
+| S2.8.1 Graph Expand 实现（自适应深度）| `retrieval/graph_expand.rs` | max_hops 提高到 3，早期终止机制 |
 | S2.8.2 跨层关联（episode ↔ memory_nodes）| `retrieval/graph_expand.rs` | source_episode 反向查询 |
-| S2.8.3 扩展节点评分 | `retrieval/graph_expand.rs` | 路径权重 × 源节点分数 |
-| S2.8.4 扩展限制（2跳/每跳5边/总数20）| `retrieval/graph_expand.rs` | 性能保障 |
+| S2.8.3 扩展节点评分（PageRank 式加权）| `retrieval/graph_expand.rs` | 多路径节点获得额外权重加成 |
+| S2.8.4 扩展限制（3跳/早期终止/总数20）| `retrieval/graph_expand.rs` | 性能保障 |
+
+**Graph Expand 更新设计**：
+- max_hops 从 2 提高到 3，但通过早期终止大多数查询在 1-2 跳停止
+- early_stop_threshold 随跳数递增（1跳: 0.1, 2跳: 0.15, 3跳: 0.2）
+- 扩散节点加入 PageRank 式加权：被多条路径经过的节点获得额外权重加成
+- 早期终止条件：本轮扩展最高分 < 阈值、累积结果已满足 token 预算、达到总节点上限（20）
+
+详见 docs/review/04-p2-s2-design-review.md §6.2
 
 #### S2.9 任务：MemoryManager 集成
 
@@ -237,6 +261,74 @@
 
 MemoryManager 包含业务逻辑（Token 裁剪策略、优先级排序等），归属 rollball-runtime。
 rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
+
+#### S2.10 任务：冲突检测与处理
+
+| 任务 | 文件 | 验收标准 |
+|------|------|---------|
+| S2.10.1 ConflictDetector 模块 | `consolidation/conflict.rs` | embedding 相似度 > 0.85 触发候选冲突标记 |
+| S2.10.2 冲突分类（离线 LLM）| `consolidation/offline.rs` | evolution/correction/ambiguous 三类 |
+| S2.10.3 自动解决策略 | `consolidation/offline.rs` | evolution→新值Active旧值Dormant；correction→替换；ambiguous→标记待确认 |
+| S2.10.4 冲突报告生成 | `consolidation/offline.rs` | ambiguous 累计 3+ 时触发用户确认 |
+
+**冲突分类设计**：
+- Evolution：新值替换旧值，记录 conflict_log（上下文中有"我搬家了"）
+- Correction：用户主动纠正，降低旧来源可信度（上下文中有"不是3月，是5月"）
+- Ambiguous：无法确定，两个都 Active，标记 conflict_group_id
+
+详见 docs/review/04-p2-s2-design-review.md §6.9
+
+#### S2.11 任务：隐私访问控制
+
+| 任务 | 文件 | 验收标准 |
+|------|------|---------|
+| S2.11.1 Intent 响应过滤 | `gateway/intent.rs` | Gateway 层自动剥离 Sensitive 节点 |
+| S2.11.2 隔离验证测试 | `tests/` | 存储隔离/进程隔离/Intent 隔离 |
+| S2.11.3 跨 Agent 隔离验证 | `tests/` | Agent A 无法访问 Agent B 的 Grafeo |
+
+**隐私设计结论**：
+- RollBall 隔离是架构级硬隔离（独立进程 + 独立 Grafeo）
+- Runtime 内部不需要访问控制，Agent 查自己的记忆不需要权限检查
+- PrivacyLevel 在打包分享和 Intent 响应过滤时起作用
+
+详见 docs/review/04-p2-s2-design-review.md §6.13
+
+#### S2.12 任务：质量评估框架
+
+| 任务 | 文件 | 验收标准 |
+|------|------|---------|
+| S2.12.1 可观测指标 | `memory/stats.rs` | 节点分布/检索统计/冲突统计/衰减统计 |
+| S2.12.2 SLA 定义 | `memory/stats.rs` | hybrid_search P99 < 100ms (1K nodes)，P99 < 500ms (10K nodes) |
+| S2.12.3 LongMemEval 集成测试 | `tests/` | 5 维评估（IE/MR/TR/KU/Abs）|
+
+**质量评估设计**：
+- Phase 2 建立可观测基础设施，Phase 3 对接开源 Benchmark
+- 采纳 LongMemEval 5 维作为 RollBall 记忆系统的评估标准
+- 衰减参数通过 manifest 可配置，Phase 3 用真实数据校准
+
+详见 docs/review/04-p2-s2-design-review.md §6.11
+
+#### S2.13 任务：工程约束与降级策略
+
+| 任务 | 文件 | 验收标准 |
+|------|------|---------|
+| S2.13.1 存储容量规划 | `grafeo/config.rs` | 100K episode ≈ 2GB，含压缩和归档策略 |
+| S2.13.2 并发控制 | `grafeo/lock.rs` | RwLock 多读并行，写操作串行 |
+| S2.13.3 Embedding 降级链路 | `embedding/fallback.rs` | Local → Remote → Disabled 三级 |
+| S2.13.4 Grafeo 故障处理 | `grafeo/recovery.rs` | 健康检查+增量备份+自动恢复 |
+| S2.13.5 HNSW 参数定义 | `vector/hnsw.rs` | M=16, ef_construction=100, ef_search=64 |
+
+详见 docs/review/04-p2-s2-design-review.md §6.12、§6.14
+
+#### S2.14 任务：备份与迁移
+
+| 任务 | 文件 | 验收标准 |
+|------|------|---------|
+| S2.14.1 自动备份 | `grafeo/backup.rs` | 每天增量备份，保留 7 天日备份 + 4 周周备份 |
+| S2.14.2 Schema 版本迁移 | `grafeo/migration.rs` | 逐版本递进迁移，迁移前自动全量备份 |
+| S2.14.3 故障恢复 | `grafeo/recovery.rs` | 从最近备份自动恢复 |
+
+详见 docs/review/04-p2-s2-design-review.md §6.16
 
 ---
 
@@ -373,10 +465,24 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S5.4.1 tiktoken-rs 集成 | `Cargo.toml` | cl100k_base |
-| S5.4.2 精确 Token 计数 | `history.rs` | tiktoken 精确计数（对话+System Prompt）；误差 < 5% |
-| S5.4.3 检索结果 Token 估算（混合策略）| `history.rs` | 字符数/3 近似估算；边界位置精确计数；CJK 比例通过采样校准 |
-| S5.4.4 ChatMessage 全字段计数 | `history.rs` | role/name/tool_calls 计入 |
+| S5.4.1 分层 TokenCounter 实现 | `token/counter.rs` | Tier 1 精确/Tier 2 近似/Tier 3 启发式 |
+| S5.4.2 tiktoken-rs 集成 | `Cargo.toml` | cl100k_base for OpenAI |
+| S5.4.3 Anthropic tokenizers 集成 | `providers/anthropic.rs` | 精确计数 |
+| S5.4.4 增量缓存策略 | `token/counter.rs` | System Prompt 缓存、消息增量计算 |
+| S5.4.5 弹性预算分配 | `memory/inject.rs` | 固定区+可分配空间，history 75%/retrieval 25% 默认 |
+| S5.4.6 ChatMessage 全字段计数 | `history.rs` | role/name/tool_calls 计入 |
+
+**分层 TokenCounter 设计**：
+- Tier 1：精确计数（OpenAI → tiktoken-rs，Anthropic → 官方 tokenizer），误差 < 1%
+- Tier 2：近似计数（未知模型，首次调用远程 tokenizer，后续用采样比推算），误差 < 5%
+- Tier 3：启发式估算（英文 words×1.3，中文 字符×0.6），误差 < 15%
+
+**预算分配策略**：
+- 固定区：System Prompt + Output Reserve（manifest.max_output_tokens）
+- 可分配空间：history 75% / retrieval 25%（可自适应调整）
+- 硬保底线：retrieval 最少 2048 tokens，history 保留最近 3 轮
+
+详见 docs/review/04-p2-s2-design-review.md §6.5
 
 #### S5.5 任务：端到端集成测试
 
@@ -419,6 +525,11 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 | S2.7 | 遗忘衰减机制（Decay）| rollball-grafeo | S2 | S2.3 | 8 | ⬚ |
 | S2.8 | 关联扩散检索（Graph Expand）| rollball-grafeo | S2 | S2.3,S2.4,S2.5 | 10 | ⬚ |
 | S2.9 | MemoryManager 集成 | rollball-runtime | S2 | S2.0~S2.8 | 12 | ⬚ |
+| S2.10 | 冲突检测与处理 | rollball-grafeo | S2 | S2.6 | 8 | ⬚ |
+| S2.11 | 隐私访问控制 | rollball-gateway | S2 | S2.10 | 6 | ⬚ |
+| S2.12 | 质量评估框架 | rollball-grafeo | S2 | S2.0~S2.11 | 5 | ⬚ |
+| S2.13 | 工程约束与降级策略 | rollball-grafeo | S2 | S2.4 | 8 | ⬚ |
+| S2.14 | 备份与迁移 | rollball-grafeo | S2 | S2.0 | 4 | ⬚ |
 | S3.1 | System Agent 包和清单 | examples/system-agent | S3 | - | 3 | ⬚ |
 | S3.2 | 身份信息系统 | rollball-core | S3 | - | 6 | ⬚ |
 | S3.3 | 冷启动身份注入 | rollball-gateway | S3 | S3.1,S3.2,S1.2 | 5 | ⬚ |
@@ -435,7 +546,7 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 | S5.5 | 端到端集成测试 | tests/ | S5 | S1~S4 | 10 | ⬚ |
 | S5.6 | 多 Agent 协作示例 | examples/ | S5 | S3,S4 | 4 | ⬚ |
 
-**总计：33 个任务，预期 270+ 测试**
+**总计：38 个任务，预期 330+ 测试**
 
 ---
 
