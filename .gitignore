@@ -30,7 +30,7 @@ Thumbs.db
 .env.local
 
 # refer
-refer-repo/
+ref-repo/
 
 # Legacy (before repo restructure)
 /cargo-check-output.txt
