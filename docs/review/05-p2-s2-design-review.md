@@ -173,7 +173,7 @@ backup_dir = ""
 | 1 | §9 Phase 1 仍描述旧版 2跳/同步三元组去重，与 §6.3/§4.1 矛盾 | P0 | 05-memory.md | 同步 §9 描述 |
 | 2 | §5.2 Fact 去重未说明"发生在离线巩固阶段"，与 §4.1 即时阶段描述混淆 | P0 | 05-memory.md | 在 §5.2 首行加阶段说明 |
 | 3 | memory_hint 字段名 `t` 与枚举值 `t`（时间相关）同名冲突 | P1 | 05-memory.md | 改时间类型为 `r` 或 `d` |
-| 4 | Autobiographical 超上限降级为 KnowledgeNode，与"永不 Purge"约束矛盾，无实现路径 | P1 | 05-memory.md / 04-grafeo.md | 补充降级模块或修改降级策略 |
+| 4 | Autobiographical 超上限降级为 KnowledgeNode，与"永不 Purge"约束矛盾 | P1 | ~~05-memory.md~~ / 04-grafeo.md → **已解决（见 04-p2-s2-design-review.md §6.3 决策4）**： Autobiographical 无硬上限，不删除不降级；相似度合并可选触发；详见 04-p2-s2-design-review.md |
 | 5 | DecayConfig 字段名 `purge_after` vs `purge_days` 不一致；`purge_importance_threshold` 缺失 | P1 | 05-memory.md / plan-p2.md | 统一字段名并补全缺失字段 |
 | 6 | S2.10.1 即时粗筛指向 `consolidation/conflict.rs`，应为 `semantic/conflict.rs` | P1 | plan-p2.md | 修正文件路径 |
 | 7 | 历史裁剪与检索预算分配的执行顺序未明确 | P2 | 05-memory.md | 在 §6.8 流程中说明顺序 |
