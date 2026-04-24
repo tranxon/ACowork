@@ -13,8 +13,6 @@ pub struct DecayConfig {
     pub access_boost: f64,
     /// Score below which -> Dormant (default: 0.3).
     pub dormant_threshold: f32,
-    /// Scan interval in hours (default: 1).
-    pub scan_interval_hours: u64,
 }
 
 impl Default for DecayConfig {
@@ -23,7 +21,6 @@ impl Default for DecayConfig {
             lambda: 0.03,
             access_boost: 0.1,
             dormant_threshold: 0.3,
-            scan_interval_hours: 1,
         }
     }
 }

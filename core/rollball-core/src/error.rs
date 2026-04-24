@@ -59,4 +59,22 @@ pub enum RollballError {
     Unknown(String),
 }
 
+impl From<&str> for RollballError {
+    fn from(s: &str) -> Self {
+        RollballError::Memory(s.to_string())
+    }
+}
+
+impl From<String> for RollballError {
+    fn from(s: String) -> Self {
+        RollballError::Memory(s)
+    }
+}
+
+impl From<grafeo_common::Error> for RollballError {
+    fn from(e: grafeo_common::Error) -> Self {
+        RollballError::Memory(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, RollballError>;

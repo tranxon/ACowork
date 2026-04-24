@@ -10,6 +10,7 @@ use grafeo_core::graph::Direction;
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
+use crate::retrieval::cosine_distance_to_similarity;
 use crate::types::labels;
 
 // ---------------------------------------------------------------------------
@@ -175,6 +176,11 @@ impl GrafeoStore {
                     continue;
                 }
 
+                // Capacity check: stop before processing to avoid unnecessary work
+                if results.len() >= config.max_total_nodes {
+                    break;
+                }
+
                 visited.insert(neighbor_id);
 
                 // Resolve label.
@@ -194,10 +200,6 @@ impl GrafeoStore {
                     accumulated_score,
                     path: new_path.clone(),
                 });
-
-                if results.len() >= config.max_total_nodes {
-                    break;
-                }
 
                 queue.push_back((neighbor_id, next_hop, accumulated_score, new_path));
             }
@@ -245,11 +247,11 @@ impl GrafeoStore {
         let mut seeds: Vec<(NodeId, f64)> = Vec::new();
 
         for (id, dist) in &knowledge_results {
-            let similarity = (2.0 - f64::from(*dist)) / 2.0;
+            let similarity = cosine_distance_to_similarity(*dist);
             seeds.push((*id, similarity));
         }
         for (id, dist) in &episodic_results {
-            let similarity = (2.0 - f64::from(*dist)) / 2.0;
+            let similarity = cosine_distance_to_similarity(*dist);
             seeds.push((*id, similarity));
         }
 

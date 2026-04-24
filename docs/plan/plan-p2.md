@@ -430,7 +430,7 @@ Abstention 在 Level 0-3 降级策略之后生效，是最终质量门控。Leve
 
 | 任务 | 文件 | 验收标准 |
 |------|------|---------|
-| S3.2.1 Identity Zone 定义 | `rollball-core/src/identity.rs` | Identity/Preferences/Knowledge/Work |
+| S3.2.1 Identity Category 定义 | `rollball-core/src/identity.rs` | Identity/Preferences/Knowledge/Work |
 | S3.2.2 PrivacyLevel 枚举 | `rollball-core/src/identity.rs` | Public/Personal/Sensitive |
 | S3.2.3 IdentityStore 接口 | `rollball-core/src/identity.rs` | store/query/observe |
 | S3.2.4 System Agent Grafeo 存储身份 | `rollball-grafeo` | 私有存储 |

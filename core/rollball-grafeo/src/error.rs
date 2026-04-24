@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use rollball_core::error::RollballError;
+
 #[derive(Debug, Error)]
 pub enum GrafeoError {
     #[error("IO error: {0}")]
@@ -23,6 +25,12 @@ pub enum GrafeoError {
         /// Actual dimension provided.
         got: usize,
     },
+}
+
+impl From<RollballError> for GrafeoError {
+    fn from(e: RollballError) -> Self {
+        GrafeoError::Memory(e.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, GrafeoError>;

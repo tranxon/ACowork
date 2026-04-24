@@ -131,12 +131,15 @@ pub fn extract_artifact_refs(content: &str) -> Vec<ArtifactRef> {
 /// Compress artifact-type content to a summary + artifact references.
 ///
 /// The summary is the first 200 characters of the original content,
-/// truncated with "..." if longer.
+/// truncated with "..." if longer. Uses UTF-8-safe truncation to avoid
+/// panicking on multi-byte character boundaries.
 pub fn compress_artifact_content(content: &str) -> (String, Vec<ArtifactRef>) {
     let refs = extract_artifact_refs(content);
 
-    let summary = if content.len() > 200 {
-        format!("{}...", &content[..200])
+    let summary = if content.chars().count() > 200 {
+        // UTF-8 safe truncation: take first 200 chars, then find byte boundary
+        let truncated: String = content.chars().take(200).collect();
+        format!("{}...", truncated)
     } else {
         content.to_string()
     };
