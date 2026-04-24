@@ -6,6 +6,17 @@ use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::index_config::validate_embedding_dim;
 
+/// Convert cosine distance to similarity score.
+///
+/// Assumes cosine distance ∈ [0, 2], converts to [0, 1] similarity:
+/// - distance = 0 (identical) → similarity = 1.0
+/// - distance = 2 (opposite) → similarity = 0.0
+/// - distance = 1 (orthogonal) → similarity = 0.5
+#[inline]
+pub fn cosine_distance_to_similarity(dist: f32) -> f64 {
+    (2.0 - f64::from(dist)) / 2.0
+}
+
 /// Apply min_score filtering to search results.
 /// Returns filtered results and the count of removed items.
 fn apply_min_score(
@@ -190,11 +201,10 @@ impl GrafeoStore {
     ) -> Result<Vec<(NodeId, f64)>> {
         validate_embedding_dim(embedding)?;
         let raw = self.db.vector_search(label, "embedding", embedding, k, Some(ef_search), None)?;
-        // Convert distance to similarity score: for cosine, distance ∈ [0, 2],
-        // convert to a [0, 1] similarity by (2.0 - distance) / 2.0.
+        // Convert distance to similarity score using shared function.
         let results: Vec<(NodeId, f64)> = raw
             .into_iter()
-            .map(|(id, dist)| (id, (2.0 - f64::from(dist)) / 2.0))
+            .map(|(id, dist)| (id, cosine_distance_to_similarity(dist)))
             .collect();
         let (filtered, _) = apply_min_score(results, min_score);
         Ok(filtered)
@@ -228,12 +238,12 @@ impl GrafeoStore {
         query: &str,
         embedding: &[f32],
         k: usize,
-        text_weight: f32,
-        vector_weight: f32,
+        _text_weight: f32,  // Reserved for future weighted RRF implementation
+        _vector_weight: f32,  // Reserved for future weighted RRF implementation
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
         validate_embedding_dim(embedding)?;
-        let mut results = self.db.hybrid_search(
+        let results = self.db.hybrid_search(
             label,
             "content",
             "embedding",
@@ -243,11 +253,9 @@ impl GrafeoStore {
             None,
         )?;
 
-        // Apply weight adjustment: scale scores by the combined weight factor.
-        let weight_factor = f64::from((text_weight + vector_weight) / 2.0);
-        for (_, score) in &mut results {
-            *score *= weight_factor;
-        }
+        // Note: RRF fusion already handles ranking combination internally.
+        // Weight scaling after RRF is meaningless as it doesn't change relative rankings.
+        // The weight_factor approach has been removed to avoid confusion.
 
         let (filtered, _) = apply_min_score(results, min_score);
         Ok(filtered)
@@ -267,11 +275,11 @@ impl GrafeoStore {
         query: &str,
         embedding: &[f32],
         k: usize,
-        text_weight: f32,
-        vector_weight: f32,
+        _text_weight: f32,  // Reserved for future weighted RRF implementation
+        _vector_weight: f32,  // Reserved for future weighted RRF implementation
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let mut results = self.db.hybrid_search(
+        let results = self.db.hybrid_search(
             label,
             text_prop,
             vec_prop,
@@ -281,12 +289,9 @@ impl GrafeoStore {
             None,
         )?;
 
-        // Apply weight adjustment: scale scores by the combined weight factor.
-        // The weight factor represents how much each signal should influence the final score.
-        let weight_factor = (text_weight + vector_weight) / 2.0;
-        for (_, score) in &mut results {
-            *score *= weight_factor as f64;
-        }
+        // Note: RRF fusion already handles ranking combination internally.
+        // Weight scaling after RRF is meaningless as it doesn't change relative rankings.
+        // The weight_factor approach has been removed to avoid confusion.
 
         let (filtered, _) = apply_min_score(results, min_score);
         Ok(filtered)
@@ -335,6 +340,9 @@ impl GrafeoStore {
             max_score,
             abstention_triggered,
             filtered_count,
+            retrieval_level: 0,
+            graph_expand_nodes: 0,
+            hint_type: rollball_memory::HintType::Semantic,
         };
 
         Ok((filtered, metrics))

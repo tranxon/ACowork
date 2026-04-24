@@ -40,6 +40,14 @@ fn value_to_episode(value: &Value) -> Result<Episode> {
 }
 
 /// Escape a string for safe use in GQL literal expressions.
+///
+/// Escapes backslashes, single quotes, double quotes, newlines, tabs,
+/// and other control characters to prevent GQL injection attacks.
 fn escape_gql_string(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
+    s.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }

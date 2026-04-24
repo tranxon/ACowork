@@ -10,9 +10,14 @@ description = "Grafeo graph database engine (Phase 2 implementation)"
 [dependencies]
 rollball-core.workspace = true
 rollball-memory.workspace = true
+
+# Grafeo dependencies:
+# - grafeo-engine: Main database engine (public API)
+# - grafeo-common: Common types (NodeId, Value, etc.)
+# - grafeo-core: Graph primitives (Direction, Node, Edge) - version-locked
 grafeo-engine.workspace = true
 grafeo-common.workspace = true
-grafeo-core.workspace = true
+grafeo-core.workspace = true  # Used for Direction and graph primitives
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

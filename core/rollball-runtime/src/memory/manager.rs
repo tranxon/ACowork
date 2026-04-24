@@ -13,7 +13,7 @@ use rollball_grafeo::{
     spreading::{config_from_hint, get_hint_weights},
     types::labels,
 };
-use rollball_memory::{MemoryQuery, RetrievalMetrics};
+use rollball_memory::{HintType, MemoryQuery, RetrievalMetrics};
 
 use crate::error::{Result, RuntimeError};
 
@@ -127,14 +127,14 @@ impl MemoryManager {
     ///
     /// Pipeline: hybrid_search → graph_expand → merge & rank → collect metrics.
     pub fn retrieve(&self, store: &GrafeoStore, query: &MemoryQuery) -> Result<RetrievalResult> {
-        let k = if query.k > 0 { query.k } else { self.config.default_k };
+        let k = if query.limit > 0 { query.limit } else { self.config.default_k };
         let min_score = query.min_score.unwrap_or(self.config.default_min_score);
-        let hint_type = query.hint_type.as_deref().unwrap_or("s");
-        let (vector_weight, text_weight, _graph_weight) = get_hint_weights(hint_type);
+        let hint_type = query.hint_type;
+        let (vector_weight, text_weight, _graph_weight) = get_hint_weights(hint_type.as_str());
 
         // Determine which labels to search based on hint type.
         let search_labels: Vec<&str> = match hint_type {
-            "i" => vec![labels::AUTOBIOGRAPHICAL],
+            HintType::Identity => vec![labels::AUTOBIOGRAPHICAL],
             _ => vec![
                 labels::EPISODIC,
                 labels::KNOWLEDGE,
@@ -185,7 +185,7 @@ impl MemoryManager {
         // Graph expansion (if enabled and we have seed results).
         let mut graph_expand_count = 0;
         if self.config.enable_graph_expand && !all_results.is_empty() {
-            let expand_config = config_from_hint(hint_type);
+            let expand_config = config_from_hint(hint_type.as_str());
             let seeds: Vec<(NodeId, f64)> = all_results
                 .iter()
                 .map(|(id, score, _, _)| (NodeId::new(*id), *score))
@@ -261,7 +261,10 @@ impl MemoryManager {
             avg_score,
             max_score,
             abstention_triggered,
-            filtered_count: 0, // Not tracked at this layer.
+            filtered_count: 0,
+            retrieval_level: 0,
+            graph_expand_nodes: graph_expand_count,
+            hint_type: query.hint_type,
         };
 
         tracing::debug!(
@@ -560,10 +563,12 @@ mod tests {
         let query = MemoryQuery {
             query_text: "rust programming".to_string(),
             embedding: Some(emb),
-            k: 5,
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
             min_score: None,
             abstention_enabled: true,
-            hint_type: None,
+            hint_type: HintType::Semantic,
         };
 
         let result = manager.retrieve(&store, &query).unwrap();
@@ -585,10 +590,12 @@ mod tests {
         let query = MemoryQuery {
             query_text: "something completely unrelated".to_string(),
             embedding: Some(emb),
-            k: 5,
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
             min_score: Some(0.99), // Very high threshold — should filter everything.
             abstention_enabled: true,
-            hint_type: None,
+            hint_type: HintType::Semantic,
         };
 
         let result = manager.retrieve(&store, &query).unwrap();
@@ -611,10 +618,12 @@ mod tests {
         let query = MemoryQuery {
             query_text: "unrelated query".to_string(),
             embedding: Some(emb),
-            k: 5,
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
             min_score: Some(0.99),
             abstention_enabled: true,
-            hint_type: None,
+            hint_type: HintType::Semantic,
         };
 
         let result = manager.retrieve(&store, &query).unwrap();
@@ -635,10 +644,12 @@ mod tests {
         let query = MemoryQuery {
             query_text: "rust programming".to_string(),
             embedding: None,
-            k: 5,
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
             min_score: None,
             abstention_enabled: false,
-            hint_type: None,
+            hint_type: HintType::Semantic,
         };
 
         let result = manager.retrieve(&store, &query).unwrap();
@@ -784,10 +795,12 @@ mod tests {
         let query = MemoryQuery {
             query_text: "concise".to_string(),
             embedding: Some(emb),
-            k: 5,
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
             min_score: None,
             abstention_enabled: true,
-            hint_type: None,
+            hint_type: HintType::Semantic,
         };
 
         let (injected, metrics) = manager.process_turn(&store, &query).unwrap();
@@ -811,10 +824,12 @@ mod tests {
         let query = MemoryQuery {
             query_text: "completely unrelated".to_string(),
             embedding: Some(emb),
-            k: 5,
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
             min_score: Some(0.99),
             abstention_enabled: true,
-            hint_type: None,
+            hint_type: HintType::Semantic,
         };
 
         let (injected, metrics) = manager.process_turn(&store, &query).unwrap();

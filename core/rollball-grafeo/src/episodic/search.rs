@@ -6,6 +6,7 @@ use grafeo_common::types::Value;
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
+use crate::retrieval::cosine_distance_to_similarity;
 use crate::types::{labels, Episode};
 
 impl GrafeoStore {
@@ -116,8 +117,8 @@ impl GrafeoStore {
 
         let mut episodes = Vec::new();
         for (node_id, distance) in raw {
-            // Convert cosine distance to similarity score: [0, 2] -> [0, 1]
-            let score = (2.0 - f64::from(distance)) / 2.0;
+            // Convert cosine distance to similarity score using shared function.
+            let score = cosine_distance_to_similarity(distance);
             if let Some(node) = self.db.get_node(node_id) {
                 let props: Vec<(String, Value)> = node
                     .properties_as_btree()
