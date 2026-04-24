@@ -73,6 +73,36 @@ impl ProviderError {
             retryable: false,
         }
     }
+
+    /// Convenience constructor for authentication/authorization errors.
+    pub fn unauthorized(message: String) -> Self {
+        Self {
+            message,
+            status_code: Some(401),
+            error_type: ProviderErrorType::Unauthorized,
+            retryable: false,
+        }
+    }
+
+    /// Convenience constructor for rate-limited errors.
+    pub fn rate_limited(message: String) -> Self {
+        Self {
+            message,
+            status_code: Some(429),
+            error_type: ProviderErrorType::RateLimited,
+            retryable: true,
+        }
+    }
+
+    /// Convenience constructor for server-side errors.
+    pub fn server_error(message: String) -> Self {
+        Self {
+            message,
+            status_code: Some(500),
+            error_type: ProviderErrorType::ServerError,
+            retryable: true,
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderError {

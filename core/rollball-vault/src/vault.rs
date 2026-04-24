@@ -35,7 +35,13 @@ impl Vault {
     /// The vault starts in a locked state. Call `unlock()` with a password
     /// to derive the master key and enable store/retrieve operations.
     pub fn open(vault_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(vault_dir)?;
+        // create_dir_all may return AlreadyExists on Windows when
+        // concurrent tests create the same directory — treat that as success.
+        if let Err(e) = fs::create_dir_all(vault_dir) {
+            if !vault_dir.is_dir() {
+                return Err(e.into());
+            }
+        }
         Ok(Self {
             vault_dir: vault_dir.to_path_buf(),
             master_key: None,

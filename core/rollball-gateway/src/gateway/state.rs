@@ -2,6 +2,9 @@
 
 use std::collections::HashMap;
 use crate::vault::VaultFacade;
+use crate::budget::tracker::BudgetTracker;
+use crate::rate::bucket::RateLimiter;
+use crate::capability::registry::CapabilityRegistry;
 
 /// Information about an installed agent
 #[derive(Debug, Clone)]
@@ -30,6 +33,12 @@ pub struct GatewayState {
     pub running_agents: HashMap<String, RunningAgentInfo>,
     /// Vault facade for key storage and distribution
     pub vault: VaultFacade,
+    /// Budget tracker for usage limits
+    budget_tracker: Option<BudgetTracker>,
+    /// Rate limiter for API call throttling
+    rate_limiter: Option<RateLimiter>,
+    /// Capability registry for Intent routing
+    pub capability_registry: CapabilityRegistry,
 }
 
 impl GatewayState {
@@ -39,6 +48,9 @@ impl GatewayState {
             installed_agents: HashMap::new(),
             running_agents: HashMap::new(),
             vault: VaultFacade::new(vault_dir),
+            budget_tracker: None,
+            rate_limiter: None,
+            capability_registry: CapabilityRegistry::new(),
         }
     }
 
@@ -54,11 +66,18 @@ impl GatewayState {
 
     /// Add an installed agent
     pub fn add_installed(&mut self, info: AgentInfo) {
+        // S4.2.2: Register capabilities from manifest on install
+        self.capability_registry.register_from_manifest(
+            &info.agent_id,
+            &info.manifest,
+        );
         self.installed_agents.insert(info.agent_id.clone(), info);
     }
 
     /// Remove an installed agent
     pub fn remove_installed(&mut self, agent_id: &str) -> Option<AgentInfo> {
+        // S4.2.3: Unregister capabilities on uninstall
+        self.capability_registry.unregister_agent(agent_id);
         self.installed_agents.remove(agent_id)
     }
 
@@ -70,6 +89,36 @@ impl GatewayState {
     /// Remove a running agent
     pub fn remove_running(&mut self, agent_id: &str) -> Option<RunningAgentInfo> {
         self.running_agents.remove(agent_id)
+    }
+
+    /// Get budget tracker (read-only)
+    pub fn budget_tracker(&self) -> Option<&BudgetTracker> {
+        self.budget_tracker.as_ref()
+    }
+
+    /// Get budget tracker (mutable)
+    pub fn budget_tracker_mut(&mut self) -> Option<&mut BudgetTracker> {
+        self.budget_tracker.as_mut()
+    }
+
+    /// Set budget tracker
+    pub fn set_budget_tracker(&mut self, tracker: BudgetTracker) {
+        self.budget_tracker = Some(tracker);
+    }
+
+    /// Get rate limiter (read-only)
+    pub fn rate_limiter(&self) -> Option<&RateLimiter> {
+        self.rate_limiter.as_ref()
+    }
+
+    /// Get rate limiter (mutable)
+    pub fn rate_limiter_mut(&mut self) -> Option<&mut RateLimiter> {
+        self.rate_limiter.as_mut()
+    }
+
+    /// Set rate limiter
+    pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
+        self.rate_limiter = Some(limiter);
     }
 }
 

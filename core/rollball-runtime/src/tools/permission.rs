@@ -1,7 +1,7 @@
 //! Tool permission validation
 //!
 //! Validates tool calls against the Agent's declared manifest permissions.
-//! 13 Phase 1 built-in tools and their required permissions:
+//! 15 built-in tools and their required permissions:
 //!
 //! | Tool | Required Permission |
 //! |------|-------------------|
@@ -18,6 +18,8 @@
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
 //! | identity_store | identity:write → IntentSend |
+//! | identity_query | identity:read → MemoryRead |
+//! | identity_observe | identity:read → MemoryRead |
 
 use rollball_core::permission::Permission;
 use rollball_core::AgentManifest;
@@ -35,6 +37,7 @@ pub fn tool_required_permission(tool_name: &str) -> Option<Permission> {
         "file_write" | "file_edit" => Some(Permission::FilesystemWrite(None)),
         "intent_send" => Some(Permission::IntentSend(None)),
         "identity_store" => Some(Permission::IntentSend(None)), // identity:write → IntentSend broad permission
+        "identity_query" | "identity_observe" => Some(Permission::MemoryRead), // identity:read → MemoryRead
         _ => None,
     }
 }

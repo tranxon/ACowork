@@ -1,0 +1,60 @@
+# Doc Writer Agent Example
+# S5.6: Multi-step task decomposition — document writing agent
+
+agent_id = "com.example.docwriter"
+version = "1.0.0"
+name = "Doc Writer Agent"
+description = "A document writing agent that breaks down complex writing tasks into steps"
+author = "Rollball Team"
+runtime_version = "0.1.0"
+system = false
+dev = false
+
+identity_deps = ["name", "language"]
+
+[[permissions]]
+type = "MemoryRead"
+
+[[permissions]]
+type = "MemoryWrite"
+
+[[tools]]
+name = "memory_store"
+
+[[tools]]
+name = "memory_recall"
+
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4"
+temperature = 0.5
+
+[llm.providers.anthropic]
+model = "claude-sonnet-4"
+api_key_ref = "vault:anthropic_key"
+
+[llm.providers.openai]
+model = "gpt-4o"
+api_key_ref = "vault:openai_key"
+
+[llm.routing]
+strategy = "quality_priority"
+fallback_order = ["anthropic", "openai"]
+
+[llm.budget]
+max_output_tokens = 4096
+exceeded_action = "fallback_to_local"
+
+[memory]
+enabled = true
+retention_days = 180
+
+[resources]
+max_memory_mb = 512
+idle_timeout_secs = 7200
+
+[sandbox]
+enabled = false
+
+[capabilities.document_write]
+description = "Write or revise a document based on instructions and context"

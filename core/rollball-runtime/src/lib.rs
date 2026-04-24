@@ -12,3 +12,5 @@ pub mod ipc;
 pub mod config;
 pub mod cli;
 pub mod error;
+pub mod token;
+pub mod embedding;

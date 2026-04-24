@@ -1,0 +1,64 @@
+# System Agent — com.rollball.system
+# The "system app" of RollBall, analogous to Android's Settings/Contacts.
+# Always started with Gateway, cannot be uninstalled.
+
+agent_id = "com.rollball.system"
+version = "1.0.0"
+name = "System Agent"
+description = "RollBall system agent: manages user identity, preferences, and system-level services"
+author = "Rollball Team"
+runtime_version = "0.1.0"
+system = true
+dev = false
+
+# System Agent has broad permissions
+[[permissions]]
+type = "MemoryRead"
+
+[[permissions]]
+type = "MemoryWrite"
+
+[[permissions]]
+type = "IntentSend"
+value = "*"
+
+triggers = []
+
+# System Agent does NOT declare identity_deps — it IS the identity provider
+identity_deps = []
+
+# System Agent tools
+[[tools]]
+name = "memory_store"
+
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "identity_store"
+
+[[tools]]
+name = "intent_send"
+
+[llm]
+provider = "openai"
+model = "gpt-4"
+temperature = 0.5
+
+[memory]
+enabled = true
+retention_days = 365
+
+[resources]
+max_memory_mb = 512
+idle_timeout_secs = 0   # System Agent never auto-stops
+
+[sandbox]
+enabled = false
+
+# ContentProvider-style capabilities for other agents
+[capabilities."identity:query"]
+description = "Query user identity fields (name, city, language, timezone, etc.)"
+
+[capabilities."identity:observe"]
+description = "Subscribe to identity field changes"

@@ -3,15 +3,23 @@
 //! IPC client for communicating with the Gateway process.
 //! Supports KeyRelease, IntentSend, BudgetQuery, UsageReport,
 //! RateAcquire, and PermissionRequest.
+//! S4.5.2: Buffers pending usage reports when disconnected,
+//! and replays them on reconnect.
 
+use std::collections::VecDeque;
 use rollball_core::protocol::{Frame, GatewayRequest, GatewayResponse};
 use crate::ipc::transport::Transport;
+
+/// Maximum number of pending usage reports to buffer
+const MAX_PENDING_REPORTS: usize = 100;
 
 /// IPC client for Gateway communication
 pub struct GatewayClient {
     transport: Box<dyn Transport>,
     /// Request ID counter for correlating request/response
     next_request_id: parking_lot::Mutex<u64>,
+    /// S4.5.2: Pending usage reports buffered during disconnect
+    pending_reports: parking_lot::Mutex<VecDeque<rollball_core::budget::UsageReport>>,
 }
 
 impl GatewayClient {
@@ -20,6 +28,7 @@ impl GatewayClient {
         Self {
             transport,
             next_request_id: parking_lot::Mutex::new(1),
+            pending_reports: parking_lot::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -140,10 +149,28 @@ impl GatewayClient {
     }
 
     /// Report token usage to Gateway
+    ///
+    /// S4.5.1: AgentLoop step ⑦ calls this to send UsageReport.
+    /// S4.5.2: If disconnected, the report is buffered and
+    /// will be sent on reconnect via `flush_pending_reports`.
     pub async fn report_usage(
         &self,
         report: rollball_core::budget::UsageReport,
     ) -> Result<(), String> {
+        if !self.is_connected() {
+            // S4.5.2: Buffer for later delivery
+            let mut pending = self.pending_reports.lock();
+            if pending.len() >= MAX_PENDING_REPORTS {
+                pending.pop_front(); // Drop oldest to make room
+            }
+            pending.push_back(report);
+            tracing::debug!(
+                "Buffered usage report (disconnected), pending={}",
+                pending.len()
+            );
+            return Ok(());
+        }
+
         let request = GatewayRequest::UsageReport(report);
 
         match self.send_and_recv(request).await {
@@ -151,6 +178,46 @@ impl GatewayClient {
             Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
             Err(e) => Err(e),
         }
+    }
+
+    /// S4.5.2: Flush pending usage reports after reconnect.
+    ///
+    /// Sends all buffered reports to the Gateway. Reports that fail
+    /// to send are re-buffered for the next attempt.
+    pub async fn flush_pending_reports(&self) -> Result<usize, String> {
+        let reports: Vec<rollball_core::budget::UsageReport> = {
+            let mut pending = self.pending_reports.lock();
+            pending.drain(..).collect()
+        };
+
+        let mut sent = 0;
+        let mut failed = VecDeque::new();
+
+        for report in reports {
+            let request = GatewayRequest::UsageReport(report.clone());
+            match self.send_and_recv(request).await {
+                Ok(GatewayResponse::UsageReportAck {}) => sent += 1,
+                Ok(_) => failed.push_back(report),
+                Err(_) => failed.push_back(report),
+            }
+        }
+
+        // Re-buffer failed reports
+        if !failed.is_empty() {
+            let mut pending = self.pending_reports.lock();
+            for report in failed {
+                if pending.len() < MAX_PENDING_REPORTS {
+                    pending.push_back(report);
+                }
+            }
+        }
+
+        Ok(sent)
+    }
+
+    /// Get the number of pending usage reports
+    pub fn pending_report_count(&self) -> usize {
+        self.pending_reports.lock().len()
     }
 
     /// Acquire a rate limit token
@@ -186,6 +253,22 @@ impl GatewayClient {
             Ok(GatewayResponse::PermissionResult { granted, reason }) => {
                 Ok((granted, reason))
             }
+            Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// S4.2.4: Query capabilities from the Gateway
+    pub async fn query_capabilities(
+        &self,
+        agent_id: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+        let request = GatewayRequest::CapabilityQuery {
+            agent_id: agent_id.map(|s| s.to_string()),
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::CapabilityOverview { capabilities }) => Ok(capabilities),
             Ok(other) => Err(format!("Unexpected response type: {:?}", other)),
             Err(e) => Err(e),
         }

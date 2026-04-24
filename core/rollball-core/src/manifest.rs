@@ -150,6 +150,74 @@ pub struct LlmConfig {
     /// Fallback providers in priority order
     #[serde(default)]
     pub fallback_providers: Vec<String>,
+    /// Multiple provider configurations (key = provider name)
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+    /// Routing configuration
+    #[serde(default)]
+    pub routing: Option<RoutingConfig>,
+    /// Budget configuration for LLM usage
+    #[serde(default)]
+    pub budget: Option<LlmBudget>,
+}
+
+/// Configuration for a specific LLM provider
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Model identifier for this provider
+    pub model: String,
+    /// API key reference (e.g., "vault:openai_key")
+    #[serde(default)]
+    pub api_key_ref: Option<String>,
+    /// Custom base URL
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Provider-specific parameters
+    #[serde(default)]
+    pub params: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Routing strategy configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// Routing strategy: cost_priority / quality_priority / latency_priority
+    #[serde(default = "default_routing_strategy")]
+    pub strategy: String,
+    /// Fallback provider order (overrides fallback_providers)
+    #[serde(default)]
+    pub fallback_order: Vec<String>,
+    /// Enable automatic provider switching on failure
+    #[serde(default = "default_true")]
+    pub auto_switch: bool,
+}
+
+fn default_routing_strategy() -> String {
+    "quality_priority".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// LLM budget configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmBudget {
+    /// Maximum tokens per request
+    #[serde(default)]
+    pub max_tokens_per_request: Option<u64>,
+    /// Maximum cost per request in USD
+    #[serde(default)]
+    pub max_cost_per_request_usd: Option<f64>,
+    /// Maximum output tokens
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    /// Action when budget exceeded: stop / fallback_to_local / warn
+    #[serde(default = "default_budget_action")]
+    pub exceeded_action: String,
+}
+
+fn default_budget_action() -> String {
+    "stop".to_string()
 }
 
 /// Memory system configuration

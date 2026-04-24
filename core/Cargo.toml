@@ -99,5 +99,7 @@ tempfile = "3.0"
 rollball-core = { path = "rollball-core" }
 rollball-memory = { path = "rollball-memory" }
 rollball-grafeo = { path = "rollball-grafeo" }
+rollball-runtime = { path = "rollball-runtime" }
+rollball-gateway = { path = "rollball-gateway" }
 rollball-vault = { path = "rollball-vault" }
 rollball-sign = { path = "rollball-sign" }

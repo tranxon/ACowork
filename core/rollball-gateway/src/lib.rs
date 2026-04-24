@@ -6,6 +6,7 @@ pub mod gateway;
 pub mod package_manager;
 pub mod lifecycle;
 pub mod intent;
+pub mod capability;
 pub mod budget;
 pub mod rate;
 pub mod vault;

@@ -19,11 +19,11 @@ pub mod memory;
 pub mod error;
 
 // Re-exports for convenience
-pub use manifest::AgentManifest;
+pub use manifest::{AgentManifest, CapabilityDef, LlmConfig, ProviderConfig, RoutingConfig, LlmBudget};
 pub use protocol::{GatewayRequest, GatewayResponse, Frame};
 pub use intent::Intent;
 pub use permission::Permission;
-pub use identity::Identity;
+pub use identity::{Identity, IdentityCategory, IdentityEntry, IdentityQueryResult, IdentityStore, IdentitySubscription, PrivacyLevel};
 pub use budget::{Budget, UsageReport};
 pub use tools::{Tool, ToolSpec, ToolResult};
 pub use providers::{Provider, ChatMessage, ChatRequest, ChatResponse, StreamEvent, ProviderError, ProviderErrorType};

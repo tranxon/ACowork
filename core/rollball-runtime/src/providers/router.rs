@@ -1,12 +1,13 @@
 //! LLM Provider router and factory
 //!
 //! Creates the appropriate Provider based on manifest LLM configuration.
-//! Phase 1 supports OpenAI-compatible and Ollama providers.
+//! Supports OpenAI-compatible, Anthropic, and Ollama providers.
 
 use std::sync::Arc;
 
 use rollball_core::providers::traits::Provider;
 
+use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::openai::OpenAIProvider;
 use crate::providers::ollama::OllamaProvider;
 
@@ -17,6 +18,14 @@ pub fn create_provider(
     base_url: Option<&str>,
 ) -> Arc<dyn Provider> {
     match provider_name {
+        "anthropic" | "claude" => {
+            let provider = if let Some(url) = base_url {
+                AnthropicProvider::with_base_url(Some(url), api_key)
+            } else {
+                AnthropicProvider::new(api_key)
+            };
+            Arc::new(provider)
+        }
         "openai" | "openai-compatible" => {
             let provider = if let Some(url) = base_url {
                 OpenAIProvider::with_base_url(Some(url), api_key)
@@ -66,6 +75,18 @@ mod tests {
     fn test_create_openai_provider() {
         let provider = create_provider("openai", Some("sk-test"), None);
         assert_eq!(provider.name(), "openai");
+    }
+
+    #[test]
+    fn test_create_anthropic_provider() {
+        let provider = create_provider("anthropic", Some("sk-ant-test"), None);
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    #[test]
+    fn test_create_claude_provider() {
+        let provider = create_provider("claude", Some("sk-ant-test"), None);
+        assert_eq!(provider.name(), "anthropic");
     }
 
     #[test]

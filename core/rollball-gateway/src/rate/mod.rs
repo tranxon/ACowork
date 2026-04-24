@@ -1,3 +1,8 @@
 //! Rate limiting module
+//!
+//! Per-provider token bucket rate limiting with configurable
+//! refill rates, burst sizes, and fair scheduling across agents.
 
-// TODO: Implement rate limiter for Phase 2
+pub mod bucket;
+
+pub use bucket::{RateLimiter, RateResult, TokenBucket};

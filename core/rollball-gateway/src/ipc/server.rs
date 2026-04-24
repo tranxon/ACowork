@@ -5,14 +5,20 @@
 //! Each connection is handled in its own tokio task, allowing
 //! multiple Agent Runtimes to communicate with the Gateway simultaneously.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
+#[cfg(unix)]
+use tokio::sync::Mutex;
 
+#[cfg(unix)]
 use rollball_core::protocol::{Frame, GatewayRequest, GatewayResponse};
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
+#[cfg(unix)]
 use crate::ipc::session::SessionManager;
 
 /// Shared state type: Arc<RwLock<GatewayState>> for concurrent read/write access.
@@ -21,6 +27,7 @@ use crate::ipc::session::SessionManager;
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
 /// Shared session manager type
+#[cfg(unix)]
 type SharedSessionMgr = Arc<Mutex<SessionManager>>;
 
 /// IPC server (async, multi-connection)
@@ -42,6 +49,7 @@ impl IpcServer {
     /// allowing multiple Agent Runtimes to connect concurrently.
     /// The GatewayState is protected by an async RwLock so that
     /// concurrent readers do not block each other.
+    #[cfg(unix)]
     pub async fn listen(&self, state: SharedState) -> Result<(), GatewayError> {
         // Clean up stale socket file
         let _ = std::fs::remove_file(&self.socket_path);
@@ -93,11 +101,27 @@ impl IpcServer {
             });
         }
     }
+
+    /// Start the server on non-Unix platforms (stub)
+    #[cfg(not(unix))]
+    pub async fn listen(&self, _state: SharedState) -> Result<(), GatewayError> {
+        tracing::warn!(
+            "IPC server: Unix sockets not available on this platform. \
+             Use Named Pipe transport instead. (socket_path={})",
+            self.socket_path
+        );
+        // On Windows, the async IPC server uses Named Pipes via transport.rs
+        // The sync server below is Unix-only.
+        Err(GatewayError::Ipc(
+            "Async IPC server not available on non-Unix platforms. Use Named Pipe transport.".to_string()
+        ))
+    }
 }
 
-// ── Connection handler ──────────────────────────────────────────────────────
+// ── Connection handler (Unix only) ─────────────────────────────────────────
 
 /// Handle a single connection's request/response loop
+#[cfg(unix)]
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     conn_id: &str,
@@ -136,6 +160,8 @@ async fn handle_connection(
 // ── Request dispatch ────────────────────────────────────────────────────────
 
 /// Dispatch request to the appropriate handler
+#[cfg(unix)]
+#[allow(dead_code)]
 async fn dispatch_request(
     request: GatewayRequest,
     conn_id: &str,
@@ -152,21 +178,35 @@ async fn dispatch_request(
             params,
             async_,
         } => {
-            handle_intent_send(&target, &action, &params, async_, conn_id, session_mgr)
+            handle_intent_send(&target, &action, &params, async_, conn_id, state, session_mgr)
                 .await
         }
-        GatewayRequest::BudgetQuery { provider } => handle_budget_query(&provider),
-        GatewayRequest::UsageReport(report) => handle_usage_report(report),
-        GatewayRequest::RateAcquire { provider } => handle_rate_acquire(&provider),
+        GatewayRequest::BudgetQuery { provider } => {
+            handle_budget_query(&provider, state).await
+        }
+        GatewayRequest::UsageReport(report) => {
+            handle_usage_report(report, state).await
+        }
+        GatewayRequest::RateAcquire { provider } => {
+            handle_rate_acquire(&provider, state).await
+        }
         GatewayRequest::PermissionRequest {
             permission,
             reason,
         } => handle_permission_request(&permission, &reason),
+        GatewayRequest::IdentityQuery { fields } => {
+            handle_identity_query(&fields, conn_id, session_mgr).await
+        }
+        GatewayRequest::CapabilityQuery { agent_id } => {
+            handle_capability_query(agent_id.as_deref(), state).await
+        }
     }
 }
 
 // ── Handler implementations ─────────────────────────────────────────────────
 
+#[cfg(unix)]
+#[allow(dead_code)]
 async fn handle_key_release(
     provider: &str,
     conn_id: &str,
@@ -223,12 +263,15 @@ async fn handle_key_release(
     }
 }
 
+#[cfg(unix)]
+#[allow(dead_code)]
 async fn handle_intent_send(
     target: &str,
     action: &str,
     _params: &serde_json::Value,
     async_: bool,
     conn_id: &str,
+    state: &SharedState,
     session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
     let from = {
@@ -246,37 +289,127 @@ async fn handle_intent_send(
         async_
     );
 
-    // Phase 1: just acknowledge. Phase 2: route to target agent.
+    // S4.1: Generate message ID for correlation
     let message_id = format!("msg-{}", chrono::Utc::now().timestamp_millis());
+
+    // S4.1.5: Error handling — validate target format
+    if target.is_empty() {
+        tracing::warn!("IntentSend rejected: empty target");
+        return GatewayResponse::IntentDelivered {
+            message_id: format!("error:empty-target-{}", message_id),
+        };
+    }
+
+    // S4.1.1: Check if target agent is installed
+    let target_installed = {
+        let guard = state.read().await;
+        guard.is_installed(target)
+    };
+
+    if !target_installed {
+        tracing::warn!("IntentSend rejected: agent not found: {}", target);
+        // S4.1.5: AgentNotFound error — return IntentDelivered with error prefix
+        return GatewayResponse::IntentDelivered {
+            message_id: format!("error:agent-not-found:{}", target),
+        };
+    }
+
+    // S4.1.2: Check if target is running
+    let target_running = {
+        let guard = state.read().await;
+        guard.is_running(target)
+    };
+
+    if !target_running {
+        // S4.1.2: Target not running — need auto-spawn
+        // This is coordinated by the Gateway layer (LifecycleManager)
+        tracing::info!("IntentSend: target '{}' not running, auto-spawn needed", target);
+    }
+
+    // S4.1.4: For async intents, the response will be delivered via callback
+    if async_ {
+        tracing::info!("Async Intent queued: msg={}", message_id);
+    }
+
     GatewayResponse::IntentDelivered { message_id }
 }
 
-fn handle_budget_query(_provider: &str) -> GatewayResponse {
-    // Phase 1: return placeholder budget
-    tracing::warn!(
-        "Budget query returns placeholder data (Phase 1 stub — not real usage data)"
-    );
-    GatewayResponse::BudgetInfo {
-        remaining_tokens: 100_000,
-        remaining_cost_usd: 10.0,
+/// S4.3.3: Budget query handler — returns real remaining budget
+#[cfg(unix)]
+#[allow(dead_code)]
+async fn handle_budget_query(provider: &str, state: &SharedState) -> GatewayResponse {
+    let guard = state.read().await;
+    if let Some(tracker) = guard.budget_tracker() {
+        let remaining = tracker.remaining_tokens(provider);
+        let remaining_cost = tracker.remaining_cost_usd(provider);
+        tracing::info!(
+            "BudgetQuery: provider={} remaining_tokens={} remaining_cost={}",
+            provider, remaining, remaining_cost
+        );
+        GatewayResponse::BudgetInfo {
+            remaining_tokens: remaining,
+            remaining_cost_usd: remaining_cost,
+        }
+    } else {
+        // No budget tracker configured — return unlimited
+        GatewayResponse::BudgetInfo {
+            remaining_tokens: u64::MAX,
+            remaining_cost_usd: f64::MAX,
+        }
     }
 }
 
-fn handle_usage_report(
-    _report: rollball_core::budget::UsageReport,
+/// S4.3.2: Usage report handler — updates cumulative usage
+#[cfg(unix)]
+#[allow(dead_code)]
+async fn handle_usage_report(
+    report: rollball_core::budget::UsageReport,
+    state: &SharedState,
 ) -> GatewayResponse {
-    // Phase 1: just acknowledge
+    tracing::info!(
+        "UsageReport: agent={} provider={} tokens={} cost={:.4}",
+        report.agent_id, report.provider, report.tokens_used, report.cost_usd
+    );
+
+    let mut guard = state.write().await;
+    if let Some(tracker) = guard.budget_tracker_mut() {
+        tracker.record_usage(
+            &report.agent_id,
+            &report.provider,
+            report.tokens_used,
+            report.cost_usd,
+        );
+    }
+
     GatewayResponse::UsageReportAck {}
 }
 
-fn handle_rate_acquire(_provider: &str) -> GatewayResponse {
-    // Phase 1: always grant
-    GatewayResponse::RateToken {
-        granted: true,
-        retry_after_ms: None,
+/// S4.4.2: Rate acquire handler — token bucket allocation
+#[cfg(unix)]
+#[allow(dead_code)]
+async fn handle_rate_acquire(provider: &str, state: &SharedState) -> GatewayResponse {
+    let mut guard = state.write().await;
+    if let Some(limiter) = guard.rate_limiter_mut() {
+        let result = limiter.try_acquire_for(provider, "default");
+        tracing::info!(
+            "RateAcquire: provider={} granted={} retry_after={:?}",
+            provider, result.granted, result.retry_after_ms
+        );
+        GatewayResponse::RateToken {
+            granted: result.granted,
+            retry_after_ms: result.retry_after_ms,
+        }
+    } else {
+        // No rate limiter configured — always grant
+        GatewayResponse::RateToken {
+            granted: true,
+            retry_after_ms: None,
+        }
     }
 }
 
+#[cfg(unix)]
+#[allow(dead_code)]
 fn handle_permission_request(permission: &str, reason: &str) -> GatewayResponse {
     // Phase 1: always deny runtime permission requests (need user UI)
     tracing::warn!(
@@ -292,9 +425,79 @@ fn handle_permission_request(permission: &str, reason: &str) -> GatewayResponse 
     }
 }
 
-// ── Async frame I/O helpers ─────────────────────────────────────────────────
+/// Handle IdentityQuery request from Runtime.
+///
+/// S3.3/S3.4: Queries the System Agent for identity fields.
+/// In Phase 2, this returns an empty result — actual query requires
+/// the System Agent to be running and accessible via IPC.
+#[cfg(unix)]
+#[allow(dead_code)]
+async fn handle_identity_query(
+    fields: &[String],
+    conn_id: &str,
+    session_mgr: &SharedSessionMgr,
+) -> GatewayResponse {
+    let agent_id = {
+        let mgr = session_mgr.lock().await;
+        mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
+    };
+
+    tracing::info!(
+        "IdentityQuery from agent={:?}, fields={:?}",
+        agent_id,
+        fields
+    );
+
+    // Phase 2: Return empty result.
+    // When System Agent IPC is fully connected, this will:
+    // 1. Forward the query to the System Agent via Intent
+    // 2. Wait for the response
+    // 3. Apply PrivacyLevel filtering based on requester
+    // 4. Return the filtered result
+    GatewayResponse::IdentityQueryResult {
+        values: std::collections::HashMap::new(),
+        confidence: std::collections::HashMap::new(),
+    }
+}
+
+/// Handle CapabilityQuery request from Runtime.
+///
+/// S4.2.4: Returns the capability registry for the requested agent
+/// or all agents if no filter is specified.
+#[cfg(unix)]
+#[allow(dead_code)]
+async fn handle_capability_query(
+    agent_id: Option<&str>,
+    state: &SharedState,
+) -> GatewayResponse {
+    let guard = state.read().await;
+    let overview = guard.capability_registry.overview();
+
+    match agent_id {
+        Some(id) => {
+            // Filter to specific agent
+            let mut filtered = std::collections::HashMap::new();
+            if let Some(actions) = overview.by_agent.get(id) {
+                filtered.insert(id.to_string(), actions.clone());
+            }
+            tracing::info!("CapabilityQuery: agent={:?}, found={}", id, filtered.len());
+            GatewayResponse::CapabilityOverview {
+                capabilities: filtered,
+            }
+        }
+        None => {
+            tracing::info!("CapabilityQuery: all agents, count={}", overview.by_agent.len());
+            GatewayResponse::CapabilityOverview {
+                capabilities: overview.by_agent,
+            }
+        }
+    }
+}
+
+// ── Async frame I/O helpers (Unix only) ────────────────────────────────────
 
 /// Read a frame from an async reader
+#[cfg(unix)]
 async fn read_frame_async(
     reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
 ) -> Result<Option<Frame>, GatewayError> {
@@ -330,6 +533,7 @@ async fn read_frame_async(
 }
 
 /// Write a frame to an async writer
+#[cfg(unix)]
 async fn write_frame_async(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     frame: &Frame,
@@ -348,7 +552,8 @@ async fn write_frame_async(
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+#[cfg(unix)]
+mod unix_tests {
     use super::*;
 
     fn temp_socket_path(name: &str) -> String {
@@ -407,33 +612,37 @@ mod tests {
         resp_frame.to_message().unwrap()
     }
 
-    // ── Unit tests for stateless handlers ───────────────────────────────────
-
-    #[test]
-    fn test_handle_budget_query() {
-        let response = handle_budget_query("openai");
+    // ── Unit tests for handlers (async, with state) ──────────────────────
+    
+    #[tokio::test]
+    async fn test_handle_budget_query() {
+        let state = test_shared_state("budget-query");
+        let response = handle_budget_query("openai", &state).await;
         if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
-            assert_eq!(remaining_tokens, 100_000);
+            // No budget tracker configured → unlimited
+            assert_eq!(remaining_tokens, u64::MAX);
         } else {
             panic!("Expected BudgetInfo");
         }
     }
-
-    #[test]
-    fn test_handle_rate_acquire() {
-        let response = handle_rate_acquire("openai");
+    
+    #[tokio::test]
+    async fn test_handle_rate_acquire() {
+        let state = test_shared_state("rate-acquire");
+        let response = handle_rate_acquire("openai", &state).await;
         if let GatewayResponse::RateToken {
             granted,
             retry_after_ms,
         } = response
         {
+            // No rate limiter configured → always grant
             assert!(granted);
             assert!(retry_after_ms.is_none());
         } else {
             panic!("Expected RateToken");
         }
     }
-
+    
     #[test]
     fn test_handle_permission_request() {
         let response = handle_permission_request("filesystem:read:/etc", "need config");
@@ -444,9 +653,10 @@ mod tests {
             panic!("Expected PermissionResult");
         }
     }
-
-    #[test]
-    fn test_handle_usage_report() {
+    
+    #[tokio::test]
+    async fn test_handle_usage_report() {
+        let state = test_shared_state("usage-report");
         let report = rollball_core::budget::UsageReport {
             agent_id: "com.example.weather".to_string(),
             provider: "openai".to_string(),
@@ -455,7 +665,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             error: None,
         };
-        let response = handle_usage_report(report);
+        let response = handle_usage_report(report, &state).await;
         assert!(matches!(response, GatewayResponse::UsageReportAck {}));
     }
 
@@ -483,7 +693,8 @@ mod tests {
         let response = send_request_recv_response(&mut stream, &request).await;
 
         if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
-            assert_eq!(remaining_tokens, 100_000);
+            // No budget tracker configured → returns u64::MAX
+            assert_eq!(remaining_tokens, u64::MAX);
         } else {
             panic!("Expected BudgetInfo, got {:?}", response);
         }
@@ -534,7 +745,7 @@ mod tests {
             let response =
                 send_request_recv_response(&mut stream, &request).await;
             if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
-                assert_eq!(remaining_tokens, 100_000);
+                assert_eq!(remaining_tokens, u64::MAX);
             } else {
                 panic!("Expected BudgetInfo");
             }

@@ -5,6 +5,9 @@ use crate::error::GatewayError;
 use crate::gateway::state::{GatewayState, RunningAgentInfo};
 use crate::lifecycle::process::{spawn_agent_process, kill_agent_process, check_health};
 
+/// System Agent ID — always auto-started with Gateway
+pub const SYSTEM_AGENT_ID: &str = "com.rollball.system";
+
 /// Lifecycle manager — controls Agent process lifecycle
 pub struct LifecycleManager {
     /// Idle timeout in seconds (0 = no timeout)
@@ -57,12 +60,91 @@ impl LifecycleManager {
         Ok(())
     }
 
+    /// Auto-start the System Agent (com.rollball.system) if installed.
+    ///
+    /// Called during Gateway startup. The System Agent is a privileged
+    /// agent that manages user identity and is always running.
+    /// It cannot be stopped by normal `stop_agent` calls.
+    pub async fn auto_start_system_agent(
+        &mut self,
+        state: &mut GatewayState,
+    ) -> Result<(), GatewayError> {
+        if !state.is_installed(SYSTEM_AGENT_ID) {
+            tracing::warn!(
+                "System Agent ({}) not installed — skipping auto-start",
+                SYSTEM_AGENT_ID
+            );
+            return Ok(());
+        }
+
+        if state.is_running(SYSTEM_AGENT_ID) {
+            tracing::debug!("System Agent already running");
+            return Ok(());
+        }
+
+        tracing::info!("Auto-starting System Agent ({})", SYSTEM_AGENT_ID);
+        self.start_agent(SYSTEM_AGENT_ID, state).await
+    }
+
+    /// Query identity_deps for an agent manifest.
+    ///
+    /// Returns the list of identity fields this agent depends on,
+    /// as declared in its manifest. If no deps are declared,
+    /// returns an empty list.
+    pub fn get_identity_deps(
+        &self,
+        agent_id: &str,
+        state: &GatewayState,
+    ) -> Vec<String> {
+        state.installed_agents
+            .get(agent_id)
+            .map(|info| info.manifest.identity_deps.clone())
+            .unwrap_or_default()
+    }
+
+    /// Build an identity_delivery payload for a given agent.
+    ///
+    /// Queries the System Agent's Grafeo for the fields specified
+    /// in the agent's identity_deps and returns them as IdentityEntry list.
+    /// In Phase 2, this returns a placeholder — actual Grafeo query
+    /// requires the System Agent to be running and accessible via IPC.
+    pub fn build_identity_delivery(
+        &self,
+        agent_id: &str,
+        state: &GatewayState,
+    ) -> Vec<rollball_core::identity::IdentityEntry> {
+        let deps = self.get_identity_deps(agent_id, state);
+        if deps.is_empty() {
+            return Vec::new();
+        }
+
+        // Phase 2: Return placeholder entries.
+        // When System Agent IPC is fully connected, this will:
+        // 1. Send IdentityQuery { fields: deps } to System Agent
+        // 2. Receive IdentityQueryResult with values + confidence
+        // 3. Convert to IdentityEntry list
+        tracing::info!(
+            "Building identity delivery for {}: fields {:?}",
+            agent_id,
+            deps
+        );
+
+        Vec::new() // Placeholder — will be populated from System Agent query
+    }
+
     /// Stop a running agent process
     pub async fn stop_agent(
         &mut self,
         agent_id: &str,
         state: &mut GatewayState,
     ) -> Result<(), GatewayError> {
+        // System Agent cannot be stopped
+        if agent_id == SYSTEM_AGENT_ID {
+            return Err(GatewayError::Lifecycle(
+                "System Agent (com.rollball.system) cannot be stopped".to_string()
+            ));
+        }
+
         let running = state.running_agents.get(agent_id)
             .ok_or_else(|| GatewayError::AgentNotRunning(agent_id.to_string()))?
             .clone();
@@ -137,5 +219,49 @@ mod tests {
         let mut state = GatewayState::new(&dir);
         let result = mgr.stop_agent("com.test.unknown", &mut state).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_system_agent_id_constant() {
+        assert_eq!(SYSTEM_AGENT_ID, "com.rollball.system");
+    }
+
+    #[tokio::test]
+    async fn test_stop_system_agent_rejected() {
+        let mut mgr = LifecycleManager::new(300);
+        let dir = temp_vault_dir("sysstop");
+        let mut state = GatewayState::new(&dir);
+        let result = mgr.stop_agent(SYSTEM_AGENT_ID, &mut state).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("System Agent") || err_msg.contains("com.rollball.system"));
+    }
+
+    #[tokio::test]
+    async fn test_auto_start_system_agent_not_installed() {
+        let mut mgr = LifecycleManager::new(300);
+        let dir = temp_vault_dir("autostart");
+        let mut state = GatewayState::new(&dir);
+        // System Agent not installed — should succeed gracefully with warning
+        let result = mgr.auto_start_system_agent(&mut state).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_identity_deps_no_deps() {
+        let mgr = LifecycleManager::new(300);
+        let dir = temp_vault_dir("deps");
+        let state = GatewayState::new(&dir);
+        let deps = mgr.get_identity_deps("com.test.unknown", &state);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_build_identity_delivery_no_deps() {
+        let mgr = LifecycleManager::new(300);
+        let dir = temp_vault_dir("delivery");
+        let state = GatewayState::new(&dir);
+        let entries = mgr.build_identity_delivery("com.test.unknown", &state);
+        assert!(entries.is_empty());
     }
 }

@@ -1,9 +1,10 @@
 //! Built-in tools module
 //!
 //! Phase 1: 13 built-in tools per design doc (12-tool-system.md)
+//! Phase 2 (S3.4): +2 identity tools (identity_query, identity_observe)
 //!
 //! | Tool | Permission |
-//! |------|-----------|
+//! |------|------------|
 //! | memory_recall | memory:read |
 //! | memory_store | memory:write |
 //! | http_request | network:<url> |
@@ -17,6 +18,8 @@
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
 //! | identity_store | identity:write |
+//! | identity_query | identity:read |
+//! | identity_observe | identity:read |
 
 pub mod memory_recall;
 pub mod memory_store;
@@ -31,11 +34,13 @@ pub mod glob_search;
 pub mod content_search;
 pub mod intent_send;
 pub mod identity_store;
+pub mod identity_query;
+pub mod identity_observe;
 
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
 
-/// Create all 13 Phase 1 built-in tools
+/// Create all 15 built-in tools (13 Phase 1 + 2 Phase 2 identity tools)
 ///
 /// # Arguments
 /// * `work_dir` - Working directory for filesystem/shell tools
@@ -58,6 +63,8 @@ pub fn all_builtin_tools(
         Arc::new(content_search::ContentSearchTool::new(work_dir)),
         Arc::new(intent_send::IntentSendTool::new()),
         Arc::new(identity_store::IdentityStoreTool::new(agent_id)),
+        Arc::new(identity_query::IdentityQueryTool::new(agent_id)),
+        Arc::new(identity_observe::IdentityObserveTool::new(agent_id)),
     ];
     tools
 }

@@ -1,21 +1,16 @@
-# Weather Agent Example
-# Phase 1: Simple weather query agent
-# S5: Updated with multi-provider routing and Intent collaboration
+# Calendar Agent Example
+# S5.6: Multi-agent collaboration — calendar event management
 
-agent_id = "com.example.weather"
+agent_id = "com.example.calendar"
 version = "1.0.0"
-name = "Weather Agent"
-description = "A weather query agent that remembers your city preference and can collaborate with calendar agent"
+name = "Calendar Agent"
+description = "A calendar agent that creates, queries, and deletes events via Intent calls"
 author = "Rollball Team"
 runtime_version = "0.1.0"
 system = false
 dev = false
 
-identity_deps = ["city"]
-
-[[permissions]]
-type = "Network"
-value = "https://wttr.in"
+identity_deps = ["timezone"]
 
 [[permissions]]
 type = "MemoryRead"
@@ -26,8 +21,8 @@ type = "MemoryWrite"
 [[permissions]]
 type = "IntentSend"
 
-[[tools]]
-name = "http_request"
+[[permissions]]
+type = "IntentReceive"
 
 [[tools]]
 name = "memory_store"
@@ -41,7 +36,7 @@ name = "intent_send"
 [llm]
 provider = "openai"
 model = "gpt-4"
-temperature = 0.7
+temperature = 0.3
 
 [llm.providers.openai]
 model = "gpt-4o"
@@ -52,16 +47,16 @@ model = "claude-sonnet-4"
 api_key_ref = "vault:anthropic_key"
 
 [llm.routing]
-strategy = "cost_priority"
+strategy = "quality_priority"
 fallback_order = ["openai", "claude"]
 
 [llm.budget]
 max_output_tokens = 2048
-exceeded_action = "warn"
+exceeded_action = "stop"
 
 [memory]
 enabled = true
-retention_days = 30
+retention_days = 90
 
 [resources]
 max_memory_mb = 256
@@ -70,5 +65,11 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
-[capabilities.weather_query]
-description = "Query weather for a location"
+[capabilities.event_create]
+description = "Create a calendar event with title, time, and optional description"
+
+[capabilities.event_query]
+description = "Query calendar events by date range or keyword"
+
+[capabilities.event_delete]
+description = "Delete a calendar event by ID"

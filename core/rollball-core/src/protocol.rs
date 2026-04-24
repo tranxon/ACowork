@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::budget::UsageReport;
+use crate::identity::IdentityEntry;
 
 /// Gateway Service API request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,13 @@ pub enum GatewayRequest {
     RateAcquire { provider: String },
     /// Request a runtime permission
     PermissionRequest { permission: String, reason: String },
+    /// Query identity fields from System Agent
+    IdentityQuery { fields: Vec<String> },
+    /// Query capabilities for a specific agent or all agents
+    CapabilityQuery {
+        /// Optional agent ID filter (None = all agents)
+        agent_id: Option<String>,
+    },
 }
 
 /// Gateway Service API response
@@ -67,6 +75,32 @@ pub enum GatewayResponse {
     PermissionResult {
         granted: bool,
         reason: Option<String>,
+    },
+    /// Identity delivery (Gateway → Runtime, cold-start injection)
+    IdentityDelivery {
+        /// List of identity entries from System Agent
+        entries: Vec<IdentityEntry>,
+    },
+    /// Identity query result from System Agent
+    IdentityQueryResult {
+        /// Field values
+        values: std::collections::HashMap<String, String>,
+        /// Confidence scores per field
+        confidence: std::collections::HashMap<String, f32>,
+    },
+    /// Capability overview (handshake step ⑤ and CapabilityQuery response)
+    CapabilityOverview {
+        /// Map of agent_id → list of action names
+        capabilities: std::collections::HashMap<String, Vec<String>>,
+    },
+    /// Capability update (incremental push on install/uninstall/update)
+    CapabilityUpdate {
+        /// Agent that was updated
+        agent_id: String,
+        /// New/updated actions
+        actions: Vec<String>,
+        /// Whether this is a removal
+        removed: bool,
     },
 }
 

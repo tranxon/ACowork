@@ -11,6 +11,11 @@ description = "Agent Runtime - unified execution engine for .agent packages"
 name = "rollball-runtime"
 path = "src/main.rs"
 
+[features]
+default = []
+# Local embedding generation via ONNX Runtime + all-MiniLM-L6-v2
+local-embeddings = []
+
 [dependencies]
 rollball-core.workspace = true
 rollball-memory.workspace = true
@@ -41,6 +46,7 @@ toml.workspace = true
 
 [dev-dependencies]
 rollball-core = { workspace = true }
+rollball-gateway = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
