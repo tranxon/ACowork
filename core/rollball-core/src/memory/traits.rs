@@ -10,11 +10,17 @@ use serde_json::Value;
 use crate::error::Result;
 
 /// Memory node with metadata
+///
+/// ⚠️ NOTE: The `zone` field is defined but NOT currently used in Phase 1-3.
+/// Zone functionality is deferred to Phase 4+. Currently all nodes belong to
+/// the `default` zone. See docs/05-memory.md §8.2 for details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryNode {
     pub id: String,
     pub content: String,
     pub metadata: Value,
+    /// Business scenario zone (e.g., "work", "personal", "system").
+    /// ⚠️ UNUSED in Phase 1-3. Reserved for Phase 4+.
     pub zone: String,
     pub privacy_level: PrivacyLevel,
 }
@@ -43,5 +49,6 @@ pub trait MemoryStore: Send + Sync {
     async fn delete(&self, id: &str) -> Result<()>;
 
     /// List all memory nodes in a zone
+    /// ⚠️ NOT IMPLEMENTED in GrafeoStore (Phase 1-3). Reserved for Phase 4+.
     async fn list_by_zone(&self, zone: &str) -> Result<Vec<MemoryNode>>;
 }
