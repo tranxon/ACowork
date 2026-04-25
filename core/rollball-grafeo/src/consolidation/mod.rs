@@ -11,9 +11,17 @@
 //!   Phase 3.
 
 pub mod ambiguous;
+pub mod conflict_llm;
+pub mod generalization;
 pub mod instant;
 pub mod offline;
+pub mod scheduler;
+pub mod triple_extraction;
 
 pub use ambiguous::AmbiguousConflict;
+pub use conflict_llm::{LlmConflictType, ConflictClassification, classify_conflict};
+pub use generalization::{BehaviorPattern, GeneralizationConfig, GeneralizationResult, PatternCategory, detect_simple_patterns, discover_patterns_llm};
 pub use instant::{ConflictCandidate, MemoryStoreInput, ConflictResolutionDetail, ProcessResult};
 pub use offline::{OfflineConsolidationConfig, OfflineConsolidationResult};
+pub use scheduler::{ConsolidationScheduler, SchedulerConfig, ConsolidationRun, TriggerReason};
+pub use triple_extraction::{ExtractedTriple, ExtractionResult, LlmMessage, LlmResponse, TripleExtractorLlm};

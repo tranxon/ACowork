@@ -1,11 +1,13 @@
 //! Offline consolidation — background upgrade of Pending knowledge nodes.
 //!
 //! Phase 2 implements a simple age-and-evidence upgrade strategy.
-//! Phase 3 will add full LLM-based re-evaluation of pending nodes.
+//! Phase 3 adds full LLM-based re-evaluation and generalization.
 
 use chrono::{TimeDelta, Utc};
 use grafeo_common::types::Value;
 
+use crate::consolidation::generalization::GeneralizationConfig;
+use crate::consolidation::triple_extraction::TripleExtractorLlm;
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::types::{labels, KnowledgeNode, NodeStatus};
@@ -39,7 +41,7 @@ impl Default for OfflineConsolidationConfig {
 // ---------------------------------------------------------------------------
 
 /// Result of an offline consolidation run.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OfflineConsolidationResult {
     /// Number of nodes upgraded from Pending → Active.
     pub upgraded: usize,
@@ -47,6 +49,10 @@ pub struct OfflineConsolidationResult {
     pub kept_pending: usize,
     /// Number of nodes marked Dormant (low confidence after re-evaluation).
     pub marked_dormant: usize,
+    /// Number of new ProceduralNodes created by generalization.
+    pub procedural_created: usize,
+    /// Number of existing ProceduralNodes boosted by generalization.
+    pub procedural_boosted: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +60,37 @@ pub struct OfflineConsolidationResult {
 // ---------------------------------------------------------------------------
 
 impl GrafeoStore {
+    /// Run offline consolidation on pending nodes, including generalization.
+    ///
+    /// Phase 3 enhancement: after upgrading/downgrading pending KnowledgeNodes,
+    /// runs experience generalization to extract ProceduralNodes from
+    /// unconsolidated episodes (step ④ in the design doc).
+    ///
+    /// The generalization step requires an embedding function. If `None` is
+    /// provided, generalization is skipped.
+    pub async fn run_offline_consolidation_with_generalization(
+        &self,
+        config: &OfflineConsolidationConfig,
+        llm: Option<&dyn TripleExtractorLlm>,
+        embedding_fn: Option<&dyn Fn(&str) -> Vec<f32>>,
+        gen_config: Option<&GeneralizationConfig>,
+    ) -> Result<OfflineConsolidationResult> {
+        // Step 1: Standard offline consolidation (upgrade/downgrade Pending nodes)
+        let mut result = self.run_offline_consolidation(config)?;
+
+        // Step 2: Experience generalization (if embedding function provided)
+        if let Some(emb_fn) = embedding_fn {
+            let gen_config = gen_config.cloned().unwrap_or_default();
+            let gen_result = self
+                .run_generalization(llm, emb_fn, &gen_config)
+                .await?;
+            result.procedural_created = gen_result.nodes_created;
+            result.procedural_boosted = gen_result.nodes_boosted;
+        }
+
+        Ok(result)
+    }
+
     /// Run offline consolidation on pending nodes.
     ///
     /// Phase 2 strategy: upgrade Pending nodes to Active if they are older
@@ -61,7 +98,8 @@ impl GrafeoStore {
     /// evidence threshold). Nodes with very low confidence (< 0.3) are
     /// downgraded to Dormant.
     ///
-    /// Phase 3: Full LLM-based re-evaluation will be added here.
+    /// Phase 3: Full LLM-based re-evaluation is available via
+    /// `run_offline_consolidation_with_generalization`.
     pub fn run_offline_consolidation(
         &self,
         config: &OfflineConsolidationConfig,
