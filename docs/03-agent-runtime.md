@@ -10,6 +10,8 @@ Agent Runtime 是平台提供的唯一二进制可执行文件，类似 Android 
 
 **设计约束：** Agent Runtime 空闲内存占用目标与 ZeroClaw 相当（~5-10 MB）。该目标约束 Runtime 的模块设计——懒初始化（Grafeo、Wasmtime Engine 等重量级模块按需加载）、最小化默认缓存、零后台轮询线程。
 
+> **验证方式**：Phase 3 将通过 `MemoryMetrics` 结构在 Debug 模式下实时报告内存占用，并提供 `/metrics` 端点供 Desktop App 展示。Phase 2 通过 Rust 标准库 `alloc::alloc::GlobalStats`（nightly）或外部 `jemalloc` 统计进行开发阶段验证。目标约束的验证不在 Phase 2 功能范围内。
+
 ```bash
 agent-runtime \
     /path/to/agent-package \

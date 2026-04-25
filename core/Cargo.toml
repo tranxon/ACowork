@@ -88,6 +88,7 @@ regex = "1.0"
 ed25519-dalek = { version = "2.1", features = ["std"] }
 x509-cert = "0.2"
 sha2 = "0.10"
+serde_yaml = "0.9"
 
 # Secret protection
 secrecy = "0.10"

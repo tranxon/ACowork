@@ -44,6 +44,8 @@ Tool Dispatcher
 | `content_search` | 文件内容搜索 | `filesystem:read:<path>` | 类似 grep，支持正则表达式，返回匹配行及上下文 |
 | `intent_send` | 发送 Intent 到其他 Agent | `intent:send:<target>` | 通过 Gateway 路由 |
 | `identity_store` | 写入用户身份信息 | `identity:write` | 系统 Agent 专用，写入/更新用户身份字段（display_name/language/timezone/city 等），带 confidence 和 source 标记，触发 `identity:changed` 通知 |
+| `identity_query` | 查询用户身份信息 | `identity:read` | 查询指定身份字段的值和 confidence，Agent 通过 identity_deps 声明的字段可查询 |
+| `identity_observe` | 订阅身份变更通知 | `identity:observe` | 订阅指定身份字段的变更通知，字段变化时收到 identity:changed 回调 |
 
 ### 2.1 平台支持矩阵
 
@@ -62,6 +64,8 @@ Tool Dispatcher
 | `content_search` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | 全平台，移动端受限 |
 | `intent_send` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
 | `identity_store` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台，系统 Agent 专用 |
+| `identity_query` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台，identity_deps 声明的 Agent 可用 |
+| `identity_observe` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台，订阅身份变更通知 |
 
 > ✅ 完整支持 | ⚠️ 受限支持（行为降级） | ❌ 不可用
 
@@ -484,5 +488,5 @@ LLM 输出 tool_calls: [{name, arguments}, ...]
 | file_edit/glob_search/content_search 内置 | 是 | 文件操作三件套（读+写+编辑+搜索），缺少任一个都会导致 Agent 用 file_write 模拟低效操作 |
 | RAG 工具类型 | 独立 type="rag" | 企业 RAG 是外部服务接入，不是内置工具也不是 WASM 工具，需要独立的声明和执行模型 |
 | RAG 凭据安全 | Vault 引用，运行时获取 | 与内置工具 API Key 管理一致，不明文出现在 manifest 或进程环境变量 |
-| identity_store 专用工具 | 新增第 14 个内置工具 | 身份数据有专属语义（字段级 confidence、变更通知、结构化查询），memory_store 通用 Fact 节点无法自然承载；专用工具有扩展点（字段校验、敏感加密、跨设备同步优先级）；内部实现基于 MemoryManager store 接口，不绕过记忆架构 |
+| identity_store 专用工具 | 新增第 14~15 个内置工具（identity_query + identity_observe） | 身份数据有专属语义（字段级 confidence、变更通知、结构化查询），memory_store 通用 Fact 节点无法自然承载；专用工具有扩展点（字段校验、敏感加密、跨设备同步优先级）；内部实现基于 MemoryManager store 接口，不绕过记忆架构 |
 | identity_store 仅系统 Agent 可用 | 权限 `identity:write` | 系统 Agent 是身份数据唯一写入方；其他 Agent 通过 intent_send 汇报，由系统 Agent LLM 判断后写入 |

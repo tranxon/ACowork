@@ -120,7 +120,6 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     use crate::agent::loop_::AgentLoop;
     use crate::tools::builtin;
     use crate::tools::registry::ToolRegistry;
-    use crate::providers::router::create_provider;
 
     // Step 0: Connect to Gateway if socket path is provided
     let ipc_client = if let Some(socket_path) = config.get_gateway_address() {
@@ -150,14 +149,10 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         "System prompt built"
     );
 
-    // Step 3: Initialize LLM Provider
+    // Step 3: Initialize LLM Provider (with multi-provider routing support)
     let api_key = resolve_api_key(&loaded.manifest);
     let base_url = std::env::var("ROLLBALL_LLM_BASE_URL").ok();
-    let provider = create_provider(
-        &loaded.manifest.llm.provider,
-        api_key.as_deref(),
-        base_url.as_deref(),
-    );
+    let provider = build_runtime_provider(&loaded.manifest, api_key.as_deref(), base_url.as_deref());
     tracing::info!(
         provider = %provider.name(),
         model = %loaded.manifest.llm.model,
@@ -189,8 +184,10 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         &tool_specs,
     );
 
-    // Step 6: Build context builder
+    // Step 6: Build context builder (with identity injection from Gateway)
+    let identity_context = load_identity_delivery(&config.work_dir);
     let context_builder = ContextBuilder::new(system_prompt)
+        .with_identity(identity_context)
         .with_tools(tool_definitions);
 
     // Step 7: Create budget (unlimited for standalone mode)
@@ -214,6 +211,137 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
 
     // Step 9: Run interactive chat loop
     run_chat_loop(&mut agent_loop, &context_builder).await
+}
+
+/// Load identity delivery from the Gateway-injected `.identity_delivery.json`
+/// in the agent workspace.
+///
+/// When Gateway spawns an Agent, it writes identity entries to this file
+/// based on the agent's `identity_deps` manifest declaration.
+/// The Runtime reads this file during cold start and formats it for
+/// System Prompt injection.
+fn load_identity_delivery(work_dir: &str) -> Option<String> {
+    let identity_path = std::path::Path::new(work_dir).join(".identity_delivery.json");
+    if !identity_path.exists() {
+        return None;
+    }
+
+    match std::fs::read_to_string(&identity_path) {
+        Ok(content) => {
+            match serde_json::from_str::<Vec<rollball_core::identity::IdentityEntry>>(&content) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        return None;
+                    }
+                    // Format identity entries as readable text for System Prompt
+                    let mut formatted = String::from("User identity information:\n");
+                    for entry in &entries {
+                        if !entry.value.is_empty() {
+                            formatted.push_str(&format!(
+                                "- {}: {} (confidence: {}%%)\n",
+                                entry.field, entry.value, (entry.confidence * 100.0) as u32
+                            ));
+                        } else {
+                            formatted.push_str(&format!(
+                                "- {}: (not yet provided)\n",
+                                entry.field
+                            ));
+                        }
+                    }
+                    tracing::info!(
+                        entries = entries.len(),
+                        "Identity delivery loaded from workspace"
+                    );
+                    Some(formatted)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse identity delivery: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read identity delivery: {}", e);
+            None
+        }
+    }
+}
+
+/// Build the runtime provider with multi-provider routing support.
+///
+/// When the manifest declares `providers` + `routing`, constructs a
+/// ProviderRegistry and builds a ReliableProvider with fallback chain.
+/// Otherwise falls back to a simple single provider.
+fn build_runtime_provider(
+    manifest: &rollball_core::AgentManifest,
+    default_api_key: Option<&str>,
+    default_base_url: Option<&str>,
+) -> std::sync::Arc<dyn rollball_core::providers::traits::Provider> {
+    use crate::providers::registry::{ProviderRegistry, RoutingStrategy};
+    use crate::providers::router::create_provider;
+
+    // If no multi-provider config, use simple single provider
+    if manifest.llm.providers.is_empty() {
+        return create_provider(
+            &manifest.llm.provider,
+            default_api_key,
+            default_base_url,
+        );
+    }
+
+    // Build ProviderRegistry from manifest
+    let strategy = manifest.llm.routing
+        .as_ref()
+        .map(|r| RoutingStrategy::from_str(&r.strategy))
+        .unwrap_or(RoutingStrategy::QualityPriority);
+
+    let registry = ProviderRegistry::with_strategy(strategy);
+
+    // Register each provider from manifest
+    for (name, config) in &manifest.llm.providers {
+        let api_key = config.api_key_ref.as_deref()
+            .or(default_api_key);
+        let base_url = config.base_url.as_deref()
+            .or(default_base_url);
+        let provider = create_provider(name, api_key, base_url);
+        let models = vec![config.model.clone()];
+        registry.register_provider(name, provider, models);
+    }
+
+    // Also register the primary provider if not already in providers map
+    if !manifest.llm.providers.contains_key(&manifest.llm.provider) {
+        let primary = create_provider(
+            &manifest.llm.provider,
+            default_api_key,
+            default_base_url,
+        );
+        registry.register_provider(
+            &manifest.llm.provider,
+            primary,
+            vec![manifest.llm.model.clone()],
+        );
+    }
+
+    // Build ReliableProvider with fallback chain
+    match registry.build_reliable_provider(&manifest.llm.provider, &manifest.llm.model) {
+        Some(reliable) => {
+            tracing::info!(
+                primary = %manifest.llm.provider,
+                model = %manifest.llm.model,
+                strategy = %strategy,
+                "Built ReliableProvider with fallback chain"
+            );
+            std::sync::Arc::new(reliable)
+        }
+        None => {
+            tracing::warn!("Failed to build ReliableProvider, falling back to single provider");
+            create_provider(
+                &manifest.llm.provider,
+                default_api_key,
+                default_base_url,
+            )
+        }
+    }
 }
 
 /// Resolve API key from environment variables (standalone mode)

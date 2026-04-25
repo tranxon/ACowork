@@ -137,6 +137,8 @@ enum FileSource {
 
 ### 11.3 Shell 命令风险分级
 
+> **Phase 2 实现说明**：Shell 命令风险分级（FileProvenance + ShellRisk + 命令-文件关联分析）完整实现标记为 **Phase 3**。Phase 2 的 Shell 工具仅实现基础沙箱（工作目录限制 + 超时可中断），不做命令风险分级。风险分级需要命令解析、文件来源追踪、工作区文件监控三个子系统协同，复杂度较高，放在 Phase 3 实现。
+
 ```rust
 /// Shell 命令执行前的风险评级
 enum ShellRisk {

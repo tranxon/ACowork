@@ -46,7 +46,7 @@ Gateway 同时为两类消费者提供服务：
 **启动策略：**
 - 按需启动：当收到匹配 trigger 的消息或用户显式调用时启动。
 - 常驻：用户可标记某 Agent 开机自启。
-- 定时启动：由 cron 表达式触发。
+- 定时启动：由 cron 表达式触发。（**Phase 3 实现**，Phase 2 仅支持按需启动和常驻模式）
 
 **进程管理：**
 - 使用 `std::process::Command` 创建子进程，设置独立工作目录、环境变量。
@@ -165,6 +165,8 @@ bwrap \
 - **日志**：Gateway 收集所有 Agent 的 stdout/stderr，写入 `~/.local/share/agent-gateway/logs/`，支持按 Agent 过滤。
 
 ## 9. HTTP API（Desktop App / CLI 接入层）
+
+> **Phase 2 实现状态**：HTTP API 的完整实现（Axum 路由 + WebSocket 流式）降级为 **Phase 3**。Phase 2 优先实现 Socket IPC（Agent Runtime 通信）。HTTP API 的接口定义和路由设计保留在本章作为 Phase 3 实现参考，接口预留已体现在协议设计中（见 §3 Socket API）。
 
 Socket API 是面向 Agent Runtime 进程间通信设计的二进制帧协议，不适合 WebView 直接调用或 CLI 工具消费。为此，Gateway 新增一层 HTTP API，作为 Desktop App 和 CLI 的统一接入点。
 

@@ -664,6 +664,8 @@ LLM 生成回复（含 tool call 判断）
 
 ### 4.2 离线巩固（Phase 3）
 
+> **实现状态**：离线巩固的完整实现（空闲检测 + 批量回放 + 关联发现 + 冲突分类）标记为 **Phase 3**。Phase 2 仅实现了即时提取（Tool Call）+ 按需遗忘计算。离线巩固的触发机制和专用 LLM 调用将在 Phase 3 实现。
+
 即时提取（Tool Call）覆盖了"显式信息的即时记忆"，但有两类信息它处理不了：
 
 1. **隐式关联**：用户三次提到上海，但每次都没说"我住在上海"——Tool Call 不会触发，但离线回放可以发现"用户可能常住上海"
@@ -808,6 +810,8 @@ activity_signal = clamp(recency_boost + access_boost, FLOOR, 1.0)
 遗忘策略分两步：**先统一计算 decay_score，再按节点类型决定动作**。
 
 **所有节点类型的 Active → Dormant 阈值统一为 0.3。** 区别仅在于 Dormant 之后是否有 Purge 路径。
+
+> **Phase 2 实现说明**：遗忘机制采用**按需计算模型**而非后台定期扫描。每个 Agent 拥有私有 Grafeo，后台 decay 扫描会重复扫描所有 Agent 的全部节点，在 Agent 数量增长时资源开销过大。按需计算模型在查询时（`hybrid_search`）实时计算 decay_score 并过滤，语义等价但资源效率更高。后台扫描作为 Phase 3 可选优化项。
 
 ```
 后台定期扫描（每小时一次，可配置）

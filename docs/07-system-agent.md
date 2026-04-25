@@ -215,6 +215,8 @@ Agent 在日常对话中自动提取用户透露的身份信息，通过 `identi
 
 三条路径最终都调用 `identity_store` 工具（系统 Agent 专用，第 14 个内置工具，见 12-tool-system.md §2.3），由系统 Agent 的 LLM 做二次质量判断：
 
+> **Phase 2 实现说明**：Phase 2 中身份提报采用**直接写入**模式——来源提报直接写入 Grafeo，不做 LLM 二次判断。LLM 二次质量判断作为 **Phase 3** 增强，需要更完善的 System Agent prompt 工程和上下文管理。Phase 2 的直接写入模式已能满足基本身份管理需求。
+
 ```
 来源提报 → 系统 Agent LLM 判断 → identity_store 写入
   ├─ 语义有效 → 写入 Grafeo

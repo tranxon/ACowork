@@ -8,8 +8,10 @@ use crate::error::Result;
 /// Classification of LLM provider error conditions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ProviderErrorType {
-    /// HTTP 429 — rate limited by the provider.
+    /// HTTP 429 — rate limited by the provider (retryable after backoff).
     RateLimited,
+    /// HTTP 402 — payment required / insufficient quota (NOT retryable).
+    PaymentRequired,
     /// HTTP 401/403 — authentication or authorization failure.
     Unauthorized,
     /// HTTP 5xx — transient server-side failure.
@@ -40,6 +42,7 @@ impl ProviderError {
     /// Automatically infers `error_type` and `retryable`.
     pub fn from_status_code(status: u16, message: String) -> Self {
         let (error_type, retryable) = match status {
+            402 => (ProviderErrorType::PaymentRequired, false),
             429 => (ProviderErrorType::RateLimited, true),
             401 | 403 => (ProviderErrorType::Unauthorized, false),
             500..=599 => (ProviderErrorType::ServerError, true),
@@ -101,6 +104,17 @@ impl ProviderError {
             status_code: Some(500),
             error_type: ProviderErrorType::ServerError,
             retryable: true,
+        }
+    }
+
+    /// Convenience constructor for payment required / insufficient quota errors.
+    /// These are NOT retryable — the user needs to add funds or upgrade their plan.
+    pub fn payment_required(message: String) -> Self {
+        Self {
+            message,
+            status_code: Some(402),
+            error_type: ProviderErrorType::PaymentRequired,
+            retryable: false,
         }
     }
 }
@@ -278,5 +292,23 @@ mod tests {
         let display_no_code = format!("{err_no_code}");
         assert!(display_no_code.contains("DNS error"));
         assert!(display_no_code.contains("retryable=true"));
+    }
+
+    #[test]
+    fn test_provider_error_from_status_402() {
+        let err = ProviderError::from_status_code(402, "Insufficient quota".to_string());
+        assert_eq!(err.status_code, Some(402));
+        assert_eq!(err.error_type, ProviderErrorType::PaymentRequired);
+        assert!(!err.retryable);
+        assert_eq!(err.message, "Insufficient quota");
+    }
+
+    #[test]
+    fn test_provider_error_payment_required_constructor() {
+        let err = ProviderError::payment_required("Billing limit reached".to_string());
+        assert_eq!(err.status_code, Some(402));
+        assert_eq!(err.error_type, ProviderErrorType::PaymentRequired);
+        assert!(!err.retryable);
+        assert_eq!(err.message, "Billing limit reached");
     }
 }

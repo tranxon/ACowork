@@ -20,6 +20,11 @@ impl LifecycleManager {
     }
 
     /// Start an agent process
+    ///
+    /// If the agent declares `identity_deps` in its manifest, builds
+    /// an identity delivery payload and writes it to the agent's
+    /// workspace so the Runtime can inject it into the System Prompt
+    /// during cold start.
     pub async fn start_agent(
         &mut self,
         agent_id: &str,
@@ -39,6 +44,25 @@ impl LifecycleManager {
         let workspace = PathBuf::from(&info.install_path).join("workspace");
         std::fs::create_dir_all(&workspace)
             .map_err(|e| GatewayError::Lifecycle(format!("Failed to create workspace: {}", e)))?;
+
+        // Build and deliver identity payload (cold-start injection)
+        let identity_entries = self.build_identity_delivery(agent_id, state);
+        if !identity_entries.is_empty() {
+            let identity_path = workspace.join(".identity_delivery.json");
+            let json = serde_json::to_string(&identity_entries)
+                .map_err(|e| GatewayError::Lifecycle(
+                    format!("Failed to serialize identity delivery: {}", e)
+                ))?;
+            std::fs::write(&identity_path, json)
+                .map_err(|e| GatewayError::Lifecycle(
+                    format!("Failed to write identity delivery: {}", e)
+                ))?;
+            tracing::info!(
+                agent_id,
+                entries = identity_entries.len(),
+                "Identity delivery written to workspace"
+            );
+        }
 
         // Spawn the agent process
         let child = spawn_agent_process(
@@ -106,30 +130,57 @@ impl LifecycleManager {
     ///
     /// Queries the System Agent's Grafeo for the fields specified
     /// in the agent's identity_deps and returns them as IdentityEntry list.
-    /// In Phase 2, this returns a placeholder — actual Grafeo query
-    /// requires the System Agent to be running and accessible via IPC.
+    ///
+    /// Current implementation uses well-known field definitions with
+    /// placeholder values. When System Agent IPC is fully connected,
+    /// this will query the System Agent's IdentityStore via IPC.
     pub fn build_identity_delivery(
         &self,
         agent_id: &str,
         state: &GatewayState,
     ) -> Vec<rollball_core::identity::IdentityEntry> {
+        use rollball_core::identity::{IdentityEntry, find_field_def};
+
         let deps = self.get_identity_deps(agent_id, state);
         if deps.is_empty() {
             return Vec::new();
         }
 
-        // Phase 2: Return placeholder entries.
-        // When System Agent IPC is fully connected, this will:
-        // 1. Send IdentityQuery { fields: deps } to System Agent
-        // 2. Receive IdentityQueryResult with values + confidence
-        // 3. Convert to IdentityEntry list
         tracing::info!(
             "Building identity delivery for {}: fields {:?}",
             agent_id,
             deps
         );
 
-        Vec::new() // Placeholder — will be populated from System Agent query
+        // Build entries from well-known field definitions.
+        // When System Agent IPC is connected, this will be replaced with:
+        // 1. Send IdentityQuery { fields: deps } to System Agent
+        // 2. Receive IdentityQueryResult with values + confidence
+        // 3. Convert to IdentityEntry list
+        let now = chrono::Utc::now().to_rfc3339();
+        let entries: Vec<IdentityEntry> = deps.iter().filter_map(|field| {
+            find_field_def(field).map(|def| {
+                IdentityEntry {
+                    field: field.clone(),
+                    value: String::new(), // Will be populated from System Agent query
+                    confidence: 0.0,
+                    category: def.category,
+                    privacy: def.privacy,
+                    source: "cold_start_delivery".to_string(),
+                    updated_at: now.clone(),
+                }
+            })
+        }).collect();
+
+        if !entries.is_empty() {
+            tracing::info!(
+                agent_id,
+                entries = entries.len(),
+                "Identity delivery built (values pending System Agent query)"
+            );
+        }
+
+        entries
     }
 
     /// Stop a running agent process
@@ -263,5 +314,52 @@ mod tests {
         let state = GatewayState::new(&dir);
         let entries = mgr.build_identity_delivery("com.test.unknown", &state);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_build_identity_delivery_with_known_fields() {
+        use crate::gateway::state::AgentInfo;
+        use rollball_core::identity::IdentityCategory;
+
+        let mgr = LifecycleManager::new(300);
+        let dir = temp_vault_dir("identity-fields");
+        let mut state = GatewayState::new(&dir);
+
+        // Install an agent with identity_deps
+        let toml_str = r#"
+            agent_id = "com.test.identity"
+            version = "1.0.0"
+            name = "Identity Test Agent"
+            description = "Test agent with identity deps"
+            author = "test"
+            runtime_version = "0.1.0"
+            identity_deps = ["display_name", "city", "language"]
+
+            [llm]
+            provider = "openai"
+            model = "gpt-4"
+        "#;
+        let manifest = rollball_core::AgentManifest::from_toml(toml_str).unwrap();
+        state.add_installed(AgentInfo {
+            agent_id: "com.test.identity".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Identity Test Agent".to_string(),
+            install_path: dir.clone(),
+            manifest,
+        });
+
+        let entries = mgr.build_identity_delivery("com.test.identity", &state);
+        assert_eq!(entries.len(), 3);
+
+        // Check that well-known fields have correct categories
+        let display_name = entries.iter().find(|e| e.field == "display_name").unwrap();
+        assert_eq!(display_name.category, IdentityCategory::Identity);
+        assert_eq!(display_name.source, "cold_start_delivery");
+
+        let city = entries.iter().find(|e| e.field == "city").unwrap();
+        assert_eq!(city.category, IdentityCategory::Identity);
+
+        let language = entries.iter().find(|e| e.field == "language").unwrap();
+        assert_eq!(language.category, IdentityCategory::Preferences);
     }
 }
