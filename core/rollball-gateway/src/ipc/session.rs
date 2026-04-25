@@ -1,9 +1,17 @@
 //! Connection session management
-//!
+//
 //! Each connected Agent Runtime has a session with identity,
-//! budget state, and message correlation.
+//! budget state, message correlation, and a server-push channel
+//! for delivering Intent messages and Capability updates.
 
 use std::collections::HashMap;
+use tokio::sync::mpsc;
+use rollball_core::protocol::GatewayResponse;
+
+/// Server-push channel sender for a connection.
+/// When the Gateway needs to push a message to an Agent
+/// (e.g., IntentReceived, CapabilityUpdate), it sends via this channel.
+pub type PushSender = mpsc::Sender<GatewayResponse>;
 
 /// Session state for a connected Agent Runtime
 pub struct Session {
@@ -15,6 +23,8 @@ pub struct Session {
     pub authenticated: bool,
     /// Request ID counter
     next_request_id: u64,
+    /// Server-push channel for delivering messages to this Agent
+    push_tx: Option<PushSender>,
 }
 
 impl Session {
@@ -25,6 +35,18 @@ impl Session {
             authenticated: false,
             pending_requests: HashMap::new(),
             next_request_id: 1,
+            push_tx: None,
+        }
+    }
+
+    /// Create a new session with a server-push channel
+    pub fn with_push_channel(push_tx: PushSender) -> Self {
+        Self {
+            agent_id: None,
+            authenticated: false,
+            pending_requests: HashMap::new(),
+            next_request_id: 1,
+            push_tx: Some(push_tx),
         }
     }
 
@@ -44,6 +66,21 @@ impl Session {
     /// Check if session is authenticated
     pub fn is_authenticated(&self) -> bool {
         self.authenticated
+    }
+
+    /// Get the server-push channel sender (if set)
+    pub fn push_sender(&self) -> Option<&PushSender> {
+        self.push_tx.as_ref()
+    }
+
+    /// Try to push a message to this session's Agent.
+    /// Returns false if the channel is closed or not set.
+    pub async fn push_message(&self, msg: GatewayResponse) -> bool {
+        if let Some(tx) = &self.push_tx {
+            tx.send(msg).await.is_ok()
+        } else {
+            false
+        }
     }
 }
 
@@ -69,6 +106,12 @@ impl SessionManager {
     pub fn create_session(&mut self, conn_id: &str) -> &mut Session {
         self.sessions.entry(conn_id.to_string())
             .or_default()
+    }
+
+    /// Create a new session with a server-push channel
+    pub fn create_session_with_push(&mut self, conn_id: &str, push_tx: PushSender) -> &mut Session {
+        self.sessions.entry(conn_id.to_string())
+            .or_insert_with(|| Session::with_push_channel(push_tx))
     }
 
     /// Get a session by connection ID

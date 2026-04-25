@@ -23,7 +23,7 @@ impl VaultFacade {
     /// to derive the master key and enable store/retrieve operations.
     pub fn new(vault_dir: &str) -> Self {
         let vault = rollball_vault::Vault::open(std::path::Path::new(vault_dir))
-            .expect("Failed to open vault directory");
+            .unwrap_or_else(|e| panic!("Failed to open vault directory '{}': {}", vault_dir, e));
         Self {
             vault,
             provider_names: Vec::new(),

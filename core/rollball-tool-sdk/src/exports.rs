@@ -7,7 +7,7 @@ use std::cell::RefCell;
 
 thread_local! {
     /// Output buffer for returning results to the host.
-    static OUTPUT_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static OUTPUT_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Write output to the thread-local buffer and return pointer.

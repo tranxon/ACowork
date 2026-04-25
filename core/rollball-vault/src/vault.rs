@@ -37,10 +37,10 @@ impl Vault {
     pub fn open(vault_dir: &Path) -> Result<Self> {
         // create_dir_all may return AlreadyExists on Windows when
         // concurrent tests create the same directory — treat that as success.
-        if let Err(e) = fs::create_dir_all(vault_dir) {
-            if !vault_dir.is_dir() {
-                return Err(e.into());
-            }
+        if let Err(e) = fs::create_dir_all(vault_dir)
+            && !vault_dir.is_dir()
+        {
+            return Err(e.into());
         }
         Ok(Self {
             vault_dir: vault_dir.to_path_buf(),

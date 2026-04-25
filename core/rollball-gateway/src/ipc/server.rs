@@ -39,25 +39,43 @@ type SharedSessionMgr = Arc<Mutex<SessionManager>>;
 pub struct IpcServer {
     endpoint: String,
     perm_store: SharedPermissionStore,
+    /// Broadcast channel for CapabilityUpdate push notifications.
+    /// When an agent is installed/uninstalled, a CapabilityUpdate message
+    /// is broadcast to all connected Agent sessions.
+    capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
 }
+
+/// Default broadcast channel capacity for capability updates
+const CAPABILITY_BROADCAST_CAPACITY: usize = 64;
 
 impl IpcServer {
     /// Create new IPC server
     pub fn new(endpoint: &str) -> Self {
         let perm_store = crate::permission_store::PermissionStore::open_in_memory()
             .expect("Failed to create in-memory permission store");
+        let (capability_tx, _) = tokio::sync::broadcast::channel(CAPABILITY_BROADCAST_CAPACITY);
         Self {
             endpoint: endpoint.to_string(),
             perm_store: Arc::new(perm_store),
+            capability_tx,
         }
     }
 
     /// Create IPC server with an existing permission store
     pub fn with_permission_store(endpoint: &str, perm_store: SharedPermissionStore) -> Self {
+        let (capability_tx, _) = tokio::sync::broadcast::channel(CAPABILITY_BROADCAST_CAPACITY);
         Self {
             endpoint: endpoint.to_string(),
             perm_store,
+            capability_tx,
         }
+    }
+
+    /// Get a sender for broadcasting capability updates.
+    /// Use this from HTTP API handlers to push CapabilityUpdate
+    /// to all connected Agent sessions when install/uninstall occurs.
+    pub fn capability_sender(&self) -> tokio::sync::broadcast::Sender<GatewayResponse> {
+        self.capability_tx.clone()
     }
 
     /// Start the server (async, multi-connection)
@@ -77,6 +95,7 @@ impl IpcServer {
             Arc::new(Mutex::new(SessionManager::new()));
         let conn_counter = AtomicU64::new(0);
         let perm_store = Arc::clone(&self.perm_store);
+        let capability_tx = self.capability_tx.clone();
 
         loop {
             let conn = server.accept().await?;
@@ -88,16 +107,13 @@ impl IpcServer {
             let state = Arc::clone(&state);
             let session_mgr = Arc::clone(&session_mgr);
             let perm_store = Arc::clone(&perm_store);
+            let cap_rx = capability_tx.subscribe();
 
             tokio::spawn(async move {
-                // Create session
-                {
-                    let mut mgr = session_mgr.lock().await;
-                    mgr.create_session(&conn_id);
-                }
+                // Session is created inside handle_connection with push channel
 
                 if let Err(e) =
-                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store).await
+                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store, cap_rx).await
                 {
                     tracing::warn!("Connection {} error: {}", conn_id, e);
                 }
@@ -115,35 +131,91 @@ impl IpcServer {
 
 // ── Connection handler (platform-agnostic) ─────────────────────────────────
 
-/// Handle a single connection's request/response loop
+/// Handle a single connection's request/response loop.
+///
+/// Uses a `tokio::select!` to multiplex:
+/// 1. Incoming requests from the Agent (recv_frame)
+/// 2. Server-push messages (IntentReceived)
+/// 3. CapabilityUpdate broadcast messages
 async fn handle_connection(
     mut conn: Box<dyn AsyncTransportConnection>,
     conn_id: &str,
     state: SharedState,
     session_mgr: &SharedSessionMgr,
     perm_store: &SharedPermissionStore,
+    mut cap_rx: tokio::sync::broadcast::Receiver<GatewayResponse>,
 ) -> Result<(), RollballError> {
+    // Create server-push channel for this connection
+    let (push_tx, mut push_rx) = tokio::sync::mpsc::channel::<GatewayResponse>(32);
+
+    // Register session with push channel
+    {
+        let mut mgr = session_mgr.lock().await;
+        mgr.create_session_with_push(conn_id, push_tx);
+    }
+
     loop {
-        let frame = match conn.recv_frame().await? {
-            Some(f) => f,
-            None => return Ok(()), // Connection closed
-        };
+        tokio::select! {
+            // Branch 1: Incoming request from Agent
+            frame_result = conn.recv_frame() => {
+                let frame = match frame_result? {
+                    Some(f) => f,
+                    None => return Ok(()), // Connection closed
+                };
 
-        if frame.msg_type == Frame::TYPE_REQUEST {
-            let request: GatewayRequest = frame.to_message().map_err(|e| {
-                RollballError::Ipc(format!("Failed to decode request: {}", e))
-            })?;
+                if frame.msg_type == Frame::TYPE_REQUEST {
+                    let request: GatewayRequest = frame.to_message().map_err(|e| {
+                        RollballError::Ipc(format!("Failed to decode request: {}", e))
+                    })?;
 
-            tracing::debug!("Received request from {}: {:?}", conn_id, request);
+                    tracing::debug!("Received request from {}: {:?}", conn_id, request);
 
-            let response =
-                dispatch_request(request, conn_id, &state, session_mgr, perm_store).await;
+                    let response =
+                        dispatch_request(request, conn_id, &state, session_mgr, perm_store).await;
 
-            let resp_frame =
-                Frame::from_message(Frame::TYPE_RESPONSE, &response)
-                    .map_err(|e| RollballError::Ipc(format!("Failed to encode response: {}", e)))?;
+                    let resp_frame =
+                        Frame::from_message(Frame::TYPE_RESPONSE, &response)
+                            .map_err(|e| RollballError::Ipc(format!("Failed to encode response: {}", e)))?;
 
-            conn.send_frame(&resp_frame).await?;
+                    conn.send_frame(&resp_frame).await?;
+                }
+            }
+            // Branch 2: Server-push message (IntentReceived)
+            push_msg = push_rx.recv() => {
+                match push_msg {
+                    Some(msg) => {
+                        tracing::debug!("Server-push to {}: {:?}", conn_id, msg);
+                        let push_frame =
+                            Frame::from_message(Frame::TYPE_RESPONSE, &msg)
+                                .map_err(|e| RollballError::Ipc(format!("Failed to encode push: {}", e)))?;
+                        conn.send_frame(&push_frame).await?;
+                    }
+                    None => {
+                        // Push channel closed — should not happen normally
+                        tracing::warn!("Push channel closed for {}", conn_id);
+                        return Ok(());
+                    }
+                }
+            }
+            // Branch 3: CapabilityUpdate broadcast (install/uninstall)
+            cap_msg = cap_rx.recv() => {
+                match cap_msg {
+                    Ok(msg) => {
+                        tracing::debug!("CapabilityUpdate broadcast to {}: {:?}", conn_id, msg);
+                        let cap_frame =
+                            Frame::from_message(Frame::TYPE_RESPONSE, &msg)
+                                .map_err(|e| RollballError::Ipc(format!("Failed to encode capability update: {}", e)))?;
+                        conn.send_frame(&cap_frame).await?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("CapabilityUpdate channel lagged for {}: skipped {} messages", conn_id, n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // All senders dropped — no more capability updates
+                        tracing::info!("CapabilityUpdate channel closed for {}", conn_id);
+                    }
+                }
+            }
         }
     }
 }
@@ -313,6 +385,45 @@ async fn handle_intent_send(
         // S4.1.2: Target not running — need auto-spawn
         // This is coordinated by the Gateway layer (LifecycleManager)
         tracing::info!("IntentSend: target '{}' not running, auto-spawn needed", target);
+    } else {
+        // S4.1.3: Target is running — push IntentReceived to target Agent
+        let target_conn_id = {
+            let mgr = session_mgr.lock().await;
+            mgr.find_by_agent_id(target).map(|(conn_id, _)| conn_id.clone())
+        };
+
+        if let Some(target_conn) = target_conn_id {
+            let pushed = {
+                let mgr = session_mgr.lock().await;
+                if let Some(session) = mgr.get_session(&target_conn) {
+                    let intent_msg = GatewayResponse::IntentReceived {
+                        from: from.clone(),
+                        action: action.to_string(),
+                        params: _params.clone(),
+                    };
+                    session.push_message(intent_msg).await
+                } else {
+                    false
+                }
+            };
+
+            if pushed {
+                tracing::info!(
+                    "Intent forwarded: from={} to={} action={} via conn={}",
+                    from, target, action, target_conn
+                );
+            } else {
+                tracing::warn!(
+                    "Intent push failed: target {} conn {} channel closed",
+                    target, target_conn
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Intent target '{}' is running but has no IPC session",
+                target
+            );
+        }
     }
 
     // S4.1.4: For async intents, the response will be delivered via callback
@@ -1035,5 +1146,179 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S4.1.3: Test that IntentSend pushes IntentReceived to the target's session
+    #[tokio::test]
+    async fn test_intent_push_to_target_session() {
+        let dir = temp_vault_dir("intent_push");
+        let state: SharedState =
+            Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
+        let _perm_store: SharedPermissionStore =
+            Arc::new(crate::permission_store::PermissionStore::open_in_memory().unwrap());
+
+        // Simulate target agent's session with a push channel
+        let (push_tx, mut push_rx) = tokio::sync::mpsc::channel::<GatewayResponse>(8);
+        {
+            let mut mgr = session_mgr.lock().await;
+            mgr.create_session_with_push("conn-target", push_tx);
+            mgr.get_session_mut("conn-target")
+                .unwrap()
+                .authenticate("com.example.target");
+        }
+
+        // Mark target as installed and running
+        {
+            let mut guard = state.write().await;
+            let toml_str = r#"
+                agent_id = "com.example.target"
+                version = "1.0.0"
+                name = "Target"
+                description = "target agent"
+                author = "test"
+                runtime_version = "0.1.0"
+                [llm]
+                provider = "openai"
+                model = "gpt-4"
+            "#;
+            let manifest = rollball_core::AgentManifest::from_toml(toml_str).unwrap();
+            guard.add_installed(crate::gateway::state::AgentInfo {
+                agent_id: "com.example.target".to_string(),
+                version: "1.0.0".to_string(),
+                name: "Target".to_string(),
+                install_path: "/tmp/test".to_string(),
+                manifest,
+            });
+            guard.add_running(crate::gateway::state::RunningAgentInfo {
+                agent_id: "com.example.target".to_string(),
+                pid: 1234,
+                started_at: chrono::Utc::now(),
+                workspace: "/tmp/test".to_string(),
+            });
+        }
+
+        // Simulate sender's session
+        {
+            let mut mgr = session_mgr.lock().await;
+            mgr.create_session("conn-sender");
+            mgr.get_session_mut("conn-sender")
+                .unwrap()
+                .authenticate("com.example.sender");
+        }
+
+        // Call handle_intent_send
+        let response = handle_intent_send(
+            "com.example.target",
+            "weather_query",
+            &serde_json::json!({"city": "Shanghai"}),
+            false,
+            "conn-sender",
+            &state,
+            &session_mgr,
+        )
+        .await;
+
+        // Verify the immediate response is IntentDelivered
+        match &response {
+            GatewayResponse::IntentDelivered { message_id } => {
+                assert!(!message_id.starts_with("error:"));
+            }
+            _ => panic!("Expected IntentDelivered, got {:?}", response),
+        }
+
+        // Verify the target received IntentReceived via push channel
+        let pushed_msg = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            push_rx.recv(),
+        )
+        .await
+        .expect("Timeout waiting for push message")
+        .expect("Push channel closed");
+
+        match &pushed_msg {
+            GatewayResponse::IntentReceived {
+                from,
+                action,
+                params,
+            } => {
+                assert_eq!(from, "com.example.sender");
+                assert_eq!(action, "weather_query");
+                assert_eq!(params["city"], "Shanghai");
+            }
+            _ => panic!("Expected IntentReceived, got {:?}", pushed_msg),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S4.2.5: Test capability broadcast pushes CapabilityUpdate to subscribers
+    #[tokio::test]
+    async fn test_capability_broadcast_to_sessions() {
+        let (capability_tx, mut cap_rx1) =
+            tokio::sync::broadcast::channel::<GatewayResponse>(CAPABILITY_BROADCAST_CAPACITY);
+        let mut cap_rx2 = capability_tx.subscribe();
+
+        // Simulate an install event — broadcast CapabilityUpdate
+        let update = GatewayResponse::CapabilityUpdate {
+            agent_id: "com.example.weather".to_string(),
+            actions: vec!["query".to_string(), "forecast".to_string()],
+            removed: false,
+        };
+        capability_tx.send(update.clone()).unwrap();
+
+        // Both subscribers should receive the update
+        let msg1 = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            cap_rx1.recv(),
+        )
+        .await
+        .expect("Timeout waiting for broadcast on subscriber 1")
+        .expect("Channel closed");
+
+        let msg2 = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            cap_rx2.recv(),
+        )
+        .await
+        .expect("Timeout waiting for broadcast on subscriber 2")
+        .expect("Channel closed");
+
+        match (&msg1, &msg2) {
+            (
+                GatewayResponse::CapabilityUpdate { agent_id, actions, removed },
+                GatewayResponse::CapabilityUpdate { .. },
+            ) => {
+                assert_eq!(agent_id, "com.example.weather");
+                assert_eq!(actions.len(), 2);
+                assert!(!removed);
+            }
+            _ => panic!("Expected CapabilityUpdate, got {:?} and {:?}", msg1, msg2),
+        }
+
+        // Simulate an uninstall event
+        let remove_update = GatewayResponse::CapabilityUpdate {
+            agent_id: "com.example.weather".to_string(),
+            actions: vec![],
+            removed: true,
+        };
+        capability_tx.send(remove_update.clone()).unwrap();
+
+        let msg3 = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            cap_rx1.recv(),
+        )
+        .await
+        .expect("Timeout waiting for uninstall broadcast")
+        .expect("Channel closed");
+
+        match &msg3 {
+            GatewayResponse::CapabilityUpdate { agent_id, actions, removed } => {
+                assert_eq!(agent_id, "com.example.weather");
+                assert!(actions.is_empty());
+                assert!(*removed);
+            }
+            _ => panic!("Expected CapabilityUpdate (removed), got {:?}", msg3),
+        }
     }
 }
