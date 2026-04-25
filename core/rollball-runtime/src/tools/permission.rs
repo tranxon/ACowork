@@ -17,9 +17,9 @@
 //! | glob_search | filesystem:read:<path> |
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
-//! | identity_store | identity:write → IntentSend |
-//! | identity_query | identity:read → MemoryRead |
-//! | identity_observe | identity:read → MemoryRead |
+//! | identity_store | identity:write |
+//! | identity_query | identity:read |
+//! | identity_observe | identity:read |
 
 use rollball_core::permission::Permission;
 use rollball_core::AgentManifest;
@@ -36,8 +36,8 @@ pub fn tool_required_permission(tool_name: &str) -> Option<Permission> {
         "file_read" | "glob_search" | "content_search" => Some(Permission::FilesystemRead(None)),
         "file_write" | "file_edit" => Some(Permission::FilesystemWrite(None)),
         "intent_send" => Some(Permission::IntentSend(None)),
-        "identity_store" => Some(Permission::IntentSend(None)), // identity:write → IntentSend broad permission
-        "identity_query" | "identity_observe" => Some(Permission::MemoryRead), // identity:read → MemoryRead
+        "identity_store" => Some(Permission::IdentityWrite),
+        "identity_query" | "identity_observe" => Some(Permission::IdentityRead),
         _ => None,
     }
 }
@@ -111,6 +111,9 @@ mod tests {
 
             [[permissions]]
             type = "IntentSend"
+
+            [[permissions]]
+            type = "IdentityWrite"
 
             [[tools]]
             name = "shell"
@@ -187,7 +190,7 @@ mod tests {
     #[test]
     fn test_tool_required_permission_identity_store() {
         let perm = tool_required_permission("identity_store").unwrap();
-        assert!(matches!(perm, Permission::IntentSend(None)));
+        assert!(matches!(perm, Permission::IdentityWrite));
     }
 
     #[test]

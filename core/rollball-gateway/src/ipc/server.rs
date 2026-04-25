@@ -17,6 +17,7 @@ use tokio::sync::{RwLock, Mutex};
 use rollball_core::protocol::{Frame, GatewayRequest, GatewayResponse};
 use rollball_core::transport::AsyncTransportConnection;
 use rollball_core::error::RollballError;
+use rollball_core::permission::{Permission, PermissionGrant, PermissionPolicy};
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::ipc::session::SessionManager;
@@ -27,19 +28,35 @@ use crate::ipc::transport;
 /// budget query) with occasional writes (install/uninstall).
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
+/// Shared permission store type.
+/// PermissionStore internally uses Mutex<Connection> for thread safety.
+pub type SharedPermissionStore = Arc<crate::permission_store::PermissionStore>;
+
 /// Shared session manager type
 type SharedSessionMgr = Arc<Mutex<SessionManager>>;
 
 /// IPC server (async, multi-connection, platform-agnostic)
 pub struct IpcServer {
     endpoint: String,
+    perm_store: SharedPermissionStore,
 }
 
 impl IpcServer {
     /// Create new IPC server
     pub fn new(endpoint: &str) -> Self {
+        let perm_store = crate::permission_store::PermissionStore::open_in_memory()
+            .expect("Failed to create in-memory permission store");
         Self {
             endpoint: endpoint.to_string(),
+            perm_store: Arc::new(perm_store),
+        }
+    }
+
+    /// Create IPC server with an existing permission store
+    pub fn with_permission_store(endpoint: &str, perm_store: SharedPermissionStore) -> Self {
+        Self {
+            endpoint: endpoint.to_string(),
+            perm_store,
         }
     }
 
@@ -59,6 +76,7 @@ impl IpcServer {
         let session_mgr: SharedSessionMgr =
             Arc::new(Mutex::new(SessionManager::new()));
         let conn_counter = AtomicU64::new(0);
+        let perm_store = Arc::clone(&self.perm_store);
 
         loop {
             let conn = server.accept().await?;
@@ -69,6 +87,7 @@ impl IpcServer {
 
             let state = Arc::clone(&state);
             let session_mgr = Arc::clone(&session_mgr);
+            let perm_store = Arc::clone(&perm_store);
 
             tokio::spawn(async move {
                 // Create session
@@ -78,7 +97,7 @@ impl IpcServer {
                 }
 
                 if let Err(e) =
-                    handle_connection(conn, &conn_id, state, &session_mgr).await
+                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store).await
                 {
                     tracing::warn!("Connection {} error: {}", conn_id, e);
                 }
@@ -102,6 +121,7 @@ async fn handle_connection(
     conn_id: &str,
     state: SharedState,
     session_mgr: &SharedSessionMgr,
+    perm_store: &SharedPermissionStore,
 ) -> Result<(), RollballError> {
     loop {
         let frame = match conn.recv_frame().await? {
@@ -117,7 +137,7 @@ async fn handle_connection(
             tracing::debug!("Received request from {}: {:?}", conn_id, request);
 
             let response =
-                dispatch_request(request, conn_id, &state, session_mgr).await;
+                dispatch_request(request, conn_id, &state, session_mgr, perm_store).await;
 
             let resp_frame =
                 Frame::from_message(Frame::TYPE_RESPONSE, &response)
@@ -137,6 +157,7 @@ async fn dispatch_request(
     conn_id: &str,
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
+    perm_store: &SharedPermissionStore,
 ) -> GatewayResponse {
     match request {
         GatewayRequest::KeyRelease { provider } => {
@@ -163,7 +184,7 @@ async fn dispatch_request(
         GatewayRequest::PermissionRequest {
             permission,
             reason,
-        } => handle_permission_request(&permission, &reason),
+        } => handle_permission_request(&permission, &reason, conn_id, state, session_mgr, perm_store).await,
         GatewayRequest::IdentityQuery { fields } => {
             handle_identity_query(&fields, conn_id, session_mgr).await
         }
@@ -373,19 +394,124 @@ async fn handle_rate_acquire(provider: &str, state: &SharedState) -> GatewayResp
     }
 }
 
+/// User approval callback for permission requests.
+///
+/// In Phase 3, this is a CLI-style callback that prints to stdout and reads from stdin.
+/// Phase 5 (Desktop App) will replace this with a GUI dialog via trait abstraction.
+pub trait PermissionApprovalCallback: Send + Sync {
+    /// Ask the user whether to grant a permission.
+    /// Returns true if approved, false if denied.
+    fn request_approval(&self, agent_id: &str, permission: &str, reason: &str) -> bool;
+}
+
+/// Default CLI-based approval callback (auto-deny in non-interactive mode).
+pub struct CliApprovalCallback;
+
+impl PermissionApprovalCallback for CliApprovalCallback {
+    fn request_approval(&self, agent_id: &str, permission: &str, reason: &str) -> bool {
+        // Phase 3: Non-interactive mode — log and auto-deny.
+        // Interactive CLI mode will be implemented when the CLI is fully built.
+        tracing::warn!(
+            "Permission request auto-denied (non-interactive): agent={}, perm={}, reason={}",
+            agent_id, permission, reason
+        );
+        false
+    }
+}
+
 #[allow(dead_code)]
-fn handle_permission_request(permission: &str, reason: &str) -> GatewayResponse {
-    // Phase 1: always deny runtime permission requests (need user UI)
-    tracing::warn!(
-        "PermissionRequest denied: {} (reason: {})",
-        permission,
-        reason
-    );
-    GatewayResponse::PermissionResult {
-        granted: false,
-        reason: Some(
-            "Runtime permission requests not supported in Phase 1".to_string(),
-        ),
+async fn handle_permission_request(
+    permission: &str,
+    reason: &str,
+    conn_id: &str,
+    _state: &SharedState,
+    session_mgr: &SharedSessionMgr,
+    perm_store: &SharedPermissionStore,
+) -> GatewayResponse {
+    // 1. Resolve agent_id from session
+    let agent_id = {
+        let mgr = session_mgr.lock().await;
+        mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
+    };
+    let agent_id = match agent_id {
+        Some(id) => id,
+        None => {
+            return GatewayResponse::PermissionResult {
+                granted: false,
+                reason: Some("Not authenticated".to_string()),
+            };
+        }
+    };
+
+    // 2. Parse the requested permission
+    let requested = match Permission::parse(permission) {
+        Some(p) => p,
+        None => {
+            return GatewayResponse::PermissionResult {
+                granted: false,
+                reason: Some(format!("Invalid permission string: {}", permission)),
+            };
+        }
+    };
+
+    // 3. Check if already granted in PermissionStore
+    match perm_store.has_permission(&agent_id, &requested) {
+        Ok(true) => {
+            tracing::info!("Permission already granted: agent={}, perm={}", agent_id, permission);
+            return GatewayResponse::PermissionResult {
+                granted: true,
+                reason: None,
+            };
+        }
+        Ok(false) => {} // Not yet granted, continue to approval
+        Err(e) => {
+            return GatewayResponse::PermissionResult {
+                granted: false,
+                reason: Some(format!("Permission store error: {}", e)),
+            };
+        }
+    }
+
+    // 4. Check policy for auto-approval
+    let policy = PermissionPolicy::for_permission(&requested);
+    if policy == PermissionPolicy::Allow {
+        // Auto-approve and persist
+        let grant = PermissionGrant::new(&agent_id, requested.clone(), "auto");
+        if let Err(e) = perm_store.grant(&grant) {
+            return GatewayResponse::PermissionResult {
+                granted: false,
+                reason: Some(format!("Failed to persist grant: {}", e)),
+            };
+        }
+        tracing::info!("Permission auto-approved: agent={}, perm={}", agent_id, permission);
+        return GatewayResponse::PermissionResult {
+            granted: true,
+            reason: None,
+        };
+    }
+
+    // 5. Ask the user (via callback — currently auto-denies)
+    let callback = CliApprovalCallback;
+    let approved = callback.request_approval(&agent_id, permission, reason);
+
+    if approved {
+        // Persist the grant
+        let grant = PermissionGrant::new(&agent_id, requested.clone(), "user");
+        if let Err(e) = perm_store.grant(&grant) {
+            return GatewayResponse::PermissionResult {
+                granted: false,
+                reason: Some(format!("Failed to persist grant: {}", e)),
+            };
+        }
+        GatewayResponse::PermissionResult {
+            granted: true,
+            reason: None,
+        }
+    } else {
+        GatewayResponse::PermissionResult {
+            granted: false,
+            reason: Some(format!("User denied permission: {}", permission)),
+        }
     }
 }
 
@@ -509,9 +635,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_handle_permission_request() {
-        let response = handle_permission_request("filesystem:read:/etc", "need config");
+    #[tokio::test]
+    async fn test_handle_permission_request() {
+        let perm_store = crate::permission_store::PermissionStore::open_in_memory().unwrap();
+        let shared_perm_store: SharedPermissionStore = Arc::new(perm_store);
+        let state = test_shared_state("perm-request");
+        let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
+        // No session created → should return "Not authenticated"
+        let response = handle_permission_request(
+            "filesystem:read:/etc",
+            "need config",
+            "conn-1",
+            &state,
+            &session_mgr,
+            &shared_perm_store,
+        ).await;
         if let GatewayResponse::PermissionResult { granted, reason } = response {
             assert!(!granted);
             assert!(reason.is_some());

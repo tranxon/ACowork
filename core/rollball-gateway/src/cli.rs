@@ -74,6 +74,33 @@ pub enum Commands {
     },
     /// List installed agents
     List,
+    /// Manage agent permissions
+    Permission {
+        /// Subcommand: revoke, reset, list
+        #[command(subcommand)]
+        action: PermissionAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PermissionAction {
+    /// Revoke a specific permission from an agent
+    Revoke {
+        /// Agent ID
+        agent_id: String,
+        /// Permission string (e.g., "shell", "network:https://api.example.com")
+        permission: String,
+    },
+    /// Reset all permissions for an agent
+    Reset {
+        /// Agent ID
+        agent_id: String,
+    },
+    /// List granted permissions for an agent
+    List {
+        /// Agent ID
+        agent_id: String,
+    },
 }
 
 impl Cli {
@@ -120,6 +147,10 @@ impl Cli {
                         println!("  {}", entry);
                     }
                 }
+            }
+            Some(Commands::Permission { action }) => {
+                let msg = gateway.handle_permission_cli(action)?;
+                println!("{}", msg);
             }
             None => {
                 if self.daemon {

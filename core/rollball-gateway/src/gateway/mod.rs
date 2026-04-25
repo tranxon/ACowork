@@ -16,6 +16,9 @@ use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
 use crate::package_manager::uninstall;
 use crate::package_manager::upgrade;
+use crate::permission_store::PermissionStore;
+use crate::cli::PermissionAction;
+use rollball_core::permission::Permission;
 
 /// Gateway — the top-level orchestrator
 ///
@@ -24,6 +27,7 @@ pub struct Gateway {
     config: GatewayConfig,
     state: GatewayState,
     lifecycle: LifecycleManager,
+    perm_store: PermissionStore,
 }
 
 impl Gateway {
@@ -31,10 +35,13 @@ impl Gateway {
     pub fn new(config: GatewayConfig) -> Self {
         let idle_timeout = config.idle_timeout_secs;
         let vault_dir = config.vault_dir.clone();
+        let perm_store = PermissionStore::open_in_memory()
+            .expect("Failed to create permission store");
         Self {
             config,
             state: GatewayState::new(&vault_dir),
             lifecycle: LifecycleManager::new(idle_timeout),
+            perm_store,
         }
     }
 
@@ -148,6 +155,46 @@ impl Gateway {
                 running: self.state.is_running(&info.agent_id),
             })
             .collect()
+    }
+
+    /// Handle permission CLI subcommands
+    pub fn handle_permission_cli(&self, action: PermissionAction) -> Result<String, GatewayError> {
+        match action {
+            PermissionAction::Revoke { agent_id, permission } => {
+                let perm = Permission::parse(&permission)
+                    .ok_or_else(|| GatewayError::Package(format!("Invalid permission: {}", permission)))?;
+                let count = self.perm_store.revoke(&agent_id, Some(&perm))
+                    .map_err(|e| GatewayError::Package(format!("Failed to revoke: {}", e)))?;
+                if count > 0 {
+                    tracing::info!("Revoked permission '{}' from agent {}", permission, agent_id);
+                    Ok(format!("Revoked '{}' from {} ({} grant(s) removed)", permission, agent_id, count))
+                } else {
+                    Ok(format!("No matching grant found for '{}' on {}", permission, agent_id))
+                }
+            }
+            PermissionAction::Reset { agent_id } => {
+                let count = self.perm_store.reset(&agent_id)
+                    .map_err(|e| GatewayError::Package(format!("Failed to reset: {}", e)))?;
+                tracing::info!("Reset all permissions for agent {}", agent_id);
+                Ok(format!("Reset {} permission grant(s) for {}", count, agent_id))
+            }
+            PermissionAction::List { agent_id } => {
+                let grants = self.perm_store.query_grants(&agent_id)
+                    .map_err(|e| GatewayError::Package(format!("Failed to list: {}", e)))?;
+                if grants.is_empty() {
+                    Ok(format!("No permissions granted for {}", agent_id))
+                } else {
+                    let lines: Vec<String> = grants.iter()
+                        .map(|g| format!("  {} (by {}, {})",
+                            g.permission.to_permission_string(),
+                            g.authorized_by,
+                            if g.expires_at.is_some() { "temporary" } else { "permanent" }
+                        ))
+                        .collect();
+                    Ok(format!("Permissions for {}:\n{}", agent_id, lines.join("\n")))
+                }
+            }
+        }
     }
 
     /// Ensure all required directories exist
