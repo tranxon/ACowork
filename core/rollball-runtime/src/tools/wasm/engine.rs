@@ -21,7 +21,10 @@ pub struct WasmEngineConfig {
     /// Maximum linear memory size in MB (default: 50)
     pub max_memory_mb: u32,
     /// Fuel limit per execution (estimated from max_execution_time_ms).
-    /// Roughly 10K fuel units per millisecond of execution time.
+    /// Conversion: ~10K fuel units per millisecond (1 fuel ≈ 1 WASM instruction,
+    /// modern CPU executes ~10B instructions/sec → 10M fuel/s → 10K fuel/ms).
+    /// This is an empirical estimate; actual consumption varies by instruction mix.
+    /// Configurable via `WasmEngineConfig::from_limits()`.
     pub fuel_limit: u64,
     /// Cranelift optimization level (default: Speed)
     pub cranelift_opt_level: OptLevel,
@@ -68,9 +71,10 @@ impl WasmEngine {
         // Set Cranelift optimization level
         wasm_config.cranelift_opt_level(config.cranelift_opt_level);
 
-        // Set max WASM linear memory size (in WASM pages, 64KB each)
-        // Note: max_pages used for reference; actual memory limit is set per-instance
-        let _max_pages = (config.max_memory_mb as u64) * (1024 * 1024) / (64 * 1024);
+        // Set max WASM linear memory size.
+        // Note: Per-instance memory limit is enforced by the WASM module's declared
+        // max_pages (in the memory section). For unbounded modules, a Store limiter
+        // will be added in a future phase (see P2-2 in review).
         wasm_config.max_wasm_stack(2 * 1024 * 1024); // 2MB stack
 
         let engine = Engine::new(&wasm_config)

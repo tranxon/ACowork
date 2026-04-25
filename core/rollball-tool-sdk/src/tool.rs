@@ -139,32 +139,20 @@ impl ToolOutput {
     }
 }
 
-/// Declarative macro for defining a WASM tool entry point.
-///
-/// Usage:
-/// ```ignore
-/// use rollball_tool_sdk::{tool, ToolInput, ToolOutput, ToolError};
-///
-/// #[tool(name = "image_filter")]
-/// fn execute(input: ToolInput) -> Result<ToolOutput, ToolError> {
-///     let filter = input.get("filter")?;
-///     Ok(ToolOutput::from(json!({"filtered": true})))
-/// }
-/// ```
-///
-/// This generates:
-/// 1. The `execute` function with the `#[no_mangle]` attribute
-/// 2. Memory allocation helpers for input/output
-/// 3. A `schema` export (optional, returns JSON schema)
-#[macro_export]
-macro_rules! tool {
-    (name = $name:expr, $func:item) => {
-        $func
-
-        // The actual WASM entry point is handled by `tool_entry!`
-        // which wraps the user function with memory management.
-    };
-}
+// The WASM entry point macro is `tool_entry!` in exports.rs.
+// It generates the `execute` and `output_len` export functions.
+// Example usage:
+//
+// ```ignore
+// use rollball_tool_sdk::{ToolInput, ToolOutput, ToolError, tool_entry};
+//
+// fn my_tool(input: ToolInput) -> Result<ToolOutput, ToolError> {
+//     let name = input.get("name")?;
+//     Ok(ToolOutput::from(json!({"greeting": format!("Hello, {}!", name)})))
+// }
+//
+// tool_entry!(my_tool);
+// ```
 
 #[cfg(test)]
 mod tests {
