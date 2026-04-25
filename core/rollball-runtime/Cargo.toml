@@ -47,6 +47,9 @@ zip.workspace = true
 toml.workspace = true
 serde_yaml.workspace = true
 
+# File system watching
+notify.workspace = true
+
 # WASM runtime (feature-gated)
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }

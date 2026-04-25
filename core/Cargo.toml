@@ -97,6 +97,9 @@ secrecy = "0.10"
 # Testing
 tempfile = "3.0"
 
+# File watching
+notify = "8"
+
 # WASM runtime
 wasmtime = "29"
 wasmtime-wasi = "29"

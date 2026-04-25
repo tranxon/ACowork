@@ -14,3 +14,4 @@ pub mod cli;
 pub mod error;
 pub mod token;
 pub mod embedding;
+pub mod security;
