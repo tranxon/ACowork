@@ -344,9 +344,48 @@ impl FileProvenance {
         self.store.record(path, &FileSource::Unknown)
     }
 
-    /// Look up the provenance of a file.
+    /// Look up the provenance of a file (exact path match).
     pub fn get(&self, path: &Path) -> Result<Option<FileSource>, ProvenanceError> {
         self.store.get(path)
+    }
+
+    /// Look up the provenance of a file with smart path resolution.
+    ///
+    /// Resolution order:
+    /// 1. Exact path match
+    /// 2. Prepend workspace directory (for relative paths like `./script.sh`)
+    /// 3. Match by filename (for relative/absolute path mismatches)
+    ///
+    /// This is the primary lookup method for ShellRisk integration,
+    /// where the command may reference files with relative paths
+    /// while the store records absolute paths.
+    pub fn lookup(&self, path: &Path) -> Option<FileSource> {
+        // 1. Exact match
+        if let Some(source) = self.store.get(path).unwrap_or(None) {
+            return Some(source);
+        }
+
+        // 2. Prepend workspace dir (e.g., "./script.sh" → "/workspace/script.sh")
+        let abs_path = self.workspace_dir.join(path);
+        if let Some(source) = self.store.get(&abs_path).unwrap_or(None) {
+            return Some(source);
+        }
+
+        // 3. Match by filename (fallback for path format mismatches)
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !file_name.is_empty() {
+            for src_type in &["downloaded", "unknown", "created_by_tool", "pre_existing"] {
+                if let Ok(list) = self.store.list_by_source(src_type) {
+                    if let Some((_, source)) = list.iter().find(|(p, _)| {
+                        p.file_name().and_then(|n| n.to_str()) == Some(file_name)
+                    }) {
+                        return Some(source.clone());
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Get the underlying store reference.
@@ -492,5 +531,59 @@ mod tests {
 
         let source = provenance.get(path).unwrap().unwrap();
         assert!(matches!(source, FileSource::CreatedByTool { tool, .. } if tool == "file_write"));
+    }
+
+    #[test]
+    fn test_lookup_exact_path() {
+        let dir = PathBuf::from("/workspace");
+        let provenance = FileProvenance::new_in_memory(&dir).unwrap();
+
+        let abs_path = Path::new("/workspace/script.sh");
+        provenance.record_downloaded(abs_path, "https://evil.com/script.sh").unwrap();
+
+        // Exact match
+        let source = provenance.lookup(abs_path);
+        assert!(source.is_some());
+        assert!(matches!(source.unwrap(), FileSource::Downloaded { .. }));
+    }
+
+    #[test]
+    fn test_lookup_relative_path() {
+        let dir = PathBuf::from("/workspace");
+        let provenance = FileProvenance::new_in_memory(&dir).unwrap();
+
+        // Store with absolute path
+        let abs_path = Path::new("/workspace/script.sh");
+        provenance.record_downloaded(abs_path, "https://evil.com/script.sh").unwrap();
+
+        // Lookup with relative path
+        let rel_path = Path::new("./script.sh");
+        let source = provenance.lookup(rel_path);
+        assert!(source.is_some());
+        assert!(source.unwrap().is_high_risk());
+    }
+
+    #[test]
+    fn test_lookup_filename_fallback() {
+        let dir = PathBuf::from("/workspace/subdir");
+        let provenance = FileProvenance::new_in_memory(&dir).unwrap();
+
+        // Store with deeply nested absolute path
+        let abs_path = Path::new("/workspace/subdir/deep/payload.sh");
+        provenance.record_downloaded(abs_path, "https://evil.com/payload.sh").unwrap();
+
+        // Lookup by filename only
+        let query = Path::new("payload.sh");
+        let source = provenance.lookup(query);
+        assert!(source.is_some());
+    }
+
+    #[test]
+    fn test_lookup_not_found() {
+        let dir = PathBuf::from("/workspace");
+        let provenance = FileProvenance::new_in_memory(&dir).unwrap();
+
+        let source = provenance.lookup(Path::new("nonexistent.txt"));
+        assert!(source.is_none());
     }
 }

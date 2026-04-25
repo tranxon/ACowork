@@ -4,16 +4,16 @@
 //! FileProvenance → ShellRisk → Approval Gate → Audit Log
 
 use rollball_runtime::security::file_provenance::{
-    FileProvenance, FileProvenanceStore, FileSource,
+    FileProvenance, FileSource,
 };
 use rollball_runtime::security::shell_risk::{
-    assess_base_risk, assess_shell_risk, ShellRisk,
+    assess_shell_risk, ShellRisk,
 };
 use rollball_runtime::security::approval_gate::{
     ApprovalGate, ApprovalRequest, ApprovalResponse, AutoApproveGate, AutoRejectGate,
 };
 use rollball_runtime::security::audit_log::{AuditLogger, ShellAuditEntry};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Simulates the complete shell execution security pipeline.
 /// Returns (allowed, audit_entry).
@@ -24,30 +24,7 @@ async fn execute_shell_with_security<G: ApprovalGate>(
 ) -> (bool, ShellAuditEntry) {
     // Step 1: Assess risk (with file provenance)
     let assessment = assess_shell_risk(command, |path| {
-        // Try exact match first, then try relative path within workspace
-        if let Some(source) = provenance.get(path).unwrap_or(None) {
-            return Some(source);
-        }
-        // Try prepending workspace dir
-        let abs_path = provenance.workspace_dir().join(path);
-        let source = provenance.get(&abs_path).unwrap_or(None);
-        if source.is_some() {
-            return source;
-        }
-        // Try matching by filename suffix (for relative vs absolute path mismatches)
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !file_name.is_empty() {
-            // Check all source types for a filename match
-            for src_type in &["downloaded", "unknown", "created_by_tool", "pre_existing"] {
-                if let Some(found) = provenance.store().list_by_source(src_type).unwrap().iter()
-                    .find(|(p, _)| p.file_name().and_then(|n| n.to_str()) == Some(file_name))
-                    .map(|(_, s)| s.clone())
-                {
-                    return Some(found);
-                }
-            }
-        }
-        None
+        provenance.lookup(path)
     });
 
     // Step 2: Check if blocked

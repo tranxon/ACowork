@@ -66,7 +66,6 @@ const LOW_RISK_COMMANDS: &[&str] = &[
     "pwd", "whoami", "hostname", "uname", "date", "env",
     "true", "false", "test", "expr",
     "git", "gh",
-    "pip", "pip3", "npm", "yarn", "cargo", "rustc",
     "tree", "tldr",
 ];
 
@@ -498,7 +497,7 @@ mod tests {
     fn test_assess_shell_risk_blocked_stays_blocked() {
         use crate::security::file_provenance::FileSource;
 
-        let assessment = assess_shell_risk("rm -rf /", |path| {
+        let assessment = assess_shell_risk("rm -rf /", |_path| {
             // Even if files are PreExisting, blocked stays blocked
             Some(FileSource::PreExisting)
         });
