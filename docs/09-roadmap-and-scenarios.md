@@ -36,14 +36,16 @@
 - Embedding 生成：集成 ONNX Runtime，本地向量生成。
 - 离线工作：所有 Memory 操作本地完成，不依赖网络。
 
-### Phase 3: 权限与沙箱
+### Phase 3: 权限与工具安全
 
-- 集成 bubblewrap（Linux）实现文件系统隔离。
 - 实现权限声明和用户授权对话框（CLI 或简单 GUI）。
 - 运行时权限请求机制。
-- 资源限制（cgroups 或 rlimit）。
-- WASM 工具沙箱（Wasmtime 集成）。
+- WASM 工具沙箱（Wasmtime 集成 + WIT 组件模型）。
 - Prompt Guard 和 approval 机制（Approval Gate：高风险工具需用户确认，Gateway → Desktop App 确认流程）。
+- Shell 命令风险分级 + 文件来源追踪（FileProvenance）+ 审计日志。
+- 离线巩固（三元组提取 + 经验泛化 + 记忆质量评估）。
+
+> **2026-04-25 调整（ADR-007）**：进程级沙箱（bubblewrap / AppContainer / Seatbelt）延后至 Phase 7。Phase 3 聚焦应用层安全防线。
 
 ### Phase 4: 通信与协调
 
@@ -95,9 +97,10 @@ Desktop App 和开发调试能力在同一阶段交付，因为它们共享 Debu
 - Agent 商店原型。
 - 付费 Agent 许可证验证。
 
-### Phase 7: 跨平台适配
+### Phase 7: 跨平台适配 + 进程级沙箱
 
-- Windows 适配：Named Pipe 传输、Job Object 隔离、Windows 路径规范。
+- 进程级沙箱：Linux（bubblewrap + seccomp-bpf）、Windows（AppContainer + Job Objects）、macOS（Seatbelt）。
+- Windows 适配：Named Pipe 传输、Windows 路径规范。
 - macOS 适配：App Sandbox 隔离、macOS 路径规范。
 - 移动端适配（Android/iOS）：SingleProcess 运行模式、Local TCP 传输、wasmi WASM 引擎、移动端路径规范。
 - 注意：.agent 包格式和 Gateway Service API 合同无需修改，适配仅在实现层。

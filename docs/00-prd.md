@@ -175,7 +175,7 @@ Rollball 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent 
 | SEC-03 | 网络隔离——默认禁止网络，仅按 manifest 授权白名单 | P1 | 最小权限 |
 | SEC-04 | 权限声明——manifest 必须声明所有权限，未声明不可用 | P0 | 最小权限原则 |
 | SEC-05 | WASM 工具沙箱——无法访问宿主内存、文件系统、网络 | P0 | 自定义代码隔离 |
-| SEC-06 | 沙箱强化——Linux 使用 bubblewrap + seccomp-bpf | P2 | 深度隔离 |
+| SEC-06 | 沙箱强化——Linux 使用 bubblewrap + seccomp-bpf | P2 | 深度隔离——延后至 Phase 7（ADR-007） |
 | SEC-07 | API Key 不通过环境变量分发，通过 Socket 一次性传输 | P0 | 防 ps/procfs 泄露 |
 | SEC-08 | Shell 命令风险分级 + 文件来源追踪（FileProvenance）+ 审计日志 | P3 | Runtime 层 Shell 安全防线——延期至 Phase 3 |
 | SEC-09 | Agent 仓库上架安全扫描：Manifest 合规性 + Prompt/Skill 行为分析 + WASM 二进制扫描 + Grafeo 记忆扫描 + 包结构合规 | P2 | 发布侧安全关卡，与运行时防御形成纵深 |
@@ -548,7 +548,7 @@ requires = [
 
 **上下文**：
 
-当前文件系统隔离是策略级的——Runtime 检查 file_read/file_write 的路径参数是否在工作区内。但 shell 工具启动的子进程继承用户进程的全部 OS 权限，可以读写工作区外的任意文件。典型攻击路径：Agent 通过 network_fetch 下载恶意脚本 → file_write 保存到工作区 → shell 执行该脚本 → 脚本越权读取 ~/.ssh/id_rsa 并上传。OS 级沙箱（bwrap / Seatbelt / AppContainer）可以从内核层阻止，但跨平台覆盖需要时间（Phase 2+），Phase 1 需要在 Runtime 层建立可检测、可拦截的安全防线。
+当前文件系统隔离是策略级的——Runtime 检查 file_read/file_write 的路径参数是否在工作区内。但 shell 工具启动的子进程继承用户进程的全部 OS 权限，可以读写工作区外的任意文件。典型攻击路径：Agent 通过 network_fetch 下载恶意脚本 → file_write 保存到工作区 → shell 执行该脚本 → 脚本越权读取 ~/.ssh/id_rsa 并上传。OS 级沙箱（bwrap / Seatbelt / AppContainer）可以从内核层阻止，但跨平台覆盖需要时间（Phase 7，ADR-007），Phase 3 需要在 Runtime 层建立可检测、可拦截的安全防线。
 
 **决策**：
 
@@ -560,12 +560,12 @@ Phase 1 在 Runtime 层实施三层防御：
 
 3. **工作区文件系统监控**：使用 inotify / FSEvents / ReadDirectoryChangesW 监控工作区文件变化，检测异常模式（新可执行文件出现、权限变更、符号链接指向工作区外）。
 
-**分阶段策略**（2026-04-25 更新：SEC-08 根据 Sprint 2 review 结论延期至 Phase 3）：
+**分阶段策略**（2026-04-25 更新：SEC-08 延期至 Phase 3；SEC-06 进程沙箱延后至 Phase 7，ADR-007）：
 
-- Phase 1：approval gate + 审计日志（基础可检测能力）
-- Phase 2：Linux bwrap 文件系统隔离 + macOS Seatbelt（内核级强制）
-- Phase 3：Shell 风险分级 + 文件来源追踪（FileProvenance）+ Windows AppContainer + 全平台 FS 监控完善
-- Phase 4：独立用户 / 容器（嵌入式/企业场景）
+- Phase 1：approval gate + 审计日志（基础可检测能力）✅
+- Phase 3：Shell 风险分级 + 文件来源追踪（FileProvenance）+ Approval Gate 完善 + 审计日志增强
+- Phase 7：Linux bwrap + macOS Seatbelt + Windows AppContainer（内核级强制，ADR-007）
+- 远期：独立用户 / 容器（嵌入式/企业场景）
 
 **权衡**：
 
