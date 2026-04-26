@@ -344,7 +344,18 @@ fn execute(input: ToolInput) -> Result<ToolOutput, ToolError> {
 
 ## 4. RAG Tools（企业知识库接入）
 
-RAG 工具让 Agent 对接企业自建的 RAG 知识库，实现"双通道检索"——本地 Grafeo（个人记忆）和企业 RAG（集体知识）并行查询，结果拼接送入 LLM 上下文。Rollball 不托管 RAG 服务，只提供标准化的查询协议适配（详见 00-prd.md §1.13）。
+RAG 工具让 Agent 对接企业自建的 RAG 知识库，实现"双通道检索"——本地 Grafeo（个人记忆）和企业 RAG（集体知识）并行查询，结果拼接送入 LLM 上下文。Rollball 不托管 RAG 服务，只定义标准查询协议（请求/响应 JSON Schema），企业 RAG 自行适配此协议（详见 00-prd.md §1.13）。
+
+**配置驱动 Opt-In**：RAG 不是默认能力，仅当 manifest 声明 `[[tools]] type = "rag"` 时使能。无 RAG 声明的 Agent，Tool Dispatcher 不注册 RAG 工具，MemoryManager.retrieve() 仅查 Grafeo 通道，行为与无 RAG 完全一致。
+
+**混合双触发**：RAG 有两种触发方式，均由 manifest 配置驱动：
+
+| 触发方式 | 时机 | 查询参数 | 说明 |
+|---------|------|---------|------|
+| 自动触发 | 主循环步骤② MemoryManager Retrieve | 用户消息作 query，top_k=3，score_threshold=0.7 | 背景知识注入，LLM 无需主动判断 |
+| 显式触发 | 主循环步骤⑤ LLM tool_call | LLM 自定义 query/filter/top_k | 针对性深入查询 |
+
+自动触发结果作为"背景上下文"注入，显式工具结果作为"工具返回值"追加到 History，两者在上下文中位置不同，语义不重叠。
 
 ### 4.1 RAG 工具声明
 
@@ -379,7 +390,9 @@ score_threshold = 0.7
 | `rag_config.max_results` | 否 | 单次查询最大返回条数，默认 5 |
 | `rag_config.score_threshold` | 否 | 最低相关性阈值（0-1），低于此值的结果不返回，默认 0.7 |
 
-### 4.2 RAG 工具执行流程
+### 4.2 RAG 工具执行流程（显式触发）
+
+LLM 通过 tool_call 主动调用 RAG 工具，用于针对性深入查询：
 
 ```
 LLM 输出 tool_call: { name: "enterprise_knowledge", arguments: { query: "Q3 产品发布计划" } }
@@ -389,7 +402,7 @@ Runtime 解析 tool_call
        │
        ├─ 从 Vault 获取认证凭据（一次性，不缓存在进程内存）
        │
-       ├─ 构造 RAG 查询请求（POST endpoint）
+       ├─ 构造 RAG 标准查询请求（POST endpoint）
        │   body: { query, collection, top_k, score_threshold }
        │   headers: { Authorization: Bearer <token> }
        │
@@ -400,11 +413,25 @@ Runtime 解析 tool_call
        └─ 构造 tool result 返回给 LLM
 ```
 
+### 4.2.1 RAG 自动检索流程（主循环步骤②）
+
+每轮迭代自动触发（仅 manifest 声明 RAG 时），用用户消息作轻量查询：
+
+```
+步骤② MemoryManager.retrieve()
+  ├─ Grafeo 通道: hybrid_search + graph_expand  ← 始终执行
+  └─ RAG 通道: RagClient.query(用户消息, top_k=3)  ← 仅 manifest 声明 RAG 时
+     ├─ 成功 → 结果按来源标注 [Grafeo] / [RAG:enterprise_knowledge]
+     ├─ 超时(5s) → 跳过 RAG 通道，仅用 Grafeo 结果
+     └─ 不可达 → 同上，不阻塞 Agent
+  结果合并、去重、按 token 预算裁剪后注入 LLM 上下文
+```
+
 ### 4.3 RAG 工具的降级与安全
 
 | 规则 | 说明 |
 |------|------|
-| 离线降级 | RAG 服务不可达时，返回空结果，不阻塞 Agent 运行 |
+| 离线降级 | RAG 服务不可达时，返回空结果，不阻塞 Agent 运行（自动触发和显式触发均降级） |
 | 凭据安全 | auth_ref 引用 Vault 密钥，Runtime 每次调用时从 Vault 获取，不缓存在进程内存或环境变量 |
 | 结果标注 | 每条 RAG 结果标注 source_url 和 chunk_id，供 LLM 和用户追溯来源 |
 | 查询范围限制 | collection 字段限定查询范围，防止跨租户数据泄露 |
@@ -423,6 +450,15 @@ RAG 工具和本地 Grafeo 是两条完全独立的检索通道：
 | 隐私边界 | Agent 私有，打包分享时按 PrivacyLevel 过滤 | 企业管理，Agent 只读 |
 
 RAG 检索结果与本地 Grafeo 检索结果在瞬态层拼接后统一送入 LLM 上下文，但不整合进 Memory 系统的抽象层——两者查询范式和存储模型完全不同。
+
+**RAG 配置驱动的 Runtime 行为差异**：
+
+| Runtime 行为 | manifest 无 RAG 声明 | manifest 有 RAG 声明 |
+|-------------|--------------------|--------------------|
+| 步骤② MemoryManager.retrieve() | 仅查 Grafeo 通道 | 并行查 Grafeo + RAG 双通道 |
+| 步骤② 上下文注入 | 仅 Grafeo 检索结果 | Grafeo + RAG 结果拼接，按来源标注 |
+| 步骤③ LLM Tool Definitions | 不含 RAG 工具 | 含 RAG 工具（可显式调用） |
+| 步骤⑤ Tool Dispatch | 无 RAG 工具路由 | RAG 工具 → RagClient HTTP 调用 |
 
 以下操作不属于"工具"（不由 LLM tool_call 触发），而是 Runtime 在特定流程中主动向 Gateway 发起的请求，通过 Gateway Service API 通信：
 
@@ -460,6 +496,7 @@ LLM 输出 tool_calls: [{name, arguments}, ...]
        │
        ├─ ③ 路由到工具实现
        │    ├─ type = "builtin" → Built-in Tool 直接执行
+       │    ├─ type = "rag" → RagClient HTTP 调用（仅 manifest 声明时注册）
        │    ├─ type = "wasm" → Wasmtime 沙箱执行
        │    └─ intent_send → Gateway 路由
        │
@@ -486,7 +523,9 @@ LLM 输出 tool_calls: [{name, arguments}, ...]
 | Builtin 范围 | 仅平台基础设施级 | SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置；垂直能力走 WASM Tool 或独立 Agent |
 | web_fetch/web_search 内置 | 是 | 几乎所有 Agent 都需要，是平台级基础设施；web_search 的 Search API Key 由 Vault 分发 |
 | file_edit/glob_search/content_search 内置 | 是 | 文件操作三件套（读+写+编辑+搜索），缺少任一个都会导致 Agent 用 file_write 模拟低效操作 |
-| RAG 工具类型 | 独立 type="rag" | 企业 RAG 是外部服务接入，不是内置工具也不是 WASM 工具，需要独立的声明和执行模型 |
+| RAG 工具类型 | 独立 type="rag"，配置驱动 Opt-In | 企业 RAG 是外部服务接入，不是内置工具也不是 WASM 工具，需要独立的声明和执行模型；仅 manifest 声明时注册，无 RAG 的 Agent 零侵入 |
 | RAG 凭据安全 | Vault 引用，运行时获取 | 与内置工具 API Key 管理一致，不明文出现在 manifest 或进程环境变量 |
+| RAG 触发模型 | 混合双触发（自动 + 显式） | 自动触发（步骤② Retrieve）解决"LLM 不知道该不该查"；显式触发（步骤⑤ tool_call）解决"需要更精确查询"；均由 manifest 配置驱动 opt-in（ADR-012，详见 plan-p4.md） |
+| RAG 协议适配 | Rollball 定义标准协议，企业 RAG 自适配 | 不为各家 RAG 实现 adapter，企业侧确保其 RAG 服务兼容标准查询接口；遵循 PRD "纯对接，不托管"原则 |
 | identity_store 专用工具 | 新增第 14~15 个内置工具（identity_query + identity_observe） | 身份数据有专属语义（字段级 confidence、变更通知、结构化查询），memory_store 通用 Fact 节点无法自然承载；专用工具有扩展点（字段校验、敏感加密、跨设备同步优先级）；内部实现基于 MemoryManager store 接口，不绕过记忆架构 |
 | identity_store 仅系统 Agent 可用 | 权限 `identity:write` | 系统 Agent 是身份数据唯一写入方；其他 Agent 通过 intent_send 汇报，由系统 Agent LLM 判断后写入 |

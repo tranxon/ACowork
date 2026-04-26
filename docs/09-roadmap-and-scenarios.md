@@ -97,6 +97,15 @@ Desktop App 和开发调试能力在同一阶段交付，因为它们共享 Debu
 - Agent 商店原型。
 - 付费 Agent 许可证验证。
 
+> **备忘：企业级记忆（Enterprise Memory）**
+>
+> Phase 6 需重点讨论的话题：企业级 RAG 升级为企业级记忆，与本地 Grafeo MemoryStore 接口兼容。
+> 核心思路：Grafeo 本身已支持 RAG 的向量检索能力（hybrid_search），企业级 RAG 通道可演化为 RemoteMemoryStore（实现 MemoryStore trait），
+> 使企业数据不再局限于向量检索，获得完整图检索能力（hybrid_search + graph_expand）。
+> 技术演进：Phase 4 的 RagClient → RemoteMemoryStore；`rag_client: Option<Arc<RagClient>>` → `enterprise_store: Option<Arc<dyn MemoryStore>>`；
+> 现有 RAG 服务可降级适配（仅实现 MemoryStore 子集）。
+> 当前思考尚不完善，需在 Phase 6 启动前深入讨论：协议细节、隐私边界、延迟优化、部署模型等。
+
 ### Phase 7: 跨平台适配 + 进程级沙箱
 
 - 进程级沙箱：Linux（bubblewrap + seccomp-bpf）、Windows（AppContainer + Job Objects）、macOS（Seatbelt）。
@@ -104,6 +113,21 @@ Desktop App 和开发调试能力在同一阶段交付，因为它们共享 Debu
 - macOS 适配：App Sandbox 隔离、macOS 路径规范。
 - 移动端适配（Android/iOS）：SingleProcess 运行模式、Local TCP 传输、wasmi WASM 引擎、移动端路径规范。
 - 注意：.agent 包格式和 Gateway Service API 合同无需修改，适配仅在实现层。
+
+### Phase 8: 企业知识平台
+
+> **备忘：企业知识生命周期平台**
+>
+> 基于 Phase 6 的企业级记忆基础设施，构建企业知识的本地训练调优→云端发布平台。
+> 核心价值：RollBall 不仅是 Agent 运行时，更是企业知识的本地化训练调优发布平台。
+> 功能维度：
+> 1. 本地训练调优：Agent 开发者/训练师在工作区中对话式写入事实、关系、程序知识，离线巩固提炼语义沉淀
+> 2. 知识打包发布：选定知识子图（按 Zone/NodeType/PrivacyLevel 过滤），个人/敏感数据自动剥离，质量门禁（importance > 0.7, 无冲突标记），导出为 .grafeo 快照
+> 3. 企业部署：企业管理员审批导入企业 Grafeo 服务 → 全企业 Agent 可检索，版本管理 + 回滚
+> 4. 持续更新：增量发布、知识衰期管理、使用反馈闭环
+>
+> 依赖关系：Phase 6 RemoteMemoryStore 基础设施 + Phase 5 Desktop App 发布向导 + Phase 3 质量评估框架和巩固管道
+> 当前为初步构想，需在 Phase 6 实施过程中进一步细化。
 
 ## 2. 使用场景示例
 
