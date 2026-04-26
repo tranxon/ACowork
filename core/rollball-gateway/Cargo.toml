@@ -31,6 +31,12 @@ parking_lot.workspace = true
 directories.workspace = true
 toml.workspace = true
 rusqlite.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+uuid.workspace = true
+futures-util.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 rollball-sign = { workspace = true }
@@ -39,3 +45,4 @@ rollball-grafeo = { workspace = true }
 grafeo-common = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }

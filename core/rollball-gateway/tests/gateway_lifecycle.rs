@@ -91,6 +91,7 @@ fn test_gateway_config(temp_dir: &Path) -> GatewayConfig {
         max_iterations: 20,
         iteration_timeout_ms: 30000,
         dev_mode: true, // tests use unsigned packages
+        http: rollball_gateway::config::HttpConfig { enabled: false, ..Default::default() },
     }
 }
 

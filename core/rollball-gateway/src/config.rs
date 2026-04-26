@@ -37,6 +37,50 @@ pub struct GatewayConfig {
     /// Development mode: allows unsigned packages, relaxed security
     #[serde(default)]
     pub dev_mode: bool,
+    /// HTTP API configuration
+    #[serde(default)]
+    pub http: HttpConfig,
+}
+
+/// HTTP API configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    /// Enable the HTTP API server
+    #[serde(default = "default_http_enabled")]
+    pub enabled: bool,
+    /// Host to bind (typically 127.0.0.1 for localhost-only)
+    #[serde(default = "default_http_host")]
+    pub host: String,
+    /// Port to listen on (0 = auto-assign, 19876 = default)
+    #[serde(default = "default_http_port")]
+    pub port: u16,
+    /// Maximum port when auto-incrementing on conflict
+    #[serde(default = "default_http_port_max")]
+    pub port_max: u16,
+    /// Enable CORS for Desktop App
+    #[serde(default)]
+    pub cors_enabled: bool,
+    /// Enable auth token (generates random token on start)
+    #[serde(default)]
+    pub auth_enabled: bool,
+}
+
+fn default_http_enabled() -> bool { true }
+fn default_http_host() -> String { "127.0.0.1".to_string() }
+fn default_http_port() -> u16 { 19876 }
+fn default_http_port_max() -> u16 { 19878 }
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_http_enabled(),
+            host: default_http_host(),
+            port: default_http_port(),
+            port_max: default_http_port_max(),
+            cors_enabled: false,
+            auth_enabled: false,
+        }
+    }
 }
 
 fn default_log_level() -> String { "info".to_string() }
@@ -116,6 +160,8 @@ impl GatewayConfig {
             iteration_timeout_ms: file_config.as_ref().map(|c| c.iteration_timeout_ms)
                 .unwrap_or_else(default_iteration_timeout_ms),
             dev_mode: file_config.as_ref().map(|c| c.dev_mode).unwrap_or(false),
+            http: file_config.as_ref().map(|c| c.http.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -165,6 +211,7 @@ impl Default for GatewayConfig {
             max_iterations: default_max_iterations(),
             iteration_timeout_ms: default_iteration_timeout_ms(),
             dev_mode: false,
+            http: HttpConfig::default(),
         }
     }
 }
@@ -184,6 +231,9 @@ mod tests {
         assert_eq!(config.idle_timeout_secs, 300);
         assert_eq!(config.max_iterations, 20);
         assert_eq!(config.iteration_timeout_ms, 30_000);
+        assert!(config.http.enabled);
+        assert_eq!(config.http.port, 19876);
+        assert_eq!(config.http.host, "127.0.0.1");
     }
 
     #[test]

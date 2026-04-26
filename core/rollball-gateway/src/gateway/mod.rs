@@ -108,9 +108,30 @@ impl Gateway {
         let shared_perm_store: crate::ipc::server::SharedPermissionStore =
             Arc::new(ipc_perm_store);
 
+        // Clone HTTP config before moving into the task
+        let http_config = self.config.http.clone();
+        let data_dir_path = std::path::PathBuf::from(&self.config.data_dir);
+
+        // Start HTTP server in a separate tokio task (parallel with IPC)
+        let http_state = shared_state.clone();
+        let http_socket_path = socket_path.clone();
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = crate::http::server::start_http_server(
+                &http_config,
+                http_state,
+                &http_socket_path,
+                &data_dir_path,
+            ).await {
+                tracing::error!("HTTP server failed: {}", e);
+            }
+        });
+
         // Run the IPC server (async, multi-connection)
         let ipc_server = IpcServer::with_permission_store(&socket_path, shared_perm_store);
         ipc_server.listen(shared_state).await?;
+
+        // Abort HTTP server when IPC exits
+        http_handle.abort();
 
         Ok(())
     }
@@ -262,6 +283,7 @@ mod tests {
             max_iterations: 20,
             iteration_timeout_ms: 30000,
             dev_mode: true,
+            http: crate::config::HttpConfig::default(),
         }
     }
 
