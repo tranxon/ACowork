@@ -89,12 +89,37 @@ impl Gateway {
                     if let Err(e) = gw.cron_scheduler.load_from_store(&store) {
                         tracing::warn!("Failed to load cron entries: {}", e);
                     }
-                    gw.cron_store = Some(store);
+                    gw.cron_store = Some(std::sync::Arc::new(store));
                 }
                 Err(e) => {
                     tracing::warn!("Failed to open cron store: {}", e);
                 }
             }
+        }
+
+        // P0-1 fix: Inject shared PermissionStore into GatewayState
+        // so that HTTP API and IPC server share the same permission data.
+        {
+            let mut gw = shared_state.write().await;
+            // Note: The IPC server opens a separate Connection to the same DB file,
+            // so both the IPC store and the GatewayState store point to the same
+            // underlying database. This is safe because SQLite supports multiple
+            // readers, and PermissionStore uses Mutex per connection.
+            let perm_db_path = std::path::Path::new(&self.config.data_dir).join("permissions.db");
+            match crate::permission_store::PermissionStore::open(&perm_db_path) {
+                Ok(store) => {
+                    gw.permission_store = Some(std::sync::Arc::new(store));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open permission store for GatewayState: {}", e);
+                }
+            }
+        }
+
+        // P0-2 fix: Store config snapshot in GatewayState for Config API
+        {
+            let mut gw = shared_state.write().await;
+            gw.config = Some(self.config.clone());
         }
 
         let socket_path = self.config.socket_path.clone();

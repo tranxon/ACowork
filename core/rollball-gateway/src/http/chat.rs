@@ -86,6 +86,16 @@ pub async fn send_message(
         }
     }
 
+    // P1-2 fix: Validate conversation_id format
+    if let Some(conv_id) = &body.conversation_id {
+        if conv_id.len() > 128 {
+            return Err(ApiError::bad_request("conversation_id too long (max 128 characters)"));
+        }
+        if !conv_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return Err(ApiError::bad_request("conversation_id contains invalid characters (only alphanumeric, '-', '_' allowed)"));
+        }
+    }
+
     // Generate message ID
     let message_id = format!("msg-{}", uuid::Uuid::new_v4());
 
@@ -274,23 +284,13 @@ async fn handle_ws_text(
         return;
     }
 
-    // Acknowledge message received
+    // Acknowledge message received — the actual Agent response
+    // (chunk/tool_call/tool_result/done) will arrive via bridge_rx.
     let ack = serde_json::json!({
         "type": "ack",
         "message_id": message_id,
     });
     let _ = socket.send(Message::Text(ack.to_string().into())).await;
-
-    // S1.6: Full streaming bridge will forward Agent responses as
-    // chunk/tool_call/tool_result messages here.
-    // For S1.3, send a placeholder "done" since the Agent response
-    // cannot yet be streamed back through this WebSocket.
-    let done = serde_json::json!({
-        "type": "done",
-        "message_id": message_id,
-        "usage": null,
-    });
-    let _ = socket.send(Message::Text(done.to_string().into())).await;
 }
 
 #[cfg(test)]

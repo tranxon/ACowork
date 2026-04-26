@@ -130,9 +130,15 @@ pub async fn add_cron(
     };
 
     // Persist to CronStore
+    // P1-9 fix: Use spawn_blocking to avoid blocking tokio runtime
+    // with synchronous rusqlite operations.
     {
-        let gw = state.gateway_state.read().await;
-        if let Some(store) = &gw.cron_store {
+        let store_opt = {
+            let gw = state.gateway_state.read().await;
+            gw.cron_store.clone()
+        };
+        if let Some(store) = store_opt {
+            let cron_id_clone = cron_id.clone();
             let entry = crate::cron::StoredCronEntry {
                 id: cron_id.clone(),
                 agent_id: agent_id.clone(),
@@ -140,9 +146,11 @@ pub async fn add_cron(
                 action: body.action.clone(),
                 params: serde_json::to_string(&body.params).unwrap_or_else(|_| "{}".to_string()),
             };
-            if let Err(e) = store.insert(&entry) {
-                tracing::warn!("Failed to persist cron entry {}: {}", cron_id, e);
-            }
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = store.insert(&entry) {
+                    tracing::warn!("Failed to persist cron entry {}: {}", cron_id_clone, e);
+                }
+            }).await.ok();
         }
     }
 
@@ -183,13 +191,20 @@ pub async fn remove_cron(
         )));
     }
 
-    // Remove from CronStore
+    // Remove from CronStore (P1-9 fix: spawn_blocking)
     {
-        let gw = state.gateway_state.read().await;
-        if let Some(store) = &gw.cron_store
-            && let Err(e) = store.delete(&cron_id) {
-                tracing::warn!("Failed to delete cron entry {} from store: {}", cron_id, e);
-            }
+        let store_opt = {
+            let gw = state.gateway_state.read().await;
+            gw.cron_store.clone()
+        };
+        if let Some(store) = store_opt {
+            let cron_id_clone = cron_id.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = store.delete(&cron_id_clone) {
+                    tracing::warn!("Failed to delete cron entry {} from store: {}", cron_id_clone, e);
+                }
+            }).await.ok();
+        }
     }
 
     tracing::info!(

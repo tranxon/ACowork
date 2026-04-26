@@ -19,7 +19,9 @@ fn create_test_app() -> axum::Router {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let gw_state = GatewayState::new(&dir.to_string_lossy());
+    let mut gw_state = GatewayState::new(&dir.to_string_lossy());
+    // P0-2 fix: Inject config so get_config() returns real data
+    gw_state.config = Some(rollball_gateway::config::GatewayConfig::default());
     let state = AppState {
         gateway_state: std::sync::Arc::new(tokio::sync::RwLock::new(gw_state)),
         auth: std::sync::Arc::new(HttpAuth::new(false)),
@@ -37,7 +39,8 @@ fn create_test_app_with_session() -> (axum::Router, SharedSessionMgr, tokio::syn
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let gw_state = GatewayState::new(&dir.to_string_lossy());
+    let mut gw_state = GatewayState::new(&dir.to_string_lossy());
+    gw_state.config = Some(rollball_gateway::config::GatewayConfig::default());
     let session_mgr: SharedSessionMgr = std::sync::Arc::new(tokio::sync::Mutex::new(SessionManager::new()));
     let (bridge_tx, _) = tokio::sync::broadcast::channel::<BridgeEvent>(256);
 

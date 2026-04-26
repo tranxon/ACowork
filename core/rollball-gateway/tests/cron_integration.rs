@@ -367,7 +367,7 @@ fn test_cron_store_in_gateway_state() {
 
     // Set up CronStore
     let store = CronStore::open_in_memory().unwrap();
-    state.cron_store = Some(store);
+    state.cron_store = Some(std::sync::Arc::new(store));
 
     // Register + persist
     let id = state.cron_scheduler
@@ -443,7 +443,7 @@ fn test_install_agent_registers_cron_triggers() {
     let mut state = GatewayState::new(&dir);
 
     // Set up CronStore
-    state.cron_store = Some(CronStore::open_in_memory().unwrap());
+    state.cron_store = Some(std::sync::Arc::new(CronStore::open_in_memory().unwrap()));
 
     let toml_str = r#"
         agent_id = "com.example.monitor"

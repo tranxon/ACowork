@@ -112,67 +112,100 @@ pub async fn get_agent_detail(
 }
 
 /// `POST /api/agents/install` — install a .agent package
+///
+/// P1-9 fix: Uses spawn_blocking because install_package performs
+/// heavy filesystem operations (ZIP extraction) and synchronous
+/// database operations (CronStore insert) that would block the
+/// tokio runtime if called directly in an async handler.
 pub async fn install_agent(
     State(state): State<AppState>,
     Json(body): Json<InstallRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
-    let mut gw = state.gateway_state.write().await;
-
     // Determine packages dir from installed agents or use default
-    let packages_dir = gw.installed_agents.values()
-        .next()
-        .map(|i| {
-            let path = std::path::Path::new(&i.install_path);
-            path.parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("./packages"));
+    let packages_dir = {
+        let gw = state.gateway_state.read().await;
+        gw.installed_agents.values()
+            .next()
+            .map(|i| {
+                let path = std::path::Path::new(&i.install_path);
+                path.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
+    };
 
-    crate::package_manager::install::install_package(
-        std::path::Path::new(&body.package_path),
-        &packages_dir,
-        &mut gw,
-        false, // dev_mode = false for HTTP API; signature is required
-    ).map_err(|e| ApiError::bad_request(&format!("Install failed: {}", e)))?;
+    // Wrap the synchronous install in spawn_blocking
+    let package_path_display = body.package_path.clone();
+    let install_result = tokio::task::spawn_blocking(move || {
+        let mut gw = state.gateway_state.blocking_write();
+        crate::package_manager::install::install_package(
+            std::path::Path::new(&body.package_path),
+            &packages_dir,
+            &mut gw,
+            false, // dev_mode = false for HTTP API; signature is required
+        )
+    }).await;
 
-    Ok((StatusCode::CREATED, Json(MessageResponse {
-        message: format!("Package installed: {}", body.package_path),
-    })))
+    match install_result {
+        Ok(Ok(_)) => Ok((StatusCode::CREATED, Json(MessageResponse {
+            message: format!("Package installed: {}", package_path_display),
+        }))),
+        Ok(Err(e)) => Err(ApiError::bad_request(&format!("Install failed: {}", e))),
+        Err(e) => Err(ApiError::internal(&format!("Install task failed: {}", e))),
+    }
 }
 
 /// `DELETE /api/agents/:id` — uninstall an agent
+///
+/// P1-9 fix: Uses spawn_blocking because uninstall_package performs
+/// synchronous database operations (CronStore delete_by_agent) that
+/// would block the tokio runtime if called directly in an async handler.
 pub async fn uninstall_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
-    let mut gw = state.gateway_state.write().await;
-
-    if gw.is_running(&agent_id) {
-        return Err(ApiError::bad_request(&format!(
-            "Agent {} is running, stop it first", agent_id
-        )));
+    // Check if agent is running first (lightweight read)
+    {
+        let gw = state.gateway_state.read().await;
+        if gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is running, stop it first", agent_id
+            )));
+        }
     }
 
-    let packages_dir = gw.installed_agents.values()
-        .next()
-        .map(|i| {
-            let path = std::path::Path::new(&i.install_path);
-            path.parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("./packages"));
+    let packages_dir = {
+        let gw = state.gateway_state.read().await;
+        gw.installed_agents.values()
+            .next()
+            .map(|i| {
+                let path = std::path::Path::new(&i.install_path);
+                path.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
+    };
 
-    crate::package_manager::uninstall::uninstall_package(
-        &agent_id,
-        &packages_dir,
-        &mut gw,
-    ).map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
+    // Wrap the synchronous uninstall in spawn_blocking
+    let agent_id_display = agent_id.clone();
+    let uninstall_result = tokio::task::spawn_blocking(move || {
+        let mut gw = state.gateway_state.blocking_write();
+        crate::package_manager::uninstall::uninstall_package(
+            &agent_id,
+            &packages_dir,
+            &mut gw,
+        )
+    }).await;
 
-    Ok(Json(MessageResponse {
-        message: format!("Agent uninstalled: {}", agent_id),
-    }))
+    match uninstall_result {
+        Ok(Ok(_)) => Ok(Json(MessageResponse {
+            message: format!("Agent uninstalled: {}", agent_id_display),
+        })),
+        Ok(Err(e)) => Err(ApiError::internal(&format!("Uninstall failed: {}", e))),
+        Err(e) => Err(ApiError::internal(&format!("Uninstall task failed: {}", e))),
+    }
 }
 
 /// `POST /api/agents/:id/start` — start an agent

@@ -122,11 +122,30 @@ impl PermissionChecker {
 
     /// Add a newly granted permission to the cache.
     /// Used when a runtime permission request is approved by the user.
+    ///
+    /// P1-7 fix: Checks for duplicates before adding, since tools
+    /// can run concurrently and multiple add_grant calls may race.
     pub fn add_grant(&self, grant: PermissionGrant) {
         let mut cache = self.cache.write();
         let cat = grant.permission.category().to_string();
-        cache.by_category.entry(cat).or_default().push(grant);
-        cache.generation += 1;
+        let entry = cache.by_category.entry(cat.clone());
+        match entry {
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                let grants = occupied.get_mut();
+                // Check if an equivalent grant already exists
+                let already_exists = grants.iter().any(|g| {
+                    g.permission == grant.permission && g.authorized_by == grant.authorized_by
+                });
+                if !already_exists {
+                    grants.push(grant);
+                    cache.generation += 1;
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(vec![grant]);
+                cache.generation += 1;
+            }
+        }
     }
 
     /// Invalidate the entire cache. Called when Gateway notifies revocation.

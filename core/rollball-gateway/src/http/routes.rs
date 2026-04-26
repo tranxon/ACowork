@@ -54,10 +54,24 @@ pub struct AppState {
 
 /// Build the HTTP router with all routes
 pub fn build_router(state: AppState) -> Router {
+    // P1-1 fix: Restrict CORS to localhost origins only.
+    // Allow both localhost and 127.0.0.1 for Desktop App development.
     let cors = tower_http::cors::CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any);
+        .allow_origin([
+            "http://localhost:3000".parse().unwrap(),
+            "http://localhost:5173".parse().unwrap(), // Vite dev server
+            "http://127.0.0.1:3000".parse().unwrap(),
+        ])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]);
 
     Router::new()
         .route("/health", get(health_check))

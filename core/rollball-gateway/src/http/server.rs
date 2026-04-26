@@ -3,7 +3,7 @@
 //! Starts the Axum HTTP server alongside the IPC server in Gateway::run().
 //! Handles port conflict auto-increment and pidfile writing.
 
-use std::net::TcpListener;
+use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::path::Path;
 
@@ -53,8 +53,9 @@ pub async fn start_http_server(
         bridge_tx,
     };
 
-    // Find available port
-    let actual_port = find_available_port(
+    // P1-3 fix: Find available port and return the bound listener
+    // to eliminate the TOCTOU race between checking and binding.
+    let (actual_port, std_listener) = find_available_port(
         &http_config.host,
         http_config.port,
         http_config.port_max,
@@ -66,15 +67,14 @@ pub async fn start_http_server(
     // Build router
     let app = routes::build_router(app_state);
 
-    // Bind and serve
-    let addr = format!("{}:{}", http_config.host, actual_port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
+    // Convert std::net::TcpListener to tokio::net::TcpListener
+    // This reuses the already-bound listener — no second bind() call.
+    let listener = tokio::net::TcpListener::from_std(std_listener)
         .map_err(|e| GatewayError::Config(format!(
-            "Failed to bind HTTP server on {}: {}", addr, e
+            "Failed to convert TCP listener: {}", e
         )))?;
 
-    tracing::info!("HTTP API listening on http://{}", addr);
+    tracing::info!("HTTP API listening on http://{}:{}", http_config.host, actual_port);
 
     axum::serve(listener, app)
         .await
@@ -83,14 +83,26 @@ pub async fn start_http_server(
     Ok(())
 }
 
-/// Find an available port in the configured range
-fn find_available_port(host: &str, start_port: u16, max_port: u16) -> Result<u16, GatewayError> {
+/// Find an available port in the configured range.
+///
+/// P1-3 fix: Returns the bound `TcpListener` directly so the caller
+/// can pass it to `axum::serve` without a second `bind()` call,
+/// eliminating the TOCTOU race condition between port-check and bind.
+fn find_available_port(
+    host: &str,
+    start_port: u16,
+    max_port: u16,
+) -> Result<(u16, StdTcpListener), GatewayError> {
     for port in start_port..=max_port {
-        if TcpListener::bind(format!("{}:{}", host, port)).is_ok() {
-            tracing::info!("Found available HTTP port: {}", port);
-            return Ok(port);
+        match StdTcpListener::bind(format!("{}:{}", host, port)) {
+            Ok(listener) => {
+                tracing::info!("Found available HTTP port: {}", port);
+                return Ok((port, listener));
+            }
+            Err(_) => {
+                tracing::warn!("Port {} occupied, trying next", port);
+            }
         }
-        tracing::warn!("Port {} occupied, trying next", port);
     }
     Err(GatewayError::Config(format!(
         "No available port in range {}-{}", start_port, max_port
@@ -121,16 +133,20 @@ mod tests {
 
     #[test]
     fn test_find_available_port() {
-        // Port 0 is always available (OS auto-assigns)
-        let port = find_available_port("127.0.0.1", 19876, 19878);
-        assert!(port.is_ok());
+        // find_available_port returns both the port number and the bound listener
+        let result = find_available_port("127.0.0.1", 19876, 19878);
+        assert!(result.is_ok());
+        let (port, listener) = result.unwrap();
+        assert!((19876..=19878).contains(&port));
+        // Verify the listener is actually bound
+        assert!(listener.local_addr().is_ok());
     }
 
     #[test]
     fn test_find_available_port_range_exhausted() {
         // Use an impossible range to test exhaustion
-        let port = find_available_port("127.0.0.1", 1, 0);
-        assert!(port.is_err());
+        let result = find_available_port("127.0.0.1", 1, 0);
+        assert!(result.is_err());
     }
 
     #[test]

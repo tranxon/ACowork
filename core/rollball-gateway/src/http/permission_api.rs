@@ -82,7 +82,7 @@ pub async fn list_permissions(
     }
 
     // Query permission store
-    let perm_store = get_permission_store(&state)?;
+    let perm_store = get_permission_store(&state).await?;
     let grants = perm_store.query_grants(&agent_id)
         .map_err(|e| ApiError::internal(&format!("Failed to query permissions: {}", e)))?;
 
@@ -126,7 +126,7 @@ pub async fn grant_permission(
         )))?;
 
     // Create and persist the grant
-    let perm_store = get_permission_store(&state)?;
+    let perm_store = get_permission_store(&state).await?;
     let grant = match body.expires_at {
         Some(expires) => PermissionGrant::with_expiry(
             &agent_id,
@@ -172,7 +172,7 @@ pub async fn revoke_permission(
         )))?;
 
     // Revoke the permission
-    let perm_store = get_permission_store(&state)?;
+    let perm_store = get_permission_store(&state).await?;
     perm_store.revoke(&agent_id, Some(&permission))
         .map_err(|e| ApiError::internal(&format!("Failed to revoke permission: {}", e)))?;
 
@@ -190,20 +190,20 @@ pub async fn revoke_permission(
 
 /// Get the permission store from GatewayState.
 ///
-/// Note: Currently PermissionStore is owned by IpcServer, not GatewayState.
-/// For the HTTP API to access it, we need to either:
-/// 1. Store PermissionStore in GatewayState (preferred for Phase 4)
-/// 2. Share it via AppState
-///
-/// For S2.5, we create a temporary in-memory store per request.
-/// This will be replaced with shared store in S2.6 integration.
-fn get_permission_store(
-    _state: &AppState,
+/// P0-1 fix: Now uses the shared PermissionStore from GatewayState
+/// instead of creating a temporary in-memory store per request.
+/// This ensures HTTP API and IPC server see the same permission data.
+async fn get_permission_store(
+    state: &AppState,
 ) -> Result<std::sync::Arc<PermissionStore>, (StatusCode, Json<ApiError>)> {
-    // TODO(S2.6): Use shared PermissionStore from IpcServer
-    // For now, create an in-memory store for each request.
-    // This is acceptable for S2.5 unit testing; the integration
-    // test (S2.6) will use the shared store.
+    let gw = state.gateway_state.read().await;
+    // Use shared store from GatewayState (injected at Gateway startup)
+    if let Some(store) = &gw.permission_store {
+        return Ok(std::sync::Arc::clone(store));
+    }
+    drop(gw);
+    // Fallback: no shared store available (should not happen in production)
+    tracing::warn!("No shared PermissionStore in GatewayState, creating in-memory fallback");
     let store = PermissionStore::open_in_memory()
         .map_err(|e| ApiError::internal(&format!("Failed to create permission store: {}", e)))?;
     Ok(std::sync::Arc::new(store))

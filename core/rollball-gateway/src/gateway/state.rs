@@ -7,6 +7,7 @@ use crate::rate::bucket::RateLimiter;
 use crate::capability::registry::CapabilityRegistry;
 use crate::cron::CronScheduler;
 use crate::cron::store::CronStore;
+use crate::permission_store::PermissionStore;
 
 /// Information about an installed agent
 #[derive(Debug, Clone)]
@@ -27,6 +28,9 @@ pub struct RunningAgentInfo {
     pub workspace: String,
 }
 
+/// Shared permission store type (same as IPC server)
+pub type SharedPermissionStore = std::sync::Arc<PermissionStore>;
+
 /// Gateway state — shared mutable state for the entire Gateway process
 pub struct GatewayState {
     /// Installed agents (agent_id → AgentInfo)
@@ -44,7 +48,14 @@ pub struct GatewayState {
     /// Cron scheduler for time-based triggers
     pub cron_scheduler: CronScheduler,
     /// Cron persistence store
-    pub cron_store: Option<CronStore>,
+    pub cron_store: Option<std::sync::Arc<CronStore>>,
+    /// Shared permission store (injected from IPC server at startup)
+    /// This allows HTTP API and IPC server to share the same permission data.
+    /// Set to None initially; populated by Gateway::run() before starting
+    /// the HTTP server.
+    pub permission_store: Option<SharedPermissionStore>,
+    /// Gateway configuration snapshot (for Config API)
+    pub config: Option<crate::config::GatewayConfig>,
 }
 
 impl GatewayState {
@@ -59,6 +70,8 @@ impl GatewayState {
             capability_registry: CapabilityRegistry::new(),
             cron_scheduler: CronScheduler::new(),
             cron_store: None,
+            permission_store: None,
+            config: None,
         }
     }
 

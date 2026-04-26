@@ -407,9 +407,14 @@ async fn handle_intent_send(
         // Broad permission may cover the narrow one
         let has_broad = perm_store.has_permission(&from, &intent_send_broad).unwrap_or(false);
         if !has_broad {
+            // P1-8 fix: Structured audit log for permission denial
             tracing::warn!(
-                "IntentSend rejected: agent '{}' lacks intent:send permission for target '{}'",
-                from, target
+                event = "permission_denied",
+                permission = "intent:send",
+                agent_id = %from,
+                target = %target,
+                action = %action,
+                "Intent blocked by permission check"
             );
             return GatewayResponse::IntentDelivered {
                 message_id: format!("error:permission-denied:intent:send:{}", target),
@@ -879,38 +884,47 @@ async fn handle_cron_register(
     params: &serde_json::Value,
     state: &SharedState,
 ) -> GatewayResponse {
-    let mut guard = state.write().await;
-    match guard.cron_scheduler.register(agent_id, schedule, action, params.clone()) {
-        Ok(cron_id) => {
-            // Persist to CronStore
-            if let Some(store) = &guard.cron_store {
-                let entry = crate::cron::StoredCronEntry {
-                    id: cron_id.clone(),
-                    agent_id: agent_id.to_string(),
-                    schedule: schedule.to_string(),
-                    action: action.to_string(),
-                    params: serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()),
+    let (cron_id, store_clone) = {
+        let mut guard = state.write().await;
+        match guard.cron_scheduler.register(agent_id, schedule, action, params.clone()) {
+            Ok(id) => {
+                let store = guard.cron_store.clone();
+                (id, store)
+            }
+            Err(e) => {
+                tracing::warn!("Cron register failed: agent={} schedule={} error={}", agent_id, schedule, e);
+                return GatewayResponse::CronRegisterResult {
+                    cron_id: None,
+                    error: Some(e),
                 };
-                if let Err(e) = store.insert(&entry) {
-                    tracing::warn!("Failed to persist cron entry {}: {}", cron_id, e);
-                }
-            }
-            tracing::info!(
-                "Cron registered via IPC: agent={} cron_id={} schedule={} action={}",
-                agent_id, cron_id, schedule, action
-            );
-            GatewayResponse::CronRegisterResult {
-                cron_id: Some(cron_id),
-                error: None,
             }
         }
-        Err(e) => {
-            tracing::warn!("Cron register failed: agent={} schedule={} error={}", agent_id, schedule, e);
-            GatewayResponse::CronRegisterResult {
-                cron_id: None,
-                error: Some(e),
+    };
+
+    // P1-9 fix: Use spawn_blocking for synchronous rusqlite operations
+    if let Some(store) = store_clone {
+        let entry = crate::cron::StoredCronEntry {
+            id: cron_id.clone(),
+            agent_id: agent_id.to_string(),
+            schedule: schedule.to_string(),
+            action: action.to_string(),
+            params: serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()),
+        };
+        let cron_id_clone = cron_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = store.insert(&entry) {
+                tracing::warn!("Failed to persist cron entry {}: {}", cron_id_clone, e);
             }
-        }
+        }).await;
+    }
+
+    tracing::info!(
+        "Cron registered via IPC: agent={} cron_id={} schedule={} action={}",
+        agent_id, cron_id, schedule, action
+    );
+    GatewayResponse::CronRegisterResult {
+        cron_id: Some(cron_id),
+        error: None,
     }
 }
 
@@ -918,15 +932,25 @@ async fn handle_cron_unregister(
     cron_id: &str,
     state: &SharedState,
 ) -> GatewayResponse {
-    let mut guard = state.write().await;
-    let removed = guard.cron_scheduler.unregister(cron_id);
-    if removed {
-        // Remove from CronStore
-        if let Some(store) = &guard.cron_store
-            && let Err(e) = store.delete(cron_id) {
-                tracing::warn!("Failed to delete cron entry {} from store: {}", cron_id, e);
+    let (removed, store_clone) = {
+        let mut guard = state.write().await;
+        let removed = guard.cron_scheduler.unregister(cron_id);
+        let store = guard.cron_store.clone();
+        (removed, store)
+    };
+
+    // P1-9 fix: Use spawn_blocking for synchronous rusqlite operations
+    if removed
+        && let Some(store) = store_clone
+    {
+        let cron_id_clone = cron_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = store.delete(&cron_id_clone) {
+                tracing::warn!("Failed to delete cron entry {} from store: {}", cron_id_clone, e);
             }
+        }).await;
     }
+
     tracing::info!("Cron unregister: cron_id={} removed={}", cron_id, removed);
     GatewayResponse::CronUnregisterResult { removed }
 }
@@ -1120,7 +1144,7 @@ mod tests {
             &shared_perm_store,
         ).await;
 
-        if let GatewayResponse::PermissionResult { request_id, granted, reason } = response {
+        if let GatewayResponse::PermissionResult { request_id, granted, reason: _ } = response {
             assert_eq!(request_id, "req-policy-1");
             assert!(granted, "MemoryRead should be auto-approved by policy");
         } else {
