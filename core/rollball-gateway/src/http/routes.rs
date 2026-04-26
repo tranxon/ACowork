@@ -24,6 +24,19 @@ pub type SharedHttpState = Arc<RwLock<GatewayState>>;
 /// Shared session manager type (same as IPC server)
 pub type SharedSessionMgr = Arc<tokio::sync::Mutex<SessionManager>>;
 
+/// Bridge event for forwarding Agent responses to HTTP clients
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BridgeEvent {
+    /// Agent ID that produced the response
+    pub agent_id: String,
+    /// Message ID for correlation
+    pub message_id: String,
+    /// Event type: "chunk", "tool_call", "tool_result", "done"
+    pub event_type: String,
+    /// Event payload (JSON)
+    pub payload: serde_json::Value,
+}
+
 /// Application state available to all HTTP handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +47,9 @@ pub struct AppState {
     /// Shared session manager for pushing messages to agents
     /// Set by Gateway::run() when the IPC server is initialized
     pub session_mgr: Option<SharedSessionMgr>,
+    /// Bridge channel for forwarding Agent responses to HTTP clients
+    /// The IPC server publishes events; HTTP WebSocket subscribes
+    pub bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
 }
 
 /// Build the HTTP router with all routes
@@ -148,6 +164,7 @@ mod tests {
             gateway_state: Arc::new(RwLock::new(gw_state)),
             auth: Arc::new(HttpAuth::new(false)),
             session_mgr: None,
+            bridge_tx: None,
         }
     }
 

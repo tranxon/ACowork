@@ -149,10 +149,12 @@ pub async fn agent_stream_ws(
 /// Handle the WebSocket connection lifecycle
 ///
 /// Receives messages from the client, pushes them to the Agent's IPC session,
-/// and streams responses back. Full IPC bridge (S1.6) will forward Agent
-/// responses here.
+/// and subscribes to the bridge channel for streaming responses back.
 async fn handle_ws(mut socket: WebSocket, agent_id: String, state: AppState) {
     tracing::info!("WebSocket connected for agent: {}", agent_id);
+
+    // Subscribe to bridge channel for this agent's responses
+    let mut bridge_rx = state.bridge_tx.as_ref().map(|tx| tx.subscribe());
 
     // Send initial connection acknowledgment
     let welcome = serde_json::json!({
@@ -162,20 +164,52 @@ async fn handle_ws(mut socket: WebSocket, agent_id: String, state: AppState) {
     let _ = socket.send(Message::Text(welcome.to_string().into())).await;
 
     loop {
-        let msg = socket.recv().await;
-        match msg {
-            Some(Ok(Message::Text(text))) => {
-                handle_ws_text(&mut socket, &agent_id, &state, &text).await;
+        tokio::select! {
+            // Branch 1: Incoming message from client
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_ws_text(&mut socket, &agent_id, &state, &text).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        tracing::info!("WebSocket closed for agent: {}", agent_id);
+                        break;
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    _ => {
+                        // Ignore binary, pong, etc.
+                    }
+                }
             }
-            Some(Ok(Message::Close(_))) | None => {
-                tracing::info!("WebSocket closed for agent: {}", agent_id);
-                break;
-            }
-            Some(Ok(Message::Ping(data))) => {
-                let _ = socket.send(Message::Pong(data)).await;
-            }
-            _ => {
-                // Ignore binary, pong, etc.
+            // Branch 2: Bridge event from Agent (streaming response)
+            bridge_event = async {
+                match &mut bridge_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match bridge_event {
+                    Ok(event) => {
+                        // Only forward events for this agent
+                        if event.agent_id == agent_id {
+                            let json = serde_json::json!({
+                                "type": event.event_type,
+                                "message_id": event.message_id,
+                                "data": event.payload,
+                            });
+                            let _ = socket.send(Message::Text(json.to_string().into())).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Bridge channel lagged for {}: skipped {} events", agent_id, n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Bridge channel closed for agent: {}", agent_id);
+                        break;
+                    }
+                }
             }
         }
     }

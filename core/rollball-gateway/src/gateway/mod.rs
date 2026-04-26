@@ -117,6 +117,10 @@ impl Gateway {
             Arc::new(tokio::sync::Mutex::new(crate::ipc::session::SessionManager::new()));
         let http_session_mgr = Some(session_mgr.clone());
 
+        // Create bridge channel for HTTP ↔ IPC message forwarding
+        let (bridge_tx, _) = tokio::sync::broadcast::channel::<crate::http::routes::BridgeEvent>(256);
+        let http_bridge_tx = Some(bridge_tx.clone());
+
         // Start HTTP server in a separate tokio task (parallel with IPC)
         let http_state = shared_state.clone();
         let http_socket_path = socket_path.clone();
@@ -127,15 +131,16 @@ impl Gateway {
                 &http_socket_path,
                 &data_dir_path,
                 http_session_mgr,
+                http_bridge_tx,
             ).await {
                 tracing::error!("HTTP server failed: {}", e);
             }
         });
 
         // Run the IPC server (async, multi-connection)
-        // Note: session_mgr is shared between HTTP and IPC for message forwarding
-        let _session_mgr_for_ipc = session_mgr; // Available for S1.6 bridge
-        let ipc_server = IpcServer::with_permission_store(&socket_path, shared_perm_store);
+        // Share session_mgr between HTTP and IPC for message forwarding
+        let ipc_server = IpcServer::with_permission_store(&socket_path, shared_perm_store)
+            .with_session_mgr(session_mgr);
         ipc_server.listen(shared_state).await?;
 
         // Abort HTTP server when IPC exits

@@ -14,7 +14,7 @@ use crate::config::HttpConfig;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
-use crate::http::routes::{self, AppState, SharedSessionMgr};
+use crate::http::routes::{self, AppState, SharedSessionMgr, BridgeEvent};
 
 /// PID file content for Desktop App discovery
 #[derive(serde::Serialize)]
@@ -34,6 +34,7 @@ pub async fn start_http_server(
     socket_path: &str,
     data_dir: &Path,
     session_mgr: Option<SharedSessionMgr>,
+    bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -49,6 +50,7 @@ pub async fn start_http_server(
         gateway_state,
         auth,
         session_mgr,
+        bridge_tx,
     };
 
     // Find available port

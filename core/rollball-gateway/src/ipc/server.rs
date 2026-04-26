@@ -43,6 +43,8 @@ pub struct IpcServer {
     /// When an agent is installed/uninstalled, a CapabilityUpdate message
     /// is broadcast to all connected Agent sessions.
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
+    /// Optional external session manager (shared with HTTP API)
+    external_session_mgr: Option<crate::http::routes::SharedSessionMgr>,
 }
 
 /// Default broadcast channel capacity for capability updates
@@ -58,6 +60,7 @@ impl IpcServer {
             endpoint: endpoint.to_string(),
             perm_store: Arc::new(perm_store),
             capability_tx,
+            external_session_mgr: None,
         }
     }
 
@@ -68,7 +71,14 @@ impl IpcServer {
             endpoint: endpoint.to_string(),
             perm_store,
             capability_tx,
+            external_session_mgr: None,
         }
+    }
+
+    /// Set external session manager (shared with HTTP API for message bridging)
+    pub fn with_session_mgr(mut self, session_mgr: crate::http::routes::SharedSessionMgr) -> Self {
+        self.external_session_mgr = Some(session_mgr);
+        self
     }
 
     /// Get a sender for broadcasting capability updates.
@@ -91,8 +101,11 @@ impl IpcServer {
 
         tracing::info!("IPC server listening on: {}", server.endpoint_desc());
 
+        // Use external session manager if provided (shared with HTTP API),
+        // otherwise create a new one (standalone mode)
         let session_mgr: SharedSessionMgr =
-            Arc::new(Mutex::new(SessionManager::new()));
+            self.external_session_mgr.clone()
+                .unwrap_or_else(|| Arc::new(Mutex::new(SessionManager::new())));
         let conn_counter = AtomicU64::new(0);
         let perm_store = Arc::clone(&self.perm_store);
         let capability_tx = self.capability_tx.clone();

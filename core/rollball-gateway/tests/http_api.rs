@@ -23,6 +23,7 @@ fn create_test_app() -> axum::Router {
         gateway_state: std::sync::Arc::new(tokio::sync::RwLock::new(gw_state)),
         auth: std::sync::Arc::new(HttpAuth::new(false)),
         session_mgr: None,
+        bridge_tx: None,
     };
     build_router(state)
 }
