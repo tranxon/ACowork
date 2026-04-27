@@ -2,6 +2,9 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentInfo, AgentDetail } from "../lib/types";
 
+/** System Agent ID — always auto-started by Gateway */
+const SYSTEM_AGENT_ID = "com.rollball.system";
+
 interface AgentStore {
   agents: AgentInfo[];
   selectedAgentId: string | null;
@@ -28,6 +31,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       const agents = await invoke<AgentInfo[]>("list_agents");
       set({ agents, loading: false });
+      
+      // Auto-select System Agent if available and nothing is selected
+      const current = get();
+      if (!current.selectedAgentId && agents.length > 0) {
+        const systemAgent = agents.find((a) => a.agent_id === SYSTEM_AGENT_ID);
+        if (systemAgent) {
+          set({ selectedAgentId: SYSTEM_AGENT_ID });
+        } else {
+          // Fallback: select first available agent
+          set({ selectedAgentId: agents[0].agent_id });
+        }
+      }
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -48,11 +63,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   uninstallAgent: async (agentId) => {
+    // Prevent uninstalling System Agent
+    if (agentId === SYSTEM_AGENT_ID) {
+      throw new Error("System Agent cannot be uninstalled");
+    }
     try {
       await invoke("uninstall_agent", { agentId });
-      // If the uninstalled agent was selected, deselect it
+      // If the uninstalled agent was selected, fallback to System Agent
       if (get().selectedAgentId === agentId) {
-        set({ selectedAgentId: null });
+        const agents = get().agents.filter((a) => a.agent_id !== agentId);
+        const systemAgent = agents.find((a) => a.agent_id === SYSTEM_AGENT_ID);
+        set({ selectedAgentId: systemAgent?.agent_id ?? (agents[0]?.agent_id ?? null) });
       }
       await get().fetchAgents();
     } catch (e) {

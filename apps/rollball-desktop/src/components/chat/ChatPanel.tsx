@@ -40,14 +40,27 @@ export function ChatPanel() {
     setInputValue("");
   };
 
-  // ── Empty state ──
+  // ── Empty state: no agents at all ──
+  if (agents.length === 0) {
+    return (
+      <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+        <div className="text-center">
+          <Bot className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
+          <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">No agents available</p>
+          <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-600">Connect to Gateway and install the System Agent</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── No agent selected ──
   if (!selectedAgent) {
     return (
       <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
         <div className="text-center">
           <Bot className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
           <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">Select an agent to start chatting</p>
-          <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-600">or install a new agent</p>
+          <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-600">or install a new agent from the sidebar</p>
         </div>
       </div>
     );
