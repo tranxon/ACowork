@@ -145,6 +145,11 @@ impl Gateway {
         // Scan packages directory and restore installed agents from disk
         self.restore_installed_agents();
 
+        // Auto-start the System Agent if installed
+        if let Err(e) = self.lifecycle.auto_start_system_agent(&mut self.state).await {
+            tracing::warn!("Failed to auto-start System Agent: {}", e);
+        }
+
         // Wrap state in Arc<RwLock> for concurrent access in multi-connection mode.
         // std::mem::take replaces self.state with Default so the Arc takes ownership.
         // This is safe because run() is the terminal daemon method that blocks forever.
