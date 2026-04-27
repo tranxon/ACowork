@@ -108,6 +108,11 @@ export function AgentList() {
   };
 
   const handleUninstall = (agentId: string) => {
+    // Block uninstalling System Agent
+    if (agentId === "com.rollball.system") {
+      addToast({ type: "warning", message: "System Agent cannot be uninstalled" });
+      return;
+    }
     const agent = agents.find((a) => a.agent_id === agentId);
     setConfirmDialog({
       open: true,
@@ -167,7 +172,12 @@ export function AgentList() {
           >
             <Bot className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{agent.name}</div>
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-sm font-medium">{agent.name}</span>
+                {agent.agent_id === "com.rollball.system" && (
+                  <span className="shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900 dark:text-blue-300">System</span>
+                )}
+              </div>
               <div className="truncate text-xs text-zinc-400 dark:text-zinc-500">{agent.agent_id}</div>
             </div>
             <div
