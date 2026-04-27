@@ -121,9 +121,7 @@ pub async fn grant_permission(
 
     // Parse permission string
     let permission = Permission::parse(&perm)
-        .ok_or_else(|| ApiError::bad_request(&format!(
-            "Invalid permission string: {}", perm
-        )))?;
+        .map_err(|e| ApiError::bad_request(&e.to_string()))?;
 
     // Create and persist the grant
     let perm_store = get_permission_store(&state).await?;
@@ -167,9 +165,7 @@ pub async fn revoke_permission(
 
     // Parse permission string
     let permission = Permission::parse(&perm)
-        .ok_or_else(|| ApiError::bad_request(&format!(
-            "Invalid permission string: {}", perm
-        )))?;
+        .map_err(|e| ApiError::bad_request(&e.to_string()))?;
 
     // Revoke the permission
     let perm_store = get_permission_store(&state).await?;

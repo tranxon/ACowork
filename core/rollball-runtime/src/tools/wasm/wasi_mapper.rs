@@ -82,7 +82,8 @@ pub fn map_permission_to_wasi(perm: &Permission) -> Option<WasiCapabilities> {
         | Permission::Shell
         | Permission::Wasm
         | Permission::IntentSend(_)
-        | Permission::IntentReceive(_) => None,
+        | Permission::IntentReceive(_)
+        | Permission::RagQuery(_) => None,
     }
 }
 

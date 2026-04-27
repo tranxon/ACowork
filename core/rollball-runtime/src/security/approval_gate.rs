@@ -2,6 +2,10 @@
 //!
 //! Implements the Approval Gate pattern from `docs/08-security.md` §11.3.
 //! Medium/High risk commands are paused for user confirmation.
+//!
+//! S5.1: Interactive CLI mode uses `dialoguer` crate for terminal prompts.
+//! Enable with `--features interactive-cli`. Without the feature,
+//! the gate auto-approves Medium/High and auto-rejects Blocked (Phase 3 behavior).
 
 use crate::security::shell_risk::ShellRisk;
 use async_trait::async_trait;
@@ -82,10 +86,27 @@ impl ApprovalGate for CliApprovalGate {
             return ApprovalResponse::Approved;
         }
 
-        // In a real CLI, this would prompt the user interactively.
-        // For now, log the request and auto-approve Medium, auto-reject Blocked.
+        #[cfg(feature = "interactive-cli")]
+        {
+            self.interactive_approval(request)
+        }
+
+        #[cfg(not(feature = "interactive-cli"))]
+        {
+            self.noninteractive_approval(request)
+        }
+    }
+}
+
+// --- Non-interactive fallback (no dialoguer) ---
+
+#[cfg(not(feature = "interactive-cli"))]
+impl CliApprovalGate {
+    /// Non-interactive approval: log the request and auto-approve
+    /// Medium/High, auto-reject Blocked.
+    fn noninteractive_approval(&self, request: &ApprovalRequest) -> ApprovalResponse {
         tracing::warn!(
-            "[ApprovalGate] {} risk: {} — {} (action: {})",
+            "[ApprovalGate] {} risk: {} — {} (action: {}) [non-interactive]",
             request.risk_level.label(),
             request.tool_name,
             request.reason,
@@ -95,6 +116,59 @@ impl ApprovalGate for CliApprovalGate {
         match request.risk_level {
             ShellRisk::Blocked => ApprovalResponse::Rejected,
             _ => ApprovalResponse::Approved,
+        }
+    }
+}
+
+// --- Interactive CLI mode (dialoguer) ---
+
+#[cfg(feature = "interactive-cli")]
+impl CliApprovalGate {
+    /// Interactive approval using dialoguer::Confirm.
+    ///
+    /// This is a blocking call (reads from stdin). It is designed to be
+    /// called from `tokio::task::spawn_blocking()` in the Gateway's IPC
+    /// handler to avoid blocking the async runtime.
+    fn interactive_approval(&self, request: &ApprovalRequest) -> ApprovalResponse {
+        use dialoguer::Confirm;
+
+        let prompt = format!(
+            "\n\n  [ApprovalGate] {} risk: {}\n  Reason: {}\n  Action: {}\n\n  Allow?",
+            request.risk_level.label(),
+            request.tool_name,
+            request.reason,
+            request.action
+        );
+
+        // Blocked actions cannot be approved interactively
+        if request.risk_level == ShellRisk::Blocked {
+            tracing::error!(
+                "[ApprovalGate] Blocked action cannot be approved: {}",
+                request.action
+            );
+            return ApprovalResponse::Rejected;
+        }
+
+        let confirmed = Confirm::new()
+            .with_prompt(prompt)
+            .default(false) // Default to reject for safety
+            .interact()
+            .unwrap_or(false); // If stdin unavailable, default to reject
+
+        if confirmed {
+            tracing::info!(
+                "[ApprovalGate] User approved: {} — {}",
+                request.tool_name,
+                request.action
+            );
+            ApprovalResponse::Approved
+        } else {
+            tracing::info!(
+                "[ApprovalGate] User rejected: {} — {}",
+                request.tool_name,
+                request.action
+            );
+            ApprovalResponse::Rejected
         }
     }
 }

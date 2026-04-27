@@ -17,6 +17,8 @@ default = []
 local-embeddings = []
 # WASM tool sandbox (Wasmtime-based)
 wasm-tools = ["wasmtime", "wasmtime-wasi"]
+# Interactive CLI approval (dialoguer-based confirmation prompts)
+interactive-cli = ["dialoguer"]
 
 [dependencies]
 rollball-core.workspace = true
@@ -49,6 +51,9 @@ serde_yaml.workspace = true
 
 # File system watching
 notify.workspace = true
+
+# Interactive CLI (feature-gated)
+dialoguer = { workspace = true, optional = true }
 
 # WASM runtime (feature-gated)
 wasmtime = { workspace = true, optional = true }

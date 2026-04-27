@@ -72,9 +72,10 @@ impl WasmEngine {
         wasm_config.cranelift_opt_level(config.cranelift_opt_level);
 
         // Set max WASM linear memory size.
-        // Note: Per-instance memory limit is enforced by the WASM module's declared
-        // max_pages (in the memory section). For unbounded modules, a Store limiter
-        // will be added in a future phase (see P2-2 in review).
+        // Per-instance memory limit is enforced by StoreLimits (ResourceLimiter)
+        // configured in WasmToolInstance::from_module() — see S5.5.
+        // The config.max_memory_mb value is propagated to HostState::with_limits()
+        // which builds a StoreLimitsBuilder.memory_size() cap.
         wasm_config.max_wasm_stack(2 * 1024 * 1024); // 2MB stack
 
         let engine = Engine::new(&wasm_config)

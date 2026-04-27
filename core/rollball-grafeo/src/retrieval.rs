@@ -117,6 +117,8 @@ impl GrafeoStore {
     ///
     /// For the full-featured expansion with scoring and early stopping,
     /// see [`crate::spreading::graph_expand`].
+    /// S5.3: Uses parameterized query (`$start_id`) for node ID
+    /// to follow safe query practices, even though node IDs are numeric.
     pub fn graph_expand_simple(
         &self,
         start_id: NodeId,
@@ -125,11 +127,12 @@ impl GrafeoStore {
     ) -> Result<Vec<NodeId>> {
         let session = self.db.session();
         let gql = format!(
-            "MATCH (m)-[r*1..{}]-(other) WHERE id(m) = {} RETURN DISTINCT id(other)",
-            max_hops,
-            start_id.as_u64()
+            "MATCH (m)-[r*1..{}]-(other) WHERE id(m) = $start_id RETURN DISTINCT id(other)",
+            max_hops
         );
-        let result = session.execute(&gql)?;
+        let mut params = std::collections::HashMap::new();
+        params.insert("start_id".to_string(), grafeo_common::types::Value::from(start_id.as_u64() as i64));
+        let result = session.execute_with_params(&gql, params)?;
 
         let mut nodes = Vec::new();
         for row in result.rows() {

@@ -604,17 +604,35 @@ pub trait PermissionApprovalCallback: Send + Sync {
 }
 
 /// Default CLI-based approval callback (auto-deny in non-interactive mode).
+///
+/// S5.1: With `interactive-cli` feature, uses `dialoguer::Confirm` to
+/// prompt the user. Without the feature, auto-denies as before.
 pub struct CliApprovalCallback;
 
 impl PermissionApprovalCallback for CliApprovalCallback {
     fn request_approval(&self, agent_id: &str, permission: &str, reason: &str) -> bool {
-        // Phase 3: Non-interactive mode — log and auto-deny.
-        // Interactive CLI mode will be implemented when the CLI is fully built.
-        tracing::warn!(
-            "Permission request auto-denied (non-interactive): agent={}, perm={}, reason={}",
-            agent_id, permission, reason
-        );
-        false
+        #[cfg(feature = "interactive-cli")]
+        {
+            use dialoguer::Confirm;
+            let prompt = format!(
+                "\n\n  [Permission] Agent '{}' requests: {}\n  Reason: {}\n\n  Grant?",
+                agent_id, permission, reason
+            );
+            Confirm::new()
+                .with_prompt(prompt)
+                .default(false)
+                .interact()
+                .unwrap_or(false)
+        }
+
+        #[cfg(not(feature = "interactive-cli"))]
+        {
+            tracing::warn!(
+                "Permission request auto-denied (non-interactive): agent={}, perm={}, reason={}",
+                agent_id, permission, reason
+            );
+            false
+        }
     }
 }
 
@@ -644,8 +662,9 @@ pub trait AsyncPermissionApprovalCallback: Send + Sync {
 
 /// S2.2: Default async callback that wraps the synchronous CLI callback.
 ///
-/// In non-interactive mode, this auto-denies. When interactive CLI
-/// is implemented (S5.1 dialoguer), it will be replaced.
+/// S5.1: With `interactive-cli` feature, spawns the `dialoguer` prompt
+/// in `tokio::task::spawn_blocking()` to avoid blocking the IPC main loop.
+/// Without the feature, auto-denies as before.
 pub struct AsyncCliApprovalCallback;
 
 #[async_trait::async_trait]
@@ -657,9 +676,33 @@ impl AsyncPermissionApprovalCallback for AsyncCliApprovalCallback {
         reason: &str,
         _timeout_ms: u64,
     ) -> bool {
-        // Delegate to sync callback (non-interactive mode auto-denies)
-        let callback = CliApprovalCallback;
-        callback.request_approval(agent_id, permission, reason)
+        #[cfg(feature = "interactive-cli")]
+        {
+            // Spawn blocking task for interactive stdin prompt.
+            // This ensures the IPC handler task can continue processing
+            // other connections while waiting for user input.
+            let agent_id = agent_id.to_string();
+            let permission = permission.to_string();
+            let reason = reason.to_string();
+            tokio::task::spawn_blocking(move || {
+                use dialoguer::Confirm;
+                let prompt = format!(
+                    "\n\n  [Permission] Agent '{}' requests: {}\n  Reason: {}\n\n  Grant?",
+                    agent_id, permission, reason
+                );
+                Confirm::new()
+                    .with_prompt(prompt)
+                    .default(false)
+                    .interact()
+                    .unwrap_or(false)
+            }).await.unwrap_or(false)
+        }
+
+        #[cfg(not(feature = "interactive-cli"))]
+        {
+            let callback = CliApprovalCallback;
+            callback.request_approval(agent_id, permission, reason)
+        }
     }
 }
 
@@ -706,12 +749,12 @@ async fn handle_permission_request(
 
     // 2. Parse the requested permission
     let requested = match Permission::parse(permission) {
-        Some(p) => p,
-        None => {
+        Ok(p) => p,
+        Err(e) => {
             return GatewayResponse::PermissionResult {
                 request_id: request_id.to_string(),
                 granted: false,
-                reason: Some(format!("Invalid permission string: {}", permission)),
+                reason: Some(format!("Invalid permission: {}", e)),
             };
         }
     };
@@ -1223,7 +1266,7 @@ mod tests {
         if let GatewayResponse::PermissionResult { request_id, granted, reason } = response {
             assert_eq!(request_id, "req-invalid-1");
             assert!(!granted);
-            assert!(reason.unwrap().contains("Invalid permission string"));
+            assert!(reason.unwrap().contains("Invalid permission"));
         } else {
             panic!("Expected PermissionResult");
         }

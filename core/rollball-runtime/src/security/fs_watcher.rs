@@ -8,10 +8,10 @@
 //! inotify/FSEvents/ReadDirectoryChangesW.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};
+use tokio::sync::mpsc;
 
 /// A filesystem event detected in the workspace.
 #[derive(Debug, Clone)]
@@ -32,17 +32,25 @@ pub enum FsEvent {
 ///
 /// Uses `notify` crate internally. Falls back to a polling
 /// implementation if native OS notifications are unavailable.
+///
+/// Channel design: uses `tokio::sync::mpsc::unbounded_channel` so the
+/// synchronous `notify` callback can send events without blocking the
+/// async runtime. The receiver side is consumed via async `.recv()`.
 pub struct FsWatcher {
     workspace_dir: PathBuf,
     #[allow(dead_code)]
     watcher: Option<notify::RecommendedWatcher>,
-    rx: mpsc::Receiver<notify::Event>,
+    rx: mpsc::UnboundedReceiver<notify::Event>,
 }
 
 impl FsWatcher {
     /// Create a new filesystem watcher for the given workspace.
+    ///
+    /// Uses an unbounded tokio channel so the synchronous `notify`
+    /// callback (`UnboundedSender::send` is non-blocking) can emit
+    /// events without requiring an async context.
     pub fn new(workspace_dir: &Path) -> Result<Self, FsWatcherError> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::unbounded_channel();
 
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
@@ -64,7 +72,10 @@ impl FsWatcher {
     }
 
     /// Try to receive pending filesystem events (non-blocking).
-    pub fn try_recv_events(&self) -> Vec<FsEvent> {
+    ///
+    /// Drains all events currently sitting in the channel without
+    /// awaiting. Returns an empty vec when no events are available.
+    pub fn try_recv_events(&mut self) -> Vec<FsEvent> {
         let mut events = Vec::new();
         while let Ok(raw_event) = self.rx.try_recv() {
             if let Some(fs_event) = self.convert_event(&raw_event) {
@@ -74,23 +85,49 @@ impl FsWatcher {
         events
     }
 
-    /// Receive filesystem events with a timeout.
-    pub fn recv_events_timeout(&self, timeout: Duration) -> Vec<FsEvent> {
+    /// Receive filesystem events asynchronously.
+    ///
+    /// First drains any already-buffered events, then (if none were
+    /// pending) waits up to `timeout` for the first event to arrive.
+    /// After receiving one event the channel is drained again so the
+    /// caller gets a batch.
+    ///
+    /// This replaces the old `recv_events_timeout` which used
+    /// `std::sync::mpsc::recv_timeout` and could block the tokio
+    /// runtime.
+    pub async fn recv_events(&mut self, timeout: Duration) -> Vec<FsEvent> {
         let mut events = Vec::new();
-        let deadline = std::time::Instant::now() + timeout;
-        while std::time::Instant::now() < deadline {
-            let remaining = deadline - std::time::Instant::now();
-            let wait = remaining.min(Duration::from_millis(100));
-            match self.rx.recv_timeout(wait) {
-                Ok(raw_event) => {
+
+        // Drain any events already buffered in the channel.
+        while let Ok(raw_event) = self.rx.try_recv() {
+            if let Some(fs_event) = self.convert_event(&raw_event) {
+                events.push(fs_event);
+            }
+        }
+
+        // If nothing was buffered, wait for the first event with a timeout.
+        if events.is_empty() {
+            match tokio::time::timeout(timeout, self.rx.recv()).await {
+                Ok(Some(raw_event)) => {
                     if let Some(fs_event) = self.convert_event(&raw_event) {
                         events.push(fs_event);
                     }
+                    // Drain any additional events that arrived in the meantime.
+                    while let Ok(raw_event) = self.rx.try_recv() {
+                        if let Some(fs_event) = self.convert_event(&raw_event) {
+                            events.push(fs_event);
+                        }
+                    }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(None) => {
+                    // Channel closed — watcher dropped; return what we have.
+                }
+                Err(_) => {
+                    // Timeout elapsed; return what we have (possibly empty).
+                }
             }
         }
+
         events
     }
 
@@ -246,8 +283,46 @@ mod tests {
 
         let result = FsWatcher::new(&dir);
         // May fail on some CI environments without inotify/FSEvents support
-        if let Ok(watcher) = result {
+        if let Ok(mut watcher) = result {
             assert_eq!(watcher.workspace_dir(), dir);
+            // Non-blocking drain should succeed (likely empty).
+            let _ = watcher.try_recv_events();
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_recv_events_timeout_returns_empty() {
+        let dir = std::env::temp_dir().join("rollball-test-fswatcher-async-timeout");
+        let _ = fs::create_dir_all(&dir);
+
+        if let Ok(mut watcher) = FsWatcher::new(&dir) {
+            // With no file changes, recv_events should return empty after timeout.
+            let events = watcher.recv_events(Duration::from_millis(50)).await;
+            assert!(events.is_empty());
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_recv_events_detects_file_creation() {
+        let dir = std::env::temp_dir().join("rollball-test-fswatcher-async-create");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+
+        if let Ok(mut watcher) = FsWatcher::new(&dir) {
+            // Create a file inside the watched directory.
+            let file_path = dir.join("test_file.txt");
+            fs::write(&file_path, b"hello").unwrap();
+
+            // Give the OS a moment to deliver the event.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            let events = watcher.recv_events(Duration::from_secs(2)).await;
+            // We should get at least one event (Create or Modify).
+            assert!(!events.is_empty(), "Expected at least one FsEvent after file creation");
         }
 
         let _ = fs::remove_dir_all(&dir);

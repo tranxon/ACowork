@@ -76,6 +76,14 @@ impl CronStore {
         Ok(store)
     }
 
+    /// Check if the database connection is alive.
+    /// Performs a lightweight `SELECT 1` query.
+    pub fn health_check(&self) -> Result<(), CronStoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT 1", [], |_row| Ok(()))?;
+        Ok(())
+    }
+
     fn init_schema(&self) -> Result<(), CronStoreError> {
         let conn = self.conn.lock().unwrap();
 

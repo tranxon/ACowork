@@ -136,7 +136,7 @@ impl GrafeoStore {
             queue.push_back((*node_id, 0, *score, vec![*node_id]));
         }
 
-        while let Some((current_id, hops, parent_score, path)) = queue.pop_front() {
+        'outer: while let Some((current_id, hops, parent_score, path)) = queue.pop_front() {
             if hops >= config.max_hops {
                 continue;
             }
@@ -176,9 +176,11 @@ impl GrafeoStore {
                     continue;
                 }
 
-                // Capacity check: stop before processing to avoid unnecessary work
+                // Capacity check BEFORE adding to results/queue:
+                // If we've reached the limit, break out of BOTH loops
+                // so no high-score neighbors are silently skipped.
                 if results.len() >= config.max_total_nodes {
-                    break;
+                    break 'outer;
                 }
 
                 visited.insert(neighbor_id);
@@ -201,7 +203,12 @@ impl GrafeoStore {
                     path: new_path.clone(),
                 });
 
-                queue.push_back((neighbor_id, next_hop, accumulated_score, new_path));
+                // Only enqueue if we haven't hit the capacity limit yet.
+                // This prevents the queue from growing with items that
+                // will never be processed.
+                if results.len() < config.max_total_nodes {
+                    queue.push_back((neighbor_id, next_hop, accumulated_score, new_path));
+                }
             }
         }
 

@@ -23,6 +23,8 @@ pub struct VaultFacade {
     vault: rollball_vault::Vault,
     /// In-memory cache of provider names (not values) for fast listing
     provider_names: Vec<String>,
+    /// Directory path where the vault is stored
+    vault_dir: String,
 }
 
 impl VaultFacade {
@@ -36,6 +38,7 @@ impl VaultFacade {
         Self {
             vault,
             provider_names: Vec::new(),
+            vault_dir: vault_dir.to_string(),
         }
     }
 
@@ -52,6 +55,11 @@ impl VaultFacade {
     /// Check if vault is unlocked
     pub fn is_unlocked(&self) -> bool {
         self.vault.is_unlocked()
+    }
+
+    /// Get the vault directory path
+    pub fn dir(&self) -> &std::path::Path {
+        std::path::Path::new(&self.vault_dir)
     }
 
     /// Store an API key for a provider (encrypted on disk)

@@ -56,72 +56,145 @@ pub enum Permission {
     RagQuery(Option<String>),
 }
 
+/// Error type for permission string parsing.
+///
+/// S5.2: Provides detailed error information when a permission string
+/// cannot be parsed, including the invalid input and expected format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionParseError {
+    /// The invalid input string.
+    pub input: String,
+    /// Human-readable description of the error.
+    pub reason: String,
+}
+
+impl std::fmt::Display for PermissionParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid permission '{}': {}", self.input, self.reason)
+    }
+}
+
+impl std::error::Error for PermissionParseError {}
+
+impl PermissionParseError {
+    /// Create a new parse error with the invalid input and reason.
+    fn new(input: &str, reason: &str) -> Self {
+        Self {
+            input: input.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Create an error for an unknown permission category.
+    fn unknown_category(input: &str, category: &str) -> Self {
+        Self::new(
+            input,
+            &format!(
+                "unknown category '{}'. Expected one of: network, filesystem, memory, intent, identity, shell, wasm, rag",
+                category
+            ),
+        )
+    }
+
+    /// Create an error for a missing component (e.g., no access type after category).
+    fn missing_component(input: &str, expected: &str) -> Self {
+        Self::new(input, &format!("missing '{}'. Expected format: {}", expected, Self::expected_format(input)))
+    }
+
+    /// Create an error for an invalid sub-component value.
+    fn invalid_value(input: &str, component: &str, valid: &str) -> Self {
+        Self::new(input, &format!("invalid {} '{}'. Valid values: {}", component, input, valid))
+    }
+
+    /// Determine the expected format hint based on the input prefix.
+    fn expected_format(input: &str) -> &'static str {
+        if input.starts_with("filesystem:") {
+            "filesystem:<read|write>:<path>"
+        } else if input.starts_with("intent:") {
+            "intent:<send|receive>:<target>"
+        } else if input.starts_with("rag:") {
+            "rag:query[:<url>]"
+        } else {
+            "<category>:<spec>"
+        }
+    }
+}
+
 impl Permission {
-    /// Parse a permission string into a Permission enum
+    /// Parse a permission string into a Permission enum.
+    ///
+    /// Returns `Result<Permission, PermissionParseError>` with detailed
+    /// error information on failure.
     ///
     /// # Examples
     /// ```
     /// use rollball_core::permission::Permission;
     /// let p = Permission::parse("network:https://api.weather.com").unwrap();
     /// assert!(matches!(p, Permission::Network(Some(_))));
+    ///
+    /// let err = Permission::parse("invalid").unwrap_err();
+    /// assert!(err.reason.contains("unknown category"));
     /// ```
-    pub fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Result<Self, PermissionParseError> {
         // Handle simple single-word permissions first
         if s == "shell" {
-            return Some(Permission::Shell);
+            return Ok(Permission::Shell);
         }
         if s == "wasm" {
-            return Some(Permission::Wasm);
+            return Ok(Permission::Wasm);
         }
         if s == "rag:query" {
-            return Some(Permission::RagQuery(None));
+            return Ok(Permission::RagQuery(None));
         }
 
         // Split on the first colon only to get the category
-        let (category, rest) = s.split_once(':')?;
+        let (category, rest) = s.split_once(':')
+            .ok_or_else(|| PermissionParseError::new(s, "missing category delimiter ':'. Expected format: <category>:<spec> or 'shell'/'wasm'"))?;
         match category {
-            "network" => Some(Permission::Network(Some(rest.to_string()))),
+            "network" => Ok(Permission::Network(Some(rest.to_string()))),
             "filesystem" => {
                 // Split rest on first colon: "read:~/Documents" or "write:~/workdir"
-                let (access, path) = rest.split_once(':')?;
+                let (access, path) = rest.split_once(':')
+                    .ok_or_else(|| PermissionParseError::missing_component(s, "access:path"))?;
                 let path = Some(path.to_string());
                 match access {
-                    "read" => Some(Permission::FilesystemRead(path)),
-                    "write" => Some(Permission::FilesystemWrite(path)),
-                    _ => None,
+                    "read" => Ok(Permission::FilesystemRead(path)),
+                    "write" => Ok(Permission::FilesystemWrite(path)),
+                    other => Err(PermissionParseError::new(s, &format!("invalid filesystem access '{}'. Expected 'read' or 'write'", other))),
                 }
             }
             "memory" => match rest {
-                "read" => Some(Permission::MemoryRead),
-                "write" => Some(Permission::MemoryWrite),
-                _ => None,
+                "read" => Ok(Permission::MemoryRead),
+                "write" => Ok(Permission::MemoryWrite),
+                other => Err(PermissionParseError::new(s, &format!("invalid memory operation '{}'. Expected 'read' or 'write'", other))),
             },
             "intent" => {
-                let (direction, target) = rest.split_once(':')?;
+                let (direction, target) = rest.split_once(':')
+                    .ok_or_else(|| PermissionParseError::missing_component(s, "direction:target"))?;
                 let target = Some(target.to_string());
                 match direction {
-                    "send" => Some(Permission::IntentSend(target)),
-                    "receive" => Some(Permission::IntentReceive(target)),
-                    _ => None,
+                    "send" => Ok(Permission::IntentSend(target)),
+                    "receive" => Ok(Permission::IntentReceive(target)),
+                    other => Err(PermissionParseError::new(s, &format!("invalid intent direction '{}'. Expected 'send' or 'receive'", other))),
                 }
             }
             "identity" => match rest {
-                "read" => Some(Permission::IdentityRead),
-                "write" => Some(Permission::IdentityWrite),
-                _ => None,
+                "read" => Ok(Permission::IdentityRead),
+                "write" => Ok(Permission::IdentityWrite),
+                other => Err(PermissionParseError::new(s, &format!("invalid identity operation '{}'. Expected 'read' or 'write'", other))),
             },
             "rag" => match rest {
-                "query" => Some(Permission::RagQuery(None)),
+                "query" => Ok(Permission::RagQuery(None)),
                 query_part => {
                     // "rag:query:https://rag.corp.example.com"
                     if let Some(url) = query_part.strip_prefix("query:") {
-                        Some(Permission::RagQuery(Some(url.to_string())))
+                        Ok(Permission::RagQuery(Some(url.to_string())))
                     } else {
-                        None
+                        Err(PermissionParseError::new(s, &format!("invalid rag operation '{}'. Expected 'query' or 'query:<url>'", query_part)))
                     }
                 }
             },
-            _ => None,
+            other => Err(PermissionParseError::unknown_category(s, other)),
         }
     }
 
@@ -428,8 +501,8 @@ mod tests {
 
     #[test]
     fn test_permission_parse_invalid() {
-        assert!(Permission::parse("invalid").is_none());
-        assert!(Permission::parse("filesystem:execute").is_none());
+        assert!(Permission::parse("invalid").is_err());
+        assert!(Permission::parse("filesystem:execute").is_err());
     }
 
     #[test]
@@ -651,5 +724,42 @@ mod tests {
     #[test]
     fn test_rag_query_policy_default() {
         assert_eq!(PermissionPolicy::for_permission(&Permission::RagQuery(None)), PermissionPolicy::Default);
+    }
+
+    // ── S5.2: PermissionParseError tests ──────────────────────────────────
+
+    #[test]
+    fn test_parse_error_unknown_category() {
+        let err = Permission::parse("foobar:baz").unwrap_err();
+        assert!(err.reason.contains("unknown category"));
+        assert!(err.reason.contains("foobar"));
+        assert_eq!(err.input, "foobar:baz");
+    }
+
+    #[test]
+    fn test_parse_error_missing_colon() {
+        let err = Permission::parse("network").unwrap_err();
+        assert!(err.reason.contains("missing category delimiter"));
+    }
+
+    #[test]
+    fn test_parse_error_invalid_filesystem_access() {
+        let err = Permission::parse("filesystem:execute:/tmp").unwrap_err();
+        assert!(err.reason.contains("invalid filesystem access"));
+        assert!(err.reason.contains("execute"));
+    }
+
+    #[test]
+    fn test_parse_error_missing_path() {
+        let err = Permission::parse("filesystem:read").unwrap_err();
+        assert!(err.reason.contains("missing"));
+    }
+
+    #[test]
+    fn test_parse_error_display() {
+        let err = Permission::parse("foobar:baz").unwrap_err();
+        let display = format!("{}", err);
+        assert!(display.contains("foobar:baz"));
+        assert!(display.contains("unknown category"));
     }
 }
