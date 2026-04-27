@@ -41,12 +41,53 @@ impl GatewayClient {
         }
     }
 
-    /// Connect to the Gateway.
+    /// Connect to the Gateway and send AgentHello to register.
     pub async fn connect(&mut self) -> Result<(), RollballError> {
         let conn = crate::ipc::transport::connect(&self.endpoint).await?;
         self.conn = Some(conn);
         tracing::info!("Connected to Gateway at: {}", self.endpoint);
         Ok(())
+    }
+
+    /// Connect to the Gateway and register with AgentHello.
+    ///
+    /// This is the preferred way to connect — it sends the AgentHello
+    /// message after establishing the transport connection, so the
+    /// Gateway can associate this connection with the agent.
+    pub async fn connect_and_register(
+        &mut self,
+        agent_id: &str,
+        version: &str,
+    ) -> Result<(), RollballError> {
+        self.connect().await?;
+
+        let request = GatewayRequest::AgentHello {
+            agent_id: agent_id.to_string(),
+            version: version.to_string(),
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::AgentHelloResult { success: true, error: None }) => {
+                tracing::info!("Gateway registered agent: {}", agent_id);
+                Ok(())
+            }
+            Ok(GatewayResponse::AgentHelloResult { success: false, error: Some(e) }) => {
+                tracing::error!("Gateway rejected AgentHello: {}", e);
+                Err(RollballError::Ipc(format!("AgentHello rejected: {}", e)))
+            }
+            Ok(GatewayResponse::AgentHelloResult { success: false, error: None }) => {
+                Err(RollballError::Ipc("AgentHello failed with no error".to_string()))
+            }
+            Ok(GatewayResponse::AgentHelloResult { success: true, error: Some(e) }) => {
+                tracing::warn!("AgentHello succeeded but with error: {}", e);
+                Ok(())
+            }
+            Ok(other) => {
+                tracing::warn!("Unexpected AgentHello response: {:?}", other);
+                Err(RollballError::Ipc(format!("Unexpected AgentHello response: {:?}", other)))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Allocate a unique request ID

@@ -345,7 +345,8 @@ pub async fn run_cron_scheduler(
                 let mut gw = gateway_state.write().await;
                 if gw.is_installed(&agent_id) {
                     // Start the agent process
-                    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(0);
+                    let socket_path = gw.config.as_ref().map(|c| c.socket_path.clone()).unwrap_or_default();
+                    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(0, socket_path);
                     match lifecycle.start_agent(&agent_id, &mut gw).await {
                         Ok(()) => {
                             tracing::info!("Cron: started agent {} for scheduled trigger", agent_id);

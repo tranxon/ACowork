@@ -91,11 +91,11 @@ impl Cli {
 
 /// Attempt to connect to Gateway via the given socket path.
 /// Returns Some(client) on success, None on failure (graceful fallback to standalone mode).
-async fn connect_gateway_client(socket_path: &str) -> Option<crate::ipc::client::GatewayClient> {
+async fn connect_gateway_client(socket_path: &str, agent_id: &str, version: &str) -> Option<crate::ipc::client::GatewayClient> {
     let mut client = crate::ipc::client::GatewayClient::new(socket_path);
-    match client.connect().await {
+    match client.connect_and_register(agent_id, version).await {
         Ok(()) => {
-            tracing::info!("Connected to Gateway at {}", socket_path);
+            tracing::info!("Connected and registered with Gateway at {}", socket_path);
             Some(client)
         }
         Err(e) => {
@@ -118,9 +118,18 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     use crate::tools::builtin;
     use crate::tools::registry::ToolRegistry;
 
-    // Step 0: Connect to Gateway if socket path is provided
+    // Step 1: Load .agent package (before Gateway connection so we know agent_id)
+    tracing::info!(path = %config.package_path, "Loading .agent package");
+    let loaded = load_package(std::path::Path::new(&config.package_path))?;
+    tracing::info!(
+        agent_id = %loaded.manifest.agent_id,
+        name = %loaded.manifest.name,
+        "Package loaded successfully"
+    );
+
+    // Step 2: Connect to Gateway if socket path is provided
     let ipc_client = if let Some(socket_path) = config.get_gateway_address() {
-        connect_gateway_client(socket_path).await
+        connect_gateway_client(socket_path, &loaded.manifest.agent_id, &loaded.manifest.version).await
     } else {
         None
     };
@@ -130,16 +139,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         tracing::info!("Running in standalone mode (no Gateway)");
     }
 
-    // Step 1: Load .agent package
-    tracing::info!(path = %config.package_path, "Loading .agent package");
-    let loaded = load_package(std::path::Path::new(&config.package_path))?;
-    tracing::info!(
-        agent_id = %loaded.manifest.agent_id,
-        name = %loaded.manifest.name,
-        "Package loaded successfully"
-    );
-
-    // Step 2: Build system prompt
+    // Step 3: Build system prompt
     let system_prompt = build_system_prompt(&loaded.package_dir)?;
     tracing::debug!(
         prompt_len = system_prompt.len(),
@@ -433,7 +433,7 @@ mod tests {
     #[tokio::test]
     async fn test_gateway_client_connection_failure_graceful() {
         // Use a non-existent socket path to force connection failure
-        let client = connect_gateway_client("unix:///nonexistent/socket/path.sock").await;
+        let client = connect_gateway_client("unix:///nonexistent/socket/path.sock", "com.test", "1.0.0").await;
         assert!(
             client.is_none(),
             "Should gracefully fallback to None on connection failure"

@@ -37,6 +37,7 @@ impl Gateway {
         let idle_timeout = config.idle_timeout_secs;
         let vault_dir = config.vault_dir.clone();
         let data_dir = config.data_dir.clone();
+        let socket_path = config.socket_path.clone();
 
         // Ensure data directory exists before opening the database
         std::fs::create_dir_all(&data_dir)
@@ -54,7 +55,7 @@ impl Gateway {
         Ok(Self {
             config,
             state: GatewayState::new(&vault_dir),
-            lifecycle: LifecycleManager::new(idle_timeout),
+            lifecycle: LifecycleManager::new(idle_timeout, socket_path),
             perm_store,
         })
     }

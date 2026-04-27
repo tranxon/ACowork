@@ -79,12 +79,27 @@ pub enum GatewayRequest {
     },
     /// List cron entries for the calling agent (S3.4)
     CronList {},
+    /// Agent registration — first message sent after IPC connection
+    /// Runtime sends this to identify itself to the Gateway
+    AgentHello {
+        /// The agent's reverse-domain identifier
+        agent_id: String,
+        /// The agent's version
+        version: String,
+    },
 }
 
 /// Gateway Service API response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GatewayResponse {
+    /// AgentHello response — confirms registration
+    AgentHelloResult {
+        /// Whether the registration was successful
+        success: bool,
+        /// Error message if registration failed
+        error: Option<String>,
+    },
     /// API key release result
     KeyReleaseResult {
         /// The released API key on success

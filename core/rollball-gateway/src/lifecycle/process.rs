@@ -28,6 +28,7 @@ pub async fn spawn_agent_process(
     agent_id: &str,
     install_path: &str,
     workspace: &Path,
+    gateway_socket: &str,
 ) -> Result<AgentChild, GatewayError> {
     // Locate the rollball-runtime binary (sibling of current executable)
     let runtime_bin = std::env::current_exe()
@@ -55,10 +56,14 @@ pub async fn spawn_agent_process(
     let mut cmd = tokio::process::Command::new(&runtime_bin);
     cmd.arg("--agent-id")
         .arg(agent_id)
+        .arg("--package-path")
+        .arg(install_path)
         .arg("--manifest-path")
         .arg(&manifest_path)
         .arg("--work-dir")
         .arg(workspace)
+        .arg("--gateway-socket")
+        .arg(gateway_socket)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -197,6 +202,7 @@ mod tests {
             "com.test.nonexistent",
             "/nonexistent/path",
             Path::new("/tmp/nonexistent-workspace"),
+            "/tmp/test-socket",
         )
         .await;
         assert!(result.is_err());

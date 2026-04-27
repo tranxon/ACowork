@@ -290,6 +290,9 @@ async fn dispatch_request(
         GatewayRequest::CronList {} => {
             handle_cron_list(conn_id, session_mgr, state).await
         }
+        GatewayRequest::AgentHello { agent_id, version } => {
+            handle_agent_hello(&agent_id, &version, conn_id, session_mgr).await
+        }
     }
 }
 
@@ -1030,6 +1033,35 @@ async fn handle_cron_list(
         .collect();
 
     GatewayResponse::CronListResult { entries }
+}
+
+/// Handle AgentHello — register the session with the agent's identity
+async fn handle_agent_hello(
+    agent_id: &str,
+    version: &str,
+    conn_id: &str,
+    session_mgr: &SharedSessionMgr,
+) -> GatewayResponse {
+    tracing::info!(
+        "AgentHello received: agent_id={} version={} conn={}",
+        agent_id, version, conn_id
+    );
+
+    let mut mgr = session_mgr.lock().await;
+    if let Some(session) = mgr.get_session_mut(conn_id) {
+        session.authenticate(agent_id);
+        tracing::info!("Session {} authenticated as agent {}", conn_id, agent_id);
+        GatewayResponse::AgentHelloResult {
+            success: true,
+            error: None,
+        }
+    } else {
+        tracing::warn!("AgentHello from unknown connection {}", conn_id);
+        GatewayResponse::AgentHelloResult {
+            success: false,
+            error: Some(format!("Unknown connection: {}", conn_id)),
+        }
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

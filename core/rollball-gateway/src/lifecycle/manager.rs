@@ -12,11 +12,13 @@ pub const SYSTEM_AGENT_ID: &str = "com.rollball.system";
 pub struct LifecycleManager {
     /// Idle timeout in seconds (0 = no timeout)
     idle_timeout_secs: u64,
+    /// Gateway socket path for IPC (passed to Runtime via --gateway-socket)
+    gateway_socket: String,
 }
 
 impl LifecycleManager {
-    pub fn new(idle_timeout_secs: u64) -> Self {
-        Self { idle_timeout_secs }
+    pub fn new(idle_timeout_secs: u64, gateway_socket: String) -> Self {
+        Self { idle_timeout_secs, gateway_socket }
     }
 
     /// Start an agent process
@@ -69,6 +71,7 @@ impl LifecycleManager {
             agent_id,
             &info.install_path,
             &workspace,
+            &self.gateway_socket,
         ).await?;
 
         let pid = child.id();
@@ -241,13 +244,13 @@ mod tests {
 
     #[test]
     fn test_lifecycle_manager_new() {
-        let mgr = LifecycleManager::new(300);
+        let mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         assert_eq!(mgr.idle_timeout_secs, 300);
     }
 
     #[test]
     fn test_lifecycle_manager_zero_timeout() {
-        let mgr = LifecycleManager::new(0);
+        let mgr = LifecycleManager::new(0, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("zero");
         let state = GatewayState::new(&dir);
         let result = mgr.check_idle_timeouts(&state);
@@ -256,7 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_agent_not_installed() {
-        let mut mgr = LifecycleManager::new(300);
+        let mut mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("start");
         let mut state = GatewayState::new(&dir);
         let result = mgr.start_agent("com.test.unknown", &mut state).await;
@@ -265,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_agent_not_running() {
-        let mut mgr = LifecycleManager::new(300);
+        let mut mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("stop");
         let mut state = GatewayState::new(&dir);
         let result = mgr.stop_agent("com.test.unknown", &mut state).await;
@@ -279,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_system_agent_rejected() {
-        let mut mgr = LifecycleManager::new(300);
+        let mut mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("sysstop");
         let mut state = GatewayState::new(&dir);
         let result = mgr.stop_agent(SYSTEM_AGENT_ID, &mut state).await;
@@ -290,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_start_system_agent_not_installed() {
-        let mut mgr = LifecycleManager::new(300);
+        let mut mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("autostart");
         let mut state = GatewayState::new(&dir);
         // System Agent not installed — should succeed gracefully with warning
@@ -300,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_get_identity_deps_no_deps() {
-        let mgr = LifecycleManager::new(300);
+        let mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("deps");
         let state = GatewayState::new(&dir);
         let deps = mgr.get_identity_deps("com.test.unknown", &state);
@@ -309,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_build_identity_delivery_no_deps() {
-        let mgr = LifecycleManager::new(300);
+        let mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("delivery");
         let state = GatewayState::new(&dir);
         let entries = mgr.build_identity_delivery("com.test.unknown", &state);
@@ -321,7 +324,7 @@ mod tests {
         use crate::gateway::state::AgentInfo;
         use rollball_core::identity::IdentityCategory;
 
-        let mgr = LifecycleManager::new(300);
+        let mgr = LifecycleManager::new(300, "/tmp/test-socket".to_string());
         let dir = temp_vault_dir("identity-fields");
         let mut state = GatewayState::new(&dir);
 

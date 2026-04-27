@@ -218,7 +218,8 @@ pub async fn start_agent(
 
     // Use the lifecycle manager to start the agent
     let idle_timeout = 300; // Default idle timeout
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout);
+    let socket_path = gw.config.as_ref().map(|c| c.socket_path.clone()).unwrap_or_default();
+    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, socket_path);
     lifecycle.start_agent(&agent_id, &mut gw).await
         .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
 
@@ -239,7 +240,8 @@ pub async fn stop_agent(
     }
 
     let idle_timeout = 300;
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout);
+    let socket_path = gw.config.as_ref().map(|c| c.socket_path.clone()).unwrap_or_default();
+    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, socket_path);
     lifecycle.stop_agent(&agent_id, &mut gw).await
         .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
 
