@@ -72,60 +72,71 @@
 
 Desktop App 和开发调试能力在同一阶段交付，因为它们共享 Debug Protocol 基础设施。
 
+> **2026-04-27 更新**：Phase 5 实施计划已编制完成，详见 `docs/plan/plan-p5.md`。
+> - S1：Desktop App 骨架 + 系统托盘（Tauri v2 + React 19）
+> - S2：Debug Protocol 实现（WebSocket + JSON-RPC 2.0 + 执行控制）
+> - S3：开发框架高级能力（Skill 热加载 + Provider 切换 + 录制回放）
+> - S4：发布工具链（Agent 克隆 + 发布检查 + 打包签名）
+> - S5：Phase 4 遗留技术债务清偿 + 全链路集成验证
+> - 预计 16~18 周，40 项任务，217 项测试
+
 #### Phase 4 遗留技术债务
 
-> 以下 P2 问题从 Phase 4 Code Review 和 P2 Grafeo/Memory Review 中延后，需在 Phase 5 早期规划时纳入。
+> 以下 P2 问题从 Phase 4 Code Review 和 P2 Grafeo/Memory Review 中延后，纳入 Phase 5 S5 处理。
 > 来源：`docs/review/05-p4-code-review.md`（P2-3~P2-14）、`docs/review/09-p2-grafeo-memory-code-review.md`（P2-3g~P2-4g）。
 
-| 编号 | 模块 | 内容 | 来源 |
-|------|------|------|------|
-| P2-3 | Gateway | API 错误响应格式统一 | P4 S1 review |
-| P2-4 | Gateway | HTTP API 请求限流（rate limiting） | P4 S1 review |
-| P2-5 | Gateway | API 版本控制 `/api/v1/` | P4 S1 review |
-| P2-8 | Gateway | PermissionGrant 序列化压缩 | P4 S2 review |
-| P2-9 | Gateway | PermissionPolicy 运行时可配置 | P4 S2 review |
-| P2-10 | Runtime | PermissionChecker 监控指标（缓存命中率、请求延迟） | P4 S2 review |
-| P2-11 | Gateway | Cron 时区支持 | P4 S3 review |
-| P2-12 | Gateway | Cron 重试机制 | P4 S3 review |
-| P2-13 | Gateway | Cron 批量操作 | P4 S3 review |
-| P2-14 | Gateway | Cron 最大执行次数（max_runs / expires_at） | P4 S3 review |
-| P2-3g | Grafeo | 冲突检测 Negation/Evolution keywords 可配置（当前硬编码中英双语） | P2 Grafeo review |
-| P2-4g | Grafeo | PageRank O(V²) 增量优化或采样策略 | P2 Grafeo review |
-| P2-5g | Memory | MEM-04 遗忘机制实现方式冲突（PRD: 按需计算 vs 代码: 后台扫描） | PRD §1.4 vs plan-p2.md S2.7 |
+| 编号 | 模块 | 内容 | 来源 | Phase 5 任务 |
+|------|------|------|------|-------------|
+| P2-3 | Gateway | API 错误响应格式统一 | P4 S1 review | S5.1 |
+| P2-4 | Gateway | HTTP API 请求限流（rate limiting） | P4 S1 review | S5.2 |
+| P2-5 | Gateway | API 版本控制 `/api/v1/` | P4 S1 review | S5.3 |
+| P2-8 | Gateway | PermissionGrant 序列化压缩 | P4 S2 review | S5.5 |
+| P2-9 | Gateway | PermissionPolicy 运行时可配置 | P4 S2 review | S5.6 |
+| P2-10 | Runtime | PermissionChecker 监控指标（缓存命中率、请求延迟） | P4 S2 review | S5.7 |
+| P2-11 | Gateway | Cron 时区支持 | P4 S3 review | S5.8 |
+| P2-12 | Gateway | Cron 重试机制 | P4 S3 review | S5.8 |
+| P2-13 | Gateway | Cron 批量操作 | P4 S3 review | S5.8 |
+| P2-14 | Gateway | Cron 最大执行次数（max_runs / expires_at） | P4 S3 review | S5.8 |
+| P2-3g | Grafeo | 冲突检测 Negation/Evolution keywords 可配置（当前硬编码中英双语） | P2 Grafeo review | S5.9 |
+| P2-4g | Grafeo | PageRank O(V²) 增量优化或采样策略 | P2 Grafeo review | S5.9 |
+| P2-5g | Memory | MEM-04 遗忘机制实现方式冲突（PRD: 按需计算 vs 代码: 后台扫描） | PRD §1.4 vs plan-p2.md S2.7 | S5.4 |
 
-> **待讨论议题（P2-5g）**：遗忘机制实现方式——PRD MEM-04 描述为"按需计算模型（查询时实时计算），无后台定时扫描"，但 plan-p2.md S2.7 和代码实现为后台扫描。需要讨论：更新 PRD 描述（承认后台扫描）或回改代码实现为按需计算。
+> **待讨论议题（P2-5g，S5.4）**：遗忘机制实现方式——PRD MEM-04 描述为"按需计算模型（查询时实时计算），无后台定时扫描"，但 plan-p2.md S2.7 和代码实现为后台扫描。需要讨论：更新 PRD 描述（承认后台扫描）或回改代码实现为按需计算。
 
 #### 5.1: Desktop App 基础（用户模式）
 
-- Gateway HTTP API：Axum HTTP Server，供 Desktop App 和 CLI 使用。
-- Tauri v2 Desktop App 骨架：Rust backend + React frontend。
-- 系统托盘：Gateway 状态指示、快捷操作。
-- Agent 管理界面：安装、卸载、启停、Agent 列表。
-- 对话界面：消息收发、流式输出、工具调用展示。
-- 设置页面：Gateway 连接配置、Provider 管理、Vault API Key 管理。
-- 首次启动引导流程。
+- Tauri v2 Desktop App 骨架：Rust backend + React 19 frontend + Vite + Tailwind CSS + shadcn/ui + Zustand。
+- Gateway HTTP Client：Rust 后端封装 Gateway HTTP API，Tauri Commands 暴露给前端。
+- 四栏布局：导航栏 + Agent 列表 + 聊天面板 + 执行结果区。
+- 系统托盘：Gateway 状态指示、快捷操作、关闭隐藏不退出。
+- Agent 管理界面：安装（文件选择+拖放）、卸载、启停、Agent 列表。
+- 对话界面：消息收发、流式输出（WebSocket）、工具调用展示（可展开/折叠）。
+- 设置页面：Gateway 连接配置、Provider 管理、Vault API Key 管理、外观设置。
+- 首次启动引导：5 步流程（欢迎 → Gateway 连接 → API Key → 身份信息 → 安装 Agent）。
 
 #### 5.2: 开发框架（Debug Protocol + 开发者模式）
 
-- Agent Runtime DevMode：`--dev-mode` 启动参数、Debug Protocol Server（WebSocket）。
-- Debug Protocol 实现：执行控制（Pause/Step/Resume）、状态查询、断点系统。
-- 消息快照与回滚机制。
-- Agent 克隆 API（Gateway HTTP API 侧）。
-- 从零创建 Agent 向导。
-- Desktop App 开发者模式：调试面板、单步执行详情、断点管理。
+- Agent Runtime DevMode：`--dev-mode` 启动参数、Debug Protocol Server（WebSocket `ws://127.0.0.1:19877`）。
+- Debug Protocol 实现：JSON-RPC 2.0、执行控制（Pause/Step/Resume/Stop）、状态查询、断点系统（4 类条件）。
+- 消息快照与回滚机制：`ConversationSnapshot`（轻量，记录 message_count）、`debugger.rollback(target_index)`。
+- Gateway DevMode 集成：Agent 标记 `dev: true` 时追加 `--dev-mode` 启动参数。
+- Desktop App 开发者模式：调试面板、单步执行详情、断点管理、消息编辑/回滚。
 
 #### 5.3: 开发框架高级
 
-- 消息编辑与重执行。
-- Skill 热加载 + Desktop App Skill 编辑器。
-- Provider 动态切换（调试面板内）。
-- Manifest 编辑器。
-- 录制回放引擎（JSONL 格式）、自动/手动回放。
+- Skill 热加载：`debugger.reloadSkills` 命令、Desktop Skill 编辑器。
+- Provider 动态切换：`debugger.switchProvider` 命令、Desktop Provider 切换器。
+- Grafeo Skill 经验层：`SkillDraft` / `SkillIteration` / `SkillExecution` / `SkillExperience` 节点类型。
+- 录制回放引擎：JSONL 格式录制、自动/手动回放、回放中编辑/切换 Provider。
+- Desktop 录制回放 UI：录制控制栏、回放进度条、步骤详情。
 
 #### 5.4: 发布工具链
 
-- 发布向导（Desktop App 内）：检查 → 清理 → 打包 → 签名 → 分发。
-- Gateway 发布 API（prepare / build / install-locally / export）。
+- Agent 克隆 API（Gateway `POST /api/agents/:id/clone`）：骨架克隆 + 完整克隆。
+- 发布检查与清理 API（`POST /api/agents/:id/publish/prepare`）：manifest/SKILL.md 校验、清理。
+- 打包与签名 API（`POST /api/agents/:id/publish/build`）：ZIP 打包 + rollball-sign 签名。
+- 分发 API：本地安装 + 导出文件。
+- Desktop 发布向导 + 克隆对话框 + 创建向导。
 
 ### Phase 6: 云端与生态
 
