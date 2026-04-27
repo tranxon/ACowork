@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
 import { AgentList } from "../agent-list/AgentList";
@@ -13,6 +13,18 @@ export function AppLayout() {
   const [currentView, setCurrentView] = useState<NavView>("chat");
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
   const gatewayStatus = useGatewayStore((s) => s.status);
+  const checkHealth = useGatewayStore((s) => s.checkHealth);
+
+  // Check Gateway health on mount and periodically
+  useEffect(() => {
+    checkHealth();
+    const interval = setInterval(() => {
+      if (useGatewayStore.getState().status !== "connected") {
+        checkHealth();
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [checkHealth]);
 
   const toggleResults = useCallback(() => {
     setResultsCollapsed((prev) => !prev);
@@ -21,7 +33,7 @@ export function AppLayout() {
   return (
     <div className="flex h-full w-full flex-col">
       {/* Gateway disconnected banner */}
-      {gatewayStatus === "error" && <GatewayBanner />}
+      {gatewayStatus !== "connected" && <GatewayBanner />}
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
