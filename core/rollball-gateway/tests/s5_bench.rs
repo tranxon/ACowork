@@ -49,7 +49,12 @@ fn create_test_app() -> axum::Router {
 }
 
 /// Calculate P50 and P99 from a sorted list of nanosecond durations.
+///
+/// Returns 0 if the list is empty (defensive fallback).
 fn percentile(mut sorted: Vec<u64>, p: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
     sorted.sort();
     let idx = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
     sorted[idx.min(sorted.len()) - 1]
@@ -60,6 +65,7 @@ fn percentile(mut sorted: Vec<u64>, p: f64) -> u64 {
 // ============================================================================
 
 #[tokio::test]
+#[ignore] // Benchmark: run with `cargo test --test s5_bench -- --ignored --nocapture`
 async fn bench_s5_http_api_latency() {
     let app = create_test_app();
     let iterations = 200;
@@ -113,6 +119,7 @@ async fn bench_s5_http_api_latency() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn bench_s5_http_config_api_latency() {
     let app = create_test_app();
     let iterations = 200;
@@ -155,6 +162,7 @@ async fn bench_s5_http_config_api_latency() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore]
 async fn bench_s5_permission_check_latency() {
     use rollball_core::permission::{Permission, PermissionGrant};
     use rollball_gateway::permission_store::PermissionStore;
@@ -203,6 +211,7 @@ async fn bench_s5_permission_check_latency() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore]
 async fn bench_s5_grafeo_query_latency() {
     use rollball_grafeo::{GrafeoStore, KnowledgeNode, KnowledgeSubType, NodeStatus, EMBEDDING_DIM};
 
@@ -271,6 +280,7 @@ async fn bench_s5_grafeo_query_latency() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore]
 async fn bench_s5_grafeo_concurrent_throughput() {
     use rollball_grafeo::{GrafeoStore, KnowledgeNode, KnowledgeSubType, NodeStatus, EMBEDDING_DIM};
 
