@@ -59,6 +59,9 @@ pub struct AgentDetailResponse {
 pub struct InstallRequest {
     /// Path to the .agent package file
     pub package_path: String,
+    /// Skip signature verification (dev mode)
+    #[serde(default)]
+    pub dev_mode: bool,
 }
 
 /// Generic message response
@@ -143,7 +146,7 @@ pub async fn install_agent(
             std::path::Path::new(&body.package_path),
             &packages_dir,
             &mut gw,
-            false, // dev_mode = false for HTTP API; signature is required
+            body.dev_mode, // allow dev_mode override from API
         )
     }).await;
 

@@ -27,9 +27,10 @@ pub async fn get_agent_detail(
 pub async fn install_agent(
     state: State<'_, AppState>,
     package_path: String,
+    #[serde(default)] dev_mode: bool,
 ) -> Result<GenericMessageResponse, String> {
     let client = state.gateway.read().await;
-    client.install_agent(&package_path).await.map_err(|e| e.to_string())
+    client.install_agent(&package_path, dev_mode).await.map_err(|e| e.to_string())
 }
 
 /// Uninstall an agent

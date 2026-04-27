@@ -81,8 +81,8 @@ impl GatewayClient {
     }
 
     /// `POST /api/agents/install`
-    pub async fn install_agent(&self, package_path: &str) -> Result<GenericMessageResponse> {
-        let body = serde_json::json!({ "package_path": package_path });
+    pub async fn install_agent(&self, package_path: &str, dev_mode: bool) -> Result<GenericMessageResponse> {
+        let body = serde_json::json!({ "package_path": package_path, "dev_mode": dev_mode });
         let resp = self
             .client
             .post(format!("{}/api/agents/install", self.base_url))

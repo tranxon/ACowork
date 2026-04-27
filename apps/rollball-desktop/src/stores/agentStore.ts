@@ -54,7 +54,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   installAgent: async (packagePath) => {
     try {
-      await invoke("install_agent", { packagePath });
+      // dev_mode=true for local development (skip signature verification)
+      await invoke("install_agent", { packagePath, devMode: true });
       await get().fetchAgents();
     } catch (e) {
       set({ error: String(e) });
