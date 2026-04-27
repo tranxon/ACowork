@@ -1,8 +1,9 @@
 # Rollball Phase 2 开发计划
 
-> 版本：v1.5 | 更新日期：2026-04-22
+> 版本：v1.6 | 更新日期：2026-04-27
 >
 > 本计划基于 `docs/09-roadmap-and-scenarios.md` v3.1 和 `docs/review/04-p2-s2-design-review.md` S2 设计评审。
+> v1.6 更新：基于代码审查更新 S1（全部✅）、S3（S3.1~S3.3✅，S3.4🚧 IPC链路未贯通）任务状态；新增备注列说明完成依据。
 > v1.5 更新：基于竞品对标和 Benchmark 审查（07/08-memory-review）的设计补充落地。主要变更：新增 Abstention 拒答机制（S2.15）、冲突检测升级为三层信号模型（S2.10）、质量评估框架扩展（S2.12.3/12.4 LongMemEval + 在线 LLM Judge）、巩固管道边界明确化（S2.6 即时/离线 Prompt 分工、PendingNode 升级条件、防重复提取）、关联扩散新增检索权重动态调整（S2.8）、删除不必要的数据迁移任务（S2.14.2）。
 > v1.4 更新：S2 阶段全面迁移至 grafeo-engine（v0.5.39）— 存储后端从 rusqlite 切换为 GrafeoDB，数据模型从 SQL 表结构改为 LPG 标签属性图，向量/全文/混合检索复用 Grafeo 原生 HNSW/BM25/RRF，关联扩散引入 GQL 图遍历 + PageRank + topology_boost + 社区检测。
 > v1.3 更新：S2.6 简化 memory_store 接口（自然语言替代三元组）、S2.7 完善 Purge 三条路径、S2.8 自适应 graph_expand、S5.4 分层 Token 计数方案；新增 S2.10-S2.14 任务（冲突检测、隐私访问控制、质量评估、工程约束、备份迁移）。
@@ -587,46 +588,46 @@ Abstention 在 Level 0-3 降级策略之后生效，是最终质量门控。Leve
 
 ## 3. 任务总表
 
-| ID | 任务 | 模块 | 阶段 | 依赖 | 预期测试数 | 状态 |
-|----|------|------|------|------|-----------|------|
-| S1.1 | AgentLoop 注入 GatewayClient | rollball-runtime | S1 | - | 5 | ⬚ |
-| S1.2 | IPC Server 改异步多连接 | rollball-gateway | S1 | S1.1 | 5 | ⬚ |
-| S1.3 | 签名块二进制级嵌入 | rollball-sign | S1 | - | 8 | ⬚ |
-| S1.4 | 结构化错误类型改进 | rollball-core | S1 | - | 6 | ⬚ |
-| S1.5 | 流式处理集成到主循环 | rollball-runtime | S1 | S1.1 | 8 | ⬚ |
-| S1.6 | AgentLoop InboundQueue | rollball-runtime | S1 | S1.1 | 6 | ⬚ |
-| S1.7 | 工具调度改并行执行 | rollball-runtime | S1 | S1.1 | 5 | ⬚ |
-| S2.0 | grafeo-engine 依赖集成与 MemoryStore Trait 适配 | rollball-core, rollball-grafeo | S2 | S1 | 8 | ✅ |
-| S2.1 | Grafeo LPG 数据模型实现 | rollball-grafeo | S2 | S2.0 | 16 | ⬚ |
-| S2.2 | 经历层（Episodic）实现 | rollball-grafeo | S2 | S2.1 | 12 | ⬚ |
-| S2.3 | 沉淀层（Semantic）实现 | rollball-grafeo | S2 | S2.1 | 15 | ⬚ |
-| S2.4 | 向量索引（grafeo-engine HNSW）集成 | rollball-grafeo | S2 | S2.1 | 6 | ⬚ |
-| S2.5 | 全文索引（grafeo-engine BM25）集成 | rollball-grafeo | S2 | S2.1 | 4 | ⬚ |
-| S2.6 | 巩固管道（Consolidation）| rollball-grafeo | S2 | S2.2,S2.3 | 14 | ⬚ |
-| S2.7 | 遗忘衰减机制（Decay）| rollball-grafeo | S2 | S2.3 | 8 | ⬚ |
-| S2.8 | 关联扩散检索（GQL + PageRank + topology_boost + 动态权重）| rollball-grafeo | S2 | S2.3,S2.4,S2.5 | 14 | ⬚ |
-| S2.9 | MemoryManager 集成 | rollball-runtime | S2 | S2.0~S2.8 | 12 | ⬚ |
-| S2.10 | 冲突检测与处理（三层信号）| rollball-grafeo | S2 | S2.6 | 10 | 🚧 |
-| S2.11 | 隐私访问控制 | rollball-gateway | S2 | S2.10 | 6 | ⬚ |
-| S2.12 | 质量评估框架（RetrievalMetrics + LongMemEval + LLM Judge）| rollball-grafeo | S2 | S2.0~S2.11 | 10 | ⬚ |
-| S2.13 | 工程约束与降级策略 | rollball-grafeo | S2 | S2.4 | 10 | ⬚ |
-| S2.14 | 备份与恢复 | rollball-grafeo | S2 | S2.0 | 3 | ⬚ |
-| S2.15 | Abstention 阈值机制实现 | rollball-grafeo, rollball-runtime | S2 | S2.4,S2.5 | 4 | ⬚ |
-| S3.1 | System Agent 包和清单 | examples/system-agent | S3 | - | 3 | ⬚ |
-| S3.2 | 身份信息系统 | rollball-core | S3 | - | 6 | ⬚ |
-| S3.3 | 冷启动身份注入 | rollball-gateway | S3 | S3.1,S3.2,S1.2 | 5 | ⬚ |
-| S3.4 | Identity 工具完整化 | rollball-runtime | S3 | S3.2 | 8 | ⬚ |
-| S4.1 | Intent 跨 Agent 转发 | rollball-gateway | S4 | S1.2 | 10 | ⬚ |
-| S4.2 | Capability Registry | rollball-gateway | S4 | S4.1 | 8 | ⬚ |
-| S4.3 | Budget Tracker 完整实现 | rollball-gateway | S4 | S1.2 | 10 | ⬚ |
-| S4.4 | Rate Limiter 完整实现 | rollball-gateway | S4 | S1.2 | 8 | ⬚ |
-| S4.5 | UsageReport 上报链路贯通 | rollball-runtime | S4 | S1.1,S4.3 | 6 | ⬚ |
-| S5.1 | Anthropic Provider | rollball-runtime | S5 | - | 10 | ⬚ |
-| S5.2 | Provider 动态路由切换 | rollball-runtime | S5 | S5.1 | 6 | ⬚ |
-| S5.3 | Embedding 生成（ONNX）| rollball-grafeo | S5 | S2.4 | 8 | ⬚ |
-| S5.4 | Token 计数精度改进 | rollball-runtime | S5 | - | 6 | ⬚ |
-| S5.5 | 端到端集成测试 | tests/ | S5 | S1~S4 | 10 | ⬚ |
-| S5.6 | 多 Agent 协作示例 | examples/ | S5 | S3,S4 | 4 | ⬚ |
+| ID | 任务 | 模块 | 阶段 | 依赖 | 预期测试数 | 状态 | 备注 |
+|----|------|------|------|------|-----------|------|------|
+| S1.1 | AgentLoop 注入 GatewayClient | rollball-runtime | S1 | - | 5 | ✅ | `ipc_client: Option<GatewayClient>` 已实现，CLI `connect_gateway_client()` 已集成 |
+| S1.2 | IPC Server 改异步多连接 | rollball-gateway | S1 | S1.1 | 5 | ✅ | `Arc<RwLock<GatewayState>>` + `tokio::spawn` per connection，02-p2-s1-code-review 确认 |
+| S1.3 | 签名块二进制级嵌入 | rollball-sign | S1 | - | 8 | ✅ | V2 binary format `to_binary()`/`from_binary()` + `zip_utils.rs`，向后兼容 V1 |
+| S1.4 | 结构化错误类型改进 | rollball-core | S1 | - | 6 | ✅ | `ProviderError` 含 `status_code` + `ProviderErrorType` + `retryable`，`ReliableProvider` 改用结构化判断 |
+| S1.5 | 流式处理集成到主循环 | rollball-runtime | S1 | S1.1 | 8 | ✅ | `chat_stream()` + `StreamEvent` 状态机，02-p2-s1-code-review 确认 |
+| S1.6 | AgentLoop InboundQueue | rollball-runtime | S1 | S1.1 | 6 | ✅ | `mpsc::channel(64)` + `InboundMessage` 三类型 + drain 逻辑，背压测试通过 |
+| S1.7 | 工具调度改并行执行 | rollball-runtime | S1 | S1.1 | 5 | ✅ | `spawn+select+channel` 分层超时，`tool_timeout_ms`/`iteration_timeout_ms` 独立配置 |
+| S2.0 | grafeo-engine 依赖集成与 MemoryStore Trait 适配 | rollball-core, rollball-grafeo | S2 | S1 | 8 | ✅ | 依赖替换+features配置+编译验证完成 |
+| S2.1 | Grafeo LPG 数据模型实现 | rollball-grafeo | S2 | S2.0 | 16 | ⬚ | |
+| S2.2 | 经历层（Episodic）实现 | rollball-grafeo | S2 | S2.1 | 12 | ⬚ | |
+| S2.3 | 沉淀层（Semantic）实现 | rollball-grafeo | S2 | S2.1 | 15 | ⬚ | |
+| S2.4 | 向量索引（grafeo-engine HNSW）集成 | rollball-grafeo | S2 | S2.1 | 6 | ⬚ | |
+| S2.5 | 全文索引（grafeo-engine BM25）集成 | rollball-grafeo | S2 | S2.1 | 4 | ⬚ | |
+| S2.6 | 巩固管道（Consolidation）| rollball-grafeo | S2 | S2.2,S2.3 | 14 | ⬚ | |
+| S2.7 | 遗忘衰减机制（Decay）| rollball-grafeo | S2 | S2.3 | 8 | ⬚ | |
+| S2.8 | 关联扩散检索（GQL + PageRank + topology_boost + 动态权重）| rollball-grafeo | S2 | S2.3,S2.4,S2.5 | 14 | ⬚ | |
+| S2.9 | MemoryManager 集成 | rollball-runtime | S2 | S2.0~S2.8 | 12 | ⬚ | |
+| S2.10 | 冲突检测与处理（三层信号）| rollball-grafeo | S2 | S2.6 | 10 | 🚧 | S2.10.1 基础结构已完成，S2.10.2~S2.10.5 待集成 |
+| S2.11 | 隐私访问控制 | rollball-gateway | S2 | S2.10 | 6 | ⬚ | |
+| S2.12 | 质量评估框架（RetrievalMetrics + LongMemEval + LLM Judge）| rollball-grafeo | S2 | S2.0~S2.11 | 10 | ⬚ | |
+| S2.13 | 工程约束与降级策略 | rollball-grafeo | S2 | S2.4 | 10 | ⬚ | |
+| S2.14 | 备份与恢复 | rollball-grafeo | S2 | S2.0 | 3 | ⬚ | |
+| S2.15 | Abstention 阈值机制实现 | rollball-grafeo, rollball-runtime | S2 | S2.4,S2.5 | 4 | ⬚ | |
+| S3.1 | System Agent 包和清单 | examples/system-agent | S3 | - | 3 | ✅ | manifest `system=true` + prompts/ 齐全，capabilities 声明完整 |
+| S3.2 | 身份信息系统 | rollball-core | S3 | - | 6 | ✅ | `IdentityStore` trait + `GrafeoStore` 完整实现 store/query/observe/list_all |
+| S3.3 | 冷启动身份注入 | rollball-gateway | S3 | S3.1,S3.2,S1.2 | 5 | ✅ | `auto_start_system_agent()` + `build_identity_delivery()` + Runtime `load_identity_delivery()`，03-p2-s2-code-review 确认 GTW-12 已实现 |
+| S3.4 | Identity 工具完整化 | rollball-runtime | S3 | S3.2 | 8 | 🚧 | 三个工具文件已创建（identity_query/store/observe），工具骨架+参数校验+测试完整，但 IPC 链路未贯通：工具未实际调用 GrafeoStore，identity_query/observe 返回 placeholder，identity_store 仅打印确认 |
+| S4.1 | Intent 跨 Agent 转发 | rollball-gateway | S4 | S1.2 | 10 | ⬚ | |
+| S4.2 | Capability Registry | rollball-gateway | S4 | S4.1 | 8 | ⬚ | |
+| S4.3 | Budget Tracker 完整实现 | rollball-gateway | S4 | S1.2 | 10 | ⬚ | |
+| S4.4 | Rate Limiter 完整实现 | rollball-gateway | S4 | S1.2 | 8 | ⬚ | |
+| S4.5 | UsageReport 上报链路贯通 | rollball-runtime | S4 | S1.1,S4.3 | 6 | ⬚ | |
+| S5.1 | Anthropic Provider | rollball-runtime | S5 | - | 10 | ⬚ | |
+| S5.2 | Provider 动态路由切换 | rollball-runtime | S5 | S5.1 | 6 | ⬚ | |
+| S5.3 | Embedding 生成（ONNX）| rollball-grafeo | S5 | S2.4 | 8 | ⬚ | |
+| S5.4 | Token 计数精度改进 | rollball-runtime | S5 | - | 6 | ⬚ | |
+| S5.5 | 端到端集成测试 | tests/ | S5 | S1~S4 | 10 | ⬚ | |
+| S5.6 | 多 Agent 协作示例 | examples/ | S5 | S3,S4 | 4 | ⬚ | |
 
 **总计：39 个任务，预期 341+ 测试**
 
@@ -693,9 +694,9 @@ Abstention 在 Level 0-3 降级策略之后生效，是最终质量门控。Leve
 | **✅ 完成** | 代码 + 测试通过 |
 | **⏸️ 阻塞** | 等待其他任务完成 |
 
-### 6.2 当前状态（初始）
+### 6.2 当前状态
 
-所有任务初始状态为 **⬚ 待开始**。
+S1 全部完成，S3.1~S3.3 完成，S3.4 工具骨架完成但 IPC 链路未贯通，S2 进行中（S2.0 完成、S2.10 部分完成）。
 
 ---
 

@@ -249,7 +249,7 @@ rollball-core (S1)
 
 ### S3.5 任务：内置工具（Phase 1 范围）
 
-**目标**：实现 13 个内置工具（按 12-tool-system.md 清单）。
+**目标**：实现 15 个内置工具（按 PRD §1.5 TOL-01 清单）。
 
 #### S3.5.1 核心 Builtin（Phase 1 必做）
 
@@ -257,7 +257,7 @@ rollball-core (S1)
 |------|------|---------|
 | `memory_recall` | `memory_recall.rs` | 关键词检索记忆 |
 | `memory_store` | `memory_store.rs` | 存储单条记忆（key + category + JSON payload） |
-| `http_request` | `http_request.rs` | HTTP GET/POST/PUT/DELETE |
+| `http_request` | `http_request.rs` | HTTP GET/POST/PUT/DELETE（合并原 http_get/http_post） |
 | `web_fetch` | `web_fetch.rs` | 网页抓取转纯文本 |
 | `web_search` | `web_search.rs` | DuckDuckGo HTML 搜索 |
 | `shell` | `shell.rs` | 命令执行，权限校验 |
@@ -268,6 +268,10 @@ rollball-core (S1)
 | `content_search` | `content_search.rs` | 正则搜索文件内容 |
 | `intent_send` | `intent_send.rs` | 发送 Intent 到其他 Agent（IPC） |
 | `identity_store` | `identity_store.rs` | 写入用户身份信息（系统 Agent 专用） |
+| `identity_query` | `identity_query.rs` | 查询身份信息（Phase 2 工具化） |
+| `identity_observe` | `identity_observe.rs` | 订阅身份变更通知（系统 Agent 专用，Phase 2 工具化） |
+
+> **注**：Phase 1 实现 13 个核心工具，`identity_query` 和 `identity_observe` 在 Phase 2 S3.4 完成工具化。
 
 #### S3.5.2 工具注册表 + 权限校验
 
