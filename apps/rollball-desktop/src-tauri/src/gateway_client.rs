@@ -129,11 +129,7 @@ impl GatewayClient {
     // ── Chat ───────────────────────────────────────────────────────────
 
     /// `POST /api/agents/:id/message`
-    pub async fn send_message(
-        &self,
-        agent_id: &str,
-        content: &str,
-    ) -> Result<SendMessageResponse> {
+    pub async fn send_message(&self, agent_id: &str, content: &str) -> Result<SendMessageResponse> {
         let body = serde_json::json!({ "content": content });
         let resp = self
             .client
@@ -141,6 +137,12 @@ impl GatewayClient {
             .json(&body)
             .send()
             .await?;
+        // Check for error status
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!("HTTP {}: {}", status, text);
+        }
         let result: SendMessageResponse = resp.json().await?;
         Ok(result)
     }

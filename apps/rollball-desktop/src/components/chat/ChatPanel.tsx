@@ -35,8 +35,8 @@ export function ChatPanel() {
 
   const handleSend = () => {
     const content = inputValue.trim();
-    if (!content || !ws || sending) return;
-    sendMessage(content);
+    if (!content || sending || !selectedAgentId) return;
+    sendMessage(content, selectedAgentId);
     setInputValue("");
   };
 
@@ -85,7 +85,7 @@ export function ChatPanel() {
   }
 
   // ── Chat view ──
-  const inputDisabled = sending || !ws || ws.readyState !== WebSocket.OPEN || gatewayStatus !== "connected";
+  const inputDisabled = sending || gatewayStatus !== "connected";
 
   return (
     <div className="flex flex-1 flex-col bg-white dark:bg-zinc-900">
@@ -111,10 +111,10 @@ export function ChatPanel() {
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             placeholder={
-              !ws
+              gatewayStatus !== "connected"
                 ? "Gateway not connected"
-                : gatewayStatus !== "connected"
-                  ? "Gateway not connected"
+                : !ws || ws.readyState !== WebSocket.OPEN
+                  ? "Type a message... (HTTP mode — streaming unavailable)"
                   : "Type a message... (Enter to send, Shift+Enter for new line)"
             }
             disabled={inputDisabled}

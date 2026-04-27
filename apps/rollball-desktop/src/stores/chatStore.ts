@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
 import type { ChatMessage, TokenUsage } from "../lib/types";
 
 interface ChatStore {
@@ -9,7 +10,7 @@ interface ChatStore {
   tokenUsage: TokenUsage | null;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
-  sendMessage: (content: string) => void;
+  sendMessage: (content: string, agentId: string) => void;
   disconnectStream: () => void;
   clearMessages: () => void;
 }
@@ -36,7 +37,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     const wsUrl = toWsUrl(gatewayUrl, agentId);
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (e) {
+      console.warn("[ChatStore] WebSocket creation failed, will use HTTP fallback:", e);
+      set({ ws: null });
+      return;
+    }
 
     ws.onopen = () => {
       console.log("[ChatStore] WebSocket connected for agent:", agentId);
@@ -57,19 +65,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     };
 
     ws.onerror = (err) => {
-      console.error("[ChatStore] WebSocket error:", err);
+      console.warn("[ChatStore] WebSocket error (will fall back to HTTP):", err);
       set({ ws: null, sending: false });
     };
 
     set({ ws, messages: [], streamingMessageId: null, tokenUsage: null });
   },
 
-  sendMessage: (content: string) => {
+  sendMessage: (content: string, agentId: string) => {
     const ws = get().ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error("[ChatStore] WebSocket not connected");
-      return;
-    }
 
     // Add user message
     const userMsg: ChatMessage = {
@@ -83,21 +87,57 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       sending: true,
     }));
 
-    // Send via WebSocket
-    ws.send(JSON.stringify({ type: "message", content }));
+    // Try WebSocket first (streaming)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "message", content }));
 
-    // Create placeholder for assistant streaming message
-    const assistantMsgId = `msg-assistant-${Date.now()}`;
-    const assistantMsg: ChatMessage = {
-      id: assistantMsgId,
-      type: "assistant",
-      content: "",
-      timestamp: Date.now(),
-    };
-    set((state) => ({
-      messages: [...state.messages, assistantMsg],
-      streamingMessageId: assistantMsgId,
-    }));
+      // Create placeholder for assistant streaming message
+      const assistantMsgId = `msg-assistant-${Date.now()}`;
+      const assistantMsg: ChatMessage = {
+        id: assistantMsgId,
+        type: "assistant",
+        content: "",
+        timestamp: Date.now(),
+      };
+      set((state) => ({
+        messages: [...state.messages, assistantMsg],
+        streamingMessageId: assistantMsgId,
+      }));
+      return;
+    }
+
+    // Fallback: send via Tauri HTTP command
+    (async () => {
+      try {
+        const result = await invoke<{ message_id: string; status: string }>(
+          "send_message",
+          { agentId, content },
+        );
+        console.log("[ChatStore] Message sent via HTTP:", result);
+        // Show a system message since we can't stream the response
+        const replyMsg: ChatMessage = {
+          id: `msg-assistant-${Date.now()}`,
+          type: "system",
+          content: "Message sent. Waiting for agent response... (streaming not available)",
+          timestamp: Date.now(),
+        };
+        set((state) => ({
+          messages: [...state.messages, replyMsg],
+          sending: false,
+        }));
+      } catch (e) {
+        const errMsg: ChatMessage = {
+          id: `msg-error-${Date.now()}`,
+          type: "system",
+          content: `Error: ${e}`,
+          timestamp: Date.now(),
+        };
+        set((state) => ({
+          messages: [...state.messages, errMsg],
+          sending: false,
+        }));
+      }
+    })();
   },
 
   disconnectStream: () => {
