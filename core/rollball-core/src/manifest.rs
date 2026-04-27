@@ -140,6 +140,21 @@ impl AgentManifest {
             .filter(|t| t.trigger_type == "cron")
             .collect()
     }
+
+    /// Get the first RAG tool configuration, if any.
+    ///
+    /// Returns `Some((tool_name, &RagToolConfig))` if a `[[tools]]` entry
+    /// with `type = "rag"` is declared, otherwise `None`.
+    pub fn rag_config(&self) -> Option<(&str, &RagToolConfig)> {
+        self.tools.iter().find(|t| t.is_rag()).and_then(|t| {
+            t.rag.as_ref().map(|rag| (t.name.as_str(), rag))
+        })
+    }
+
+    /// Check if this manifest declares any RAG tool
+    pub fn has_rag(&self) -> bool {
+        self.tools.iter().any(|t| t.is_rag())
+    }
 }
 
 /// LLM provider configuration
@@ -255,11 +270,88 @@ fn default_memory_enabled() -> bool {
 /// Tool declaration in manifest
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDeclaration {
+    /// Tool type (default: "builtin"). Use "rag" for RAG tools.
+    #[serde(rename = "type", default = "default_tool_type")]
+    pub tool_type: String,
     /// Tool name (must match a registered tool)
     pub name: String,
     /// Optional tool-specific configuration
     #[serde(default)]
     pub config: Option<serde_json::Value>,
+    /// RAG configuration (only when tool_type = "rag")
+    #[serde(default)]
+    pub rag: Option<RagToolConfig>,
+}
+
+fn default_tool_type() -> String {
+    "builtin".to_string()
+}
+
+impl ToolDeclaration {
+    /// Check if this is a RAG tool declaration
+    pub fn is_rag(&self) -> bool {
+        self.tool_type == "rag"
+    }
+}
+
+/// RAG tool configuration (manifest `[[tools]]` with type = "rag")
+///
+/// Declares an enterprise RAG knowledge base endpoint for the agent.
+/// RAG is an opt-in capability — agents without this declaration behave
+/// exactly as in Phase 3, zero intrusion.
+///
+/// Example manifest:
+/// ```toml
+/// [[tools]]
+/// type = "rag"
+/// name = "enterprise_knowledge"
+///
+/// [tools.rag]
+/// endpoint = "https://rag.corp.example.com/v1/query"
+/// collection = "product_docs"
+/// auth_ref = "vault:rag_enterprise_key"
+/// auth_type = "bearer"
+/// max_results = 5
+/// score_threshold = 0.7
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagToolConfig {
+    /// RAG service endpoint URL (required)
+    pub endpoint: String,
+    /// Collection / index name in the RAG service (optional)
+    #[serde(default)]
+    pub collection: Option<String>,
+    /// Vault reference for authentication credential (e.g., "vault:rag_enterprise_key")
+    #[serde(default)]
+    pub auth_ref: Option<String>,
+    /// Authentication type: "bearer" or "api_key" (default: "bearer")
+    #[serde(default = "default_auth_type")]
+    pub auth_type: String,
+    /// Maximum number of results per query (default: 5)
+    #[serde(default = "default_max_results")]
+    pub max_results: u32,
+    /// Minimum score threshold for results (default: 0.7)
+    #[serde(default = "default_score_threshold")]
+    pub score_threshold: f32,
+    /// Query timeout in seconds (default: 10)
+    #[serde(default = "default_rag_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_auth_type() -> String {
+    "bearer".to_string()
+}
+
+fn default_max_results() -> u32 {
+    5
+}
+
+fn default_score_threshold() -> f32 {
+    0.7
+}
+
+fn default_rag_timeout() -> u64 {
+    10
 }
 
 /// Capability definition for Intent routing
@@ -482,5 +574,62 @@ mod tests {
         let tool = manifest.get_tool("weather").unwrap();
         assert_eq!(tool.name, "weather");
         assert!(manifest.get_tool("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_manifest_rag_tool_declaration() {
+        let toml_str = r#"
+            agent_id = "com.example.sales"
+            version = "1.0.0"
+            name = "Sales Assistant"
+            description = "Enterprise sales agent with RAG"
+            author = "corp"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "openai"
+            model = "gpt-4"
+
+            [[permissions]]
+            type = "Network"
+            value = "https://rag.corp.example.com"
+
+            [[tools]]
+            type = "rag"
+            name = "enterprise_knowledge"
+
+            [tools.rag]
+            endpoint = "https://rag.corp.example.com/v1/query"
+            collection = "product_docs"
+            auth_ref = "vault:rag_enterprise_key"
+            auth_type = "bearer"
+            max_results = 5
+            score_threshold = 0.7
+        "#;
+        let manifest = AgentManifest::from_toml(toml_str).unwrap();
+        assert!(manifest.has_rag());
+        let (tool_name, rag_config) = manifest.rag_config().unwrap();
+        assert_eq!(tool_name, "enterprise_knowledge");
+        assert_eq!(rag_config.endpoint, "https://rag.corp.example.com/v1/query");
+        assert_eq!(rag_config.collection.as_deref(), Some("product_docs"));
+        assert_eq!(rag_config.auth_ref.as_deref(), Some("vault:rag_enterprise_key"));
+        assert_eq!(rag_config.auth_type, "bearer");
+        assert_eq!(rag_config.max_results, 5);
+        assert!((rag_config.score_threshold - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_manifest_no_rag_by_default() {
+        let manifest = AgentManifest::from_toml(sample_manifest_toml()).unwrap();
+        assert!(!manifest.has_rag());
+        assert!(manifest.rag_config().is_none());
+    }
+
+    #[test]
+    fn test_manifest_tool_declaration_default_type() {
+        let manifest = AgentManifest::from_toml(sample_manifest_toml()).unwrap();
+        let tool = manifest.get_tool("weather").unwrap();
+        assert_eq!(tool.tool_type, "builtin");
+        assert!(!tool.is_rag());
     }
 }

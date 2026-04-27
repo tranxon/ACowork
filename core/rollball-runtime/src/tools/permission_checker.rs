@@ -390,4 +390,65 @@ mod tests {
             CheckResult::NeedsRequest(_)
         ));
     }
+
+    // ── RagQuery permission checker tests (S4.6) ─────────────────────────
+
+    #[test]
+    fn test_rag_query_broad_grant_covers_scoped() {
+        let grants = vec![
+            PermissionGrant::new(
+                "com.example.rag",
+                Permission::RagQuery(None),
+                "user",
+            ),
+        ];
+        let checker = PermissionChecker::new("com.example.rag", grants);
+
+        // Broad RagQuery(None) covers scoped RagQuery(Some(endpoint))
+        assert_eq!(
+            checker.check(&Permission::RagQuery(Some("https://rag.corp.example.com".into()))),
+            CheckResult::Granted
+        );
+    }
+
+    #[test]
+    fn test_rag_query_scoped_grant_does_not_cover_broad() {
+        let grants = vec![
+            PermissionGrant::new(
+                "com.example.rag",
+                Permission::RagQuery(Some("https://rag.corp.example.com".into())),
+                "user",
+            ),
+        ];
+        let checker = PermissionChecker::new("com.example.rag", grants);
+
+        // Scoped grant does NOT cover broad request
+        assert!(matches!(
+            checker.check(&Permission::RagQuery(None)),
+            CheckResult::NeedsRequest(_)
+        ));
+
+        // Scoped grant covers same endpoint
+        assert_eq!(
+            checker.check(&Permission::RagQuery(Some("https://rag.corp.example.com".into()))),
+            CheckResult::Granted
+        );
+
+        // Scoped grant does NOT cover different endpoint
+        assert!(matches!(
+            checker.check(&Permission::RagQuery(Some("https://other-rag.example.com".into()))),
+            CheckResult::NeedsRequest(_)
+        ));
+    }
+
+    #[test]
+    fn test_rag_query_default_policy_needs_request() {
+        let checker = PermissionChecker::empty("com.example.rag");
+
+        // RagQuery is Default policy — needs request when not in cache
+        assert!(matches!(
+            checker.check(&Permission::RagQuery(None)),
+            CheckResult::NeedsRequest(_)
+        ));
+    }
 }

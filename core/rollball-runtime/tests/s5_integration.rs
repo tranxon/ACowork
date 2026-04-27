@@ -186,7 +186,7 @@ async fn test_s5_memory_persistence() {
         hint_type: HintType::Semantic,
     };
 
-    let result = manager.retrieve(&store, &query).unwrap();
+    let result = manager.retrieve(&store, &query).await.unwrap();
     assert!(!result.memories.is_empty(), "Memory should be retrievable after recording");
 }
 

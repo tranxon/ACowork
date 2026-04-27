@@ -20,7 +20,7 @@ pub mod memory;
 pub mod error;
 
 // Re-exports for convenience
-pub use manifest::{AgentManifest, CapabilityDef, LlmConfig, ProviderConfig, RoutingConfig, LlmBudget};
+pub use manifest::{AgentManifest, CapabilityDef, LlmConfig, ProviderConfig, RoutingConfig, LlmBudget, RagToolConfig, ToolDeclaration};
 pub use protocol::{GatewayRequest, GatewayResponse, Frame};
 pub use transport::{AsyncTransportConnection, AsyncTransportServer, TransportKind, classify_endpoint, default_endpoint};
 pub use intent::Intent;

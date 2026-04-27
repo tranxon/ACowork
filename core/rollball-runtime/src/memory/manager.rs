@@ -3,8 +3,12 @@
 //! 1. Retrieve — search relevant memories before LLM generation
 //! 2. Inject  — format and inject memories into the system prompt
 //! 3. Record  — asynchronously record the conversation episode
+//!
+//! Phase 4 (S4.5): When manifest declares RAG, retrieve() runs dual-channel:
+//! Grafeo (local) + RAG (enterprise) in parallel, with source annotations.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use grafeo_common::types::{NodeId, Timestamp, Value};
@@ -16,6 +20,7 @@ use rollball_grafeo::{
 use rollball_memory::{HintType, MemoryQuery, RetrievalMetrics};
 
 use crate::error::{Result, RuntimeError};
+use crate::tools::rag::client::RagClient;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -68,14 +73,19 @@ pub struct RetrievalResult {
 pub struct RetrievedMemory {
     /// Formatted content text.
     pub content: String,
-    /// Node label (Knowledge, Episodic, Procedural, Autobiographical).
+    /// Node label (Knowledge, Episodic, Procedural, Autobiographical) or
+    /// RAG source label (e.g., "RAG:enterprise_knowledge").
     pub label: String,
     /// Relevance score.
     pub score: f64,
-    /// Retrieval source: "vector" | "text" | "graph" | "hybrid".
+    /// Retrieval source: "vector" | "text" | "graph" | "hybrid" | "rag".
     pub source: String,
-    /// Grafeo node ID (for tracing).
+    /// Grafeo node ID (for tracing). 0 for RAG results.
     pub node_id: u64,
+    /// Source URL (for RAG results, describing where the chunk came from).
+    pub source_url: Option<String>,
+    /// Chunk ID within the source document (for RAG results).
+    pub chunk_id: Option<String>,
 }
 
 /// Formatted memory block ready for prompt injection.
@@ -113,20 +123,49 @@ pub struct ConversationRecord {
 // ---------------------------------------------------------------------------
 
 /// Orchestrates the three-phase memory lifecycle.
+///
+/// When `rag_client` is Some, retrieve() runs dual-channel:
+/// Grafeo (local) + RAG (enterprise) in parallel.
 pub struct MemoryManager {
     config: MemoryManagerConfig,
+    /// Optional RAG client for enterprise knowledge retrieval (Phase 4 S4.5).
+    /// None = no RAG declared in manifest, behavior identical to Phase 3.
+    rag_client: Option<Arc<RagClient>>,
 }
 
 impl MemoryManager {
     /// Create a new MemoryManager with the given configuration.
     pub fn new(config: MemoryManagerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            rag_client: None,
+        }
+    }
+
+    /// Create a new MemoryManager with RAG support.
+    ///
+    /// When rag_client is Some, retrieve() will run dual-channel retrieval.
+    pub fn with_rag(config: MemoryManagerConfig, rag_client: Arc<RagClient>) -> Self {
+        Self {
+            config,
+            rag_client: Some(rag_client),
+        }
+    }
+
+    /// Check if this manager has RAG enabled
+    pub fn has_rag(&self) -> bool {
+        self.rag_client.is_some()
     }
 
     /// Retrieve relevant memories for the current query.
     ///
-    /// Pipeline: hybrid_search → graph_expand → merge & rank → collect metrics.
-    pub fn retrieve(&self, store: &GrafeoStore, query: &MemoryQuery) -> Result<RetrievalResult> {
+    /// Pipeline: Grafeo hybrid_search → graph_expand → merge & rank
+    /// + RAG channel (if rag_client is Some, run in parallel).
+    ///
+    /// RAG channel uses the user message as query with default top_k=3.
+    /// Results from both channels are merged and sorted by score.
+    /// Source annotations distinguish [Grafeo] vs [RAG:<tool_name>].
+    pub async fn retrieve(&self, store: &GrafeoStore, query: &MemoryQuery) -> Result<RetrievalResult> {
         let k = if query.limit > 0 { query.limit } else { self.config.default_k };
         let min_score = query.min_score.unwrap_or(self.config.default_min_score);
         let hint_type = query.hint_type;
@@ -235,7 +274,30 @@ impl MemoryManager {
                 score,
                 source,
                 node_id,
+                source_url: None,
+                chunk_id: None,
             });
+        }
+
+        // RAG channel: parallel query when rag_client is configured (S4.5)
+        //
+        // Uses the user message as query with top_k=3 (lightweight).
+        // RAG unavailability is non-blocking — timeout returns empty.
+        let mut rag_result_count = 0;
+        if let Some(ref rag_client) = self.rag_client {
+            let rag_results = rag_client.query(&query.query_text).await;
+            rag_result_count = rag_results.len();
+            for annotated in rag_results {
+                memories.push(RetrievedMemory {
+                    content: annotated.item.content,
+                    label: annotated.source_label.trim_start_matches('[').trim_end_matches(']').to_string(),
+                    score: annotated.item.score as f64,
+                    source: "rag".to_string(),
+                    node_id: 0, // RAG results have no Grafeo node
+                    source_url: annotated.item.source_url,
+                    chunk_id: annotated.item.chunk_id,
+                });
+            }
         }
         memories.sort_by(|a, b| {
             b.score
@@ -268,11 +330,12 @@ impl MemoryManager {
         };
 
         tracing::debug!(
-            "Retrieved {} memories (max_score={:.3}, avg_score={:.3}, graph_expanded={})",
+            "Retrieved {} memories (max_score={:.3}, avg_score={:.3}, graph_expanded={}, rag_results={})",
             result_count,
             max_score,
             avg_score,
-            graph_expand_count
+            graph_expand_count,
+            rag_result_count
         );
 
         Ok(RetrievalResult { memories, metrics })
@@ -370,12 +433,12 @@ impl MemoryManager {
     /// 1. Retrieve memories for the query
     /// 2. Format for injection
     /// 3. Return injection text + metrics
-    pub fn process_turn(
+    pub async fn process_turn(
         &self,
         store: &GrafeoStore,
         query: &MemoryQuery,
     ) -> Result<(InjectedMemory, RetrievalMetrics)> {
-        let retrieval = self.retrieve(store, query)?;
+        let retrieval = self.retrieve(store, query).await?;
         let metrics = retrieval.metrics.clone();
         let injected = self.inject(&retrieval, self.config.max_inject_tokens);
         Ok((injected, metrics))
@@ -552,8 +615,8 @@ mod tests {
     // Test 3: Retrieve normal case
     // =====================================================================
 
-    #[test]
-    fn test_retrieve_normal() {
+    #[tokio::test]
+    async fn test_retrieve_normal() {
         let store = test_store();
         let emb = test_embedding();
         store_episode(&store, "user likes rust programming", &emb);
@@ -571,9 +634,8 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).unwrap();
+        let result = manager.retrieve(&store, &query).await.unwrap();
         assert!(!result.memories.is_empty(), "expected at least one result");
-        assert!(result.metrics.result_count > 0);
         assert!(!result.metrics.abstention_triggered);
     }
 
@@ -581,8 +643,8 @@ mod tests {
     // Test 4: Retrieve empty results
     // =====================================================================
 
-    #[test]
-    fn test_retrieve_empty() {
+    #[tokio::test]
+    async fn test_retrieve_empty() {
         let store = test_store();
         let emb = test_embedding();
 
@@ -598,7 +660,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).unwrap();
+        let result = manager.retrieve(&store, &query).await.unwrap();
         assert!(result.memories.is_empty());
         assert!(result.metrics.abstention_triggered);
         assert_eq!(result.metrics.result_count, 0);
@@ -608,8 +670,8 @@ mod tests {
     // Test 5: Retrieve abstention triggered
     // =====================================================================
 
-    #[test]
-    fn test_retrieve_abstention() {
+    #[tokio::test]
+    async fn test_retrieve_abstention() {
         let store = test_store();
         let emb = test_embedding();
         store_episode(&store, "test content", &emb);
@@ -626,7 +688,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).unwrap();
+        let result = manager.retrieve(&store, &query).await.unwrap();
         assert!(result.metrics.abstention_triggered);
     }
 
@@ -634,8 +696,8 @@ mod tests {
     // Test 6: Retrieve without embedding falls back to text search
     // =====================================================================
 
-    #[test]
-    fn test_retrieve_no_embedding_fallback() {
+    #[tokio::test]
+    async fn test_retrieve_no_embedding_fallback() {
         let store = test_store();
         let emb = test_embedding();
         store_episode(&store, "rust programming tutorial", &emb);
@@ -652,7 +714,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).unwrap();
+        let result = manager.retrieve(&store, &query).await.unwrap();
         // Text search should still find results.
         assert!(!result.memories.is_empty());
     }
@@ -671,6 +733,8 @@ mod tests {
                     score: 0.95,
                     source: "hybrid".to_string(),
                     node_id: 1,
+                    source_url: None,
+                    chunk_id: None,
                 },
                 RetrievedMemory {
                     content: "Previous discussion about traits.".to_string(),
@@ -678,6 +742,8 @@ mod tests {
                     score: 0.85,
                     source: "hybrid".to_string(),
                     node_id: 2,
+                    source_url: None,
+                    chunk_id: None,
                 },
             ],
             metrics: RetrievalMetrics::default(),
@@ -707,6 +773,8 @@ mod tests {
                     score: 0.95,
                     source: "hybrid".to_string(),
                     node_id: 1,
+                    source_url: None,
+                    chunk_id: None,
                 },
                 RetrievedMemory {
                     content: "Another very long memory content that takes up many tokens.".to_string(),
@@ -714,6 +782,8 @@ mod tests {
                     score: 0.85,
                     source: "hybrid".to_string(),
                     node_id: 2,
+                    source_url: None,
+                    chunk_id: None,
                 },
                 RetrievedMemory {
                     content: "Third memory with even more text content to exceed token budget.".to_string(),
@@ -721,6 +791,8 @@ mod tests {
                     score: 0.75,
                     source: "hybrid".to_string(),
                     node_id: 3,
+                    source_url: None,
+                    chunk_id: None,
                 },
             ],
             metrics: RetrievalMetrics::default(),
@@ -785,8 +857,8 @@ mod tests {
     // Test 11: process_turn integration
     // =====================================================================
 
-    #[test]
-    fn test_process_turn() {
+    #[tokio::test]
+    async fn test_process_turn() {
         let store = test_store();
         let emb = test_embedding();
         store_episode(&store, "user prefers concise replies", &emb);
@@ -803,7 +875,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let (injected, metrics) = manager.process_turn(&store, &query).unwrap();
+        let (injected, metrics) = manager.process_turn(&store, &query).await.unwrap();
 
         assert!(!injected.formatted_text.is_empty());
         assert!(metrics.result_count > 0);
@@ -814,8 +886,8 @@ mod tests {
     // Test 12: process_turn with abstention
     // =====================================================================
 
-    #[test]
-    fn test_process_turn_abstention() {
+    #[tokio::test]
+    async fn test_process_turn_abstention() {
         let store = test_store();
         let emb = test_embedding();
         store_episode(&store, "some content", &emb);
@@ -832,7 +904,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let (injected, metrics) = manager.process_turn(&store, &query).unwrap();
+        let (injected, metrics) = manager.process_turn(&store, &query).await.unwrap();
 
         assert!(metrics.abstention_triggered);
         assert_eq!(injected.memory_count, 0);

@@ -2,6 +2,7 @@
 //!
 //! Phase 1: 13 built-in tools per design doc (12-tool-system.md)
 //! Phase 2 (S3.4): +2 identity tools (identity_query, identity_observe)
+//! Phase 4 (S4.4): +1 RAG tool (rag_query, conditional on manifest RAG declaration)
 //!
 //! | Tool | Permission |
 //! |------|------------|
@@ -20,6 +21,7 @@
 //! | identity_store | identity:write |
 //! | identity_query | identity:read |
 //! | identity_observe | identity:read |
+//! | rag_query | rag:query + network:<rag_url> (conditional) |
 
 pub mod memory_recall;
 pub mod memory_store;
@@ -36,11 +38,12 @@ pub mod intent_send;
 pub mod identity_store;
 pub mod identity_query;
 pub mod identity_observe;
+pub mod rag_query;
 
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
 
-/// Create all 15 built-in tools (13 Phase 1 + 2 Phase 2 identity tools)
+/// Create the standard 15 built-in tools (without RAG)
 ///
 /// # Arguments
 /// * `work_dir` - Working directory for filesystem/shell tools

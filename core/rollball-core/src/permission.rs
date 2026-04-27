@@ -10,6 +10,7 @@
 //! - `"identity:read"` / `"identity:write"` — Identity access
 //! - `"shell"` — Shell command execution
 //! - `"wasm"` — WASM tool execution
+//! - `"rag:query"` — RAG tool query permission (Phase 4 S4.6)
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -48,6 +49,11 @@ pub enum Permission {
     Shell,
     /// WASM tool execution
     Wasm,
+    /// RAG tool query permission
+    /// Required for agents with `[[tools]] type = "rag"` declaration.
+    /// The optional scope is the RAG endpoint URL pattern.
+    /// e.g., "rag:query" or "rag:query:https://rag.corp.example.com"
+    RagQuery(Option<String>),
 }
 
 impl Permission {
@@ -66,6 +72,9 @@ impl Permission {
         }
         if s == "wasm" {
             return Some(Permission::Wasm);
+        }
+        if s == "rag:query" {
+            return Some(Permission::RagQuery(None));
         }
 
         // Split on the first colon only to get the category
@@ -101,6 +110,17 @@ impl Permission {
                 "write" => Some(Permission::IdentityWrite),
                 _ => None,
             },
+            "rag" => match rest {
+                "query" => Some(Permission::RagQuery(None)),
+                query_part => {
+                    // "rag:query:https://rag.corp.example.com"
+                    if let Some(url) = query_part.strip_prefix("query:") {
+                        Some(Permission::RagQuery(Some(url.to_string())))
+                    } else {
+                        None
+                    }
+                }
+            },
             _ => None,
         }
     }
@@ -124,6 +144,8 @@ impl Permission {
             Permission::IdentityWrite => "identity:write".to_string(),
             Permission::Shell => "shell".to_string(),
             Permission::Wasm => "wasm".to_string(),
+            Permission::RagQuery(None) => "rag:query".to_string(),
+            Permission::RagQuery(Some(url)) => format!("rag:query:{url}"),
         }
     }
 
@@ -153,6 +175,8 @@ impl Permission {
             (Permission::IdentityWrite, Permission::IdentityWrite) => true,
             (Permission::Shell, Permission::Shell) => true,
             (Permission::Wasm, Permission::Wasm) => true,
+            (Permission::RagQuery(None), Permission::RagQuery(_)) => true,
+            (Permission::RagQuery(a), Permission::RagQuery(b)) => a == b,
             _ => false,
         }
     }
@@ -167,6 +191,7 @@ impl Permission {
             Permission::IdentityRead | Permission::IdentityWrite => "identity",
             Permission::Shell => "shell",
             Permission::Wasm => "wasm",
+            Permission::RagQuery(_) => "rag",
         }
     }
 
@@ -185,6 +210,7 @@ impl Permission {
             Permission::IdentityWrite => "IdentityWrite",
             Permission::Shell => "Shell",
             Permission::Wasm => "Wasm",
+            Permission::RagQuery(_) => "RagQuery",
         }
     }
 
@@ -197,6 +223,7 @@ impl Permission {
             Permission::FilesystemWrite(v) => v.as_deref(),
             Permission::IntentSend(v) => v.as_deref(),
             Permission::IntentReceive(v) => v.as_deref(),
+            Permission::RagQuery(v) => v.as_deref(),
             Permission::MemoryRead
             | Permission::MemoryWrite
             | Permission::IdentityRead
@@ -249,6 +276,7 @@ impl<'de> Deserialize<'de> for Permission {
             "IdentityWrite" => Ok(Permission::IdentityWrite),
             "Shell" => Ok(Permission::Shell),
             "Wasm" => Ok(Permission::Wasm),
+            "RagQuery" => Ok(Permission::RagQuery(repr.value)),
             other => Err(serde::de::Error::custom(format!(
                 "Unknown permission type: {other}"
             ))),
@@ -342,6 +370,8 @@ impl PermissionPolicy {
             Permission::Shell => PermissionPolicy::AskAlways,
             Permission::IdentityWrite => PermissionPolicy::AskAlways,
             Permission::Wasm => PermissionPolicy::AskAlways,
+            // RAG: medium-risk, ask on first use
+            Permission::RagQuery(_) => PermissionPolicy::Default,
             // Medium-risk: ask on first use
             Permission::Network(_) => PermissionPolicy::Default,
             Permission::FilesystemRead(_) => PermissionPolicy::Default,
@@ -572,5 +602,54 @@ mod tests {
         let json_str = serde_json::to_string(&perms).unwrap();
         let parsed: Vec<Permission> = serde_json::from_str(&json_str).unwrap();
         assert_eq!(perms, parsed);
+    }
+
+    // ── RagQuery permission tests (S4.6) ─────────────────────────────────
+
+    #[test]
+    fn test_permission_parse_rag_query() {
+        let p = Permission::parse("rag:query").unwrap();
+        assert_eq!(p, Permission::RagQuery(None));
+
+        let p2 = Permission::parse("rag:query:https://rag.corp.example.com").unwrap();
+        assert_eq!(p2, Permission::RagQuery(Some("https://rag.corp.example.com".into())));
+    }
+
+    #[test]
+    fn test_rag_query_permission_string() {
+        assert_eq!(Permission::RagQuery(None).to_permission_string(), "rag:query");
+        assert_eq!(
+            Permission::RagQuery(Some("https://rag.corp.example.com".into())).to_permission_string(),
+            "rag:query:https://rag.corp.example.com"
+        );
+    }
+
+    #[test]
+    fn test_rag_query_matches_broad_narrow() {
+        let broad = Permission::RagQuery(None);
+        let narrow = Permission::RagQuery(Some("https://rag.corp.example.com".into()));
+        assert!(broad.matches(&narrow));
+        assert!(!narrow.matches(&broad));
+    }
+
+    #[test]
+    fn test_rag_query_toml_roundtrip() {
+        let perms = vec![
+            Permission::RagQuery(None),
+            Permission::RagQuery(Some("https://rag.corp.example.com".into())),
+        ];
+        let json_str = serde_json::to_string(&perms).unwrap();
+        let parsed: Vec<Permission> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(perms, parsed);
+    }
+
+    #[test]
+    fn test_rag_query_category() {
+        assert_eq!(Permission::RagQuery(None).category(), "rag");
+    }
+
+    #[test]
+    fn test_rag_query_policy_default() {
+        assert_eq!(PermissionPolicy::for_permission(&Permission::RagQuery(None)), PermissionPolicy::Default);
     }
 }
