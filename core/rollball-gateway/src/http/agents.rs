@@ -124,17 +124,12 @@ pub async fn install_agent(
     State(state): State<AppState>,
     Json(body): Json<InstallRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
-    // Determine packages dir from installed agents or use default
+    // Determine packages dir from Gateway config (canonical source of truth)
     let packages_dir = {
         let gw = state.gateway_state.read().await;
-        gw.installed_agents.values()
-            .next()
-            .map(|i| {
-                let path = std::path::Path::new(&i.install_path);
-                path.parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-            })
+        gw.config
+            .as_ref()
+            .map(|c| std::path::PathBuf::from(&c.packages_dir))
             .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
     };
 
@@ -178,16 +173,12 @@ pub async fn uninstall_agent(
         }
     }
 
+    // Determine packages dir from Gateway config
     let packages_dir = {
         let gw = state.gateway_state.read().await;
-        gw.installed_agents.values()
-            .next()
-            .map(|i| {
-                let path = std::path::Path::new(&i.install_path);
-                path.parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-            })
+        gw.config
+            .as_ref()
+            .map(|c| std::path::PathBuf::from(&c.packages_dir))
             .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
     };
 

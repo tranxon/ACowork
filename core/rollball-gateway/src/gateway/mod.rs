@@ -59,6 +59,74 @@ impl Gateway {
         })
     }
 
+    /// Scan packages directory and restore installed agents from disk.
+    ///
+    /// On startup, the Gateway needs to rebuild its in-memory `installed_agents`
+    /// map by reading `manifest.toml` from each subdirectory under `packages_dir`.
+    /// Without this, agents installed in a previous session are invisible.
+    fn restore_installed_agents(&mut self) {
+        let packages_dir = std::path::Path::new(&self.config.packages_dir);
+        if !packages_dir.exists() {
+            return;
+        }
+
+        let Ok(entries) = std::fs::read_dir(packages_dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let agent_dir = entry.path();
+            if !agent_dir.is_dir() {
+                continue;
+            }
+
+            let manifest_path = agent_dir.join("manifest.toml");
+            if !manifest_path.exists() {
+                continue;
+            }
+
+            match std::fs::read_to_string(&manifest_path) {
+                Ok(content) => {
+                    match toml::from_str::<rollball_core::AgentManifest>(&content) {
+                        Ok(manifest) => {
+                            let info = crate::gateway::state::AgentInfo {
+                                agent_id: manifest.agent_id.clone(),
+                                version: manifest.version.clone(),
+                                name: manifest.name.clone(),
+                                install_path: agent_dir.to_string_lossy().to_string(),
+                                manifest,
+                            };
+                            let agent_id = info.agent_id.clone();
+                            self.state.add_installed(info);
+                            tracing::info!(
+                                "Restored installed agent: {} v{}",
+                                agent_id,
+                                self.state.installed_agents.get(&agent_id).map(|i| i.version.as_str()).unwrap_or("?")
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to parse manifest at '{}': {}",
+                                manifest_path.display(), e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read manifest at '{}': {}",
+                        manifest_path.display(), e
+                    );
+                }
+            }
+        }
+
+        let count = self.state.installed_agents.len();
+        if count > 0 {
+            tracing::info!("Restored {} installed agent(s) from disk", count);
+        }
+    }
+
     /// Run the Gateway daemon (async, multi-connection)
     ///
     /// This starts the IPC server and enters the main event loop.
@@ -73,6 +141,9 @@ impl Gateway {
 
         // Ensure directories exist
         self.ensure_dirs()?;
+
+        // Scan packages directory and restore installed agents from disk
+        self.restore_installed_agents();
 
         // Wrap state in Arc<RwLock> for concurrent access in multi-connection mode.
         // std::mem::take replaces self.state with Default so the Arc takes ownership.
