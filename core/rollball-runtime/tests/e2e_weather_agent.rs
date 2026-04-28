@@ -260,7 +260,7 @@ async fn test_e2e_weather_manifest_loads_correctly() {
 
     assert_eq!(manifest.agent_id, "com.example.weather");
     assert_eq!(manifest.name, "Weather Agent");
-    assert_eq!(manifest.llm.provider, "mock");
+    assert_eq!(manifest.llm.suggested_provider, "mock");
     assert!(manifest.has_tool("http_request"));
     assert!(manifest.has_tool("memory_store"));
     assert!(manifest.has_tool("memory_recall"));
