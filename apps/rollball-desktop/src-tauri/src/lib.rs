@@ -11,6 +11,12 @@ mod tray;
 use state::AppState;
 use tauri::Manager;
 
+/// System Agent ID — always bundled with Desktop App
+const SYSTEM_AGENT_ID: &str = "com.rollball.system";
+
+/// Bundled system-agent resource directory name
+const SYSTEM_AGENT_RESOURCE: &str = "system-agent";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -45,6 +51,15 @@ pub fn run() {
         ])
         .setup(|app| {
             tray::setup(app)?;
+
+            // Auto-install bundled System Agent on first launch
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = auto_install_system_agent(&app_handle).await {
+                    tracing::warn!("Failed to auto-install System Agent: {}", e);
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -56,4 +71,77 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Auto-install the bundled System Agent if not already installed.
+async fn auto_install_system_agent(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::time::{sleep, Duration};
+
+    // Wait for Gateway to be ready (max 30 seconds)
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let gateway_url = "http://127.0.0.1:19876";
+
+    for i in 0..60 {
+        if client.get(format!("{}/health", gateway_url)).send().await.is_ok() {
+            break;
+        }
+        sleep(Duration::from_millis(500)).await;
+        if i % 10 == 0 {
+            tracing::debug!("Waiting for Gateway to be ready...");
+        }
+    }
+
+    // Check if System Agent is already installed
+    match client.get(format!("{}/api/agents/{}", gateway_url, SYSTEM_AGENT_ID)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!("System Agent already installed, skipping auto-install");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Get the bundled system-agent path
+    let resource_dir = app.path().resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+    let system_agent_path = resource_dir.join(SYSTEM_AGENT_RESOURCE);
+
+    if !system_agent_path.exists() {
+        tracing::warn!("Bundled System Agent not found at {:?}", system_agent_path);
+        return Ok(());
+    }
+
+    // Verify manifest exists
+    if !system_agent_path.join("manifest.toml").exists() {
+        tracing::warn!("Bundled System Agent missing manifest.toml");
+        return Ok(());
+    }
+
+    tracing::info!("Auto-installing bundled System Agent from {:?}", system_agent_path);
+
+    // Install the System Agent via Gateway API
+    let body = serde_json::json!({
+        "package_path": system_agent_path.to_string_lossy(),
+        "dev_mode": true
+    });
+
+    match client.post(format!("{}/api/agents/install", gateway_url))
+        .json(&body)
+        .send()
+        .await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                tracing::info!("Successfully auto-installed bundled System Agent");
+            } else {
+                let error = resp.text().await.unwrap_or_default();
+                tracing::warn!("Failed to install System Agent: {}", error);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to call install API: {}", e);
+        }
+    }
+
+    Ok(())
 }
