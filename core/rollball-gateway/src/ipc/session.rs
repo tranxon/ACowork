@@ -25,6 +25,8 @@ pub struct Session {
     next_request_id: u64,
     /// Server-push channel for delivering messages to this Agent
     push_tx: Option<PushSender>,
+    /// Connection role: "main" for primary IPC, "chunk-relay" for streaming
+    pub connection_role: String,
 }
 
 impl Session {
@@ -36,6 +38,7 @@ impl Session {
             pending_requests: HashMap::new(),
             next_request_id: 1,
             push_tx: None,
+            connection_role: "main".to_string(),
         }
     }
 
@@ -47,6 +50,7 @@ impl Session {
             pending_requests: HashMap::new(),
             next_request_id: 1,
             push_tx: Some(push_tx),
+            connection_role: "main".to_string(),
         }
     }
 
@@ -139,9 +143,15 @@ impl SessionManager {
         self.sessions.values().filter(|s| s.authenticated).count()
     }
 
-    /// Find session by agent_id
+    /// Find session by agent_id (only main connections)
+    ///
+    /// When an agent has multiple connections (main + chunk-relay),
+    /// only the main connection should receive IntentReceived messages.
+    /// chunk-relay connections only send TYPE_STREAM_CHUNK frames.
     pub fn find_by_agent_id(&self, agent_id: &str) -> Option<(&String, &Session)> {
-        self.sessions.iter().find(|(_, s)| s.agent_id.as_deref() == Some(agent_id))
+        self.sessions.iter().find(|(_, s)| {
+            s.agent_id.as_deref() == Some(agent_id) && s.connection_role == "main"
+        })
     }
 }
 

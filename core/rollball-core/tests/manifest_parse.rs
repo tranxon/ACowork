@@ -48,8 +48,8 @@ max_execution_time_ms = 30000
     assert_eq!(manifest.agent_id, "com.example.weather");
     assert_eq!(manifest.version, "1.0.0");
     assert_eq!(manifest.name, "Weather Agent");
-    assert_eq!(manifest.llm.provider, "openai");
-    assert_eq!(manifest.llm.model, "gpt-4o-mini");
+    assert_eq!(manifest.llm.suggested_provider, "openai");
+    assert_eq!(manifest.llm.suggested_model, "gpt-4o-mini");
     assert_eq!(manifest.tools.len(), 3);
     assert!(manifest.has_tool("http_request"));
     assert!(manifest.has_tool("memory_store"));
@@ -127,7 +127,7 @@ fn test_parse_weather_agent_example() {
     let manifest = rollball_core::AgentManifest::from_toml(&toml_str).expect("Failed to parse weather manifest");
 
     assert_eq!(manifest.agent_id, "com.example.weather");
-    assert_eq!(manifest.llm.provider, "openai");
+    assert_eq!(manifest.llm.suggested_provider, "openai");
     assert!(manifest.has_tool("http_request"));
     assert!(manifest.has_tool("memory_store"));
     assert!(manifest.has_tool("memory_recall"));

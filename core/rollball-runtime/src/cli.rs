@@ -291,7 +291,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
             Some(tokio::spawn(async move {
                 // Connect a second IPC client for chunk relay
                 let mut chunk_client = crate::ipc::client::GatewayClient::new(&socket_path);
-                if let Err(e) = chunk_client.connect_and_register(&agent_id, &version).await {
+                if let Err(e) = chunk_client.connect_and_register_with_role(&agent_id, &version, "chunk-relay").await {
                     tracing::error!("Chunk relay IPC connection failed: {}", e);
                     return;
                 }

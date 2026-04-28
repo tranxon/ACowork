@@ -75,11 +75,25 @@ impl GatewayClient {
         agent_id: &str,
         version: &str,
     ) -> Result<(), RollballError> {
+        self.connect_and_register_with_role(agent_id, version, "main").await
+    }
+
+    /// Connect to the Gateway and register with AgentHello, specifying connection role.
+    ///
+    /// `connection_role` is "main" for the primary IPC connection or
+    /// "chunk-relay" for the streaming chunk relay connection.
+    pub async fn connect_and_register_with_role(
+        &mut self,
+        agent_id: &str,
+        version: &str,
+        connection_role: &str,
+    ) -> Result<(), RollballError> {
         self.connect().await?;
 
         let request = GatewayRequest::AgentHello {
             agent_id: agent_id.to_string(),
             version: version.to_string(),
+            connection_role: connection_role.to_string(),
         };
 
         match self.send_and_recv(request).await {

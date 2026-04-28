@@ -322,8 +322,8 @@ async fn dispatch_request(
         GatewayRequest::CronList {} => {
             handle_cron_list(conn_id, session_mgr, state).await
         }
-        GatewayRequest::AgentHello { agent_id, version } => {
-            handle_agent_hello(&agent_id, &version, conn_id, state, session_mgr).await
+        GatewayRequest::AgentHello { agent_id, version, connection_role } => {
+            handle_agent_hello(&agent_id, &version, &connection_role, conn_id, state, session_mgr).await
         }
     }
 }
@@ -1229,22 +1229,26 @@ async fn handle_cron_list(
 async fn handle_agent_hello(
     agent_id: &str,
     version: &str,
+    connection_role: &str,
     conn_id: &str,
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
     tracing::info!(
-        "AgentHello received: agent_id={} version={} conn={}",
-        agent_id, version, conn_id
+        "AgentHello received: agent_id={} version={} conn={} role={}",
+        agent_id, version, conn_id, connection_role
     );
 
     let mut mgr = session_mgr.lock().await;
     if let Some(session) = mgr.get_session_mut(conn_id) {
         session.authenticate(agent_id);
-        tracing::info!("Session {} authenticated as agent {}", conn_id, agent_id);
+        session.connection_role = connection_role.to_string();
+        tracing::info!("Session {} authenticated as agent {} (role={})", conn_id, agent_id, connection_role);
 
-        // Push LLM configuration to the newly authenticated Agent
-        let llm_config = resolve_llm_config_for_agent(agent_id, state).await;
+        // Only push LLM config to main connections.
+        // chunk-relay connections don't need LLM config — they only send TYPE_STREAM_CHUNK.
+        if connection_role == "main" {
+            let llm_config = resolve_llm_config_for_agent(agent_id, state).await;
         if let Some((provider, model, api_key, base_url)) = llm_config {
             tracing::info!(
                 "Pushing LLMConfigDelivery to agent={}: provider={} model={:?}",
@@ -1266,6 +1270,7 @@ async fn handle_agent_hello(
                 agent_id
             );
         }
+        } // end if connection_role == "main"
 
         GatewayResponse::AgentHelloResult {
             success: true,

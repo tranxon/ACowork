@@ -17,6 +17,11 @@ fn default_permission_timeout() -> u64 {
     PERMISSION_REQUEST_TIMEOUT_MS
 }
 
+/// Default connection role for backward compatibility
+fn default_connection_role() -> String {
+    "main".to_string()
+}
+
 /// Gateway Service API request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -86,6 +91,12 @@ pub enum GatewayRequest {
         agent_id: String,
         /// The agent's version
         version: String,
+        /// Connection role — "main" for the primary IPC connection,
+        /// "chunk-relay" for the streaming chunk relay connection.
+        /// The Gateway uses this to route IntentReceived only to "main" connections.
+        /// Defaults to "main" when absent (backward compatible).
+        #[serde(default = "default_connection_role")]
+        connection_role: String,
     },
 }
 

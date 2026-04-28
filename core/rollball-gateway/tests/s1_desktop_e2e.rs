@@ -442,9 +442,10 @@ fn test_s1_websocket_streaming() {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
                                 let msg_type = parsed.clone().get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                println!("  WS: type={}", msg_type);
+                                let preview = if text.len() > 200 { &text[..200] } else { &text };
+                                println!("  WS: type={} data={}", msg_type, preview);
                                 messages.push(parsed);
-                                if msg_type == "done" { break; }
+                                if msg_type == "done" || msg_type == "error" { break; }
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => break,
