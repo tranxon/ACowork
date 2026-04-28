@@ -167,9 +167,21 @@ impl GatewayClient {
         Ok(keys)
     }
 
-    /// `POST /api/vault/keys`
-    pub async fn add_key(&self, provider: &str, key: &str) -> Result<GenericMessageResponse> {
-        let body = serde_json::json!({ "provider": provider, "key": key });
+    /// `POST /api/vault/keys` (with optional base_url and default_model)
+    pub async fn add_key(
+        &self,
+        provider: &str,
+        key: &str,
+        base_url: Option<&str>,
+        default_model: Option<&str>,
+    ) -> Result<GenericMessageResponse> {
+        let mut body = serde_json::json!({ "provider": provider, "key": key });
+        if let Some(url) = base_url {
+            body["base_url"] = serde_json::Value::String(url.to_string());
+        }
+        if let Some(model) = default_model {
+            body["default_model"] = serde_json::Value::String(model.to_string());
+        }
         let resp = self
             .client
             .post(format!("{}/api/vault/keys", self.base_url))
@@ -191,9 +203,21 @@ impl GatewayClient {
         Ok(result)
     }
 
-    /// `PUT /api/vault/keys/:provider`
-    pub async fn update_key(&self, provider: &str, key: &str) -> Result<GenericMessageResponse> {
-        let body = serde_json::json!({ "key": key });
+    /// `PUT /api/vault/keys/:provider` (with optional base_url and default_model)
+    pub async fn update_key(
+        &self,
+        provider: &str,
+        key: &str,
+        base_url: Option<&str>,
+        default_model: Option<&str>,
+    ) -> Result<GenericMessageResponse> {
+        let mut body = serde_json::json!({ "key": key });
+        if let Some(url) = base_url {
+            body["base_url"] = serde_json::Value::String(url.to_string());
+        }
+        if let Some(model) = default_model {
+            body["default_model"] = serde_json::Value::String(model.to_string());
+        }
         let resp = self
             .client
             .put(format!("{}/api/vault/keys/{}", self.base_url, provider))
@@ -222,6 +246,8 @@ impl GatewayClient {
         &self,
         log_level: Option<&str>,
         idle_timeout_secs: Option<u64>,
+        default_provider: Option<&str>,
+        default_model: Option<&str>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::Map::new();
         if let Some(level) = log_level {
@@ -232,6 +258,12 @@ impl GatewayClient {
                 "idle_timeout_secs".to_string(),
                 serde_json::Value::Number(timeout.into()),
             );
+        }
+        if let Some(provider) = default_provider {
+            body.insert("default_provider".to_string(), serde_json::Value::String(provider.to_string()));
+        }
+        if let Some(model) = default_model {
+            body.insert("default_model".to_string(), serde_json::Value::String(model.to_string()));
         }
         let resp = self
             .client
@@ -308,11 +340,17 @@ pub struct SendMessageResponse {
     pub status: String,
 }
 
-/// Vault key entry (masked)
+/// Vault key entry (masked, with optional base_url and default_model)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultKeyEntry {
     pub provider: String,
     pub key_preview: String,
+    /// Configured base URL (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Configured default model (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 /// Config response
@@ -325,6 +363,12 @@ pub struct ConfigResponse {
     pub idle_timeout_secs: u64,
     pub dev_mode: bool,
     pub http: HttpConfigResponse,
+    /// Default LLM provider (if configured)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+    /// Default LLM model (if configured)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 /// HTTP config subset

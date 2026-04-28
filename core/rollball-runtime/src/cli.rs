@@ -6,6 +6,9 @@ use tracing_subscriber::EnvFilter;
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 
+/// Retry interval when Gateway recv encounters a transient error
+const GATEWAY_RECV_RETRY_INTERVAL_MS: u64 = 100;
+
 /// Agent Runtime CLI
 #[derive(Parser)]
 #[command(name = "rollball-runtime")]
@@ -128,7 +131,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     );
 
     // Step 2: Connect to Gateway if socket path is provided
-    let ipc_client = if let Some(socket_path) = config.get_gateway_address() {
+    let mut ipc_client = if let Some(socket_path) = config.get_gateway_address() {
         connect_gateway_client(socket_path, &loaded.manifest.agent_id, &loaded.manifest.version).await
     } else {
         None
@@ -146,15 +149,60 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         "System prompt built"
     );
 
-    // Step 3: Initialize LLM Provider (with multi-provider routing support)
-    let api_key = resolve_api_key(&loaded.manifest);
-    let base_url = std::env::var("ROLLBALL_LLM_BASE_URL").ok();
-    let provider = build_runtime_provider(&loaded.manifest, api_key.as_deref(), base_url.as_deref());
-    tracing::info!(
-        provider = %provider.name(),
-        model = %loaded.manifest.llm.model,
-        "Provider initialized"
-    );
+    // Step 3: Initialize LLM Provider
+    //
+    // In Gateway mode: receive LLM config from Gateway via IPC (LLMConfigDelivery).
+    //   This is the primary path — the user's provider/key/model configured in
+    //   Desktop App → stored in Vault → distributed to Agent via IPC.
+    //   This satisfies PRD GTW-05 and SEC-07 (no env-var key distribution).
+    //
+    // In Standalone mode: fall back to manifest suggested_provider + env vars.
+    let (provider, _resolved_model) = if let Some(ref mut client) = ipc_client {
+        // Gateway mode: receive LLM config from Gateway
+        // TODO: Pass resolved_model to AgentLoop or ContextBuilder so the Gateway-delivered
+        // model overrides the manifest's suggested_model at runtime.
+        match client.recv_llm_config().await {
+            Ok(llm_config) => {
+                tracing::info!(
+                    provider = %llm_config.provider,
+                    model = ?llm_config.model,
+                    source = "Gateway IPC",
+                    "LLM config received from Gateway"
+                );
+                let p = crate::providers::router::create_provider(
+                    &llm_config.provider,
+                    llm_config.api_key.as_deref(),
+                    llm_config.base_url.as_deref(),
+                );
+                // Use Gateway-delivered model if specified, otherwise fall back to manifest's suggested_model
+                let resolved = llm_config.model
+                    .unwrap_or_else(|| loaded.manifest.llm.suggested_model.clone());
+                (p, resolved)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to receive LLM config from Gateway, falling back to manifest + env"
+                );
+                let api_key = resolve_api_key(&loaded.manifest);
+                let base_url = std::env::var("ROLLBALL_LLM_BASE_URL").ok();
+                let p = build_runtime_provider(&loaded.manifest, api_key.as_deref(), base_url.as_deref());
+                (p, loaded.manifest.llm.suggested_model.clone())
+            }
+        }
+    } else {
+        // Standalone mode: use manifest suggested_provider + env vars
+        let api_key = resolve_api_key(&loaded.manifest);
+        let base_url = std::env::var("ROLLBALL_LLM_BASE_URL").ok();
+        let p = build_runtime_provider(&loaded.manifest, api_key.as_deref(), base_url.as_deref());
+        tracing::info!(
+            provider = %p.name(),
+            model = %loaded.manifest.llm.suggested_model,
+            source = "manifest + env",
+            "Provider initialized (standalone mode)"
+        );
+        (p, loaded.manifest.llm.suggested_model.clone())
+    };
 
     // Step 4: Build tool registry + activate by manifest
     let mut registry = ToolRegistry::new();
@@ -196,18 +244,25 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         exceeded_action: "warn".to_string(),
     };
 
-    // Step 8: Create AgentLoop
-    let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+    // Step 8: Create AgentLoop (without IPC client - handled separately)
+    let (mut agent_loop, inbound_tx) = AgentLoop::new(
         config.clone(),
         loaded.manifest.clone(),
         provider,
         active_tools,
         budget,
-        ipc_client,
     );
 
-    // Step 9: Run interactive chat loop
-    run_chat_loop(&mut agent_loop, &context_builder).await
+    // Step 9: Run the appropriate loop based on connection mode
+    if let Some(mut client) = ipc_client {
+        // Gateway mode: run message loop to receive messages from Gateway
+        tracing::info!("Running in Gateway mode");
+        run_gateway_loop(agent_loop, inbound_tx, &mut client, context_builder).await
+    } else {
+        // Standalone mode: run interactive stdin chat loop
+        tracing::info!("Running in standalone mode");
+        run_chat_loop(&mut agent_loop, &context_builder).await
+    }
 }
 
 /// Load identity delivery from the Gateway-injected `.identity_delivery.json`
@@ -280,7 +335,7 @@ fn build_runtime_provider(
     // If no multi-provider config, use simple single provider
     if manifest.llm.providers.is_empty() {
         return create_provider(
-            &manifest.llm.provider,
+            &manifest.llm.suggested_provider,
             default_api_key,
             default_base_url,
         );
@@ -306,25 +361,25 @@ fn build_runtime_provider(
     }
 
     // Also register the primary provider if not already in providers map
-    if !manifest.llm.providers.contains_key(&manifest.llm.provider) {
+    if !manifest.llm.providers.contains_key(&manifest.llm.suggested_provider) {
         let primary = create_provider(
-            &manifest.llm.provider,
+            &manifest.llm.suggested_provider,
             default_api_key,
             default_base_url,
         );
         registry.register_provider(
-            &manifest.llm.provider,
+            &manifest.llm.suggested_provider,
             primary,
-            vec![manifest.llm.model.clone()],
+            vec![manifest.llm.suggested_model.clone()],
         );
     }
 
     // Build ReliableProvider with fallback chain
-    match registry.build_reliable_provider(&manifest.llm.provider, &manifest.llm.model) {
+    match registry.build_reliable_provider(&manifest.llm.suggested_provider, &manifest.llm.suggested_model) {
         Some(reliable) => {
             tracing::info!(
-                primary = %manifest.llm.provider,
-                model = %manifest.llm.model,
+                primary = %manifest.llm.suggested_provider,
+                model = %manifest.llm.suggested_model,
                 strategy = %strategy,
                 "Built ReliableProvider with fallback chain"
             );
@@ -333,7 +388,7 @@ fn build_runtime_provider(
         None => {
             tracing::warn!("Failed to build ReliableProvider, falling back to single provider");
             create_provider(
-                &manifest.llm.provider,
+                &manifest.llm.suggested_provider,
                 default_api_key,
                 default_base_url,
             )
@@ -352,8 +407,10 @@ fn resolve_api_key(manifest: &rollball_core::AgentManifest) -> Option<String> {
         return Some(key);
     }
 
-    let env_key = match manifest.llm.provider.as_str() {
+    let env_key = match manifest.llm.suggested_provider.as_str() {
         "ollama" => "OLLAMA_API_KEY",
+        "minimax" => "MINIMAX_API_KEY",
+        "anthropic" | "claude" => "ANTHROPIC_API_KEY",
         _ => "OPENAI_API_KEY",
     };
 
@@ -404,6 +461,118 @@ async fn run_chat_loop(
         stdout.flush().ok();
     }
 
+    Ok(())
+}
+
+/// Run Gateway message loop — receives messages from Gateway and processes them.
+///
+/// This loop:
+/// 1. Receives IntentReceived messages from Gateway via IPC
+/// 2. Checks remaining budget before processing each message
+/// 3. Runs the agent loop for each message
+/// 4. Sends responses back to Gateway
+async fn run_gateway_loop(
+    mut agent_loop: crate::agent::loop_::AgentLoop,
+    _inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
+    ipc_client: &mut crate::ipc::client::GatewayClient,
+    context_builder: crate::agent::context::ContextBuilder,
+) -> Result<()> {
+    use rollball_core::protocol::GatewayResponse;
+
+    // Retrieve the provider name for budget queries
+    let budget_provider = agent_loop.manifest().llm.suggested_provider.clone();
+
+    tracing::info!("Gateway message loop started");
+
+    // Main message loop — receive messages from Gateway and process them
+    loop {
+        match ipc_client.recv_message().await {
+            Ok(Some(response)) => {
+                tracing::debug!("Received Gateway message: {:?}", response);
+
+                match response {
+                    GatewayResponse::IntentReceived { from, action, params } => {
+                        tracing::info!("Received intent from {}: {}", from, action);
+
+                        // Budget pre-check: skip processing if budget is exhausted
+                        if let Ok((remaining_tokens, _)) = ipc_client.query_budget(&budget_provider).await {
+                            if remaining_tokens == 0 {
+                                tracing::warn!(
+                                    "Budget exhausted for provider={}, skipping message from {}",
+                                    budget_provider, from
+                                );
+                                let error_params = serde_json::json!({
+                                    "content": "Budget exhausted — cannot process this message",
+                                    "message_id": params.get("message_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown"),
+                                });
+                                let _ = ipc_client.send_intent(&from, "agent_error", error_params, false).await;
+                                continue;
+                            }
+                        }
+                        // If budget query fails (e.g. provider not tracked), proceed anyway
+
+                        // Extract message content from params
+                        let content = params.get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        let message_id = params.get("message_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("msg-{}", chrono::Utc::now().timestamp_millis()));
+
+                        // Process the message through the agent loop
+                        match agent_loop.run(&content, &context_builder).await {
+                            Ok(response_text) => {
+                                tracing::info!("Agent response: {}", &response_text[..response_text.len().min(100)]);
+
+                                // Send response back to Gateway via bridge channel
+                                // Target is the HTTP client that originated the message
+                                let reply_target = &from;
+                                let intent_params = serde_json::json!({
+                                    "content": response_text,
+                                    "message_id": message_id,
+                                });
+
+                                match ipc_client.send_intent(reply_target, "agent_response", intent_params, false).await {
+                                    Ok(_) => tracing::debug!("Response sent to {}", reply_target),
+                                    Err(e) => tracing::error!("Failed to send response: {}", e),
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Agent error: {}", e);
+
+                                // Send error response
+                                let error_params = serde_json::json!({
+                                    "content": format!("Error: {}", e),
+                                    "message_id": message_id,
+                                });
+                                let _ = ipc_client.send_intent(&from, "agent_error", error_params, false).await;
+                            }
+                        }
+                    }
+                    // Ignore other push messages (CapabilityUpdate, etc.)
+                    _ => {
+                        tracing::debug!("Ignoring non-IntentReceived Gateway message");
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!("Gateway connection closed");
+                break;
+            }
+            Err(e) => {
+                tracing::error!("Gateway recv error: {}", e);
+                // Don't break on transient errors — try to continue
+                tokio::time::sleep(std::time::Duration::from_millis(GATEWAY_RECV_RETRY_INTERVAL_MS)).await;
+            }
+        }
+    }
+
+    tracing::info!("Gateway message loop ended");
     Ok(())
 }
 

@@ -2,9 +2,28 @@
 //!
 //! Wraps rollball-vault crate and adds Gateway-specific key distribution logic.
 //! All API keys are stored encrypted on disk via rollball_vault::Vault.
+//!
+//! Storage format (encrypted):
+//!   Legacy: plain text API key string
+//!   Current: JSON { "api_key": "...", "base_url": "...", "default_model": "..." }
+//! The `get_key` method handles both formats transparently.
 
 use crate::error::GatewayError;
 use secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
+
+/// Full provider configuration stored in Vault
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    /// API key for the provider
+    pub api_key: String,
+    /// Base URL override (empty = use default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Default model for this provider (empty = use model from manifest)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
 
 /// Key entry for HTTP API listing (masked preview)
 #[derive(Debug, Clone, serde::Serialize)]
@@ -62,9 +81,30 @@ impl VaultFacade {
         std::path::Path::new(&self.vault_dir)
     }
 
-    /// Store an API key for a provider (encrypted on disk)
+    /// Store a provider entry (encrypted on disk)
+    ///
+    /// Stores the full provider configuration as JSON:
+    /// `{ "api_key": "...", "base_url": "...", "default_model": "..." }`
     pub fn store_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
-        self.vault.store(provider, api_key)
+        self.store_provider(provider, None, None, api_key)
+    }
+
+    /// Store a full provider entry with optional base_url and default_model
+    pub fn store_provider(
+        &mut self,
+        provider: &str,
+        base_url: Option<&str>,
+        default_model: Option<&str>,
+        api_key: &str,
+    ) -> Result<(), GatewayError> {
+        let entry = ProviderEntry {
+            api_key: api_key.to_string(),
+            base_url: base_url.map(|s| s.to_string()),
+            default_model: default_model.map(|s| s.to_string()),
+        };
+        let json = serde_json::to_string(&entry)
+            .map_err(|e| GatewayError::Vault(format!("Failed to serialize provider entry: {}", e)))?;
+        self.vault.store(provider, &json)
             .map_err(|e| GatewayError::Vault(format!("Failed to store key: {}", e)))?;
         if !self.provider_names.contains(&provider.to_string()) {
             self.provider_names.push(provider.to_string());
@@ -72,11 +112,33 @@ impl VaultFacade {
         Ok(())
     }
 
-    /// Get an API key for a provider (one-time distribution, decrypted)
-    pub fn get_key(&self, provider: &str) -> Result<String, GatewayError> {
+    /// Get the full provider entry (decrypted)
+    ///
+    /// Handles both the current JSON format and the legacy plain-text format.
+    /// Legacy entries (plain API key) are returned with base_url=None, default_model=None.
+    pub fn get_provider(&self, provider: &str) -> Result<ProviderEntry, GatewayError> {
         let secret = self.vault.retrieve(provider)
             .map_err(|e| GatewayError::Vault(format!("Failed to retrieve key for '{}': {}", provider, e)))?;
-        Ok(secret.expose_secret().to_string())
+        let raw = secret.expose_secret();
+
+        // Try JSON format first (current)
+        if let Ok(entry) = serde_json::from_str::<ProviderEntry>(raw) {
+            return Ok(entry);
+        }
+
+        // Legacy format: plain text API key
+        Ok(ProviderEntry {
+            api_key: raw.to_string(),
+            base_url: None,
+            default_model: None,
+        })
+    }
+
+    /// Get just the API key for a provider (one-time distribution, decrypted)
+    /// Backward-compatible: works with both JSON and legacy format.
+    pub fn get_key(&self, provider: &str) -> Result<String, GatewayError> {
+        let entry = self.get_provider(provider)?;
+        Ok(entry.api_key)
     }
 
     /// List all providers with stored keys (no values returned)
@@ -91,9 +153,9 @@ impl VaultFacade {
         let mut entries = Vec::new();
         for provider in &self.provider_names {
             let preview = if self.vault.is_unlocked() {
-                match self.vault.retrieve(provider) {
-                    Ok(secret) => {
-                        let key = secret.expose_secret();
+                match self.get_provider(provider) {
+                    Ok(entry) => {
+                        let key = &entry.api_key;
                         if key.len() > 6 {
                             format!("{}...{}", &key[..3], &key[key.len()-3..])
                         } else {
@@ -198,6 +260,47 @@ mod tests {
         vault.store_key("ollama", "").unwrap();
         let providers = vault.list_providers();
         assert_eq!(providers.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_store_provider_full_config() {
+        let dir = temp_vault_dir("store_provider");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        vault.store_provider("deepseek", Some("https://api.deepseek.com/v1"), Some("deepseek-chat"), "sk-abc").unwrap();
+        let entry = vault.get_provider("deepseek").unwrap();
+        assert_eq!(entry.api_key, "sk-abc");
+        assert_eq!(entry.base_url, Some("https://api.deepseek.com/v1".to_string()));
+        assert_eq!(entry.default_model, Some("deepseek-chat".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_store_provider_minimal() {
+        let dir = temp_vault_dir("store_provider_min");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        vault.store_provider("openai", None, None, "sk-test").unwrap();
+        let entry = vault.get_provider("openai").unwrap();
+        assert_eq!(entry.api_key, "sk-test");
+        assert_eq!(entry.base_url, None);
+        assert_eq!(entry.default_model, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_legacy_format_compatibility() {
+        let dir = temp_vault_dir("legacy");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        // Store using old API (plain key)
+        vault.store_key("openai", "sk-legacy-key").unwrap();
+        // Retrieve using new API — should work with legacy format
+        let entry = vault.get_provider("openai").unwrap();
+        assert_eq!(entry.api_key, "sk-legacy-key");
+        assert_eq!(entry.base_url, None);
+        assert_eq!(entry.default_model, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

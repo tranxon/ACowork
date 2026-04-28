@@ -75,6 +75,8 @@ fn gateway_config(temp_dir: &Path) -> GatewayConfig {
             cors_enabled: true,
             auth_enabled: false,
         },
+        default_provider: None,
+        default_model: None,
     }
 }
 
@@ -224,19 +226,41 @@ fn send_message(agent_id: &str, content: &str) -> anyhow::Result<serde_json::Val
 }
 
 fn install_and_start_system_agent(temp: &Path) -> anyhow::Result<()> {
-    let system_agent_dir = examples_dir().join("system-agent");
-    anyhow::ensure!(system_agent_dir.exists(), "system-agent not found");
+    // Check if already installed (dev_mode auto-installs on startup)
+    let already_installed = list_agents()
+        .map(|agents| {
+            agents.iter().any(|a| a.get("agent_id").and_then(|v| v.as_str()) == Some("com.rollball.system"))
+        })
+        .unwrap_or(false);
 
-    let package_path = temp.join("system.agent");
-    package_agent(&system_agent_dir, &package_path)?;
+    if !already_installed {
+        let system_agent_dir = examples_dir().join("system-agent");
+        anyhow::ensure!(system_agent_dir.exists(), "system-agent not found");
 
-    let install_body = serde_json::json!({
-        "package_path": package_path.to_str().unwrap(),
-        "dev_mode": true
-    }).to_string();
-    http_post(&format!("{}/api/agents/install", GATEWAY_URL), &install_body)?;
+        let package_path = temp.join("system.agent");
+        package_agent(&system_agent_dir, &package_path)?;
 
-    start_agent("com.rollball.system")?;
+        let install_body = serde_json::json!({
+            "package_path": package_path.to_str().unwrap(),
+            "dev_mode": true
+        }).to_string();
+        http_post(&format!("{}/api/agents/install", GATEWAY_URL), &install_body)?;
+    } else {
+        println!("System Agent already installed (dev_mode auto-install)");
+    }
+
+    // Check if already running (dev_mode auto-starts)
+    let already_running = http_get(&format!("{}/api/agents/com.rollball.system", GATEWAY_URL))
+        .ok()
+        .and_then(|resp| serde_json::from_str::<serde_json::Value>(&resp).ok())
+        .and_then(|agent| agent.get("running").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    if !already_running {
+        start_agent("com.rollball.system")?;
+    } else {
+        println!("System Agent already running");
+    }
 
     // Wait for agent ready
     let deadline = std::time::Instant::now() + AGENT_STARTUP_TIMEOUT;
@@ -295,18 +319,26 @@ fn test_s1_install_system_agent() {
     let _gw = GatewayProcess::start(&temp).expect("Failed to start Gateway");
     wait_for_gateway().expect("Gateway not responding");
 
-    let system_agent_dir = examples_dir().join("system-agent");
-    if !system_agent_dir.exists() { return; }
+    // In dev_mode, System Agent is auto-installed — verify it exists
+    let agents = list_agents().expect("Failed to list agents");
+    let ids: Vec<&str> = agents.iter().filter_map(|a| a.get("agent_id").and_then(|v| v.as_str())).collect();
+    if ids.contains(&"com.rollball.system") {
+        println!("System Agent already installed (dev_mode auto-install)");
+    } else {
+        // Manual install if not auto-installed
+        let system_agent_dir = examples_dir().join("system-agent");
+        if !system_agent_dir.exists() { return; }
 
-    let package_path = temp.join("system.agent");
-    package_agent(&system_agent_dir, &package_path).expect("Failed to package agent");
+        let package_path = temp.join("system.agent");
+        package_agent(&system_agent_dir, &package_path).expect("Failed to package agent");
 
-    let install_body = serde_json::json!({
-        "package_path": package_path.to_str().unwrap(),
-        "dev_mode": true
-    }).to_string();
-    let resp = http_post(&format!("{}/api/agents/install", GATEWAY_URL), &install_body).expect("Install failed");
-    println!("Install response: {}", resp);
+        let install_body = serde_json::json!({
+            "package_path": package_path.to_str().unwrap(),
+            "dev_mode": true
+        }).to_string();
+        let resp = http_post(&format!("{}/api/agents/install", GATEWAY_URL), &install_body).expect("Install failed");
+        println!("Install response: {}", resp);
+    }
 
     let agents = list_agents().expect("Failed to list agents");
     let ids: Vec<&str> = agents.iter().filter_map(|a| a.get("agent_id").and_then(|v| v.as_str())).collect();

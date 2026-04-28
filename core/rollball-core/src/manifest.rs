@@ -101,17 +101,17 @@ impl AgentManifest {
             ));
         }
 
-        // llm.provider must be specified
-        if self.llm.provider.is_empty() {
+        // llm.suggested_provider must be specified
+        if self.llm.suggested_provider.is_empty() {
             return Err(ManifestError::Validation(
-                "llm.provider cannot be empty".into(),
+                "llm.suggested_provider cannot be empty".into(),
             ));
         }
 
-        // llm.model must be specified
-        if self.llm.model.is_empty() {
+        // llm.suggested_model must be specified
+        if self.llm.suggested_model.is_empty() {
             return Err(ManifestError::Validation(
-                "llm.model cannot be empty".into(),
+                "llm.suggested_model cannot be empty".into(),
             ));
         }
 
@@ -160,10 +160,20 @@ impl AgentManifest {
 /// LLM provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// Provider name (e.g., "openai", "ollama", "anthropic")
-    pub provider: String,
-    /// Model identifier (e.g., "gpt-4", "llama3")
-    pub model: String,
+    /// Suggested provider name (e.g., "openai", "ollama", "anthropic").
+    /// This is a recommendation from the Agent developer; the actual provider
+    /// used at runtime is determined by the Gateway's LLMConfigDelivery,
+    /// which overrides this value when the user has configured a default provider.
+    /// Backward-compatible: deserializes from both `suggested_provider` and `provider`.
+    #[serde(default, alias = "provider")]
+    pub suggested_provider: String,
+
+    /// Suggested model identifier (e.g., "gpt-4", "llama3").
+    /// Same override semantics as `suggested_provider`.
+    /// Backward-compatible: deserializes from both `suggested_model` and `model`.
+    #[serde(default, alias = "model")]
+    pub suggested_model: String,
+
     /// Sampling temperature (0.0 - 2.0)
     #[serde(default)]
     pub temperature: Option<f64>,
@@ -491,8 +501,8 @@ mod tests {
         "#;
         let manifest = AgentManifest::from_toml(toml_str).unwrap();
         assert_eq!(manifest.agent_id, "com.example.weather");
-        assert_eq!(manifest.llm.provider, "openai");
-        assert_eq!(manifest.llm.model, "gpt-4");
+        assert_eq!(manifest.llm.suggested_provider, "openai");
+        assert_eq!(manifest.llm.suggested_model, "gpt-4");
         assert!(manifest.permissions.is_empty());
         assert!(manifest.tools.is_empty());
         assert!(manifest.memory.enabled); // default true
@@ -518,8 +528,8 @@ mod tests {
         let parsed = AgentManifest::from_toml(&toml_str).unwrap();
         assert_eq!(original.agent_id, parsed.agent_id);
         assert_eq!(original.version, parsed.version);
-        assert_eq!(original.llm.provider, parsed.llm.provider);
-        assert_eq!(original.llm.model, parsed.llm.model);
+        assert_eq!(original.llm.suggested_provider, parsed.llm.suggested_provider);
+        assert_eq!(original.llm.suggested_model, parsed.llm.suggested_model);
     }
 
     #[test]

@@ -18,10 +18,17 @@ pub async fn update_config(
     state: State<'_, AppState>,
     log_level: Option<String>,
     idle_timeout_secs: Option<u64>,
+    default_provider: Option<String>,
+    default_model: Option<String>,
 ) -> Result<GenericMessageResponse, String> {
     let client = state.gateway.read().await;
     client
-        .update_config(log_level.as_deref(), idle_timeout_secs)
+        .update_config(
+            log_level.as_deref(),
+            idle_timeout_secs,
+            default_provider.as_deref(),
+            default_model.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())
 }

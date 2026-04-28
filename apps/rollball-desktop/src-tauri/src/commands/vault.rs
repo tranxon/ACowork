@@ -12,15 +12,25 @@ pub async fn list_keys(state: State<'_, AppState>) -> Result<Vec<VaultKeyEntry>,
     client.list_keys().await.map_err(|e| e.to_string())
 }
 
-/// Add a new API key
+/// Add a new API key (with optional base_url and default_model)
 #[tauri::command]
 pub async fn add_key(
     state: State<'_, AppState>,
     provider: String,
     key: String,
+    base_url: Option<String>,
+    default_model: Option<String>,
 ) -> Result<GenericMessageResponse, String> {
     let client = state.gateway.read().await;
-    client.add_key(&provider, &key).await.map_err(|e| e.to_string())
+    client
+        .add_key(
+            &provider,
+            &key,
+            base_url.as_deref(),
+            default_model.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Remove an API key
@@ -33,13 +43,23 @@ pub async fn remove_key(
     client.remove_key(&provider).await.map_err(|e| e.to_string())
 }
 
-/// Update an API key
+/// Update an API key (with optional base_url and default_model)
 #[tauri::command]
 pub async fn update_key(
     state: State<'_, AppState>,
     provider: String,
     key: String,
+    base_url: Option<String>,
+    default_model: Option<String>,
 ) -> Result<GenericMessageResponse, String> {
     let client = state.gateway.read().await;
-    client.update_key(&provider, &key).await.map_err(|e| e.to_string())
+    client
+        .update_key(
+            &provider,
+            &key,
+            base_url.as_deref(),
+            default_model.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())
 }

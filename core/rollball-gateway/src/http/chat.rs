@@ -219,11 +219,20 @@ async fn handle_ws(mut socket: WebSocket, agent_id: String, state: AppState) {
                     Ok(event) => {
                         // Only forward events for this agent
                         if event.agent_id == agent_id {
-                            let json = serde_json::json!({
-                                "type": event.event_type,
+                            // Build the WebSocket message matching frontend protocol:
+                            //   { "type": "chunk", "delta": "...", "message_id": "..." }
+                            //   { "type": "done", "content": "...", "message_id": "..." }
+                            //   { "type": "error", "message": "...", "message_id": "..." }
+                            let mut json = serde_json::json!({
+                                "type": event.event_type.as_str(),
                                 "message_id": event.message_id,
-                                "data": event.payload,
                             });
+                            // Merge payload fields into the top-level JSON
+                            if let serde_json::Value::Object(map) = event.payload {
+                                for (k, v) in map {
+                                    json[&k] = v;
+                                }
+                            }
                             let _ = socket.send(Message::Text(json.to_string().into())).await;
                         }
                     }

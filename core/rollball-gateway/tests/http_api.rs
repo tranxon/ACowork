@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, Method, StatusCode};
 use tower::ServiceExt; // for oneshot()
 
-use rollball_gateway::http::routes::{AppState, build_router, BridgeEvent, SharedSessionMgr};
+use rollball_gateway::http::routes::{AppState, build_router, BridgeEvent, BridgeEventType, SharedSessionMgr};
 use rollball_gateway::http::auth::HttpAuth;
 use rollball_gateway::gateway::state::GatewayState;
 use rollball_gateway::ipc::session::SessionManager;
@@ -354,7 +354,7 @@ async fn test_bridge_event_serialization() {
     let event = BridgeEvent {
         agent_id: "com.example.weather".to_string(),
         message_id: "msg-abc".to_string(),
-        event_type: "chunk".to_string(),
+        event_type: BridgeEventType::Chunk,
         payload: serde_json::json!({"delta": "Hello"}),
     };
     let json = serde_json::to_string(&event).unwrap();
@@ -370,7 +370,7 @@ async fn test_bridge_channel_broadcast() {
     let event = BridgeEvent {
         agent_id: "com.example.weather".to_string(),
         message_id: "msg-001".to_string(),
-        event_type: "done".to_string(),
+        event_type: BridgeEventType::Done,
         payload: serde_json::json!({"usage": {"tokens": 150}}),
     };
 
@@ -385,7 +385,7 @@ async fn test_bridge_channel_broadcast() {
     .expect("Channel closed");
 
     assert_eq!(received.agent_id, "com.example.weather");
-    assert_eq!(received.event_type, "done");
+    assert_eq!(received.event_type, BridgeEventType::Done);
     assert_eq!(received.message_id, "msg-001");
 }
 
