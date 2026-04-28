@@ -33,11 +33,13 @@ impl GatewayClient {
     }
 
     /// Get the current base URL
+    #[allow(dead_code)]
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
     /// Update the base URL (e.g., from settings)
+    #[allow(dead_code)]
     pub fn set_base_url(&mut self, url: String) {
         self.base_url = url;
     }
@@ -148,6 +150,7 @@ impl GatewayClient {
     }
 
     /// Get the WebSocket URL for streaming chat
+    #[allow(dead_code)]
     pub fn stream_url(&self, agent_id: &str) -> String {
         format!("{}/api/agents/{}/stream", self.base_url, agent_id)
             .replace("http://", "ws://")
