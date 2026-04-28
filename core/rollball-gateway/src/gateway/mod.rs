@@ -60,6 +60,144 @@ impl Gateway {
         })
     }
 
+    /// Auto-install bundled agents (System Agent, etc.) if not already installed.
+    ///
+    /// This is called during Gateway startup. It looks for bundled agents in:
+    /// 1. The project source directory (../../examples/)
+    /// 2. The ROLLBALL_BUNDLED_AGENTS_DIR environment variable
+    ///
+    /// Bundled agents are identified by `system = true` in their manifest.toml.
+    async fn auto_install_bundled_agents(&mut self) {
+        // Skip in production mode (bundled agents only for dev)
+        if !self.config.dev_mode {
+            tracing::debug!("Skipping bundled agents installation (dev_mode=false)");
+            return;
+        }
+
+        // Check if System Agent is already installed
+        if self.state.is_installed(crate::lifecycle::SYSTEM_AGENT_ID) {
+            tracing::debug!("System Agent already installed, skipping bundled install");
+            return;
+        }
+
+        // Find bundled agents directory
+        let bundled_dir = Self::find_bundled_agents_dir();
+        let Some(bundled_dir) = bundled_dir else {
+            tracing::debug!("No bundled agents directory found, skipping auto-install");
+            return;
+        };
+
+        // Find system agent in bundled directory
+        let system_agent_src = bundled_dir.join("system-agent");
+        if !system_agent_src.exists() {
+            tracing::debug!("Bundled system-agent not found at {:?}", system_agent_src);
+            return;
+        }
+
+        // Verify it has manifest.toml
+        if !system_agent_src.join("manifest.toml").exists() {
+            tracing::warn!("Bundled system-agent missing manifest.toml");
+            return;
+        }
+
+        // Install the system agent
+        tracing::info!("Auto-installing bundled System Agent from {:?}", system_agent_src);
+        match self.install_agent_from_dir(&system_agent_src).await {
+            Ok(agent_id) => {
+                tracing::info!("Successfully auto-installed bundled agent: {}", agent_id);
+                // Refresh installed agents state
+                self.restore_installed_agents();
+            }
+            Err(e) => {
+                tracing::warn!("Failed to auto-install bundled System Agent: {}", e);
+            }
+        }
+    }
+
+    /// Find the bundled agents directory.
+    /// Returns Some(path) if found, None otherwise.
+    fn find_bundled_agents_dir() -> Option<std::path::PathBuf> {
+        // Try environment variable first
+        if let Ok(dir) = std::env::var("ROLLBALL_BUNDLED_AGENTS_DIR") {
+            let path = std::path::PathBuf::from(&dir);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+
+        // Try to find project root from CARGO_MANIFEST_DIR
+        // CARGO_MANIFEST_DIR = core/rollball-gateway
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = manifest_dir.parent()?.parent()?;
+        let bundled_dir = project_root.join("examples");
+
+        if bundled_dir.exists() {
+            return Some(bundled_dir);
+        }
+
+        None
+    }
+
+    /// Install an agent from a source directory.
+    async fn install_agent_from_dir(&mut self, src_dir: &std::path::Path) -> Result<String, GatewayError> {
+        use rollball_core::AgentManifest;
+
+        // Read and parse manifest
+        let manifest_path = src_dir.join("manifest.toml");
+        let content = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| GatewayError::Config(format!("Failed to read manifest: {}", e)))?;
+
+        let manifest: AgentManifest = toml::from_str(&content)
+            .map_err(|e| GatewayError::Config(format!("Failed to parse manifest: {}", e)))?;
+
+        let agent_id = manifest.agent_id.clone();
+        let version = manifest.version.clone();
+
+        // Copy agent files to packages directory
+        let packages_dir = std::path::Path::new(&self.config.packages_dir);
+        let agent_pkg_dir = packages_dir.join(format!("{}-{}", agent_id, version));
+
+        // Remove existing directory if it exists
+        let _ = std::fs::remove_dir_all(&agent_pkg_dir);
+        std::fs::create_dir_all(&agent_pkg_dir)
+            .map_err(|e| GatewayError::Config(format!("Failed to create package dir: {}", e)))?;
+
+        // Copy all files from src_dir to package dir
+        Self::copy_dir_recursive(src_dir, &agent_pkg_dir)
+            .map_err(|e| GatewayError::Config(format!("Failed to copy agent files: {}", e)))?;
+
+        // Create AgentInfo and add to state
+        let info = crate::gateway::state::AgentInfo {
+            agent_id: agent_id.clone(),
+            version,
+            name: manifest.name.clone(),
+            install_path: agent_pkg_dir.to_string_lossy().to_string(),
+            manifest,
+        };
+
+        self.state.add_installed(info);
+        Ok(agent_id)
+    }
+
+    /// Recursively copy a directory
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let dst_path = dst.join(entry.file_name());
+            if ty.is_dir() {
+                std::fs::create_dir_all(&dst_path)?;
+                Self::copy_dir_recursive(&entry.path(), &dst_path)?;
+            } else {
+                if let Some(parent) = dst_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(entry.path(), dst_path)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Scan packages directory and restore installed agents from disk.
     ///
     /// On startup, the Gateway needs to rebuild its in-memory `installed_agents`
@@ -145,6 +283,9 @@ impl Gateway {
 
         // Scan packages directory and restore installed agents from disk
         self.restore_installed_agents();
+
+        // Auto-install bundled agents (System Agent, etc.) if not installed
+        self.auto_install_bundled_agents().await;
 
         // Auto-start the System Agent if installed
         if let Err(e) = self.lifecycle.auto_start_system_agent(&mut self.state).await {
