@@ -159,7 +159,7 @@ impl GatewayConfig {
                 .unwrap_or_else(default_max_iterations),
             iteration_timeout_ms: file_config.as_ref().map(|c| c.iteration_timeout_ms)
                 .unwrap_or_else(default_iteration_timeout_ms),
-            dev_mode: file_config.as_ref().map(|c| c.dev_mode).unwrap_or(false),
+            dev_mode: file_config.as_ref().map(|c| c.dev_mode).unwrap_or(true),
             http: file_config.as_ref().map(|c| c.http.clone())
                 .unwrap_or_default(),
         })
@@ -210,7 +210,7 @@ impl Default for GatewayConfig {
             idle_timeout_secs: default_idle_timeout(),
             max_iterations: default_max_iterations(),
             iteration_timeout_ms: default_iteration_timeout_ms(),
-            dev_mode: false,
+            dev_mode: true,
             http: HttpConfig::default(),
         }
     }
