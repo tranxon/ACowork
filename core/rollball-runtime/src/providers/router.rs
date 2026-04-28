@@ -77,6 +77,72 @@ pub fn create_provider(
     }
 }
 
+/// Return a sensible default model name for a given provider.
+/// Used when Gateway doesn't specify a model in LLMConfigDelivery.
+pub fn default_model_for_provider(provider: &str) -> String {
+    match provider {
+        "openai" => "gpt-4o".to_string(),
+        "anthropic" | "claude" => "claude-sonnet-4-20250514".to_string(),
+        "google" | "gemini" => "gemini-2.5-flash".to_string(),
+        "deepseek" => "deepseek-chat".to_string(),
+        "zhipu" | "glm" => "glm-4-flash".to_string(),
+        "moonshot" | "kimi" => "moonshot-v1-128k".to_string(),
+        "qwen" | "dashscope" | "alibaba" => "qwen-max".to_string(),
+        "groq" => "llama-4-scout-17b-16e-instruct".to_string(),
+        "minimax" => "MiniMax-M2.5".to_string(),
+        "mistral" => "mistral-large-latest".to_string(),
+        "ollama" => "llama3".to_string(),
+        _ => "gpt-4o".to_string(), // fallback
+    }
+}
+
+/// Create a no-op provider that always returns an error.
+/// Used when no LLM config is available (Gateway mode without API key).
+pub fn create_noop_provider() -> Arc<dyn Provider> {
+    Arc::new(NoopProvider)
+}
+
+/// A provider that always returns an error, used when no LLM config is available.
+struct NoopProvider;
+
+#[async_trait::async_trait]
+impl Provider for NoopProvider {
+    fn name(&self) -> &str { "noop" }
+
+    async fn chat(
+        &self,
+        _request: rollball_core::providers::traits::ChatRequest,
+    ) -> rollball_core::error::Result<rollball_core::providers::traits::ChatResponse> {
+        Err(rollball_core::error::RollballError::Provider(
+            rollball_core::providers::traits::ProviderError::unknown(
+                "No LLM provider configured. Please add an API key in Desktop App Settings.".to_string(),
+            )
+        ))
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: rollball_core::providers::traits::ChatRequest,
+    ) -> rollball_core::error::Result<Box<dyn futures_core::Stream<Item = rollball_core::providers::traits::StreamEvent> + Send>> {
+        Err(rollball_core::error::RollballError::Provider(
+            rollball_core::providers::traits::ProviderError::unknown(
+                "No LLM provider configured. Please add an API key in Desktop App Settings.".to_string(),
+            )
+        ))
+    }
+
+    async fn chat_token_count(
+        &self,
+        _messages: &[rollball_core::providers::traits::ChatMessage],
+    ) -> rollball_core::error::Result<u64> {
+        Err(rollball_core::error::RollballError::Provider(
+            rollball_core::providers::traits::ProviderError::unknown(
+                "No LLM provider configured.".to_string(),
+            )
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

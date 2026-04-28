@@ -1,22 +1,37 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 // cn utility available for future styling
 // import { cn } from "../../lib/utils";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage } from "../../lib/types";
+import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
   const { messages, sending, ws, connectStream, sendMessage, streamingMessageId } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
+  const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+
+  // Check if Vault has at least one API key configured
+  useEffect(() => {
+    const checkVault = async () => {
+      try {
+        const keys = await invoke<VaultKeyEntry[]>("list_keys");
+        setHasLlmConfig(keys.length > 0);
+      } catch {
+        setHasLlmConfig(false);
+      }
+    };
+    checkVault();
+  }, [gatewayStatus]); // re-check when gateway reconnects
 
   // Connect WebSocket when agent changes
   useEffect(() => {
@@ -89,6 +104,15 @@ export function ChatPanel() {
 
   return (
     <div className="flex flex-1 flex-col bg-white dark:bg-zinc-900">
+      {/* LLM config warning */}
+      {hasLlmConfig === false && (
+        <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 dark:border-amber-900 dark:bg-amber-950">
+          <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+          <span className="text-xs text-amber-700 dark:text-amber-300">
+            No LLM provider configured. Please add an API key in Settings → Providers.
+          </span>
+        </div>
+      )}
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto px-4 py-3" role="log" aria-label="Chat messages">
         {messages.length === 0 && (

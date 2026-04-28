@@ -208,7 +208,7 @@ const MINIMAX: ProviderDef = {
   editableBaseUrl: true,
   authStyle: "bearer",
   keyPlaceholder: "API key...",
-  exampleModels: ["MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-Text-01"],
+  exampleModels: ["MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2.7"],
   needsApiKey: true,
   aliases: [],
 };

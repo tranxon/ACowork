@@ -95,6 +95,19 @@ impl AgentLoop {
         (loop_, inbound_tx)
     }
 
+    /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
+    /// LLMConfigDelivery from Gateway).
+    pub fn update_provider(&mut self, new_provider: Arc<dyn Provider>, model: String) {
+        let old_name = self.provider.name().to_string();
+        self.provider = new_provider;
+        tracing::info!(
+            old_provider = %old_name,
+            new_provider = %self.provider.name(),
+            model = %model,
+            "LLM provider updated at runtime via LLMConfigDelivery"
+        );
+    }
+
     /// Run the agent loop for a single user message
     pub async fn run(&mut self, user_message: &str, context_builder: &ContextBuilder) -> Result<String> {
         // Add user message to history

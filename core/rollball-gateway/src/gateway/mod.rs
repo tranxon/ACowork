@@ -389,6 +389,12 @@ impl Gateway {
             Arc::new(tokio::sync::Mutex::new(crate::ipc::session::SessionManager::new()));
         let http_session_mgr = Some(session_mgr.clone());
 
+        // Store session manager in shared state so HTTP API can access it
+        {
+            let mut gw = shared_state.write().await;
+            gw.ipc_sessions = Some(session_mgr.clone());
+        }
+
         // S3.1: Start cron scheduler tick loop
         let cron_scheduler = Arc::new(tokio::sync::Mutex::new({
             let gw = shared_state.read().await;

@@ -168,7 +168,7 @@ pub enum GatewayResponse {
     LLMConfigDelivery {
         /// Provider name (e.g. "minimax", "openai", "anthropic")
         provider: String,
-        /// Model identifier (e.g. "MiniMax-Text-01", "gpt-4o").
+        /// Model identifier (e.g. "MiniMax-M2.7", "minimax-m2.5").
         /// None when Gateway has no model preference — Runtime uses manifest's suggested_model.
         model: Option<String>,
         /// API key for the provider (one-time delivery, not stored on disk by Runtime)

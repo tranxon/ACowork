@@ -42,7 +42,7 @@ name = "intent_send"
 
 [llm]
 suggested_provider = "minimax"
-suggested_model = "MiniMax-Text-01"
+suggested_model = "MiniMax-M2.7"
 temperature = 0.5
 
 [memory]

@@ -151,14 +151,14 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
 
     // Step 3: Initialize LLM Provider
     //
-    // In Gateway mode: receive LLM config from Gateway via IPC (LLMConfigDelivery).
-    //   This is the primary path — the user's provider/key/model configured in
-    //   Desktop App → stored in Vault → distributed to Agent via IPC.
+    // In Gateway mode: LLMConfigDelivery is MANDATORY.
+    //   The user's provider/key/model MUST come from Gateway IPC.
+    //   Manifest's suggested_provider/model is for REFERENCE only — never used at runtime.
     //   This satisfies PRD GTW-05 and SEC-07 (no env-var key distribution).
     //
-    // In Standalone mode: fall back to manifest suggested_provider + env vars.
+    // In Standalone mode: use manifest suggested_provider + env vars (development only).
     let (provider, resolved_model) = if let Some(ref mut client) = ipc_client {
-        // Gateway mode: receive LLM config from Gateway
+        // Gateway mode: LLMConfigDelivery is required
         match client.recv_llm_config().await {
             Ok(llm_config) => {
                 tracing::info!(
@@ -172,20 +172,31 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                     llm_config.api_key.as_deref(),
                     llm_config.base_url.as_deref(),
                 );
-                // Use Gateway-delivered model if specified, otherwise fall back to manifest's suggested_model
-                let resolved = llm_config.model
-                    .unwrap_or_else(|| loaded.manifest.llm.suggested_model.clone());
+                // Model is required — if Gateway didn't specify one, use the first
+                // example model from the provider definition as a sensible default.
+                let resolved = llm_config.model.unwrap_or_else(|| {
+                    let fallback = crate::providers::router::default_model_for_provider(
+                        &llm_config.provider,
+                    );
+                    tracing::warn!(
+                        provider = %llm_config.provider,
+                        fallback_model = %fallback,
+                        "No model specified by Gateway, using provider default"
+                    );
+                    fallback
+                });
                 (p, resolved)
             }
             Err(e) => {
-                tracing::warn!(
+                // CRITICAL: In Gateway mode, no LLM config means the agent cannot function.
+                tracing::error!(
                     error = %e,
-                    "Failed to receive LLM config from Gateway, falling back to manifest + env"
+                    "CRITICAL: Failed to receive LLM config from Gateway. \
+                     Agent cannot process messages until API key is configured."
                 );
-                let api_key = resolve_api_key(&loaded.manifest);
-                let base_url = std::env::var("ROLLBALL_LLM_BASE_URL").ok();
-                let p = build_runtime_provider(&loaded.manifest, api_key.as_deref(), base_url.as_deref());
-                (p, loaded.manifest.llm.suggested_model.clone())
+                // Return a provider that returns clear error messages on any request
+                let p = crate::providers::router::create_noop_provider();
+                (p, "no-model".to_string())
             }
         }
     } else {
@@ -623,6 +634,28 @@ async fn run_gateway_loop(
                         }
                     }
                     // Ignore other push messages (CapabilityUpdate, etc.)
+                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url } => {
+                        tracing::info!(
+                            provider = %provider,
+                            model = ?model,
+                            "Received LLMConfigDelivery at runtime — updating provider"
+                        );
+                        let new_provider = crate::providers::router::create_provider(
+                            &provider,
+                            Some(&api_key),
+                            base_url.as_deref(),
+                        );
+                        let resolved = model.unwrap_or_else(|| {
+                            let fallback = crate::providers::router::default_model_for_provider(&provider);
+                            tracing::warn!(
+                                provider = %provider,
+                                fallback_model = %fallback,
+                                "No model in runtime LLMConfigDelivery, using provider default"
+                            );
+                            fallback
+                        });
+                        agent_loop.update_provider(new_provider, resolved);
+                    }
                     _ => {
                         tracing::debug!("Ignoring non-IntentReceived Gateway message");
                     }

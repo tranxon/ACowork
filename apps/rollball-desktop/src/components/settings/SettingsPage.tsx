@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import type { GatewayConfig, VaultKeyEntry } from "../../lib/types";
+import type { GatewayConfig, VaultKeyEntry, ModelInfo } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ALL_PROVIDERS, PROVIDER_CATEGORIES, getProviderDef } from "../../lib/providers";
+import { fetchProviderModels } from "../../lib/gateway-api";
 
 type SettingsTab = "gateway" | "providers" | "vault" | "appearance" | "general";
 
@@ -124,9 +125,22 @@ function ProvidersTab() {
   const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState<string | null>(null);
   const [newProvider, setNewProvider] = useState("openai");
   const [newKey, setNewKey] = useState("");
   const [newBaseUrl, setNewBaseUrl] = useState("");
+  const [newModels, setNewModels] = useState<string[]>([]);
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSearchTerm, setModelSearchTerm] = useState("");
+
+  // Edit dialog state
+  const [editKey, setEditKey] = useState("");
+  const [editBaseUrl, setEditBaseUrl] = useState("");
+  const [editModels, setEditModels] = useState<string[]>([]);
+  const [editAvailableModels, setEditAvailableModels] = useState<ModelInfo[]>([]);
+  const [editModelsLoading, setEditModelsLoading] = useState(false);
+  const [editModelSearchTerm, setEditModelSearchTerm] = useState("");
 
   const newProviderDef = getProviderDef(newProvider);
 
@@ -143,17 +157,42 @@ function ProvidersTab() {
 
   useEffect(() => { fetchKeys(); }, [fetchKeys]);
 
-  const handleAddProviderChange = (id: string) => {
+  // Fetch available models for a provider from Gateway API
+  const fetchModels = useCallback(async (providerId: string): Promise<ModelInfo[]> => {
+    try {
+      const data = await fetchProviderModels(providerId);
+      return data.models ?? [];
+    } catch {
+      // Fallback to exampleModels from provider definition
+      const def = getProviderDef(providerId);
+      return (def?.exampleModels ?? []).map((id) => ({ id, name: id }));
+    }
+  }, []);
+
+  const handleAddProviderChange = async (id: string) => {
     setNewProvider(id);
     const def = getProviderDef(id);
     setNewBaseUrl(def?.baseUrl ?? "");
+    setNewModels([]);
+    setModelSearchTerm("");
+    // Fetch available models for the selected provider
+    setModelsLoading(true);
+    const models = await fetchModels(id);
+    setAvailableModels(models);
+    setModelsLoading(false);
   };
 
   const handleAdd = async () => {
     try {
-      await invoke("add_key", { provider: newProvider, key: newKey });
+      await invoke("add_key", {
+        provider: newProvider,
+        key: newKey,
+        baseUrl: newBaseUrl || undefined,
+        defaultModel: newModels.length > 0 ? newModels[0] : undefined,
+      });
       setShowAddDialog(false);
       setNewKey("");
+      setNewModels([]);
       await fetchKeys();
     } catch (e) {
       alert(`Failed to add key: ${e}`);
@@ -170,12 +209,56 @@ function ProvidersTab() {
     }
   };
 
+  const handleEdit = async (provider: string) => {
+    const keyEntry = keys.find((k) => k.provider === provider);
+    const def = getProviderDef(provider);
+    setEditKey(keyEntry?.key_preview ?? "");
+    setEditBaseUrl(keyEntry?.base_url ?? def?.baseUrl ?? "");
+    setEditModels(keyEntry?.default_model ? [keyEntry.default_model] : []);
+    setEditModelSearchTerm("");
+    setShowEditDialog(provider);
+    // Fetch models
+    setEditModelsLoading(true);
+    const models = await fetchModels(provider);
+    setEditAvailableModels(models);
+    setEditModelsLoading(false);
+  };
+
+  const handleEditSave = async () => {
+    if (!showEditDialog) return;
+    try {
+      await invoke("update_key", {
+        provider: showEditDialog,
+        key: editKey,
+        baseUrl: editBaseUrl || undefined,
+        defaultModel: editModels.length > 0 ? editModels[0] : undefined,
+      });
+      setShowEditDialog(null);
+      await fetchKeys();
+    } catch (e) {
+      alert(`Failed to update key: ${e}`);
+    }
+  };
+
+  // Toggle a model in the selection list
+  const toggleModel = (model: string, currentList: string[], setList: (v: string[]) => void) => {
+    if (currentList.includes(model)) {
+      setList(currentList.filter((m) => m !== model));
+    } else {
+      setList([...currentList, model]);
+    }
+  };
+
   return (
     <div className="max-w-lg space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium">Provider Management</h2>
         <button
-          onClick={() => setShowAddDialog(true)}
+          onClick={() => {
+            setShowAddDialog(true);
+            // Pre-fetch models for default provider
+            fetchModels("openai").then((models) => setAvailableModels(models));
+          }}
           className="rounded-md bg-zinc-800 px-3 py-1 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
         >
           + Add Key
@@ -198,10 +281,15 @@ function ProvidersTab() {
                     return (
                       <div key={provider.id} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
                         <div className="flex items-center justify-between">
-                          <div>
+                          <div className="min-w-0 flex-1">
                             <span className="text-sm font-medium">{provider.name}</span>
-                            <span className="ml-2 text-xs text-zinc-400">{provider.exampleModels.slice(0, 2).join(", ")}</span>
-                            {provider.description && (
+                            {keyEntry?.default_model && (
+                              <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.default_model}</span>
+                            )}
+                            {!keyEntry?.default_model && keyEntry && (
+                              <span className="ml-2 text-xs text-zinc-400">{provider.exampleModels[0] ?? "—"}</span>
+                            )}
+                            {!keyEntry && provider.description && (
                               <span className="ml-2 text-xs text-zinc-400">— {provider.description}</span>
                             )}
                           </div>
@@ -209,6 +297,12 @@ function ProvidersTab() {
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-green-600 dark:text-green-400">Active</span>
                               <span className="text-xs text-zinc-400">Key: {keyEntry.key_preview}</span>
+                              <button
+                                onClick={() => handleEdit(provider.id)}
+                                className="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                              >
+                                Edit
+                              </button>
                               <button
                                 onClick={() => handleRemove(provider.id)}
                                 className="text-xs text-red-500 hover:text-red-700"
@@ -235,7 +329,7 @@ function ProvidersTab() {
       {/* Add key dialog */}
       {showAddDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-96 rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
             <h3 className="mb-4 text-sm font-semibold">Add API Key</h3>
 
             <div className="space-y-3">
@@ -282,6 +376,80 @@ function ProvidersTab() {
                 </div>
               )}
 
+              {/* Model selection (multi-select) */}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">
+                  Default Model {newModels.length > 0 && <span className="text-blue-500">({newModels.length} selected)</span>}
+                </label>
+                {/* Selected models as tags */}
+                {newModels.length > 0 && (
+                  <div className="mb-1 flex flex-wrap gap-1">
+                    {newModels.map((m) => (
+                      <span key={m} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                        {m}
+                        <button onClick={() => setNewModels(newModels.filter((x) => x !== m))} className="text-blue-400 hover:text-blue-600">×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {/* Search and select models */}
+                <input
+                  type="text"
+                  value={modelSearchTerm}
+                  onChange={(e) => setModelSearchTerm(e.target.value)}
+                  placeholder="Search models..."
+                  className="w-full rounded-md border border-zinc-200 px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                />
+                <div className="mt-1 max-h-40 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
+                  {modelsLoading ? (
+                    <div className="px-3 py-2 text-xs text-zinc-400">Loading models...</div>
+                  ) : (
+                    availableModels
+                      .filter((m) =>
+                        !modelSearchTerm ||
+                        m.id.toLowerCase().includes(modelSearchTerm.toLowerCase()) ||
+                        m.name.toLowerCase().includes(modelSearchTerm.toLowerCase())
+                      )
+                      .map((m) => (
+                        <label
+                          key={m.id}
+                          className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={newModels.includes(m.id)}
+                            onChange={() => toggleModel(m.id, newModels, setNewModels)}
+                            className="accent-blue-600"
+                          />
+                          <span className="flex-1 truncate">{m.name || m.id}</span>
+                          {m.reasoning && <span className="text-[10px] text-zinc-400">reasoning</span>}
+                          {m.tool_call && <span className="text-[10px] text-zinc-400">tools</span>}
+                        </label>
+                      ))
+                  )}
+                  {!modelsLoading && availableModels.length === 0 && (
+                    <div className="px-3 py-2 text-xs text-zinc-400">No models found. Select provider first.</div>
+                  )}
+                </div>
+                {/* Manual model input */}
+                <div className="mt-1 flex gap-1">
+                  <input
+                    type="text"
+                    placeholder="Or type a custom model name..."
+                    className="flex-1 rounded-md border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const val = (e.target as HTMLInputElement).value.trim();
+                        if (val && !newModels.includes(val)) {
+                          setNewModels([...newModels, val]);
+                          (e.target as HTMLInputElement).value = "";
+                        }
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+
               {newProviderDef?.description && (
                 <p className="text-xs text-zinc-400">{newProviderDef.description}</p>
               )}
@@ -289,7 +457,7 @@ function ProvidersTab() {
 
             <div className="mt-4 flex justify-end gap-2">
               <button
-                onClick={() => setShowAddDialog(false)}
+                onClick={() => { setShowAddDialog(false); setNewModels([]); }}
                 className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
               >
                 Cancel
@@ -297,6 +465,125 @@ function ProvidersTab() {
               <button
                 onClick={handleAdd}
                 disabled={newProviderDef?.needsApiKey ? !newKey.trim() : false}
+                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit key dialog */}
+      {showEditDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+            <h3 className="mb-4 text-sm font-semibold">Edit: {showEditDialog}</h3>
+
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">API Key</label>
+                <input
+                  type="password"
+                  value={editKey}
+                  onChange={(e) => setEditKey(e.target.value)}
+                  placeholder="Enter new API key..."
+                  className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                />
+              </div>
+
+              {(getProviderDef(showEditDialog)?.editableBaseUrl ?? true) && (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
+                  <input
+                    type="text"
+                    value={editBaseUrl}
+                    onChange={(e) => setEditBaseUrl(e.target.value)}
+                    placeholder="https://..."
+                    className="w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                  />
+                </div>
+              )}
+
+              {/* Model selection */}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">
+                  Default Model {editModels.length > 0 && <span className="text-blue-500">({editModels.length} selected)</span>}
+                </label>
+                {editModels.length > 0 && (
+                  <div className="mb-1 flex flex-wrap gap-1">
+                    {editModels.map((m) => (
+                      <span key={m} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                        {m}
+                        <button onClick={() => setEditModels(editModels.filter((x) => x !== m))} className="text-blue-400 hover:text-blue-600">×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <input
+                  type="text"
+                  value={editModelSearchTerm}
+                  onChange={(e) => setEditModelSearchTerm(e.target.value)}
+                  placeholder="Search models..."
+                  className="w-full rounded-md border border-zinc-200 px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                />
+                <div className="mt-1 max-h-40 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
+                  {editModelsLoading ? (
+                    <div className="px-3 py-2 text-xs text-zinc-400">Loading models...</div>
+                  ) : (
+                    editAvailableModels
+                      .filter((m) =>
+                        !editModelSearchTerm ||
+                        m.id.toLowerCase().includes(editModelSearchTerm.toLowerCase()) ||
+                        m.name.toLowerCase().includes(editModelSearchTerm.toLowerCase())
+                      )
+                      .map((m) => (
+                        <label
+                          key={m.id}
+                          className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={editModels.includes(m.id)}
+                            onChange={() => toggleModel(m.id, editModels, setEditModels)}
+                            className="accent-blue-600"
+                          />
+                          <span className="flex-1 truncate">{m.name || m.id}</span>
+                          {m.reasoning && <span className="text-[10px] text-zinc-400">reasoning</span>}
+                          {m.tool_call && <span className="text-[10px] text-zinc-400">tools</span>}
+                        </label>
+                      ))
+                  )}
+                </div>
+                <div className="mt-1 flex gap-1">
+                  <input
+                    type="text"
+                    placeholder="Or type a custom model name..."
+                    className="flex-1 rounded-md border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const val = (e.target as HTMLInputElement).value.trim();
+                        if (val && !editModels.includes(val)) {
+                          setEditModels([...editModels, val]);
+                          (e.target as HTMLInputElement).value = "";
+                        }
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowEditDialog(null)}
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleEditSave}
+                disabled={!editKey.trim()}
                 className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 Save

@@ -125,6 +125,11 @@ pub async fn add_key(
         body.default_model.as_deref(),
         &body.key,
     ).map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
+    drop(gw); // Release write lock before hot-push (which acquires read lock)
+
+    // Hot-push LLMConfigDelivery to all connected agents
+    // so they pick up the new provider without requiring a Gateway restart.
+    hot_push_llm_config(&state).await;
 
     Ok((StatusCode::CREATED, Json(MessageResponse {
         message: format!("Key stored for provider: {}", body.provider),
@@ -173,10 +178,64 @@ pub async fn update_key(
         body.default_model.as_deref(),
         &body.key,
     ).map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
+    drop(gw); // Release write lock before hot-push (which acquires read lock)
+
+    // Hot-push LLMConfigDelivery to all connected agents
+    hot_push_llm_config(&state).await;
 
     Ok(Json(MessageResponse {
         message: format!("Key updated for provider: {}", provider),
     }))
+}
+
+/// Hot-push LLMConfigDelivery to all connected agents after a vault update.
+/// Uses the shared session manager to find authenticated "main" sessions
+/// and pushes the resolved LLM config from Vault.
+async fn hot_push_llm_config(state: &AppState) {
+    use crate::ipc::server::resolve_llm_config_for_agent;
+    use rollball_core::protocol::GatewayResponse;
+
+    let session_mgr = match &state.session_mgr {
+        Some(mgr) => mgr.clone(),
+        None => {
+            tracing::warn!("No IPC session manager available, skipping hot-push");
+            return;
+        }
+    };
+
+    // Collect running agent IDs (brief read lock)
+    let agent_ids: Vec<String> = {
+        let gw = state.gateway_state.read().await;
+        gw.running_agents.keys().cloned().collect()
+    };
+
+    for agent_id in agent_ids {
+        if let Some((provider, model, api_key, base_url)) =
+            resolve_llm_config_for_agent(&agent_id, &state.gateway_state).await
+        {
+            let mgr = session_mgr.lock().await;
+            if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+                let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    api_key: api_key.clone(),
+                    base_url: base_url.clone(),
+                }).await;
+                if push_result {
+                    tracing::info!(
+                        agent = %agent_id,
+                        provider = %provider,
+                        "Hot-pushed LLMConfigDelivery after vault update"
+                    );
+                } else {
+                    tracing::warn!(
+                        agent = %agent_id,
+                        "Failed to hot-push LLMConfigDelivery (channel closed)"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

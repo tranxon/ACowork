@@ -1296,7 +1296,7 @@ async fn handle_agent_hello(
 /// 1. Gateway config `default_model` (explicit user choice)
 /// 2. Vault entry's `default_model` (set when adding the provider key)
 /// 3. None — Agent Runtime falls back to its manifest's suggested_model
-async fn resolve_llm_config_for_agent(
+pub async fn resolve_llm_config_for_agent(
     _agent_id: &str,
     state: &SharedState,
 ) -> Option<(String, Option<String>, String, Option<String>)> {

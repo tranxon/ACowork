@@ -56,6 +56,8 @@ pub struct GatewayState {
     pub permission_store: Option<SharedPermissionStore>,
     /// Gateway configuration snapshot (for Config API)
     pub config: Option<crate::config::GatewayConfig>,
+    /// Shared IPC session manager (set during Gateway::run before IPC/HTTP start)
+    pub ipc_sessions: Option<crate::http::routes::SharedSessionMgr>,
 }
 
 impl GatewayState {
@@ -72,6 +74,7 @@ impl GatewayState {
             cron_store: None,
             permission_store: None,
             config: None,
+            ipc_sessions: None,
         }
     }
 

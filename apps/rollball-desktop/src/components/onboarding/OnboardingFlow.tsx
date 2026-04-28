@@ -4,6 +4,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
 import { ALL_PROVIDERS, PROVIDER_CATEGORIES, LOCAL_PROVIDERS, getProviderDef } from "../../lib/providers";
+import { fetchProviderModels } from "../../lib/gateway-api";
+import type { ModelInfo } from "../../lib/types";
 
 const TOTAL_STEPS = 5;
 
@@ -196,28 +198,66 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
   const [provider, setProvider] = useState("openai");
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSearchTerm, setModelSearchTerm] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
   const providerDef = getProviderDef(provider);
 
+  // Fetch models from Gateway API with fallback to exampleModels
+  const loadModels = useCallback(async (providerId: string) => {
+    setModelsLoading(true);
+    try {
+      const data = await fetchProviderModels(providerId);
+      setAvailableModels(data.models ?? []);
+    } catch {
+      const def = getProviderDef(providerId);
+      setAvailableModels((def?.exampleModels ?? []).map((id) => ({ id, name: id })));
+    }
+    setModelsLoading(false);
+  }, []);
+
   // Update base URL when provider changes
   const handleProviderChange = (id: string) => {
     setProvider(id);
     setSaved(false);
+    setSelectedModels([]);
+    setModelSearchTerm("");
     const def = getProviderDef(id);
     setBaseUrl(def?.baseUrl ?? "");
+    loadModels(id);
   };
+
+  // Load initial models
+  useEffect(() => {
+    loadModels(provider);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await invoke("add_key", { provider, key: apiKey });
+      await invoke("add_key", {
+        provider,
+        key: apiKey,
+        baseUrl: baseUrl || undefined,
+        defaultModel: selectedModels.length > 0 ? selectedModels[0] : undefined,
+      });
       setSaved(true);
     } catch {
       // Continue anyway
     } finally {
       setSaving(false);
+    }
+  };
+
+  const toggleModel = (model: string) => {
+    if (selectedModels.includes(model)) {
+      setSelectedModels(selectedModels.filter((m) => m !== model));
+    } else {
+      setSelectedModels([...selectedModels, model]);
     }
   };
 
@@ -271,15 +311,77 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
             />
           )}
 
+          {/* Model selection (multi-select) */}
+          <div className="mt-2">
+            <label className="mb-1 block text-xs text-zinc-500">
+              Default Model {selectedModels.length > 0 && <span className="text-blue-500">({selectedModels.length} selected)</span>}
+            </label>
+            {/* Selected model tags */}
+            {selectedModels.length > 0 && (
+              <div className="mb-1 flex flex-wrap gap-1">
+                {selectedModels.map((m) => (
+                  <span key={m} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                    {m}
+                    <button onClick={() => setSelectedModels(selectedModels.filter((x) => x !== m))} className="text-blue-400 hover:text-blue-600">×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* Search and select */}
+            <input
+              type="text"
+              value={modelSearchTerm}
+              onChange={(e) => setModelSearchTerm(e.target.value)}
+              placeholder="Search models..."
+              className="w-full rounded-md border border-zinc-200 px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            />
+            <div className="mt-1 max-h-32 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
+              {modelsLoading ? (
+                <div className="px-3 py-2 text-xs text-zinc-400">Loading models...</div>
+              ) : (
+                availableModels
+                  .filter((m) =>
+                    !modelSearchTerm ||
+                    m.id.toLowerCase().includes(modelSearchTerm.toLowerCase()) ||
+                    m.name.toLowerCase().includes(modelSearchTerm.toLowerCase())
+                  )
+                  .map((m) => (
+                    <label
+                      key={m.id}
+                      className="flex cursor-pointer items-center gap-2 px-3 py-1 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-700"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedModels.includes(m.id)}
+                        onChange={() => toggleModel(m.id)}
+                        className="accent-blue-600"
+                      />
+                      <span className="flex-1 truncate">{m.name || m.id}</span>
+                    </label>
+                  ))
+              )}
+            </div>
+            {/* Manual model input */}
+            <input
+              type="text"
+              placeholder="Or type a custom model name and press Enter..."
+              className="mt-1 w-full rounded-md border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const val = (e.target as HTMLInputElement).value.trim();
+                  if (val && !selectedModels.includes(val)) {
+                    setSelectedModels([...selectedModels, val]);
+                    (e.target as HTMLInputElement).value = "";
+                  }
+                }
+              }}
+            />
+          </div>
+
           {/* Provider description */}
           {providerDef?.description && (
             <p className="mt-1 text-xs text-zinc-400">{providerDef.description}</p>
           )}
-
-          {/* Example models */}
-          <p className="mt-1 text-xs text-zinc-400">
-            Models: {providerDef?.exampleModels.join(", ") ?? "—"}
-          </p>
 
           <button
             onClick={handleSave}
