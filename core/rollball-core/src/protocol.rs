@@ -145,6 +145,26 @@ pub enum GatewayResponse {
         /// List of identity entries from System Agent
         entries: Vec<IdentityEntry>,
     },
+    /// LLM configuration delivery (Gateway → Runtime, handshake)
+    ///
+    /// After AgentHello, Gateway pushes the user's configured LLM provider
+    /// to the Agent Runtime. This satisfies PRD GTW-05 and SEC-07:
+    /// API keys are distributed via IPC, not environment variables.
+    ///
+    /// The provider always overrides the manifest's suggested_provider.
+    /// model=None means Gateway has no model preference — Runtime falls back
+    /// to the manifest's suggested_model.
+    LLMConfigDelivery {
+        /// Provider name (e.g. "minimax", "openai", "anthropic")
+        provider: String,
+        /// Model identifier (e.g. "MiniMax-Text-01", "gpt-4o").
+        /// None when Gateway has no model preference — Runtime uses manifest's suggested_model.
+        model: Option<String>,
+        /// API key for the provider (one-time delivery, not stored on disk by Runtime)
+        api_key: String,
+        /// Base URL override (optional, provider-specific)
+        base_url: Option<String>,
+    },
     /// Identity query result from System Agent
     IdentityQueryResult {
         /// Field values

@@ -71,7 +71,7 @@ impl ContextBuilder {
         messages.extend(history.messages().iter().cloned());
 
         ChatRequest {
-            model: manifest.llm.model.clone(),
+            model: manifest.llm.suggested_model.clone(),
             messages,
             temperature: manifest.llm.temperature,
             max_tokens: manifest.llm.max_tokens,

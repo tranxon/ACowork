@@ -48,6 +48,8 @@ fn test_gateway_config(temp_dir: &Path) -> GatewayConfig {
             enabled: false,
             ..Default::default()
         },
+        default_provider: None,
+        default_model: None,
     }
 }
 

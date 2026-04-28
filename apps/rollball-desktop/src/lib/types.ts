@@ -40,6 +40,8 @@ export interface VaultKeyEntry {
   key_preview: string;
   /** Optional base URL override for this provider */
   base_url?: string;
+  /** Optional default model for this provider */
+  default_model?: string;
 }
 
 /** Gateway config response */
@@ -56,6 +58,10 @@ export interface GatewayConfig {
     port: number;
     auth_enabled: boolean;
   };
+  /** Default LLM provider (if configured) */
+  default_provider?: string;
+  /** Default LLM model (if configured) */
+  default_model?: string;
 }
 
 /** Generic message response */

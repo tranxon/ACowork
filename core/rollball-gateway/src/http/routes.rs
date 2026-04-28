@@ -24,6 +24,61 @@ pub type SharedHttpState = Arc<RwLock<GatewayState>>;
 /// Shared session manager type (same as IPC server)
 pub type SharedSessionMgr = Arc<tokio::sync::Mutex<SessionManager>>;
 
+/// Bridge event type — known event types for Agent → HTTP client forwarding
+///
+/// Provides compile-time safety instead of raw string matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeEventType {
+    /// Streaming text chunk
+    Chunk,
+    /// LLM tool invocation
+    ToolCall,
+    /// Tool execution result
+    ToolResult,
+    /// Final response (complete)
+    Done,
+    /// Error response
+    Error,
+}
+
+impl BridgeEventType {
+    /// Map an IPC action string to a BridgeEventType.
+    /// Returns None for unrecognized actions.
+    pub fn from_action(action: &str) -> Option<Self> {
+        match action {
+            "agent_response" => Some(Self::Done),
+            "agent_chunk" => Some(Self::Chunk),
+            "agent_tool_call" => Some(Self::ToolCall),
+            "agent_tool_result" => Some(Self::ToolResult),
+            "agent_error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    /// Default event type for unrecognized actions
+    pub fn default_for_unknown() -> Self {
+        Self::Done
+    }
+
+    /// Get the serialized string value (matches frontend WebSocket protocol)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chunk => "chunk",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+            Self::Done => "done",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for BridgeEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Bridge event for forwarding Agent responses to HTTP clients
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BridgeEvent {
@@ -31,8 +86,8 @@ pub struct BridgeEvent {
     pub agent_id: String,
     /// Message ID for correlation
     pub message_id: String,
-    /// Event type: "chunk", "tool_call", "tool_result", "done"
-    pub event_type: String,
+    /// Event type
+    pub event_type: BridgeEventType,
     /// Event payload (JSON)
     pub payload: serde_json::Value,
 }
@@ -367,5 +422,39 @@ mod tests {
     fn test_build_router() {
         let state = test_app_state();
         let _router = build_router(state);
+    }
+
+    // ── BridgeEventType tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_bridge_event_type_from_action() {
+        assert_eq!(BridgeEventType::from_action("agent_response"), Some(BridgeEventType::Done));
+        assert_eq!(BridgeEventType::from_action("agent_chunk"), Some(BridgeEventType::Chunk));
+        assert_eq!(BridgeEventType::from_action("agent_tool_call"), Some(BridgeEventType::ToolCall));
+        assert_eq!(BridgeEventType::from_action("agent_tool_result"), Some(BridgeEventType::ToolResult));
+        assert_eq!(BridgeEventType::from_action("agent_error"), Some(BridgeEventType::Error));
+        assert_eq!(BridgeEventType::from_action("unknown_action"), None);
+    }
+
+    #[test]
+    fn test_bridge_event_type_as_str() {
+        assert_eq!(BridgeEventType::Chunk.as_str(), "chunk");
+        assert_eq!(BridgeEventType::Done.as_str(), "done");
+        assert_eq!(BridgeEventType::Error.as_str(), "error");
+        assert_eq!(BridgeEventType::ToolCall.as_str(), "tool_call");
+        assert_eq!(BridgeEventType::ToolResult.as_str(), "tool_result");
+    }
+
+    #[test]
+    fn test_bridge_event_type_serialization() {
+        let event = BridgeEvent {
+            agent_id: "com.test".to_string(),
+            message_id: "msg-1".to_string(),
+            event_type: BridgeEventType::Chunk,
+            payload: serde_json::json!({"delta": "hi"}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        // serde rename_all = snake_case
+        assert!(json.contains("\"chunk\""));
     }
 }

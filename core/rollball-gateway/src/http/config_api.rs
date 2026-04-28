@@ -34,6 +34,12 @@ pub struct ConfigResponse {
     pub idle_timeout_secs: u64,
     pub dev_mode: bool,
     pub http: HttpConfigResponse,
+    /// Default LLM provider (if configured)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+    /// Default LLM model (if configured)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 /// HTTP config subset
@@ -54,6 +60,12 @@ pub struct UpdateConfigRequest {
     /// Idle timeout in seconds
     #[serde(default)]
     pub idle_timeout_secs: Option<u64>,
+    /// Default LLM provider for all agents
+    #[serde(default)]
+    pub default_provider: Option<String>,
+    /// Default LLM model for all agents
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 /// Generic message response
@@ -88,6 +100,8 @@ pub async fn get_config(
             port: config.http.port,
             auth_enabled: config.http.auth_enabled,
         },
+        default_provider: config.default_provider.clone(),
+        default_model: config.default_model.clone(),
     }))
 }
 
@@ -113,6 +127,12 @@ pub async fn update_config(
     if let Some(timeout) = body.idle_timeout_secs {
         updates.push(format!("idle_timeout_secs={}", timeout));
     }
+    if let Some(ref provider) = body.default_provider {
+        updates.push(format!("default_provider={}", provider));
+    }
+    if let Some(ref model) = body.default_model {
+        updates.push(format!("default_model={}", model));
+    }
 
     if updates.is_empty() {
         return Err(ApiError::bad_request("No configuration fields to update"));
@@ -126,6 +146,22 @@ pub async fn update_config(
         }
         if let Some(timeout) = body.idle_timeout_secs {
             config.idle_timeout_secs = timeout;
+        }
+        // Update default_provider: Some("name") sets it, Some("") clears it
+        if let Some(ref provider) = body.default_provider {
+            if provider.is_empty() {
+                config.default_provider = None;
+            } else {
+                config.default_provider = Some(provider.clone());
+            }
+        }
+        // Update default_model: Some("model") sets it, Some("") clears it
+        if let Some(ref model) = body.default_model {
+            if model.is_empty() {
+                config.default_model = None;
+            } else {
+                config.default_model = Some(model.clone());
+            }
         }
     }
     drop(gw);
@@ -155,6 +191,8 @@ mod tests {
         let req: UpdateConfigRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.log_level, Some("debug".to_string()));
         assert!(req.idle_timeout_secs.is_none());
+        assert!(req.default_provider.is_none());
+        assert!(req.default_model.is_none());
     }
 
     #[test]
@@ -163,6 +201,14 @@ mod tests {
         let req: UpdateConfigRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.log_level, Some("warn".to_string()));
         assert_eq!(req.idle_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn test_update_config_request_provider_and_model() {
+        let json = r#"{"default_provider": "deepseek", "default_model": "deepseek-chat"}"#;
+        let req: UpdateConfigRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.default_provider, Some("deepseek".to_string()));
+        assert_eq!(req.default_model, Some("deepseek-chat".to_string()));
     }
 
     #[test]
@@ -180,9 +226,12 @@ mod tests {
                 port: 19876,
                 auth_enabled: false,
             },
+            default_provider: Some("deepseek".to_string()),
+            default_model: Some("deepseek-chat".to_string()),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("19876"));
         assert!(json.contains("info"));
+        assert!(json.contains("deepseek"));
     }
 }

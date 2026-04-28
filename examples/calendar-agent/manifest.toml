@@ -34,8 +34,8 @@ name = "memory_recall"
 name = "intent_send"
 
 [llm]
-provider = "openai"
-model = "gpt-4"
+suggested_provider = "openai"
+suggested_model = "gpt-4"
 temperature = 0.3
 
 [llm.providers.openai]

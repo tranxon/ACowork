@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { VaultKeyEntry } from "../../lib/types";
-import { Key, Home, Plus, Trash2 } from "lucide-react";
+import type { VaultKeyEntry, GatewayConfig } from "../../lib/types";
+import { Key, Home, Plus, Trash2, Star } from "lucide-react";
 import { ALL_PROVIDERS, PROVIDER_CATEGORIES, getProviderDef } from "../../lib/providers";
 
 type ProviderWithStatus = {
@@ -16,11 +16,13 @@ type ProviderWithStatus = {
 
 export function ModelsPage() {
   const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
+  const [config, setConfig] = useState<GatewayConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newProvider, setNewProvider] = useState("openai");
   const [newKey, setNewKey] = useState("");
   const [newBaseUrl, setNewBaseUrl] = useState("");
+  const [newDefaultModel, setNewDefaultModel] = useState("");
 
   const newProviderDef = getProviderDef(newProvider);
 
@@ -35,20 +37,36 @@ export function ModelsPage() {
     }
   }, []);
 
-  useEffect(() => { fetchKeys(); }, [fetchKeys]);
+  const fetchConfig = useCallback(async () => {
+    try {
+      const result = await invoke<GatewayConfig>("get_config");
+      setConfig(result);
+    } catch {
+      // Gateway may not be running
+    }
+  }, []);
+
+  useEffect(() => { fetchKeys(); fetchConfig(); }, [fetchKeys, fetchConfig]);
 
   const handleAddProviderChange = (id: string) => {
     setNewProvider(id);
     const def = getProviderDef(id);
     setNewBaseUrl(def?.baseUrl ?? "");
+    setNewDefaultModel(def?.exampleModels[0] ?? "");
   };
 
   const handleAdd = async () => {
     try {
-      await invoke("add_key", { provider: newProvider, key: newKey });
+      await invoke("add_key", {
+        provider: newProvider,
+        key: newKey,
+        baseUrl: newBaseUrl || undefined,
+        defaultModel: newDefaultModel || undefined,
+      });
       setShowAddDialog(false);
       setNewKey("");
       await fetchKeys();
+      await fetchConfig();
     } catch (e) {
       alert(`Failed to add key: ${e}`);
     }
@@ -59,8 +77,22 @@ export function ModelsPage() {
     try {
       await invoke("remove_key", { provider });
       await fetchKeys();
+      await fetchConfig();
     } catch (e) {
       alert(`Failed to remove key: ${e}`);
+    }
+  };
+
+  const handleSetDefaultProvider = async (provider: string) => {
+    try {
+      const entry = keys.find((k) => k.provider === provider);
+      await invoke("update_config", {
+        defaultProvider: provider,
+        defaultModel: entry?.default_model || undefined,
+      });
+      await fetchConfig();
+    } catch (e) {
+      alert(`Failed to set default provider: ${e}`);
     }
   };
 
@@ -125,7 +157,13 @@ export function ModelsPage() {
                         {keyEntry && (
                           <p className="mt-1 text-xs text-zinc-400">Key: {keyEntry.key_preview}</p>
                         )}
-                        {provider.baseUrl && (
+                        {keyEntry?.base_url && (
+                          <p className="mt-1 font-mono text-xs text-zinc-400">URL: {keyEntry.base_url}</p>
+                        )}
+                        {keyEntry?.default_model && (
+                          <p className="mt-1 text-xs text-zinc-400">Model: {keyEntry.default_model}</p>
+                        )}
+                        {!keyEntry?.base_url && provider.baseUrl && (
                           <p className="mt-1 font-mono text-xs text-zinc-400">{provider.baseUrl}</p>
                         )}
                         {provider.description && (
@@ -135,13 +173,22 @@ export function ModelsPage() {
                     </div>
                     <div className="flex items-center gap-1">
                       {keyEntry && (
-                        <button
-                          onClick={() => handleRemove(provider.id)}
-                          className="rounded p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-red-500 dark:hover:bg-zinc-800"
-                          title="Remove key"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        <>
+                          <button
+                            onClick={() => handleSetDefaultProvider(provider.id)}
+                            className={`rounded p-1.5 ${config?.default_provider === provider.id ? "text-amber-500" : "text-zinc-400 hover:bg-zinc-100 hover:text-amber-500 dark:hover:bg-zinc-800"}`}
+                            title={config?.default_provider === provider.id ? "Default provider" : "Set as default provider"}
+                          >
+                            <Star className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => handleRemove(provider.id)}
+                            className="rounded p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-red-500 dark:hover:bg-zinc-800"
+                            title="Remove key"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -198,6 +245,16 @@ export function ModelsPage() {
                   />
                 </div>
               )}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">Default Model</label>
+                <input
+                  type="text"
+                  value={newDefaultModel}
+                  onChange={(e) => setNewDefaultModel(e.target.value)}
+                  placeholder={newProviderDef?.exampleModels[0] ?? "model name..."}
+                  className="w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                />
+              </div>
               {newProviderDef?.description && (
                 <p className="text-xs text-zinc-400">{newProviderDef.description}</p>
               )}

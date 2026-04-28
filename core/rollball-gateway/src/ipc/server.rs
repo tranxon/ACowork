@@ -45,6 +45,11 @@ pub struct IpcServer {
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
     /// Optional external session manager (shared with HTTP API)
     external_session_mgr: Option<crate::http::routes::SharedSessionMgr>,
+    /// Bridge channel for forwarding Agent responses to HTTP/WebSocket clients.
+    /// When an Agent sends an IntentSend targeting "http-api" or "http-ws",
+    /// the response is broadcast via this channel so the HTTP WebSocket handler
+    /// can stream it back to the Desktop App.
+    bridge_tx: Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 }
 
 /// Default broadcast channel capacity for capability updates
@@ -61,6 +66,7 @@ impl IpcServer {
             perm_store: Arc::new(perm_store),
             capability_tx,
             external_session_mgr: None,
+            bridge_tx: None,
         }
     }
 
@@ -72,12 +78,19 @@ impl IpcServer {
             perm_store,
             capability_tx,
             external_session_mgr: None,
+            bridge_tx: None,
         }
     }
 
     /// Set external session manager (shared with HTTP API for message bridging)
     pub fn with_session_mgr(mut self, session_mgr: crate::http::routes::SharedSessionMgr) -> Self {
         self.external_session_mgr = Some(session_mgr);
+        self
+    }
+
+    /// Set bridge channel for forwarding Agent responses to HTTP/WebSocket clients
+    pub fn with_bridge_tx(mut self, bridge_tx: tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>) -> Self {
+        self.bridge_tx = Some(bridge_tx);
         self
     }
 
@@ -109,6 +122,7 @@ impl IpcServer {
         let conn_counter = AtomicU64::new(0);
         let perm_store = Arc::clone(&self.perm_store);
         let capability_tx = self.capability_tx.clone();
+        let bridge_tx = self.bridge_tx.clone();
 
         loop {
             let conn = server.accept().await?;
@@ -121,12 +135,13 @@ impl IpcServer {
             let session_mgr = Arc::clone(&session_mgr);
             let perm_store = Arc::clone(&perm_store);
             let cap_rx = capability_tx.subscribe();
+            let bridge_tx = bridge_tx.clone();
 
             tokio::spawn(async move {
                 // Session is created inside handle_connection with push channel
 
                 if let Err(e) =
-                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store, cap_rx).await
+                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store, cap_rx, bridge_tx).await
                 {
                     tracing::warn!("Connection {} error: {}", conn_id, e);
                 }
@@ -157,6 +172,7 @@ async fn handle_connection(
     session_mgr: &SharedSessionMgr,
     perm_store: &SharedPermissionStore,
     mut cap_rx: tokio::sync::broadcast::Receiver<GatewayResponse>,
+    bridge_tx: Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> Result<(), RollballError> {
     // Create server-push channel for this connection
     let (push_tx, mut push_rx) = tokio::sync::mpsc::channel::<GatewayResponse>(32);
@@ -184,7 +200,7 @@ async fn handle_connection(
                     tracing::debug!("Received request from {}: {:?}", conn_id, request);
 
                     let response =
-                        dispatch_request(request, conn_id, &state, session_mgr, perm_store).await;
+                        dispatch_request(request, conn_id, &state, session_mgr, perm_store, &bridge_tx).await;
 
                     let resp_frame =
                         Frame::from_message(Frame::TYPE_RESPONSE, &response)
@@ -243,6 +259,7 @@ async fn dispatch_request(
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
     perm_store: &SharedPermissionStore,
+    bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> GatewayResponse {
     match request {
         GatewayRequest::KeyRelease { provider } => {
@@ -254,7 +271,7 @@ async fn dispatch_request(
             params,
             async_,
         } => {
-            handle_intent_send(&target, &action, &params, async_, conn_id, state, session_mgr, perm_store)
+            handle_intent_send(&target, &action, &params, async_, conn_id, state, session_mgr, perm_store, bridge_tx)
                 .await
         }
         GatewayRequest::BudgetQuery { provider } => {
@@ -291,7 +308,7 @@ async fn dispatch_request(
             handle_cron_list(conn_id, session_mgr, state).await
         }
         GatewayRequest::AgentHello { agent_id, version } => {
-            handle_agent_hello(&agent_id, &version, conn_id, session_mgr).await
+            handle_agent_hello(&agent_id, &version, conn_id, state, session_mgr).await
         }
     }
 }
@@ -369,6 +386,7 @@ async fn handle_intent_send(
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
     perm_store: &SharedPermissionStore,
+    bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> GatewayResponse {
     let from = {
         let mgr = session_mgr.lock().await;
@@ -393,6 +411,69 @@ async fn handle_intent_send(
         tracing::warn!("IntentSend rejected: empty target");
         return GatewayResponse::IntentDelivered {
             message_id: format!("error:empty-target-{}", message_id),
+        };
+    }
+
+    // Special handling: target is the HTTP/WebSocket client (not an Agent)
+    // When an Agent sends a response back to the Desktop App, it targets
+    // "http-api" or "http-ws". We forward via the bridge channel instead
+    // of routing through the normal Intent system.
+    if target == "http-api" || target == "http-ws" {
+        tracing::info!(
+            "IntentSend to HTTP client: from={} action={} msg={}",
+            from, action, message_id
+        );
+
+        if let Some(tx) = bridge_tx {
+            // Determine event type based on action
+            let event_type = crate::http::routes::BridgeEventType::from_action(action)
+                .unwrap_or_else(crate::http::routes::BridgeEventType::default_for_unknown);
+
+            // Transform payload to match frontend WebSocket protocol expectations:
+            //   chunk  → { "delta": "..." }
+            //   done   → { "content": "..." }
+            //   error  → { "message": "..." }
+            //   tool_call / tool_result → pass through as-is
+            let payload = match event_type {
+                crate::http::routes::BridgeEventType::Chunk => {
+                    let delta = params.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    serde_json::json!({ "delta": delta })
+                }
+                crate::http::routes::BridgeEventType::Done => {
+                    // Include the full response content for 'done' events
+                    let content = params.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    serde_json::json!({ "content": content })
+                }
+                crate::http::routes::BridgeEventType::Error => {
+                    let msg = params.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown error");
+                    serde_json::json!({ "message": msg })
+                }
+                // tool_call / tool_result — pass through params as-is
+                _ => params.clone(),
+            };
+
+            let event = crate::http::routes::BridgeEvent {
+                agent_id: from.clone(),
+                message_id: message_id.clone(),
+                event_type,
+                payload,
+            };
+
+            if let Err(e) = tx.send(event) {
+                tracing::warn!("Failed to broadcast bridge event: {}", e);
+            }
+        } else {
+            tracing::warn!("No bridge channel available for HTTP response");
+        }
+
+        return GatewayResponse::IntentDelivered {
+            message_id: message_id.clone(),
         };
     }
 
@@ -1036,10 +1117,15 @@ async fn handle_cron_list(
 }
 
 /// Handle AgentHello — register the session with the agent's identity
+///
+/// On successful authentication, also pushes LLMConfigDelivery to the Agent
+/// via the session's push channel. This satisfies PRD GTW-05 and SEC-07:
+/// API keys are distributed via IPC, not environment variables.
 async fn handle_agent_hello(
     agent_id: &str,
     version: &str,
     conn_id: &str,
+    state: &SharedState,
     session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
     tracing::info!(
@@ -1051,6 +1137,31 @@ async fn handle_agent_hello(
     if let Some(session) = mgr.get_session_mut(conn_id) {
         session.authenticate(agent_id);
         tracing::info!("Session {} authenticated as agent {}", conn_id, agent_id);
+
+        // Push LLM configuration to the newly authenticated Agent
+        let llm_config = resolve_llm_config_for_agent(agent_id, state).await;
+        if let Some((provider, model, api_key, base_url)) = llm_config {
+            tracing::info!(
+                "Pushing LLMConfigDelivery to agent={}: provider={} model={:?}",
+                agent_id, provider, model
+            );
+            // Use push_message (async) to deliver LLM config via the session's push channel
+            let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
+                provider,
+                model,
+                api_key,
+                base_url,
+            }).await;
+            if !push_result {
+                tracing::warn!("Failed to push LLMConfigDelivery to {} (channel closed)", conn_id);
+            }
+        } else {
+            tracing::warn!(
+                "No LLM config available for agent={}. Agent will fall back to manifest/env.",
+                agent_id
+            );
+        }
+
         GatewayResponse::AgentHelloResult {
             success: true,
             error: None,
@@ -1060,6 +1171,71 @@ async fn handle_agent_hello(
         GatewayResponse::AgentHelloResult {
             success: false,
             error: Some(format!("Unknown connection: {}", conn_id)),
+        }
+    }
+}
+
+/// Resolve the LLM configuration to deliver to an Agent.
+///
+/// Priority:
+/// 1. Gateway config `default_provider` + `default_model` → look up in Vault
+/// 2. First key stored in Vault (with its default_model)
+/// 3. None (Agent falls back to manifest suggested_provider + env vars)
+///
+/// Model resolution order (within the chosen provider):
+/// 1. Gateway config `default_model` (explicit user choice)
+/// 2. Vault entry's `default_model` (set when adding the provider key)
+/// 3. None — Agent Runtime falls back to its manifest's suggested_model
+async fn resolve_llm_config_for_agent(
+    _agent_id: &str,
+    state: &SharedState,
+) -> Option<(String, Option<String>, String, Option<String>)> {
+    let state_guard = state.read().await;
+
+    // Try default_provider from Gateway config first
+    let default_provider = state_guard.config.as_ref()
+        .and_then(|c| c.default_provider.as_deref());
+
+    // Try default_model from Gateway config
+    let config_default_model = state_guard.config.as_ref()
+        .and_then(|c| c.default_model.as_deref());
+
+    // Determine which provider to use
+    let provider_name = if let Some(name) = default_provider {
+        Some(name.to_string())
+    } else {
+        // Fall back to first key in Vault
+        state_guard.vault.list_providers().first().cloned()
+    };
+
+    let provider_name = match provider_name {
+        Some(name) => name,
+        None => {
+            tracing::info!("No provider configured in Vault, cannot deliver LLM config");
+            return None;
+        }
+    };
+
+    // Retrieve the provider entry from Vault
+    match state_guard.vault.get_provider(&provider_name) {
+        Ok(entry) => {
+            // Model resolution: config default > Vault default > None (Agent decides)
+            let model = config_default_model
+                .map(|m| m.to_string())
+                .or(entry.default_model.clone());
+            // model is None when neither config nor Vault has a preference —
+            // Agent Runtime will fall back to its manifest's suggested_model
+
+            Some((
+                provider_name.clone(),
+                model,
+                entry.api_key,
+                entry.base_url,
+            ))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to get provider '{}' from Vault: {}", provider_name, e);
+            None
         }
     }
 }
@@ -1774,6 +1950,7 @@ mod tests {
             &state,
             &session_mgr,
             &_perm_store,
+            &None,
         )
         .await;
 
@@ -1871,6 +2048,7 @@ mod tests {
             &state,
             &session_mgr,
             &perm_store,
+            &None,
         )
         .await;
 
@@ -1947,6 +2125,7 @@ mod tests {
             &state,
             &session_mgr,
             &perm_store,
+            &None,
         )
         .await;
 
@@ -2036,6 +2215,7 @@ mod tests {
             &state,
             &session_mgr,
             &perm_store,
+            &None,
         )
         .await;
 

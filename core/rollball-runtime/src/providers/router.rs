@@ -11,6 +11,9 @@ use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::openai::OpenAIProvider;
 use crate::providers::ollama::OllamaProvider;
 
+/// Default base URL for MiniMax OpenAI-compatible API
+const MINIMAX_DEFAULT_BASE_URL: &str = "https://api.minimax.chat/v1";
+
 /// Create a provider based on the provider name from manifest
 pub fn create_provider(
     provider_name: &str,
@@ -42,16 +45,23 @@ pub fn create_provider(
             };
             Arc::new(provider)
         }
-        // DeepSeek, Groq, Together AI, etc. are all OpenAI-compatible
+        // DeepSeek, Groq, Together AI, MiniMax, etc. are all OpenAI-compatible
         name if name.contains("deepseek")
             || name.contains("groq")
             || name.contains("together")
             || name.contains("fireworks")
-            || name.contains("mistral") =>
+            || name.contains("mistral")
+            || name.contains("minimax") =>
         {
             tracing::info!(provider = name, "Using OpenAI-compatible provider");
             let provider = if let Some(url) = base_url {
                 OpenAIProvider::with_base_url(Some(url), api_key)
+            } else if name.contains("minimax") {
+                // MiniMax China API — default base URL for OpenAI-compatible endpoint
+                OpenAIProvider::with_base_url(
+                    Some(MINIMAX_DEFAULT_BASE_URL),
+                    api_key,
+                )
             } else {
                 OpenAIProvider::new(api_key)
             };

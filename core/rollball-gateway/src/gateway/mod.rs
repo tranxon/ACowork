@@ -423,7 +423,8 @@ impl Gateway {
 
         // Run the IPC server in a spawned task so we can select on signals
         let ipc_server = IpcServer::with_permission_store(&socket_path, shared_perm_store)
-            .with_session_mgr(session_mgr);
+            .with_session_mgr(session_mgr)
+            .with_bridge_tx(bridge_tx);
         let ipc_state = shared_state.clone();
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc_server.listen(ipc_state).await {
@@ -604,6 +605,8 @@ mod tests {
             iteration_timeout_ms: 30000,
             dev_mode: true,
             http: crate::config::HttpConfig::default(),
+            default_provider: None,
+            default_model: None,
         }
     }
 

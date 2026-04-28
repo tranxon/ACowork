@@ -7,6 +7,7 @@
 //! and replays them on reconnect.
 
 use std::collections::VecDeque;
+
 use rollball_core::protocol::{Frame, GatewayRequest, GatewayResponse};
 use rollball_core::transport::AsyncTransportConnection;
 use rollball_core::error::RollballError;
@@ -14,16 +15,31 @@ use rollball_core::error::RollballError;
 /// Maximum number of pending usage reports to buffer
 const MAX_PENDING_REPORTS: usize = 100;
 
+/// LLM configuration received from Gateway via IPC
+///
+/// Contains the user's configured provider, model, API key, and optional base URL.
+/// This is the primary way Agent Runtime gets its LLM credentials (PRD GTW-05, SEC-07).
+pub struct LlmConfigReceived {
+    /// Provider name (e.g. "minimax", "openai")
+    pub provider: String,
+    /// Model identifier, or None to use manifest's suggested_model
+    pub model: Option<String>,
+    /// API key for the provider
+    pub api_key: Option<String>,
+    /// Base URL override (optional)
+    pub base_url: Option<String>,
+}
+
 /// IPC client for Gateway communication
 pub struct GatewayClient {
-    /// The active transport connection (None when disconnected)
-    conn: Option<Box<dyn AsyncTransportConnection>>,
     /// The endpoint URI to connect/reconnect to
     endpoint: String,
+    /// The active transport connection (None when disconnected)
+    conn: Option<Box<dyn AsyncTransportConnection>>,
     /// Request ID counter for correlating request/response
-    next_request_id: parking_lot::Mutex<u64>,
+    next_request_id: u64,
     /// S4.5.2: Pending usage reports buffered during disconnect
-    pending_reports: parking_lot::Mutex<VecDeque<rollball_core::budget::UsageReport>>,
+    pending_reports: VecDeque<rollball_core::budget::UsageReport>,
 }
 
 impl GatewayClient {
@@ -34,10 +50,10 @@ impl GatewayClient {
     pub fn new(endpoint: &str) -> Self {
         let normalized = crate::ipc::transport::normalize_endpoint(endpoint);
         Self {
-            conn: None,
             endpoint: normalized,
-            next_request_id: parking_lot::Mutex::new(1),
-            pending_reports: parking_lot::Mutex::new(VecDeque::new()),
+            conn: None,
+            next_request_id: 1,
+            pending_reports: VecDeque::new(),
         }
     }
 
@@ -91,11 +107,10 @@ impl GatewayClient {
     }
 
     /// Allocate a unique request ID
-    fn next_id(&self) -> u64 {
-        let mut id = self.next_request_id.lock();
-        let current = *id;
-        *id += 1;
-        current
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        id
     }
 
     /// Check if the client is connected
@@ -109,9 +124,90 @@ impl GatewayClient {
         Ok(())
     }
 
+    /// Receive a message from Gateway (blocking).
+    ///
+    /// This is used in the Gateway message loop to receive messages
+    /// from the Gateway (like IntentReceived, system notifications).
+    pub async fn recv_message(&mut self) -> Result<Option<GatewayResponse>, RollballError> {
+        let conn = self.conn.as_mut().ok_or_else(|| {
+            RollballError::Ipc("Not connected to Gateway".to_string())
+        })?;
+
+        match conn.recv_frame().await? {
+            Some(frame) => {
+                let response: GatewayResponse = frame.to_message()?;
+                Ok(Some(response))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Receive the LLM configuration from Gateway after handshake.
+    ///
+    /// After AgentHello, Gateway pushes LLMConfigDelivery containing
+    /// the user's configured provider, model, and API key.
+    /// This is the primary mechanism for distributing LLM credentials,
+    /// satisfying PRD GTW-05 and SEC-07 (no env-var key distribution).
+    ///
+    /// If no LLMConfigDelivery is received within the timeout,
+    /// returns an error and the caller falls back to manifest + env vars.
+    pub async fn recv_llm_config(&mut self) -> Result<LlmConfigReceived, RollballError> {
+        // Wait for LLMConfigDelivery with a timeout.
+        // Gateway may also push IdentityDelivery and CapabilityOverview
+        // during the handshake — skip those.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(RollballError::Ipc(
+                    "Timeout waiting for LLMConfigDelivery from Gateway".to_string()
+                ));
+            }
+
+            match tokio::time::timeout(remaining, self.recv_message()).await {
+                Ok(Ok(Some(GatewayResponse::LLMConfigDelivery {
+                    provider,
+                    model,
+                    api_key,
+                    base_url,
+                }))) => {
+                    tracing::info!(
+                        provider = %provider,
+                        model = ?model,
+                        "Received LLMConfigDelivery from Gateway"
+                    );
+                    return Ok(LlmConfigReceived {
+                        provider,
+                        model,
+                        api_key: Some(api_key),
+                        base_url,
+                    });
+                }
+                Ok(Ok(Some(_other))) => {
+                    // Skip other handshake messages (IdentityDelivery, etc.)
+                    tracing::debug!(
+                        "Skipping non-LLMConfig message during handshake"
+                    );
+                    continue;
+                }
+                Ok(Ok(None)) => {
+                    return Err(RollballError::Ipc(
+                        "Connection closed while waiting for LLMConfigDelivery".to_string()
+                    ));
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(RollballError::Ipc(
+                        "Timeout waiting for LLMConfigDelivery from Gateway".to_string()
+                    ));
+                }
+            }
+        }
+    }
+
     /// Send a request to Gateway and receive a response
     async fn send_and_recv(&mut self, request: GatewayRequest) -> Result<GatewayResponse, RollballError> {
-        // Allocate request ID before borrowing conn
         let _request_id = self.next_id();
 
         let conn = self.conn.as_mut().ok_or_else(|| {
@@ -211,14 +307,13 @@ impl GatewayClient {
     ) -> Result<(), RollballError> {
         if !self.is_connected() {
             // S4.5.2: Buffer for later delivery
-            let mut pending = self.pending_reports.lock();
-            if pending.len() >= MAX_PENDING_REPORTS {
-                pending.pop_front(); // Drop oldest to make room
+            if self.pending_reports.len() >= MAX_PENDING_REPORTS {
+                self.pending_reports.pop_front(); // Drop oldest to make room
             }
-            pending.push_back(report);
+            self.pending_reports.push_back(report);
             tracing::debug!(
                 "Buffered usage report (disconnected), pending={}",
-                pending.len()
+                self.pending_reports.len()
             );
             return Ok(());
         }
@@ -237,29 +332,20 @@ impl GatewayClient {
     /// Sends all buffered reports to the Gateway. Reports that fail
     /// to send are re-buffered for the next attempt.
     pub async fn flush_pending_reports(&mut self) -> Result<usize, RollballError> {
-        let reports: Vec<rollball_core::budget::UsageReport> = {
-            let mut pending = self.pending_reports.lock();
-            pending.drain(..).collect()
-        };
+        // Take all pending reports out
+        let reports: Vec<rollball_core::budget::UsageReport> =
+            std::mem::take(&mut self.pending_reports).into_iter().collect();
 
         let mut sent = 0;
-        let mut failed = VecDeque::new();
-
         for report in reports {
             let request = GatewayRequest::UsageReport(report.clone());
             match self.send_and_recv(request).await {
                 Ok(GatewayResponse::UsageReportAck {}) => sent += 1,
-                Ok(_) => failed.push_back(report),
-                Err(_) => failed.push_back(report),
-            }
-        }
-
-        // Re-buffer failed reports
-        if !failed.is_empty() {
-            let mut pending = self.pending_reports.lock();
-            for report in failed {
-                if pending.len() < MAX_PENDING_REPORTS {
-                    pending.push_back(report);
+                _ => {
+                    // Re-buffer failed reports
+                    if self.pending_reports.len() < MAX_PENDING_REPORTS {
+                        self.pending_reports.push_back(report);
+                    }
                 }
             }
         }
@@ -269,7 +355,7 @@ impl GatewayClient {
 
     /// Get the number of pending usage reports
     pub fn pending_report_count(&self) -> usize {
-        self.pending_reports.lock().len()
+        self.pending_reports.len()
     }
 
     /// Acquire a rate limit token
@@ -365,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_gateway_client_next_id() {
-        let client = GatewayClient::new("unix:///tmp/test.sock");
+        let mut client = GatewayClient::new("unix:///tmp/test.sock");
         assert_eq!(client.next_id(), 1);
         assert_eq!(client.next_id(), 2);
         assert_eq!(client.next_id(), 3);

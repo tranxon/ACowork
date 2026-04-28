@@ -40,6 +40,18 @@ pub struct GatewayConfig {
     /// HTTP API configuration
     #[serde(default)]
     pub http: HttpConfig,
+    /// Default LLM provider for agents
+    /// When set, Gateway delivers this provider's config to agents via IPC,
+    /// overriding the manifest's suggested_provider.
+    /// If not set, falls back to the first key stored in Vault.
+    #[serde(default)]
+    pub default_provider: Option<String>,
+    /// Default LLM model for agents
+    /// When set, Gateway delivers this model to agents via IPC.
+    /// If not set, falls back to the Vault entry's default_model,
+    /// then the manifest's suggested_model.
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 /// HTTP API configuration
@@ -162,6 +174,8 @@ impl GatewayConfig {
             dev_mode: file_config.as_ref().map(|c| c.dev_mode).unwrap_or(true),
             http: file_config.as_ref().map(|c| c.http.clone())
                 .unwrap_or_default(),
+            default_provider: file_config.as_ref().and_then(|c| c.default_provider.clone()),
+            default_model: file_config.as_ref().and_then(|c| c.default_model.clone()),
         })
     }
 
@@ -212,6 +226,8 @@ impl Default for GatewayConfig {
             iteration_timeout_ms: default_iteration_timeout_ms(),
             dev_mode: true,
             http: HttpConfig::default(),
+            default_provider: None,
+            default_model: None,
         }
     }
 }

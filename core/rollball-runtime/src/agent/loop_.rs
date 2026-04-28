@@ -25,7 +25,6 @@ use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_detector::{LoopDetectionResult, LoopDetector, ResponseLevel};
 use crate::config::RuntimeConfig;
 use crate::error::{Result, RuntimeError};
-use crate::ipc::client::GatewayClient;
 
 /// Agent loop runner
 pub struct AgentLoop {
@@ -43,8 +42,6 @@ pub struct AgentLoop {
     budget_guard: BudgetGuard,
     /// Loop detector
     loop_detector: LoopDetector,
-    /// Gateway IPC client (None in standalone mode)
-    ipc_client: Option<GatewayClient>,
     /// Inbound message receiver for external message injection
     inbound_rx: tokio::sync::mpsc::Receiver<InboundMessage>,
 }
@@ -60,7 +57,6 @@ impl AgentLoop {
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
         budget: rollball_core::Budget,
-        ipc_client: Option<GatewayClient>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
         let max_tokens = config.history_max_tokens;
@@ -73,7 +69,6 @@ impl AgentLoop {
             history: HistoryManager::new(max_tokens, keep_full),
             budget_guard: BudgetGuard::new(budget),
             loop_detector: LoopDetector::with_defaults(),
-            ipc_client,
             inbound_rx,
         };
         (loop_, inbound_tx)
@@ -105,22 +100,6 @@ impl AgentLoop {
             self.drain_inbound_queue();
 
             // ① Budget pre-check
-            // Query remote budget from Gateway if connected
-            if let Some(ref mut client) = self.ipc_client {
-                match client.query_budget(&self.manifest.llm.provider).await {
-                    Ok((remaining_tokens, remaining_cost)) => {
-                        tracing::debug!(
-                            remaining_tokens,
-                            remaining_cost,
-                            "Gateway budget info"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("Gateway budget query failed: {e}");
-                    }
-                }
-            }
-
             let estimated_tokens = self.history.estimate_total_tokens() + 500; // +500 for new response
             match self.budget_guard.check(estimated_tokens) {
                 BudgetCheckResult::Allowed => {}
@@ -248,23 +227,9 @@ impl AgentLoop {
             }
 
             // ⑦ Usage report (async, non-blocking)
-            if let Some(ref mut client) = self.ipc_client {
-                if let Some(usage) = &response.usage {
-                    let report = rollball_core::budget::UsageReport {
-                        agent_id: self.manifest.agent_id.clone(),
-                        provider: self.manifest.llm.provider.clone(),
-                        tokens_used: usage.total_tokens,
-                        cost_usd: 0.0,
-                        timestamp: chrono::Utc::now(),
-                        error: None,
-                    };
-                    if let Err(e) = client.report_usage(report).await {
-                        tracing::warn!("Failed to report usage to Gateway: {e}");
-                    }
-                }
-            } else {
-                tracing::debug!(iteration, "Usage report would be sent here (standalone mode)");
-            }
+            // NOTE: Usage reporting to Gateway is handled by the caller
+            // (run_gateway_loop in cli.rs) after the loop iteration completes.
+            tracing::debug!(iteration, "Loop iteration complete");
 
             // ⑨ DevMode control
             // TODO(Phase 5): DevMode step control — debug.step(iteration)
@@ -573,6 +538,11 @@ impl AgentLoop {
         &self.history
     }
 
+    /// Get reference to the agent manifest
+    pub fn manifest(&self) -> &rollball_core::AgentManifest {
+        &self.manifest
+    }
+
     /// Get mutable reference to history manager
     pub fn history_mut(&mut self) -> &mut HistoryManager {
         &mut self.history
@@ -686,7 +656,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("ok"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         // Verify inbound sender works
         assert!(_inbound_tx.try_send(InboundMessage::UserMessage("test".to_string())).is_ok());
     }
@@ -698,7 +668,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("ok"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         // Just verify construction works
         assert!(_inbound_tx.try_send(InboundMessage::UserMessage("test".to_string())).is_ok());
     }
@@ -710,7 +680,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("Hello from standalone!"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -728,7 +698,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("Accumulated content here"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -746,7 +716,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -760,7 +730,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -780,7 +750,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_err());
@@ -802,7 +772,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -816,7 +786,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -831,7 +801,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
         let _ = agent_loop.run("Hi", &context_builder).await;
         let messages = agent_loop.history().messages();
@@ -850,7 +820,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
         let _ = agent_loop.run("Hi", &context_builder).await;
         // Budget guard should have been updated with usage from the stream
@@ -867,7 +837,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // Inject a user message before running
@@ -890,7 +860,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         inbound_tx.try_send(InboundMessage::SystemNotification {
@@ -914,7 +884,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         inbound_tx.try_send(InboundMessage::IntentMessage {
@@ -939,7 +909,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // Inject 10 messages concurrently
@@ -963,7 +933,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
 
         // Fill the channel (capacity 64)
         for i in 0..64 {
@@ -983,7 +953,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // Run without any inbound messages — drain should return immediately
@@ -1081,7 +1051,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -1194,7 +1164,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop.run("Test failure", &context_builder).await;
@@ -1255,7 +1225,7 @@ mod tests {
 
         let config = RuntimeConfig { iteration_timeout_ms: 100, ..Default::default() }; // 100ms timeout
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -1307,7 +1277,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // The tool call will fail because shell is not in the tool registry
@@ -1412,7 +1382,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop.run("Run ordered", &context_builder).await;
@@ -1544,7 +1514,7 @@ mod tests {
             ..Default::default()
         };
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -1632,7 +1602,7 @@ mod tests {
             ..Default::default()
         };
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -1736,7 +1706,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop.run("Test partial permission", &context_builder).await;
