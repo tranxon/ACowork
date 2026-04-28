@@ -62,7 +62,7 @@ export function ModelsPage() {
           setNewDefaultModel(resp.models[0].id);
         }
       })
-      .catch(() => setDynamicModels([]))
+      .catch((e) => { console.warn("Failed to fetch models on mount:", e); setDynamicModels([]); })
       .finally(() => setModelsLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -83,8 +83,9 @@ export function ModelsPage() {
           setNewDefaultModel(resp.models[0].id);
         }
       })
-      .catch(() => {
+      .catch((e) => {
         // Fallback: use hardcoded exampleModels from provider def
+        console.warn(`Failed to fetch models for ${id}:`, e);
         setDynamicModels([]);
       })
       .finally(() => setModelsLoading(false));

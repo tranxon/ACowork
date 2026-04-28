@@ -113,7 +113,8 @@ async fn fetch_models(cache: &ModelsCache) -> Result<serde_json::Value, String> 
 }
 
 /// Map our provider IDs to models.dev provider IDs
-/// Our IDs are simple ("openai", "minimax"), models.dev may differ
+/// Our IDs are simple ("openai", "minimax"), models.dev may differ.
+/// Mapping verified against https://models.dev/api.json on 2026-04-28.
 fn to_models_dev_id(provider_id: &str) -> Vec<String> {
     match provider_id {
         "openai" => vec!["openai".to_string()],
@@ -125,12 +126,20 @@ fn to_models_dev_id(provider_id: &str) -> Vec<String> {
         "openrouter" => vec!["openrouter".to_string()],
         "azure" => vec!["azure".to_string()],
         "deepseek" => vec!["deepseek".to_string()],
-        "glm" | "zhipu" => vec!["zhipu".to_string()],
-        "moonshot" | "kimi" => vec!["moonshot".to_string()],
-        "qwen" | "dashscope" => vec!["qwen".to_string(), "dashscope".to_string()],
+        // GLM / 智谱: models.dev uses "zhipuai" (not "zhipu")
+        "glm" | "zhipu" | "zhipuai" => vec!["zhipuai".to_string(), "zhipuai-coding-plan".to_string()],
+        // Moonshot / Kimi: models.dev uses "moonshotai" (not "moonshot")
+        "moonshot" | "kimi" => vec!["moonshotai".to_string(), "moonshotai-cn".to_string()],
+        // Qwen / 阿里云: models.dev uses "alibaba" (not "qwen" or "dashscope")
+        "qwen" | "dashscope" | "alibaba" => vec!["alibaba".to_string(), "alibaba-cn".to_string()],
         "minimax" => vec!["minimax".to_string(), "minimax-cn".to_string()],
-        "doubao" => vec!["doubao".to_string(), "volcengine".to_string()],
-        "ollama" => vec!["ollama".to_string()],
+        // Doubao / 豆包: not available on models.dev, return empty so
+        // the client falls back to hardcoded exampleModels
+        "doubao" | "volcengine" => vec![],
+        // Ollama local: models.dev has no "ollama" key (only "ollama-cloud"
+        // which is a different product). Return empty for local providers.
+        "ollama" => vec![],
+        // LM Studio: local provider, limited models.dev data
         "lmstudio" => vec!["lmstudio".to_string()],
         _ => vec![provider_id.to_string()],
     }
@@ -303,15 +312,60 @@ mod tests {
 
     #[test]
     fn test_to_models_dev_id_qwen() {
+        // models.dev uses "alibaba" for Qwen (not "qwen" or "dashscope")
         assert_eq!(
             to_models_dev_id("qwen"),
-            vec!["qwen".to_string(), "dashscope".to_string()]
+            vec!["alibaba".to_string(), "alibaba-cn".to_string()]
+        );
+        assert_eq!(
+            to_models_dev_id("dashscope"),
+            vec!["alibaba".to_string(), "alibaba-cn".to_string()]
         );
     }
 
     #[test]
     fn test_to_models_dev_id_openai() {
         assert_eq!(to_models_dev_id("openai"), vec!["openai".to_string()]);
+    }
+
+    #[test]
+    fn test_to_models_dev_id_zhipu() {
+        // models.dev uses "zhipuai" (not "zhipu")
+        assert_eq!(
+            to_models_dev_id("glm"),
+            vec!["zhipuai".to_string(), "zhipuai-coding-plan".to_string()]
+        );
+        assert_eq!(
+            to_models_dev_id("zhipu"),
+            vec!["zhipuai".to_string(), "zhipuai-coding-plan".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_to_models_dev_id_moonshot() {
+        // models.dev uses "moonshotai" (not "moonshot")
+        assert_eq!(
+            to_models_dev_id("moonshot"),
+            vec!["moonshotai".to_string(), "moonshotai-cn".to_string()]
+        );
+        assert_eq!(
+            to_models_dev_id("kimi"),
+            vec!["moonshotai".to_string(), "moonshotai-cn".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_to_models_dev_id_not_on_models_dev() {
+        // doubao and ollama are not available on models.dev
+        assert_eq!(to_models_dev_id("doubao"), Vec::<String>::new());
+        assert_eq!(to_models_dev_id("volcengine"), Vec::<String>::new());
+        assert_eq!(to_models_dev_id("ollama"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_to_models_dev_id_unknown_fallback() {
+        // Unknown provider IDs are passed through as-is
+        assert_eq!(to_models_dev_id("some-new-provider"), vec!["some-new-provider".to_string()]);
     }
 
     #[test]

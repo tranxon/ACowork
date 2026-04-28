@@ -22,7 +22,9 @@ export interface ProviderDef {
   authStyle: AuthStyle;
   /** Placeholder text for API key input */
   keyPlaceholder: string;
-  /** Example models this provider offers (for display only) */
+  /** Example models this provider offers.
+   * Used as fallback when dynamic models.dev fetch fails.
+   * NOT actively maintained — always prefer dynamic list from Gateway API. */
   exampleModels: string[];
   /** Whether this provider needs an API key (Ollama doesn't) */
   needsApiKey: boolean;
