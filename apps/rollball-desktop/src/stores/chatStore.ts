@@ -33,6 +33,40 @@ function toWsUrl(httpUrl: string, agentId: string): string {
 
 const DEFAULT_GATEWAY_URL = "http://127.0.0.1:19876";
 
+/** Reconnect state — tracked outside zustand to avoid re-render loops */
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+function scheduleReconnect(agentId: string, gatewayUrl: string) {
+  if (reconnectTimer) return; // already scheduled
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.warn("[ChatStore] Max reconnect attempts reached, giving up");
+    return;
+  }
+  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.5, reconnectAttempts), RECONNECT_MAX_MS);
+  reconnectAttempts++;
+  console.log(`[ChatStore] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    const store = useChatStore.getState();
+    // Only reconnect if still on the same agent
+    if (store.ws === null) {
+      store.connectStream(agentId, gatewayUrl);
+    }
+  }, delay);
+}
+
+function resetReconnect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  reconnectAttempts = 0;
+}
+
 export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
   streamingMessageId: null,
@@ -45,6 +79,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   availableModels: [],
 
   connectStream: (agentId: string, gatewayUrl: string = DEFAULT_GATEWAY_URL) => {
+    // Cancel any pending reconnect
+    resetReconnect();
+
     // Close existing connection
     const existing = get().ws;
     if (existing) {
@@ -56,13 +93,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       ws = new WebSocket(wsUrl);
     } catch (e) {
-      console.warn("[ChatStore] WebSocket creation failed, will use HTTP fallback:", e);
+      console.warn("[ChatStore] WebSocket creation failed, will retry:", e);
       set({ ws: null });
+      scheduleReconnect(agentId, gatewayUrl);
       return;
     }
 
     ws.onopen = () => {
       console.log("[ChatStore] WebSocket connected for agent:", agentId);
+      resetReconnect(); // successful connection resets retry counter
     };
 
     ws.onmessage = (event) => {
@@ -75,16 +114,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     };
 
     ws.onclose = () => {
-      console.log("[ChatStore] WebSocket closed");
-      set({ ws: null, sending: false });
+      console.log("[ChatStore] WebSocket closed, scheduling reconnect");
+      set({ ws: null, sending: false, streamingMessageId: null });
+      scheduleReconnect(agentId, gatewayUrl);
     };
 
     ws.onerror = (err) => {
-      console.warn("[ChatStore] WebSocket error (will fall back to HTTP):", err);
-      set({ ws: null, sending: false });
+      console.warn("[ChatStore] WebSocket error:", err);
+      // Don't set ws: null here — onclose will fire after onerror
     };
 
-    set({ ws, messages: [], streamingMessageId: null, tokenUsage: null });
+    set({ ws, streamingMessageId: null, tokenUsage: null });
   },
 
   sendMessage: (content: string, agentId: string) => {
@@ -156,6 +196,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   disconnectStream: () => {
+    resetReconnect(); // stop any pending reconnect
     const ws = get().ws;
     if (ws) {
       ws.close();

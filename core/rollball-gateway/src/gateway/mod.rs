@@ -266,6 +266,46 @@ impl Gateway {
         }
     }
 
+    /// Kill orphaned rollball-runtime processes left over from a previous Gateway run.
+    ///
+    /// When Gateway restarts, previously spawned runtime processes lose their IPC
+    /// connection and become useless orphans. This method finds them by scanning
+    /// /proc for rollball-runtime processes and killing them.
+    fn cleanup_orphaned_runtimes(&self) {
+        // Find all rollball-runtime processes
+        let output = match std::process::Command::new("pgrep")
+            .args(["-f", "rollball-runtime"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return, // pgrep not available, skip cleanup
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let pids: Vec<u32> = stdout
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .filter(|&pid| pid != std::process::id()) // don't kill self
+            .collect();
+
+        if pids.is_empty() {
+            return;
+        }
+
+        tracing::info!("Found {} orphaned runtime process(es), cleaning up", pids.len());
+
+        for pid in pids {
+            // Try graceful kill first
+            match std::process::Command::new("kill")
+                .args(["-15", &pid.to_string()])
+                .output()
+            {
+                Ok(_) => tracing::info!("Sent SIGTERM to orphaned runtime (PID {})", pid),
+                Err(e) => tracing::warn!("Failed to kill orphaned runtime (PID {}): {}", pid, e),
+            }
+        }
+    }
+
     /// Run the Gateway daemon (async, multi-connection)
     ///
     /// This starts the IPC server and enters the main event loop.
@@ -294,6 +334,12 @@ impl Gateway {
 
         // Scan packages directory and restore installed agents from disk
         self.restore_installed_agents();
+
+        // Clean up orphaned runtime processes from a previous Gateway run.
+        // When Gateway restarts, previously running agents become orphaned
+        // (no IPC connection). We kill them so the fresh Gateway can manage
+        // agents from a clean state.
+        self.cleanup_orphaned_runtimes();
 
         // Auto-install bundled agents (System Agent, etc.) if not installed
         self.auto_install_bundled_agents().await;

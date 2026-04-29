@@ -92,11 +92,17 @@ pub async fn list_agents(
     let agents: Vec<AgentListResponse> = gw
         .installed_agents
         .values()
-        .map(|info| AgentListResponse {
-            agent_id: info.agent_id.clone(),
-            name: info.name.clone(),
-            version: info.version.clone(),
-            running: gw.is_running(&info.agent_id),
+        .map(|info| {
+            // Verify the process is actually alive (not just in running_agents)
+            let actually_running = gw.running_agents.get(&info.agent_id)
+                .map(|r| std::path::Path::new(&format!("/proc/{}", r.pid)).exists())
+                .unwrap_or(false);
+            AgentListResponse {
+                agent_id: info.agent_id.clone(),
+                name: info.name.clone(),
+                version: info.version.clone(),
+                running: actually_running,
+            }
         })
         .collect();
     Json(agents)
@@ -112,6 +118,10 @@ pub async fn get_agent_detail(
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
 
     let running_info = gw.running_agents.get(&agent_id);
+    // Verify the process is actually alive
+    let actually_running = running_info.as_ref()
+        .map(|r| std::path::Path::new(&format!("/proc/{}", r.pid)).exists())
+        .unwrap_or(false);
     let resp = AgentDetailResponse {
         agent_id: info.agent_id.clone(),
         name: info.name.clone(),
@@ -119,7 +129,7 @@ pub async fn get_agent_detail(
         description: info.manifest.description.clone(),
         author: info.manifest.author.clone(),
         install_path: info.install_path.clone(),
-        running: running_info.is_some(),
+        running: actually_running,
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
     };

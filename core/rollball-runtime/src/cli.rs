@@ -315,20 +315,25 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         // Gateway mode: run message loop to receive messages from Gateway
         tracing::info!("Running in Gateway mode");
 
+        // Extract reconnect parameters before spawning tasks
+        let agent_id = config.agent_id.clone();
+        let version = loaded.manifest.version.clone();
+        let socket_path = config.get_gateway_address()
+            .expect("gateway address must be set in Gateway mode")
+            .to_string();
+
         // Spawn chunk relay task: consumes ChunkEvent from mpsc channel and
         // forwards each delta to Gateway via TYPE_STREAM_CHUNK (no response wait).
         // This uses a second IPC connection dedicated to outbound streaming chunks,
         // so it doesn't interfere with the main connection's recv/send cycle.
         let chunk_relay = if let Some(mut chunk_rx) = chunk_rx {
-            let agent_id = config.agent_id.clone();
-            let version = loaded.manifest.version.clone();
-            let socket_path = config.get_gateway_address()
-                .expect("gateway address must be set in Gateway mode")
-                .to_string();
+            let agent_id_clone = agent_id.clone();
+            let version_clone = version.clone();
+            let socket_path_clone = socket_path.clone();
             Some(tokio::spawn(async move {
                 // Connect a second IPC client for chunk relay
-                let mut chunk_client = crate::ipc::client::GatewayClient::new(&socket_path);
-                if let Err(e) = chunk_client.connect_and_register_with_role(&agent_id, &version, "chunk-relay").await {
+                let mut chunk_client = crate::ipc::client::GatewayClient::new(&socket_path_clone);
+                if let Err(e) = chunk_client.connect_and_register_with_role(&agent_id_clone, &version_clone, "chunk-relay").await {
                     tracing::error!("Chunk relay IPC connection failed: {}", e);
                     return;
                 }
@@ -355,7 +360,10 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
             None
         };
 
-        let result = run_gateway_loop(agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone()).await;
+        let result = run_gateway_loop(
+            agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone(),
+            socket_path.clone(), agent_id.clone(), version.clone(),
+        ).await;
 
         // Chunk relay task will end when chunk_rx is dropped (agent_loop dropped)
         if let Some(handle) = chunk_relay {
@@ -582,6 +590,9 @@ async fn run_gateway_loop(
     ipc_client: &mut crate::ipc::client::GatewayClient,
     mut context_builder: crate::agent::context::ContextBuilder,
     work_dir: String,
+    socket_path: String,
+    agent_id_for_reconnect: String,
+    version_for_reconnect: String,
 ) -> Result<()> {
     use rollball_core::protocol::GatewayResponse;
 
@@ -707,8 +718,23 @@ async fn run_gateway_loop(
                 }
             }
             Ok(None) => {
-                tracing::info!("Gateway connection closed");
-                break;
+                tracing::info!("Gateway connection closed, attempting reconnect...");
+                // Try to reconnect with exponential backoff
+                match try_reconnect_gateway(
+                    &socket_path,
+                    &agent_id_for_reconnect,
+                    &version_for_reconnect,
+                    ipc_client,
+                ).await {
+                    Ok(()) => {
+                        tracing::info!("Reconnected to Gateway successfully");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to reconnect to Gateway: {}", e);
+                        break;
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!("Gateway recv error: {}", e);
@@ -838,4 +864,48 @@ fn remove_agent_model(work_dir: &str) {
             tracing::warn!("Failed to remove {}: {}", AGENT_MODEL_FILE, e);
         }
     }
+}
+
+/// Attempt to reconnect to the Gateway with exponential backoff.
+///
+/// Called when the IPC connection drops (Gateway restart, network issue, etc.).
+/// Returns Ok(()) if reconnection succeeds, Err if all attempts fail.
+async fn try_reconnect_gateway(
+    socket_path: &str,
+    agent_id: &str,
+    version: &str,
+    ipc_client: &mut crate::ipc::client::GatewayClient,
+) -> Result<()> {
+    const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+    const BASE_DELAY_MS: u64 = 1000;
+    const MAX_DELAY_MS: u64 = 30000;
+
+    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+        let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt - 1), MAX_DELAY_MS);
+        tracing::info!(
+            attempt, max = MAX_RECONNECT_ATTEMPTS,
+            delay_ms = delay,
+            "Reconnect attempt {}/{} in {}ms",
+            attempt, MAX_RECONNECT_ATTEMPTS, delay
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+        // Create a fresh client and try to connect
+        let mut new_client = crate::ipc::client::GatewayClient::new(socket_path);
+        match new_client.connect_and_register(agent_id, version).await {
+            Ok(()) => {
+                tracing::info!("Reconnected to Gateway on attempt {}", attempt);
+                // Swap the old client with the new one
+                *ipc_client = new_client;
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!("Reconnect attempt {} failed: {}", attempt, e);
+            }
+        }
+    }
+
+    Err(crate::error::RuntimeError::Ipc(
+        format!("Failed to reconnect to Gateway after {} attempts", MAX_RECONNECT_ATTEMPTS)
+    ))
 }
