@@ -82,6 +82,27 @@ pub struct AgentModelResponse {
     pub available_models: Vec<String>,
 }
 
+// ── Process liveness check ────────────────────────────────────────────
+
+/// Check if a process with the given PID is still alive.
+///
+/// Uses `/proc/{pid}` on Linux (always available, no I/O cost since procfs
+/// is in-memory). On non-Linux platforms, always returns `true` as a fallback.
+///
+/// Note: There is an inherent TOCTOU race — the process may exit between
+/// this check and when the result is used. This is acceptable because the
+/// consequence is only a stale `running: true` that self-corrects on the
+/// next API call.
+#[cfg(target_os = "linux")]
+fn is_process_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_process_alive(_pid: u32) -> bool {
+    true // fallback: assume alive if we have a PID record
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────
 
 /// `GET /api/agents` — list all installed agents
@@ -95,7 +116,7 @@ pub async fn list_agents(
         .map(|info| {
             // Verify the process is actually alive (not just in running_agents)
             let actually_running = gw.running_agents.get(&info.agent_id)
-                .map(|r| std::path::Path::new(&format!("/proc/{}", r.pid)).exists())
+                .map(|r| is_process_alive(r.pid))
                 .unwrap_or(false);
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
@@ -120,7 +141,7 @@ pub async fn get_agent_detail(
     let running_info = gw.running_agents.get(&agent_id);
     // Verify the process is actually alive
     let actually_running = running_info.as_ref()
-        .map(|r| std::path::Path::new(&format!("/proc/{}", r.pid)).exists())
+        .map(|r| is_process_alive(r.pid))
         .unwrap_or(false);
     let resp = AgentDetailResponse {
         agent_id: info.agent_id.clone(),

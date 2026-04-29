@@ -270,32 +270,55 @@ impl Gateway {
     ///
     /// When Gateway restarts, previously spawned runtime processes lose their IPC
     /// connection and become useless orphans. This method finds them by scanning
-    /// /proc for rollball-runtime processes and killing them.
-    fn cleanup_orphaned_runtimes(&self) {
+    /// /proc for rollball-runtime processes whose `--gateway-socket` argument
+    /// matches this Gateway's socket path, and kills them.
+    ///
+    /// Scoping by socket path ensures we only kill orphans belonging to THIS
+    /// Gateway instance, not runtimes managed by other concurrent Gateway instances.
+    fn cleanup_orphaned_runtimes(&self) -> usize {
         // Find all rollball-runtime processes
         let output = match std::process::Command::new("pgrep")
-            .args(["-f", "rollball-runtime"])
+            .args(["-af", "rollball-runtime"])
             .output()
         {
             Ok(o) => o,
-            Err(_) => return, // pgrep not available, skip cleanup
+            Err(_) => return 0, // pgrep not available, skip cleanup
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let pids: Vec<u32> = stdout
+        let my_pid = std::process::id();
+
+        // Filter PIDs whose command line includes our socket path
+        let pids_to_kill: Vec<(u32, String)> = stdout
             .lines()
-            .filter_map(|l| l.trim().parse().ok())
-            .filter(|&pid| pid != std::process::id()) // don't kill self
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+                let pid: u32 = parts.first()?.trim().parse().ok()?;
+                if pid == my_pid {
+                    return None; // don't kill self
+                }
+                let cmdline = parts.get(1).map(|s| s.trim()).unwrap_or("");
+                // Only kill runtimes that were connected to OUR socket path
+                if cmdline.contains(&self.config.socket_path) {
+                    Some((pid, cmdline.to_string()))
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        if pids.is_empty() {
-            return;
+        if pids_to_kill.is_empty() {
+            return 0;
         }
 
-        tracing::info!("Found {} orphaned runtime process(es), cleaning up", pids.len());
+        tracing::info!(
+            count = pids_to_kill.len(),
+            "Found {} orphaned runtime process(es) for this Gateway, cleaning up",
+            pids_to_kill.len()
+        );
 
-        for pid in pids {
-            // Try graceful kill first
+        for (pid, _cmdline) in &pids_to_kill {
+            // Try graceful kill first (SIGTERM)
             match std::process::Command::new("kill")
                 .args(["-15", &pid.to_string()])
                 .output()
@@ -304,6 +327,8 @@ impl Gateway {
                 Err(e) => tracing::warn!("Failed to kill orphaned runtime (PID {}): {}", pid, e),
             }
         }
+
+        pids_to_kill.len()
     }
 
     /// Run the Gateway daemon (async, multi-connection)
@@ -339,7 +364,10 @@ impl Gateway {
         // When Gateway restarts, previously running agents become orphaned
         // (no IPC connection). We kill them so the fresh Gateway can manage
         // agents from a clean state.
-        self.cleanup_orphaned_runtimes();
+        let orphan_count = self.cleanup_orphaned_runtimes();
+        if orphan_count > 0 {
+            tracing::info!(count = orphan_count, "Cleaned up orphan runtime processes");
+        }
 
         // Auto-install bundled agents (System Agent, etc.) if not installed
         self.auto_install_bundled_agents().await;

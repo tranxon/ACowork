@@ -327,13 +327,15 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         // This uses a second IPC connection dedicated to outbound streaming chunks,
         // so it doesn't interfere with the main connection's recv/send cycle.
         let chunk_relay = if let Some(mut chunk_rx) = chunk_rx {
-            let agent_id_clone = agent_id.clone();
-            let version_clone = version.clone();
-            let socket_path_clone = socket_path.clone();
+            let agent_id = agent_id.clone();
+            let version = version.clone();
+            let socket_path = socket_path.clone();
             Some(tokio::spawn(async move {
-                // Connect a second IPC client for chunk relay
-                let mut chunk_client = crate::ipc::client::GatewayClient::new(&socket_path_clone);
-                if let Err(e) = chunk_client.connect_and_register_with_role(&agent_id_clone, &version_clone, "chunk-relay").await {
+                // Connect a second IPC client for chunk relay.
+                // On send failure, reconnect with exponential backoff so that
+                // streaming resumes after Gateway restart / IPC reconnect.
+                let mut chunk_client = crate::ipc::client::GatewayClient::new(&socket_path);
+                if let Err(e) = chunk_client.connect_and_register_with_role(&agent_id, &version, "chunk-relay").await {
                     tracing::error!("Chunk relay IPC connection failed: {}", e);
                     return;
                 }
@@ -349,7 +351,27 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                                 .send_stream_chunk("http-ws", "agent_chunk", params, true)
                                 .await
                             {
-                                tracing::debug!("Chunk relay send failed: {}", e);
+                                tracing::warn!("Chunk relay send failed: {}, reconnecting...", e);
+                                // Reconnect chunk relay IPC with exponential backoff
+                                match try_reconnect_chunk_relay(
+                                    &socket_path, &agent_id, &version, &mut chunk_client,
+                                ).await {
+                                    Ok(()) => {
+                                        tracing::info!("Chunk relay reconnected, resending last chunk");
+                                        // Retry the failed chunk once after reconnect
+                                        let retry_params = serde_json::json!({ "content": delta });
+                                        if let Err(e2) = chunk_client
+                                            .send_stream_chunk("http-ws", "agent_chunk", retry_params, true)
+                                            .await
+                                        {
+                                            tracing::warn!("Chunk relay retry failed after reconnect: {}", e2);
+                                        }
+                                    }
+                                    Err(e2) => {
+                                        tracing::error!("Chunk relay reconnect failed: {}", e2);
+                                        // Keep consuming chunks but they will be dropped until reconnect succeeds
+                                    }
+                                }
                             }
                         }
                     }
@@ -907,5 +929,47 @@ async fn try_reconnect_gateway(
 
     Err(crate::error::RuntimeError::Ipc(
         format!("Failed to reconnect to Gateway after {} attempts", MAX_RECONNECT_ATTEMPTS)
+    ))
+}
+
+/// Attempt to reconnect the chunk relay IPC connection with exponential backoff.
+///
+/// Similar to `try_reconnect_gateway` but registers with the "chunk-relay" role
+/// so the Gateway associates this connection with the streaming chunk channel.
+async fn try_reconnect_chunk_relay(
+    socket_path: &str,
+    agent_id: &str,
+    version: &str,
+    chunk_client: &mut crate::ipc::client::GatewayClient,
+) -> Result<()> {
+    const MAX_RECONNECT_ATTEMPTS: u32 = 3;
+    const BASE_DELAY_MS: u64 = 500;
+    const MAX_DELAY_MS: u64 = 10000;
+
+    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+        let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt - 1), MAX_DELAY_MS);
+        tracing::info!(
+            attempt, max = MAX_RECONNECT_ATTEMPTS,
+            delay_ms = delay,
+            "Chunk relay reconnect attempt {}/{} in {}ms",
+            attempt, MAX_RECONNECT_ATTEMPTS, delay
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+        let mut new_client = crate::ipc::client::GatewayClient::new(socket_path);
+        match new_client.connect_and_register_with_role(agent_id, version, "chunk-relay").await {
+            Ok(()) => {
+                tracing::info!("Chunk relay reconnected on attempt {}", attempt);
+                *chunk_client = new_client;
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!("Chunk relay reconnect attempt {} failed: {}", attempt, e);
+            }
+        }
+    }
+
+    Err(crate::error::RuntimeError::Ipc(
+        format!("Failed to reconnect chunk relay after {} attempts", MAX_RECONNECT_ATTEMPTS)
     ))
 }

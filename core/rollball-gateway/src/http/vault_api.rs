@@ -317,7 +317,7 @@ mod tests {
     fn test_update_key_request_deserialization() {
         let json = r#"{"key": "sk-new-key"}"#;
         let req: UpdateKeyRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.key, "sk-new-key");
+        assert_eq!(req.key, Some("sk-new-key".to_string()));
         assert!(req.base_url.is_none());
         assert!(req.default_model.is_none());
     }
@@ -326,7 +326,7 @@ mod tests {
     fn test_update_key_request_with_full_config() {
         let json = r#"{"key": "sk-new", "base_url": "https://api.custom.com/v1", "default_model": "custom-model"}"#;
         let req: UpdateKeyRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.key, "sk-new");
+        assert_eq!(req.key, Some("sk-new".to_string()));
         assert_eq!(req.base_url, Some("https://api.custom.com/v1".to_string()));
         assert_eq!(req.default_model, Some("custom-model".to_string()));
     }

@@ -102,6 +102,7 @@ impl PermissionParseError {
     }
 
     /// Create an error for an invalid sub-component value.
+    #[allow(dead_code)]
     fn invalid_value(input: &str, component: &str, valid: &str) -> Self {
         Self::new(input, &format!("invalid {} '{}'. Valid values: {}", component, input, valid))
     }
