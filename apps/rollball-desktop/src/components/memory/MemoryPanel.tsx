@@ -161,21 +161,21 @@ export function MemoryPanel() {
         </div>
       )}
 
-      {/* Main content: list + detail */}
+      {/* Main content: drawer-style master-detail toggle */}
       <div className="flex flex-1 overflow-hidden">
-        <MemoryNodeList
-          nodes={nodes}
-          total={total}
-          page={page}
-          pageSize={pageSize}
-          totalPages={totalPages}
-          loading={loading}
-          selectedNodeId={selectedNodeId}
-          onSelectNode={setSelectedNodeId}
-          onPageChange={setPage}
-        />
-
-        {selectedNode && (
+        {!selectedNode ? (
+          <MemoryNodeList
+            nodes={nodes}
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            totalPages={totalPages}
+            loading={loading}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
+            onPageChange={setPage}
+          />
+        ) : (
           <MemoryNodeDetail
             node={selectedNode}
             onClose={() => setSelectedNodeId(null)}

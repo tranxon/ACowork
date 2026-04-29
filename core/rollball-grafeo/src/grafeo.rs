@@ -234,6 +234,50 @@ impl MemoryStore for GrafeoStore {
         Ok(count as u64)
     }
 
+    fn get_episodes(
+        &self,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> rollball_core::error::Result<Vec<rollball_memory::Episode>> {
+        let grafeo_eps = if let Some(sid) = session_id {
+            self.search_episodes_by_session(sid, limit)
+                .map_err(|e| rollball_core::error::RollballError::Memory(e.to_string()))?
+        } else {
+            self.list_all_episodes(limit)
+                .map_err(|e| rollball_core::error::RollballError::Memory(e.to_string()))?
+        };
+
+        Ok(grafeo_eps
+            .into_iter()
+            .map(|ep| rollball_memory::Episode {
+                session_id: ep.session_id,
+                turn_index: ep.turn_index,
+                role: ep.role,
+                content: ep.content,
+                content_type: match ep.content_type {
+                    crate::types::ContentType::Informational => rollball_memory::ContentType::Informational,
+                    crate::types::ContentType::Artifact => rollball_memory::ContentType::Artifact,
+                    crate::types::ContentType::Structural => rollball_memory::ContentType::Structural,
+                },
+                embedding: ep.embedding,
+                timestamp: ep.timestamp,
+                consolidated: ep.consolidated,
+                metadata: ep.metadata,
+                artifact_refs: ep
+                    .artifact_refs
+                    .into_iter()
+                    .map(|r| rollball_memory::ArtifactRef {
+                        path: r.path,
+                        hash: r.hash,
+                        description: r.description,
+                        line_range: r.line_range,
+                    })
+                    .collect(),
+                importance: ep.importance,
+            })
+            .collect())
+    }
+
     fn store_knowledge(&self, node: &KnowledgeNode) -> rollball_core::error::Result<()> {
         let grafeo_node = GrafeoKnowledgeNode {
             id: None,

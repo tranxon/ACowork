@@ -136,6 +136,28 @@ impl GrafeoStore {
         }
         Ok(episodes)
     }
+
+    /// List all episodes ordered by timestamp descending.
+    ///
+    /// Returns up to `limit` episodes across all sessions.
+    pub fn list_all_episodes(&self, limit: usize) -> Result<Vec<Episode>> {
+        let session = self.db.session();
+        let gql = format!(
+            "MATCH (e:Episodic) RETURN e ORDER BY e.timestamp DESC LIMIT {}",
+            limit
+        );
+        let result = session.execute(&gql)?;
+
+        let mut episodes = Vec::new();
+        for row in result.rows() {
+            if let Some(Value::Map(map)) = row.first() {
+                if let Ok(ep) = crate::episodic::value_to_episode(&Value::Map(map.clone())) {
+                    episodes.push(ep);
+                }
+            }
+        }
+        Ok(episodes)
+    }
 }
 
 #[cfg(test)]

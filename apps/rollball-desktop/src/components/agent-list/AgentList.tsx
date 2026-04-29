@@ -146,7 +146,7 @@ export function AgentList({ width }: AgentListProps) {
 
   return (
     <div
-      className="flex flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+      className="flex flex-col bg-white dark:bg-zinc-900"
       style={{ width: width ?? 240 }}
     >
       {/* Header */}
@@ -164,38 +164,62 @@ export function AgentList({ width }: AgentListProps) {
           </div>
         )}
 
-        {agents.map((agent) => (
-          <div
-            key={agent.agent_id}
-            className={cn(
-              "flex cursor-pointer items-center gap-2 px-3 py-2 transition-colors duration-150",
-              selectedAgentId === agent.agent_id
-                ? "bg-zinc-100 dark:bg-zinc-800"
-                : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
-            )}
-            onClick={() => selectAgent(agent.agent_id)}
-            onContextMenu={(e) => handleContextMenu(e, agent.agent_id)}
-            role="listitem"
-          >
-            <Bot className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="truncate text-sm font-medium">{agent.name}</span>
-                {agent.agent_id === "com.rollball.system" && (
-                  <span className="shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900 dark:text-blue-300">System</span>
-                )}
-              </div>
-              <div className="truncate text-xs text-zinc-400 dark:text-zinc-500">{agent.agent_id}</div>
-            </div>
+        {agents.map((agent) => {
+          const isSystem = agent.agent_id === "com.rollball.system";
+          const lastActivity = agent.running ? "Active" : "Stopped";
+          
+          return (
             <div
+              key={agent.agent_id}
               className={cn(
-                "h-2 w-2 shrink-0 rounded-full transition-colors duration-300",
-                agent.running ? "bg-green-500" : "bg-zinc-300 dark:bg-zinc-600",
+                "flex cursor-pointer items-start gap-3 px-3 py-3 transition-colors duration-150",
+                selectedAgentId === agent.agent_id
+                  ? "bg-zinc-100 dark:bg-zinc-800"
+                  : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
               )}
-              title={agent.running ? "Running" : "Stopped"}
-            />
-          </div>
-        ))}
+              onClick={() => selectAgent(agent.agent_id)}
+              onContextMenu={(e) => handleContextMenu(e, agent.agent_id)}
+              role="listitem"
+            >
+              {/* Avatar with status indicator */}
+              <div className="relative mt-0.5">
+                <div className={cn(
+                  "flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold",
+                  isSystem 
+                    ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white"
+                    : "bg-gradient-to-br from-zinc-400 to-zinc-500 text-white dark:from-zinc-500 dark:to-zinc-600"
+                )}>
+                  {agent.name.charAt(0).toUpperCase()}
+                </div>
+                {/* Status dot */}
+                <div
+                  className={cn(
+                    "absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white dark:border-zinc-900",
+                    agent.running ? "bg-green-500" : "bg-zinc-400 dark:bg-zinc-600"
+                  )}
+                  title={agent.running ? "Running" : "Stopped"}
+                />
+              </div>
+
+              {/* Content area */}
+              <div className="min-w-0 flex-1">
+                {/* Top row: name + system badge */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{agent.name}</span>
+                    {isSystem && (
+                      <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/50 dark:text-blue-300">System</span>
+                    )}
+                  </div>
+                </div>
+                {/* Bottom row: version / last activity */}
+                <div className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-500">
+                  {`v${agent.version} · ${lastActivity}`}
+                </div>
+              </div>
+            </div>
+          );
+        })}
 
         {agents.length === 0 && !loading && (
           <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-500">

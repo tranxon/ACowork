@@ -25,6 +25,8 @@ interface ChatStore {
   setAvailableModels: (models: string[]) => void;
   /** Load model for a specific agent from Gateway API, returns the model name */
   loadAgentModel: (agentId: string) => Promise<string | null>;
+  /** Load conversation history for a specific agent from Gateway API */
+  loadConversationHistory: (agentId: string) => Promise<void>;
 }
 
 /** Derive WebSocket URL from Gateway HTTP base URL */
@@ -294,6 +296,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return data.model ?? null;
     } catch {
       return null;
+    }
+  },
+  loadConversationHistory: async (agentId: string) => {
+    try {
+      const resp = await fetch(`http://127.0.0.1:19876/api/agents/${agentId}/conversations/latest`);
+      if (!resp.ok) return;
+      const data = await resp.json() as { session_id?: string; messages?: Array<{ role: string; content: string; timestamp: number; turn_index: number }> };
+
+      if (!data.messages || data.messages.length === 0) return;
+
+      // Convert Episode messages to ChatMessage format
+      const historyMessages: ChatMessage[] = data.messages.map((msg) => ({
+        id: `history-${msg.turn_index}-${msg.role}-${msg.timestamp}`,
+        type: msg.role === "user" ? "user" : msg.role === "assistant" ? "assistant" : "system",
+        content: msg.content,
+        timestamp: msg.timestamp * 1000, // Convert seconds to milliseconds
+      }));
+
+      set({ messages: historyMessages });
+    } catch (e) {
+      console.error("Failed to load conversation history:", e);
+      // Silently fail — empty chat is acceptable
     }
   },
 }));

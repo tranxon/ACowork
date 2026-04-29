@@ -4,6 +4,7 @@ mod events;
 mod menu;
 
 use tauri::{
+    image::Image,
     menu::MenuBuilder,
     tray::TrayIconBuilder,
     App,
@@ -21,9 +22,14 @@ pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .items(&[&quit])
         .build()?;
 
+    // Load icon from embedded resources
+    let icon = Image::from_bytes(include_bytes!("../../icons/icon.png"))?;
+
     let _tray = TrayIconBuilder::new()
+        .icon(icon)
         .menu(&menu)
         .tooltip("Rollball")
+        .menu_on_left_click(false)  // Right-click shows menu, left-click triggers event
         .on_menu_event(events::on_menu_event)
         .on_tray_icon_event(events::on_tray_icon_event)
         .build(app)?;

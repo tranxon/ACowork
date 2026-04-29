@@ -38,6 +38,12 @@ pub trait MemoryStore: Send + Sync {
     /// Cleanup consolidated episodes older than the given duration.
     fn cleanup_episodes(&self, older_than: Duration) -> Result<u64>;
 
+    /// Retrieve episodes for conversation history.
+    ///
+    /// If `session_id` is provided, returns episodes for that session ordered by
+    /// timestamp descending. Otherwise returns all episodes across all sessions.
+    fn get_episodes(&self, session_id: Option<&str>, limit: usize) -> Result<Vec<Episode>>;
+
     // ── Semantic layer ───────────────────────────────────────────────────
 
     /// Store or update a knowledge node (Fact/Preference/Relation).

@@ -4,18 +4,21 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
+import { MemoryPanel } from "../memory/MemoryPanel";
+import { SkillBrowser } from "../skills/SkillBrowser";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
+  const [activeDrawer, setActiveDrawer] = useState<"memory" | "skills" | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
@@ -51,11 +54,13 @@ export function ChatPanel() {
       connectStream(selectedAgentId, "http://127.0.0.1:19876");
       // Always load model from Gateway API (reads per-agent .agent_model.json)
       loadAgentModel(selectedAgentId);
+      // Load conversation history for the new agent
+      loadConversationHistory(selectedAgentId);
     }
     return () => {
       useChatStore.getState().disconnectStream();
     };
-  }, [selectedAgentId, selectedAgent?.running, connectStream]);
+  }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadConversationHistory]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -129,60 +134,119 @@ export function ChatPanel() {
           </span>
         </div>
       )}
-      {/* Messages area */}
-      <div className="flex-1 overflow-y-auto px-4 py-3" role="log" aria-label="Chat messages">
-        {messages.length === 0 && (
-          <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
-            Start a conversation with {selectedAgent.name}
+      {/* Messages area with drawer overlay */}
+      <div className="relative flex-1 overflow-hidden">
+        <div className="h-full overflow-y-auto px-4 py-3" role="log" aria-label="Chat messages">
+          {messages.length === 0 && (
+            <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+              Start a conversation with {selectedAgent.name}
+            </div>
+          )}
+          <div className="space-y-2">
+            {messages.map((msg) => (
+              <MessageBubble key={msg.id} message={msg} isStreaming={msg.id === streamingMessageId} />
+            ))}
+          </div>
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Drawer panel — slides in from the right */}
+        {activeDrawer && (
+          <div
+            className="absolute inset-0 flex justify-end bg-black/20 z-20"
+            onClick={() => setActiveDrawer(null)}
+          >
+            <div
+              className="w-[480px] max-w-full h-full bg-white dark:bg-zinc-900 shadow-xl overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="sticky top-0 flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 z-10">
+                <span className="font-medium text-sm text-zinc-900 dark:text-zinc-100">
+                  {activeDrawer === "memory" ? "Memory" : "Skills"}
+                </span>
+                <button
+                  className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  onClick={() => setActiveDrawer(null)}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              {activeDrawer === "memory" && <MemoryPanel />}
+              {activeDrawer === "skills" && <SkillBrowser />}
+            </div>
           </div>
         )}
-        <div className="space-y-2">
-          {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} isStreaming={msg.id === streamingMessageId} />
-          ))}
-        </div>
-        <div ref={messagesEndRef} />
       </div>
 
-      {/* Input area */}
-      <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
-        {/* Model switcher — only enabled when agent is running */}
-        {availableModels.length > 1 && selectedAgent?.running && (
-          <ModelMenu
-            models={availableModels}
-            currentModel={currentModel}
-            currentProvider={currentProvider}
-            onSelect={(m) => selectedAgentId && setCurrentModel(m, selectedAgentId)}
-          />
-        )}
-        <div className="flex gap-2">
-          <textarea
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder={
-              gatewayStatus !== "connected"
-                ? "Gateway not connected"
-                : !ws || ws.readyState !== WebSocket.OPEN
-                  ? "Type a message... (HTTP mode — streaming unavailable)"
-                  : "Type a message... (Enter to send, Shift+Enter for new line)"
+      {/* Unified input container with toolbar */}
+      <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 overflow-hidden">
+        {/* Textarea area — borderless, transparent background */}
+        <textarea
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          placeholder={
+            gatewayStatus !== "connected"
+              ? "Gateway not connected"
+              : !ws || ws.readyState !== WebSocket.OPEN
+                ? "Type a message... (HTTP mode — streaming unavailable)"
+                : "Type a message... (Enter to send, Shift+Enter for new line)"
+          }
+          disabled={inputDisabled}
+          rows={3}
+          className="w-full resize-none border-0 bg-transparent p-3 pb-2 text-sm outline-none placeholder:text-zinc-500 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSend();
             }
-            disabled={inputDisabled}
-            rows={1}
-            className="max-h-32 min-h-[36px] flex-1 resize-none rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-          />
+          }}
+        />
+
+        {/* Bottom toolbar */}
+        <div className="flex items-center justify-between px-3 pb-2">
+          {/* Left: feature buttons */}
+          <div className="flex items-center gap-1">
+            {/* Model switcher — only enabled when agent is running */}
+            {availableModels.length > 1 && selectedAgent?.running && (
+              <ModelMenu
+                models={availableModels}
+                currentModel={currentModel}
+                currentProvider={currentProvider}
+                onSelect={(m) => selectedAgentId && setCurrentModel(m, selectedAgentId)}
+              />
+            )}
+            {/* Memory button */}
+            <button
+              className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors ${
+                activeDrawer === "memory"
+                  ? "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100"
+                  : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
+              }`}
+              onClick={() => setActiveDrawer(activeDrawer === "memory" ? null : "memory")}
+            >
+              <Brain size={14} /> Memory
+            </button>
+            {/* Skills button */}
+            <button
+              className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors ${
+                activeDrawer === "skills"
+                  ? "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100"
+                  : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
+              }`}
+              onClick={() => setActiveDrawer(activeDrawer === "skills" ? null : "skills")}
+            >
+              <Wrench size={14} /> Skills
+            </button>
+          </div>
+
+          {/* Right: send button */}
           <button
+            className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
             onClick={handleSend}
             disabled={inputDisabled || !inputValue.trim()}
-            className="flex h-9 w-9 items-center justify-center rounded-md bg-zinc-800 text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
             aria-label="Send message"
           >
-            <Send className="h-4 w-4" />
+            <Send size={16} />
           </button>
         </div>
       </div>
@@ -348,13 +412,13 @@ function ModelMenu({
   }, [open]);
 
   return (
-    <div ref={ref} className="relative mb-2 inline-block">
+    <div ref={ref} className="relative inline-block">
       {/* Trigger button */}
       <button
         type="button"
         onClick={() => setOpen(!open)}
         className={cn(
-          "flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
+          "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
           "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
           "dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700",
           open && "ring-1 ring-zinc-300 dark:ring-zinc-600",
