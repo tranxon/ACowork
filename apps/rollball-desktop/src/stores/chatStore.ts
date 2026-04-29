@@ -8,15 +8,20 @@ interface ChatStore {
   sending: boolean;
   ws: WebSocket | null;
   tokenUsage: TokenUsage | null;
+  /** Current active model for the selected agent */
   currentModel: string | null;
+  /** Per-agent model memory: agent_id → model name */
+  agentModels: Record<string, string>;
   availableModels: string[];
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => void;
   disconnectStream: () => void;
   clearMessages: () => void;
-  setCurrentModel: (model: string) => void;
+  setCurrentModel: (model: string, agentId: string) => void;
   setAvailableModels: (models: string[]) => void;
+  /** Load model for a specific agent from Gateway API, returns the model name */
+  loadAgentModel: (agentId: string) => Promise<string | null>;
 }
 
 /** Derive WebSocket URL from Gateway HTTP base URL */
@@ -33,6 +38,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   ws: null,
   tokenUsage: null,
   currentModel: null,
+  agentModels: {},
   availableModels: [],
 
   connectStream: (agentId: string, gatewayUrl: string = DEFAULT_GATEWAY_URL) => {
@@ -157,8 +163,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   clearMessages: () => {
     set({ messages: [], tokenUsage: null });
   },
-  setCurrentModel: (model: string) => {
-    set({ currentModel: model });
+  setCurrentModel: (model: string, agentId: string) => {
+    set((state) => ({
+      currentModel: model,
+      agentModels: { ...state.agentModels, [agentId]: model },
+    }));
     // Send model_switch message to Agent via WebSocket when user changes model
     const ws = get().ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -167,6 +176,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
   setAvailableModels: (models: string[]) => {
     set({ availableModels: models, currentModel: models[0] ?? null });
+  },
+  loadAgentModel: async (agentId: string): Promise<string | null> => {
+    try {
+      const resp = await fetch(`http://127.0.0.1:19876/api/agents/${agentId}/model`);
+      if (!resp.ok) return null;
+      const data = await resp.json() as { provider: string; model: string; available_models: string[] };
+      if (data.model) {
+        set((state) => ({
+          currentModel: data.model,
+          agentModels: { ...state.agentModels, [agentId]: data.model },
+          availableModels: data.available_models?.length ? data.available_models : state.availableModels,
+        }));
+      }
+      return data.model ?? null;
+    } catch {
+      return null;
+    }
   },
 }));
 
@@ -254,6 +280,13 @@ function handleMessageEvent(
           tokenUsage: usage ?? state.tokenUsage,
         };
       });
+      break;
+    }
+
+    case "model_confirmed": {
+      // Gateway confirms the model switch was forwarded to the Agent
+      const confirmedModel = data.model as string;
+      console.log("[ChatStore] Model switch confirmed:", confirmedModel);
       break;
     }
 

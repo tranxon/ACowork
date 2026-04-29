@@ -12,7 +12,7 @@ import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, availableModels, setCurrentModel, setAvailableModels } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, agentModels } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
@@ -42,10 +42,16 @@ export function ChatPanel() {
     loadModels();
   }, [gatewayStatus, setAvailableModels]);
 
-  // Connect WebSocket when agent changes
+  // Connect WebSocket when agent changes + restore per-agent model
   useEffect(() => {
     if (selectedAgentId && selectedAgent?.running) {
       connectStream(selectedAgentId, "http://127.0.0.1:19876");
+      // Restore per-agent model: check local cache first, then fetch from Gateway
+      if (agentModels[selectedAgentId]) {
+        // Already cached locally
+      } else {
+        loadAgentModel(selectedAgentId);
+      }
     }
     return () => {
       useChatStore.getState().disconnectStream();
@@ -145,7 +151,7 @@ export function ChatPanel() {
             <span className="text-[10px] text-zinc-400">Model:</span>
             <select
               value={currentModel ?? ""}
-              onChange={(e) => setCurrentModel(e.target.value)}
+              onChange={(e) => selectedAgentId && setCurrentModel(e.target.value, selectedAgentId)}
               className="rounded border border-zinc-200 bg-white px-2 py-0.5 text-xs text-zinc-700 outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:focus:border-zinc-500"
             >
               {availableModels.map((m) => (
