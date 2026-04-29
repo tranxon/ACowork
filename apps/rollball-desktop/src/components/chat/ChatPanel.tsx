@@ -11,7 +11,7 @@ import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, agentModels } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
@@ -43,6 +43,9 @@ export function ChatPanel() {
 
   // Connect WebSocket when agent changes + restore per-agent model
   useEffect(() => {
+    // Clear stale messages from previous agent
+    useChatStore.getState().clearMessages();
+
     if (selectedAgentId && selectedAgent?.running) {
       connectStream(selectedAgentId, "http://127.0.0.1:19876");
       // Always load model from Gateway API (reads per-agent .agent_model.json)
@@ -61,7 +64,9 @@ export function ChatPanel() {
   const handleSend = () => {
     const content = inputValue.trim();
     if (!content || sending || !selectedAgentId) return;
-    sendMessage(content, selectedAgentId);
+    // sendMessage is async but we fire-and-forget here —
+    // the store handles all state updates internally
+    void sendMessage(content, selectedAgentId);
     setInputValue("");
   };
 

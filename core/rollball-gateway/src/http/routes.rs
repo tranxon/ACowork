@@ -403,6 +403,13 @@ impl ApiError {
             code: 401,
         }))
     }
+
+    pub fn service_unavailable(msg: &str) -> (StatusCode, Json<Self>) {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(Self {
+            error: msg.to_string(),
+            code: 503,
+        }))
+    }
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ interface ChatStore {
   availableModels: string[];
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
-  sendMessage: (content: string, agentId: string) => void;
+  sendMessage: (content: string, agentId: string) => Promise<void>;
   disconnectStream: () => void;
   clearMessages: () => void;
   setCurrentModel: (model: string, agentId: string) => void;
@@ -127,8 +127,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set({ ws, streamingMessageId: null, tokenUsage: null });
   },
 
-  sendMessage: (content: string, agentId: string) => {
-    const ws = get().ws;
+  sendMessage: async (content: string, agentId: string) => {
+    const { ws } = get();
 
     // Add user message
     const userMsg: ChatMessage = {
@@ -142,9 +142,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       sending: true,
     }));
 
-    // Try WebSocket first (streaming)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "message", content }));
+    // Helper: send via WebSocket and set up streaming placeholder
+    const sendViaWs = (socket: WebSocket) => {
+      socket.send(JSON.stringify({ type: "message", content }));
 
       // Create placeholder for assistant streaming message
       const assistantMsgId = `msg-assistant-${Date.now()}`;
@@ -158,41 +158,75 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: [...state.messages, assistantMsg],
         streamingMessageId: assistantMsgId,
       }));
-      return;
+    };
+
+    // If WebSocket exists, try to use it
+    if (ws) {
+      if (ws.readyState === WebSocket.OPEN) {
+        // Already connected — send immediately
+        sendViaWs(ws);
+        return;
+      }
+
+      if (ws.readyState === WebSocket.CONNECTING) {
+        // Wait for connection to open (max 2 seconds)
+        const connected = await new Promise<boolean>((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 2000);
+          const onOpen = () => {
+            clearTimeout(timeout);
+            ws.removeEventListener("open", onOpen);
+            ws.removeEventListener("error", onError);
+            resolve(true);
+          };
+          const onError = () => {
+            clearTimeout(timeout);
+            ws.removeEventListener("open", onOpen);
+            ws.removeEventListener("error", onError);
+            resolve(false);
+          };
+          ws.addEventListener("open", onOpen);
+          ws.addEventListener("error", onError);
+        });
+
+        if (connected) {
+          sendViaWs(ws);
+          return;
+        }
+        // Connection timed out or failed — fall through to HTTP
+      }
     }
 
     // Fallback: send via Tauri HTTP command
-    (async () => {
-      try {
-        const result = await invoke<{ message_id: string; status: string }>(
-          "send_message",
-          { agentId, content },
-        );
-        console.log("[ChatStore] Message sent via HTTP:", result);
-        // Show a system message since we can't stream the response
-        const replyMsg: ChatMessage = {
-          id: `msg-assistant-${Date.now()}`,
-          type: "system",
-          content: "Message sent. Waiting for agent response... (streaming not available)",
-          timestamp: Date.now(),
-        };
-        set((state) => ({
-          messages: [...state.messages, replyMsg],
-          sending: false,
-        }));
-      } catch (e) {
-        const errMsg: ChatMessage = {
-          id: `msg-error-${Date.now()}`,
-          type: "system",
-          content: `Error: ${e}`,
-          timestamp: Date.now(),
-        };
-        set((state) => ({
-          messages: [...state.messages, errMsg],
-          sending: false,
-        }));
-      }
-    })();
+    try {
+      const result = await invoke<{ message_id: string; status: string }>(
+        "send_message",
+        { agentId, content },
+      );
+      console.log("[ChatStore] Message sent via HTTP:", result);
+      // Show a system message since we can't stream the response
+      const replyMsg: ChatMessage = {
+        id: `msg-assistant-${Date.now()}`,
+        type: "system",
+        content: "Message sent. Waiting for agent response... (streaming not available)",
+        timestamp: Date.now(),
+      };
+      set((state) => ({
+        messages: [...state.messages, replyMsg],
+        sending: false,
+      }));
+    } catch (error) {
+      console.error("[ChatStore] HTTP message send failed:", error);
+      const errorMsg: ChatMessage = {
+        id: `msg-error-${Date.now()}`,
+        type: "system",
+        content: `Failed to send message: Agent may not be connected yet. Please wait and try again.`,
+        timestamp: Date.now(),
+      };
+      set((state) => ({
+        messages: [...state.messages, errorMsg],
+        sending: false,
+      }));
+    }
   },
 
   disconnectStream: () => {
@@ -247,7 +281,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 function handleMessageEvent(
   data: Record<string, unknown>,
   set: (fn: Partial<ChatStore> | ((state: ChatStore) => Partial<ChatStore>)) => void,
-  _get: () => ChatStore,
+  get: () => ChatStore,
 ) {
   const eventType = data.type as string;
 

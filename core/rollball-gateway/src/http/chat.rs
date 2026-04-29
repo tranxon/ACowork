@@ -137,9 +137,14 @@ pub async fn send_message(
                     agent_id,
                     conn_id
                 );
+                return Err(ApiError::internal("Failed to deliver message to agent"));
             }
         } else {
             tracing::warn!("Agent {} is running but has no IPC session", agent_id);
+            return Err(ApiError::service_unavailable(&format!(
+                "Agent {} is not yet connected",
+                agent_id
+            )));
         }
     }
 
