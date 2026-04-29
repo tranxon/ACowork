@@ -9,8 +9,15 @@ interface AgentDetailDialogProps {
   onClose: () => void;
 }
 
+interface AgentModelInfo {
+  provider: string;
+  model: string;
+  available_models: string[];
+}
+
 export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogProps) {
   const [detail, setDetail] = useState<AgentDetail | null>(null);
+  const [modelInfo, setModelInfo] = useState<AgentModelInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -24,6 +31,12 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
       .then((d) => setDetail(d))
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
+
+    // Fetch model info from Gateway API
+    fetch(`http://127.0.0.1:19876/api/agents/${agentId}/model`)
+      .then((resp) => resp.ok ? resp.json() as Promise<AgentModelInfo> : null)
+      .then((data) => setModelInfo(data))
+      .catch(() => setModelInfo(null));
   }, [open, agentId]);
 
   // Focus close button on open; Escape to close
@@ -94,6 +107,17 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
             {detail.pid !== null && <DetailRow label="PID" value={String(detail.pid)} mono />}
             {detail.started_at && <DetailRow label="Started At" value={detail.started_at} />}
             <DetailRow label="Install Path" value={detail.install_path} mono />
+            {modelInfo && (
+              <DetailRow
+                label="Current Model"
+                value={
+                  <span className="flex items-center gap-1.5">
+                    <span className="font-mono text-xs text-blue-600 dark:text-blue-400">{modelInfo.model}</span>
+                    <span className="text-[10px] text-zinc-400">({modelInfo.provider})</span>
+                  </span>
+                }
+              />
+            )}
           </div>
         )}
 
