@@ -606,6 +606,7 @@ async fn run_chat_loop(
 /// 2. Checks remaining budget before processing each message
 /// 3. Runs the agent loop for each message
 /// 4. Sends responses back to Gateway
+#[allow(clippy::too_many_arguments)]
 async fn run_gateway_loop(
     mut agent_loop: crate::agent::loop_::AgentLoop,
     _inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
@@ -634,21 +635,21 @@ async fn run_gateway_loop(
                         tracing::info!("Received intent from {}: {}", from, action);
 
                         // Budget pre-check: skip processing if budget is exhausted
-                        if let Ok((remaining_tokens, _)) = ipc_client.query_budget(&budget_provider).await {
-                            if remaining_tokens == 0 {
-                                tracing::warn!(
-                                    "Budget exhausted for provider={}, skipping message from {}",
-                                    budget_provider, from
-                                );
-                                let error_params = serde_json::json!({
-                                    "content": "Budget exhausted — cannot process this message",
-                                    "message_id": params.get("message_id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown"),
-                                });
-                                let _ = ipc_client.send_intent(&from, "agent_error", error_params, false).await;
-                                continue;
-                            }
+                        if let Ok((remaining_tokens, _)) = ipc_client.query_budget(&budget_provider).await
+                            && remaining_tokens == 0
+                        {
+                            tracing::warn!(
+                                "Budget exhausted for provider={}, skipping message from {}",
+                                budget_provider, from
+                            );
+                            let error_params = serde_json::json!({
+                                "content": "Budget exhausted — cannot process this message",
+                                "message_id": params.get("message_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown"),
+                            });
+                            let _ = ipc_client.send_intent(&from, "agent_error", error_params, false).await;
+                            continue;
                         }
                         // If budget query fails (e.g. provider not tracked), proceed anyway
 

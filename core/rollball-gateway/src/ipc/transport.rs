@@ -16,7 +16,7 @@ use rollball_core::error::RollballError;
 pub mod unix_transport {
     use super::*;
     use tokio::net::UnixListener;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
     /// Server that listens on a Unix domain socket.
     pub struct UnixTransportServer {
@@ -124,7 +124,7 @@ pub mod unix_transport {
         }
 
         fn peer_desc(&self) -> String {
-            format!("unix:peer")
+            "unix:peer".to_string()
         }
     }
 }

@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     println!("Verifying package: {}", cli.package.display());
-    println!("");
+    println!();
 
     let result = verify_package(&cli.package)?;
 

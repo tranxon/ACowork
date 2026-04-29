@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{GrafeoError, Result};
 use crate::grafeo::GrafeoStore;
-use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, EMBEDDING_DIM};
+use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus};
 
 // ---------------------------------------------------------------------------
 // LLM abstraction
@@ -354,6 +354,7 @@ fn extract_json_array(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EMBEDDING_DIM;
 
     // =====================================================================
     // Test: parse_triples with valid JSON

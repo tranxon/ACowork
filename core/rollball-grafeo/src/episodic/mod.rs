@@ -43,6 +43,7 @@ fn value_to_episode(value: &Value) -> Result<Episode> {
 ///
 /// Escapes backslashes, single quotes, double quotes, newlines, tabs,
 /// and other control characters to prevent GQL injection attacks.
+#[allow(dead_code)]
 fn escape_gql_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\'', "\\'")

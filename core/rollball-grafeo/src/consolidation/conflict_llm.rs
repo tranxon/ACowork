@@ -77,6 +77,7 @@ Output format:
 /// * `new_subject`, `new_predicate`, `new_object` — The incoming knowledge triple.
 /// * `evidence_context` — Optional surrounding context from source episodes.
 /// * `llm` — The LLM abstraction for making the call.
+#[allow(clippy::too_many_arguments)]
 pub async fn classify_conflict(
     old_subject: &str,
     old_predicate: &str,

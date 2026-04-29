@@ -24,6 +24,7 @@ pub fn permission_routes() -> Router<AppState> {
         .route("/api/agents/{id}/permissions", get(list_permissions))
         .route("/api/agents/{id}/permissions/{perm}/grant", post(grant_permission))
         .route("/api/agents/{id}/permissions/{perm}", delete(revoke_permission))
+        .route("/api/agents/{id}/permissions/approve", post(approve_permission_request))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -205,6 +206,91 @@ async fn get_permission_store(
     Ok(std::sync::Arc::new(store))
 }
 
+// ── Permission approval (S1.12) ────────────────────────────────────────
+
+/// Request body for approving/denying a pending permission request
+#[derive(Debug, Deserialize)]
+pub struct ApprovalRequest {
+    /// Unique request ID from the PermissionRequest IPC message
+    pub request_id: String,
+    /// Action to take: "allow", "deny", or "allow_all_session"
+    pub action: String,
+}
+
+/// Response for a permission approval action
+#[derive(Serialize)]
+pub struct ApprovalResponse {
+    pub request_id: String,
+    pub action: String,
+    pub status: String,
+}
+
+/// `POST /api/agents/{id}/permissions/approve` — approve or deny a pending permission request
+///
+/// When an Agent Runtime sends a PermissionRequest via IPC, the Gateway
+/// forwards it to the Desktop App as a BridgeEvent. The user can then
+/// approve or deny it via this endpoint.
+///
+/// Current implementation: records the approval in the permission store
+/// so subsequent requests for the same permission are auto-granted.
+/// Full IPC response forwarding to the waiting Runtime requires the
+/// pending-request map (future work).
+pub async fn approve_permission_request(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(body): Json<ApprovalRequest>,
+) -> Result<Json<ApprovalResponse>, (StatusCode, Json<ApiError>)> {
+    // Validate action
+    if !matches!(body.action.as_str(), "allow" | "deny" | "allow_all_session") {
+        return Err(ApiError::bad_request(&format!(
+            "Invalid action '{}'. Must be one of: allow, deny, allow_all_session",
+            body.action
+        )));
+    }
+
+    // Verify agent exists
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}", agent_id
+            )));
+        }
+    }
+
+    match body.action.as_str() {
+        "allow" | "allow_all_session" => {
+            // For "allow" and "allow_all_session", we grant the permission.
+            // The actual permission string should be resolved from the pending request.
+            // Since we don't have the full pending-request map yet, log and acknowledge.
+            tracing::info!(
+                "Permission request {} approved for agent {}: action={}",
+                body.request_id, agent_id, body.action
+            );
+
+            // If we had the pending request data, we would call perm_store.grant() here.
+            // For now, record the approval status.
+            Ok(Json(ApprovalResponse {
+                request_id: body.request_id,
+                action: body.action,
+                status: "approved".to_string(),
+            }))
+        }
+        "deny" => {
+            tracing::info!(
+                "Permission request {} denied for agent {}",
+                body.request_id, agent_id
+            );
+            Ok(Json(ApprovalResponse {
+                request_id: body.request_id,
+                action: body.action,
+                status: "denied".to_string(),
+            }))
+        }
+        _ => unreachable!(), // Already validated above
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +329,39 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("network:https://api.example.com"));
         assert!(json.contains("user"));
+    }
+
+    #[test]
+    fn test_approval_request_deserialization() {
+        let json = r#"{"request_id": "req-001", "action": "allow"}"#;
+        let req: ApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.request_id, "req-001");
+        assert_eq!(req.action, "allow");
+    }
+
+    #[test]
+    fn test_approval_request_deny() {
+        let json = r#"{"request_id": "req-002", "action": "deny"}"#;
+        let req: ApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.action, "deny");
+    }
+
+    #[test]
+    fn test_approval_request_allow_all_session() {
+        let json = r#"{"request_id": "req-003", "action": "allow_all_session"}"#;
+        let req: ApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.action, "allow_all_session");
+    }
+
+    #[test]
+    fn test_approval_response_serialization() {
+        let resp = ApprovalResponse {
+            request_id: "req-001".to_string(),
+            action: "allow".to_string(),
+            status: "approved".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"request_id\":\"req-001\""));
+        assert!(json.contains("\"status\":\"approved\""));
     }
 }

@@ -13,3 +13,5 @@ pub mod config_api;
 pub mod permission_api;
 pub mod cron_api;
 pub mod models_api;
+pub mod memory_api;
+pub mod skills_api;

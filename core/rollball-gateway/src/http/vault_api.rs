@@ -119,12 +119,12 @@ pub async fn add_key(
     Json(body): Json<AddKeyRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
     // Validate base_url format if provided
-    if let Some(ref url) = body.base_url {
-        if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(ApiError::bad_request(
-                "base_url must start with http:// or https://"
-            ));
-        }
+    if let Some(ref url) = body.base_url
+        && !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://")
+    {
+        return Err(ApiError::bad_request(
+            "base_url must start with http:// or https://"
+        ));
     }
     // Validate provider name is not empty
     if body.provider.is_empty() {
@@ -186,12 +186,12 @@ pub async fn update_key(
     Json(body): Json<UpdateKeyRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     // Validate base_url format if provided
-    if let Some(ref url) = body.base_url {
-        if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(ApiError::bad_request(
-                "base_url must start with http:// or https://"
-            ));
-        }
+    if let Some(ref url) = body.base_url
+        && !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://")
+    {
+        return Err(ApiError::bad_request(
+            "base_url must start with http:// or https://"
+        ));
     }
 
     let mut gw = state.gateway_state.write().await;

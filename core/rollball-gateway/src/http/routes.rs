@@ -36,10 +36,16 @@ pub enum BridgeEventType {
     ToolCall,
     /// Tool execution result
     ToolResult,
+    /// Tool approval needed (user interaction required)
+    ToolApprovalNeeded,
     /// Final response (complete)
     Done,
     /// Error response
     Error,
+    /// Memory store updated (node added/removed/consolidated)
+    MemoryUpdated,
+    /// Skill execution event
+    SkillExecuted,
 }
 
 impl BridgeEventType {
@@ -52,6 +58,9 @@ impl BridgeEventType {
             "agent_tool_call" => Some(Self::ToolCall),
             "agent_tool_result" => Some(Self::ToolResult),
             "agent_error" => Some(Self::Error),
+            "tool_approval_needed" => Some(Self::ToolApprovalNeeded),
+            "memory_updated" => Some(Self::MemoryUpdated),
+            "skill_executed" => Some(Self::SkillExecuted),
             _ => None,
         }
     }
@@ -67,8 +76,11 @@ impl BridgeEventType {
             Self::Chunk => "chunk",
             Self::ToolCall => "tool_call",
             Self::ToolResult => "tool_result",
+            Self::ToolApprovalNeeded => "tool_approval_needed",
             Self::Done => "done",
             Self::Error => "error",
+            Self::MemoryUpdated => "memory_updated",
+            Self::SkillExecuted => "skill_executed",
         }
     }
 }
@@ -157,7 +169,9 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::config_api::config_routes())
         .merge(crate::http::permission_api::permission_routes())
         .merge(crate::http::cron_api::cron_routes())
-.merge(crate::http::models_api::models_routes())
+        .merge(crate::http::models_api::models_routes())
+        .merge(crate::http::memory_api::memory_routes())
+        .merge(crate::http::skills_api::skills_routes())
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
@@ -461,6 +475,9 @@ mod tests {
         assert_eq!(BridgeEventType::from_action("agent_tool_call"), Some(BridgeEventType::ToolCall));
         assert_eq!(BridgeEventType::from_action("agent_tool_result"), Some(BridgeEventType::ToolResult));
         assert_eq!(BridgeEventType::from_action("agent_error"), Some(BridgeEventType::Error));
+        assert_eq!(BridgeEventType::from_action("tool_approval_needed"), Some(BridgeEventType::ToolApprovalNeeded));
+        assert_eq!(BridgeEventType::from_action("memory_updated"), Some(BridgeEventType::MemoryUpdated));
+        assert_eq!(BridgeEventType::from_action("skill_executed"), Some(BridgeEventType::SkillExecuted));
         assert_eq!(BridgeEventType::from_action("unknown_action"), None);
     }
 
@@ -471,6 +488,9 @@ mod tests {
         assert_eq!(BridgeEventType::Error.as_str(), "error");
         assert_eq!(BridgeEventType::ToolCall.as_str(), "tool_call");
         assert_eq!(BridgeEventType::ToolResult.as_str(), "tool_result");
+        assert_eq!(BridgeEventType::ToolApprovalNeeded.as_str(), "tool_approval_needed");
+        assert_eq!(BridgeEventType::MemoryUpdated.as_str(), "memory_updated");
+        assert_eq!(BridgeEventType::SkillExecuted.as_str(), "skill_executed");
     }
 
     #[test]

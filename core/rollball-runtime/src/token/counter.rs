@@ -371,7 +371,7 @@ mod tests {
         let text = "Hello, how are you today?";
         let count = counter.count_text(text, "gpt-4");
         // "Hello, how are you today?" ≈ 7-8 tokens
-        assert!(count >= 4 && count <= 12, "Expected ~7 tokens, got {count}");
+        assert!((4..=12).contains(&count), "Expected ~7 tokens, got {count}");
     }
 
     #[test]
@@ -489,7 +489,7 @@ mod tests {
         let counter = TokenCounter::new();
         let count = counter.count_text("Hello world this is a test", "unknown-model");
         // 6 words × 1.3 ≈ 8 tokens
-        assert!(count >= 5 && count <= 12, "Expected ~8 tokens, got {count}");
+        assert!((5..=12).contains(&count), "Expected ~8 tokens, got {count}");
     }
 
     #[test]

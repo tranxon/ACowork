@@ -167,9 +167,7 @@ async fn test_generalization_improves_retrieval_coverage() {
             session_id: format!("sess-{}", i / 2),
             turn_index: i % 2,
             role: "assistant".to_string(),
-            content: format!(
-                "Let me check the weather for you.\n{{\"name\": \"http_request\", \"arguments\": {{\"url\": \"weather-api\"}}}}"
-            ),
+            content: "Let me check the weather for you.\n{\"name\": \"http_request\", \"arguments\": {\"url\": \"weather-api\"}}".to_string(),
             content_type: ContentType::Informational,
             embedding: Some(test_embedding(&format!("weather check request {}", i))),
             timestamp: Utc::now() - TimeDelta::hours(6 - i as i64),

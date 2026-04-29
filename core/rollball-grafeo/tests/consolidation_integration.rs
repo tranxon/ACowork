@@ -14,13 +14,11 @@ use chrono::{TimeDelta, Utc};
 use rollball_grafeo::{
     ConsolidationScheduler, GeneralizationConfig, GrafeoStore, OfflineConsolidationConfig,
     SchedulerConfig, TriggerReason,
-    BehaviorPattern, PatternCategory,
-    BenchmarkMetrics, EvalQuery, MetricsAggregator, AlertThresholds,
+    EvalQuery, MetricsAggregator,
     OnlineRetrievalMetrics, HintType,
-    ConflictResolutionRecord, ConflictAccuracyStats,
-    KnowledgeNode, KnowledgeSubType, NodeStatus, ProceduralNode,
+    ConflictResolutionRecord,
+    KnowledgeNode, KnowledgeSubType, NodeStatus,
     Episode, ContentType, EMBEDDING_DIM,
-    precision_at_k, recall_at_k,
 };
 use rollball_grafeo::consolidation::triple_extraction::{LlmMessage, LlmResponse, TripleExtractorLlm};
 

@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Key type:    {}", cli.r#type);
     println!("  Output dir:  {}", cli.output_dir.display());
     println!("  Fingerprint: {}", keypair.fingerprint());
-    println!("");
+    println!();
     println!("Files created:");
     println!("  - {}/{}.key   (secret key)", cli.output_dir.display(), cli.r#type);
     println!("  - {}/{}.pub   (public key)", cli.output_dir.display(), cli.r#type);

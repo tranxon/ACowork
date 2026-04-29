@@ -79,10 +79,10 @@ async fn fetch_models(cache: &ModelsCache) -> Result<serde_json::Value, String> 
     // Check cache
     {
         let guard = cache.read().await;
-        if let Some(ref cached) = *guard {
-            if cached.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS {
-                return Ok(cached.data.clone());
-            }
+        if let Some(ref cached) = *guard
+            && cached.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS
+        {
+            return Ok(cached.data.clone());
         }
     }
 

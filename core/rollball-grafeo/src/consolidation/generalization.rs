@@ -150,7 +150,7 @@ impl Default for GeneralizationConfig {
 /// Detect patterns from a list of (action, tool_calls) pairs.
 ///
 /// Simple heuristic: if the same action+tool combination appears
-/// >= `min_observations` times, it's a pattern. Patterns are
+/// \>= `min_observations` times, it's a pattern. Patterns are
 /// automatically categorized by their content.
 pub fn detect_simple_patterns(
     episodes: &[(String, String, String)], // (episode_id, action, tool_calls)
@@ -189,7 +189,7 @@ pub fn detect_simple_patterns(
     }
 
     // Sort by observation count descending
-    patterns.sort_by(|a, b| b.observation_count.cmp(&a.observation_count));
+    patterns.sort_by_key(|p| std::cmp::Reverse(p.observation_count));
     patterns
 }
 
@@ -442,7 +442,7 @@ fn extract_action_and_tools(content: &str) -> (String, String) {
             // Try to extract the value after "name":
             if let Some(idx) = trimmed.find("\"name\"") {
                 let rest = &trimmed[idx + 6..];
-                let rest = rest.trim_start_matches(|c: char| c == ':' || c == ' ' || c == '"');
+                let rest = rest.trim_start_matches([':', ' ', '"']);
                 if let Some(end) = rest.find('"') {
                     let name = &rest[..end];
                     if !name.is_empty() && !tool_names.contains(&name.to_string()) {

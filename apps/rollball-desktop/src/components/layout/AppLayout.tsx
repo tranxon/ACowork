@@ -7,6 +7,9 @@ import { ResultsPanel } from "../results/ResultsPanel";
 import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { SettingsPage } from "../settings/SettingsPage";
+import { MemoryPanel } from "../memory/MemoryPanel";
+import { SkillBrowser } from "../skills/SkillBrowser";
+import { ToolApprovalModal } from "../tools/ToolApprovalModal";
 
 const MIN_SIDEBAR_WIDTH = 160;
 const MAX_SIDEBAR_WIDTH = 400;
@@ -111,15 +114,13 @@ export function AppLayout() {
 
         {currentView === "settings" && <SettingsPage />}
 
-        {currentView === "skills" && (
-          <div className="flex flex-1 items-center justify-center text-zinc-400 dark:text-zinc-500">
-            <div className="text-center">
-              <p className="text-lg">Skills</p>
-              <p className="text-sm mt-1">Available in Developer Mode</p>
-            </div>
-          </div>
-        )}
+        {currentView === "memory" && <MemoryPanel />}
+
+        {currentView === "skills" && <SkillBrowser />}
       </div>
+
+      {/* Global tool approval modal */}
+      <ToolApprovalModal />
     </div>
   );
 }

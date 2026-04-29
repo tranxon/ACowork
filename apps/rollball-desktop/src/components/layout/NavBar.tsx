@@ -1,6 +1,6 @@
 import type { NavView } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { MessageSquare, ClipboardList, Settings } from "lucide-react";
+import { MessageSquare, Wrench, Brain, Settings } from "lucide-react";
 
 interface NavBarProps {
   currentView: NavView;
@@ -9,7 +9,8 @@ interface NavBarProps {
 
 const navItems: { view: NavView; icon: typeof MessageSquare; label: string; disabled?: boolean }[] = [
   { view: "chat", icon: MessageSquare, label: "Chat" },
-  { view: "skills", icon: ClipboardList, label: "Skills", disabled: true },
+  { view: "memory", icon: Brain, label: "Memory" },
+  { view: "skills", icon: Wrench, label: "Skills" },
   { view: "settings", icon: Settings, label: "Settings" },
 ];
 

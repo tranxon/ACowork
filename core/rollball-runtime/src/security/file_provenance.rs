@@ -375,12 +375,12 @@ impl FileProvenance {
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if !file_name.is_empty() {
             for src_type in &["downloaded", "unknown", "created_by_tool", "pre_existing"] {
-                if let Ok(list) = self.store.list_by_source(src_type) {
-                    if let Some((_, source)) = list.iter().find(|(p, _)| {
+                if let Ok(list) = self.store.list_by_source(src_type)
+                    && let Some((_, source)) = list.iter().find(|(p, _)| {
                         p.file_name().and_then(|n| n.to_str()) == Some(file_name)
-                    }) {
-                        return Some(source.clone());
-                    }
+                    })
+                {
+                    return Some(source.clone());
                 }
             }
         }

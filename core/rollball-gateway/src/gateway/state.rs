@@ -31,6 +31,9 @@ pub struct RunningAgentInfo {
 /// Shared permission store type (same as IPC server)
 pub type SharedPermissionStore = std::sync::Arc<PermissionStore>;
 
+/// Shared memory store type
+pub type SharedMemoryStore = std::sync::Arc<dyn rollball_memory::MemoryStore + Send + Sync>;
+
 /// Gateway state — shared mutable state for the entire Gateway process
 pub struct GatewayState {
     /// Installed agents (agent_id → AgentInfo)
@@ -54,6 +57,9 @@ pub struct GatewayState {
     /// Set to None initially; populated by Gateway::run() before starting
     /// the HTTP server.
     pub permission_store: Option<SharedPermissionStore>,
+    /// Shared memory store (Grafeo-backed) for memory API access.
+    /// None until a MemoryStore is initialized and injected at startup.
+    pub memory_store: Option<SharedMemoryStore>,
     /// Gateway configuration snapshot (for Config API)
     pub config: Option<crate::config::GatewayConfig>,
     /// Shared IPC session manager (set during Gateway::run before IPC/HTTP start)
@@ -73,6 +79,7 @@ impl GatewayState {
             cron_scheduler: CronScheduler::new(),
             cron_store: None,
             permission_store: None,
+            memory_store: None,
             config: None,
             ipc_sessions: None,
         }

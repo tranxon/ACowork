@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Key dir:   {}", cli.key.display());
     println!("  Key type:  {}", cli.key_type);
     println!("  Output:    {}", cli.output.display());
-    println!("");
+    println!();
 
     sign_package(&cli.input, &cli.output, &cli.key, cli.key_type)?;
 

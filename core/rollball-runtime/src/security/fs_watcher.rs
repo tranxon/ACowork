@@ -148,20 +148,20 @@ impl FsWatcher {
             match &event.kind {
                 EventKind::Create(_) => {
                     // Check for symlink
-                    if path.is_symlink() {
-                        if let Ok(target) = std::fs::read_link(path) {
-                            // Check if symlink points outside workspace
-                            let abs_target = if target.is_absolute() {
-                                target
-                            } else {
-                                path.parent().unwrap_or(path).join(&target)
-                            };
-                            if !abs_target.starts_with(&self.workspace_dir) {
-                                return Some(FsEvent::SymlinkCreated {
-                                    path: path.clone(),
-                                    target: abs_target,
-                                });
-                            }
+                    if path.is_symlink()
+                        && let Ok(target) = std::fs::read_link(path)
+                    {
+                        // Check if symlink points outside workspace
+                        let abs_target = if target.is_absolute() {
+                            target
+                        } else {
+                            path.parent().unwrap_or(path).join(&target)
+                        };
+                        if !abs_target.starts_with(&self.workspace_dir) {
+                            return Some(FsEvent::SymlinkCreated {
+                                path: path.clone(),
+                                target: abs_target,
+                            });
                         }
                     }
                     return Some(FsEvent::FileCreated { path: path.clone() });
@@ -207,11 +207,11 @@ pub fn is_executable_file(path: &Path) -> bool {
     // On Unix, check execute permission bits
     #[cfg(unix)]
     {
-        if ext.is_empty() {
-            if let Ok(metadata) = std::fs::metadata(path) {
-                use std::os::unix::fs::PermissionsExt;
-                return metadata.permissions().mode() & 0o111 != 0;
-            }
+        if ext.is_empty()
+            && let Ok(metadata) = std::fs::metadata(path)
+        {
+            use std::os::unix::fs::PermissionsExt;
+            return metadata.permissions().mode() & 0o111 != 0;
         }
     }
 

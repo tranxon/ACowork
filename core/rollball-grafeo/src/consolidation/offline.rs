@@ -68,6 +68,7 @@ impl GrafeoStore {
     ///
     /// The generalization step requires an embedding function. If `None` is
     /// provided, generalization is skipped.
+    #[allow(clippy::type_complexity)]
     pub async fn run_offline_consolidation_with_generalization(
         &self,
         config: &OfflineConsolidationConfig,

@@ -297,7 +297,7 @@ async fn handle_ws_text(
         let mut pushed_ok = false;
         if let Some(session_mgr) = &state.session_mgr {
             let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
+            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
                 let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
                     from: "http-ws".to_string(),
                     action: "model_switch".to_string(),

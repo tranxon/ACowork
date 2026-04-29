@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage, TokenUsage } from "../lib/types";
+import type { ChatMessage, TokenUsage, ToolApprovalNeededEvent } from "../lib/types";
+import { usePermissionStore } from "./permissionStore";
 
 interface ChatStore {
   messages: ChatMessage[];
@@ -423,6 +424,19 @@ function handleMessageEvent(
       }));
       break;
     }
+
+    case "tool_approval_needed":
+      usePermissionStore.getState().showApprovalDialog(data as unknown as ToolApprovalNeededEvent);
+      break;
+
+    case "memory_updated":
+      // Trigger refresh of memory data if panel is open
+      console.log("[WS] Memory updated event:", data);
+      break;
+
+    case "skill_executed":
+      console.log("[WS] Skill executed event:", data);
+      break;
 
     default:
       console.log("[ChatStore] Unknown event type:", eventType, data);

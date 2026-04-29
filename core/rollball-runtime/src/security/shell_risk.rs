@@ -292,24 +292,24 @@ where
 
     // Check if any executable paths have high-risk provenance
     for path in &assessment.executable_paths {
-        if let Some(source) = provenance_lookup(path) {
-            if source.is_high_risk() {
-                let reason = match &source {
-                    crate::security::file_provenance::FileSource::Downloaded { from_url, .. } => {
-                        format!("{} — executing Downloaded file (from: {})",
-                            assessment.reason, from_url)
-                    }
-                    crate::security::file_provenance::FileSource::Unknown => {
-                        format!("{} — executing file with Unknown provenance",
-                            assessment.reason)
-                    }
-                    _ => assessment.reason.clone(),
-                };
-                assessment.risk = ShellRisk::High;
-                assessment.reason = reason;
-                assessment.provenance_elevated = true;
-                return assessment;
-            }
+        if let Some(source) = provenance_lookup(path)
+            && source.is_high_risk()
+        {
+            let reason = match &source {
+                crate::security::file_provenance::FileSource::Downloaded { from_url, .. } => {
+                    format!("{} — executing Downloaded file (from: {})",
+                        assessment.reason, from_url)
+                }
+                crate::security::file_provenance::FileSource::Unknown => {
+                    format!("{} — executing file with Unknown provenance",
+                        assessment.reason)
+                }
+                _ => assessment.reason.clone(),
+            };
+            assessment.risk = ShellRisk::High;
+            assessment.reason = reason;
+            assessment.provenance_elevated = true;
+            return assessment;
         }
     }
 

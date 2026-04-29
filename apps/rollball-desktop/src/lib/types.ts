@@ -109,7 +109,7 @@ export interface TokenUsage {
 }
 
 /** Navigation view type */
-export type NavView = "chat" | "skills" | "settings";
+export type NavView = "chat" | "agents" | "memory" | "skills" | "settings";
 
 /** Theme type */
 export type Theme = "light" | "dark" | "system";
@@ -137,4 +137,126 @@ export interface ProviderListEntry {
   id: string;
   name: string;
   model_count: number;
+}
+
+// ── Memory types ──────────────────────────────────────────────────────
+
+/** Single memory node in the list response */
+export interface MemoryNodeResponse {
+  node_id: number;
+  node_type: string;
+  content: string;
+  confidence: number;
+  decay_score: number;
+  created_at: number;
+  last_accessed_at: number;
+  access_count: number;
+  status: string;
+}
+
+/** Paginated list of memory nodes */
+export interface MemoryNodesListResponse {
+  total: number;
+  page: number;
+  size: number;
+  nodes: MemoryNodeResponse[];
+}
+
+/** Memory statistics summary */
+export interface MemoryStatsResponse {
+  total_nodes: number;
+  storage_bytes: number;
+  by_type: Record<string, number>;
+  by_status: Record<string, number>;
+  avg_decay_score: number;
+  index_health: string;
+}
+
+/** Response for deleting a memory node */
+export interface DeleteNodeResponse {
+  node_id: number;
+  deleted: boolean;
+  message: string;
+}
+
+/** Response for memory consolidation trigger */
+export interface ConsolidateResponse {
+  started: boolean;
+  duration_ms: number;
+  episodes_consolidated: number;
+  knowledge_nodes_generated: number;
+  message: string;
+}
+
+// ── Skill types ───────────────────────────────────────────────────────
+
+/** A single skill entry in the list response */
+export interface SkillListEntry {
+  name: string;
+  description: string;
+  version: string | null;
+  author: string | null;
+  triggers: string[];
+  tool_deps: string[];
+}
+
+/** Paginated list of skills */
+export interface SkillListResponse {
+  total: number;
+  page: number;
+  size: number;
+  skills: SkillListEntry[];
+}
+
+/** Detailed skill information */
+export interface SkillDetailResponse {
+  name: string;
+  description: string;
+  version: string | null;
+  author: string | null;
+  triggers: string[];
+  tool_deps: string[];
+  instructions: string;
+}
+
+/** Skill execution history */
+export interface SkillExecutionHistoryResponse {
+  skill_name: string;
+  total_executions: number;
+  page: number;
+  size: number;
+  executions: unknown[];
+}
+
+// ── Tool approval types ───────────────────────────────────────────────
+
+/** Tool approval needed event from WebSocket */
+export interface ToolApprovalNeededEvent {
+  type: "tool_approval_needed";
+  request_id: string;
+  agent_id: string;
+  tool_name: string;
+  risk_level: "Low" | "Medium" | "High";
+  shell_command?: {
+    command: string;
+    preview: string;
+    risk_assessment: string;
+  };
+  params: Record<string, unknown>;
+  params_summary: string;
+  required_permission: string;
+  timeout_ms: number;
+}
+
+/** Tool approval request payload */
+export interface ToolApprovalResponse {
+  request_id: string;
+  action: "allow" | "deny" | "allow_all_session";
+}
+
+/** Approval API response */
+export interface ApprovalApiResponse {
+  request_id: string;
+  action: string;
+  status: string;
 }
