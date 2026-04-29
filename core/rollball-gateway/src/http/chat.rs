@@ -61,6 +61,8 @@ struct WsClientMessage {
     #[serde(rename = "type")]
     msg_type: String,
     content: Option<String>,
+    /// Model name for model_switch messages
+    model: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -268,6 +270,56 @@ async fn handle_ws_text(
             return;
         }
     };
+
+    if client_msg.msg_type == "model_switch" {
+        // Handle model switch: push to agent as IntentReceived with model_switch action
+        let model = match client_msg.model {
+            Some(ref m) if !m.is_empty() => m.clone(),
+            _ => {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "message": "model_switch requires a non-empty model field",
+                });
+                let _ = socket.send(Message::Text(err.to_string().into())).await;
+                return;
+            }
+        };
+
+        tracing::info!(agent = %agent_id, model = %model, "Forwarding model_switch to agent");
+
+        let message_id = format!("msg-{}", uuid::Uuid::new_v4());
+        let mut pushed_ok = false;
+        if let Some(session_mgr) = &state.session_mgr {
+            let mgr = session_mgr.lock().await;
+            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
+                let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
+                    from: "http-ws".to_string(),
+                    action: "model_switch".to_string(),
+                    params: serde_json::json!({
+                        "model": model,
+                        "message_id": message_id,
+                    }),
+                };
+                pushed_ok = session.push_message(intent).await;
+            }
+        }
+
+        if pushed_ok {
+            let ack = serde_json::json!({
+                "type": "ack",
+                "message_id": message_id,
+            });
+            let _ = socket.send(Message::Text(ack.to_string().into())).await;
+        } else {
+            let err = serde_json::json!({
+                "type": "error",
+                "message": format!("Agent {} is not connected via IPC", agent_id),
+                "message_id": message_id,
+            });
+            let _ = socket.send(Message::Text(err.to_string().into())).await;
+        }
+        return;
+    }
 
     if client_msg.msg_type != "message" {
         let err = serde_json::json!({

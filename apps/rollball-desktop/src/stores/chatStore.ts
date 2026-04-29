@@ -159,6 +159,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
   setCurrentModel: (model: string) => {
     set({ currentModel: model });
+    // Send model_switch message to Agent via WebSocket when user changes model
+    const ws = get().ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "model_switch", model }));
+    }
   },
   setAvailableModels: (models: string[]) => {
     set({ availableModels: models, currentModel: models[0] ?? null });

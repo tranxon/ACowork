@@ -49,6 +49,17 @@ impl ContextBuilder {
         self
     }
 
+    /// Update model override in-place (from model_switch message at runtime)
+    pub fn set_override_model(&mut self, model: String) {
+        let old = self.override_model.clone();
+        tracing::info!(
+            old_model = ?old,
+            new_model = %model,
+            "ContextBuilder model override updated via model_switch"
+        );
+        self.override_model = Some(model);
+    }
+
     /// Build the complete ChatRequest for the LLM
     pub fn build(
         &self,

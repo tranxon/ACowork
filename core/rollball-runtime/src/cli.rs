@@ -554,7 +554,7 @@ async fn run_gateway_loop(
     mut agent_loop: crate::agent::loop_::AgentLoop,
     _inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
     ipc_client: &mut crate::ipc::client::GatewayClient,
-    context_builder: crate::agent::context::ContextBuilder,
+    mut context_builder: crate::agent::context::ContextBuilder,
 ) -> Result<()> {
     use rollball_core::protocol::GatewayResponse;
 
@@ -591,6 +591,22 @@ async fn run_gateway_loop(
                             }
                         }
                         // If budget query fails (e.g. provider not tracked), proceed anyway
+
+                        // Handle model_switch: update context_builder's model override
+                        if action == "model_switch" {
+                            if let Some(model) = params.get("model").and_then(|v| v.as_str()) {
+                                context_builder.set_override_model(model.to_string());
+                                tracing::info!(
+                                    model = %model,
+                                    "Model switched via model_switch message"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "model_switch message missing 'model' field, ignoring"
+                                );
+                            }
+                            continue;
+                        }
 
                         // Extract message content from params
                         let content = params.get("content")
