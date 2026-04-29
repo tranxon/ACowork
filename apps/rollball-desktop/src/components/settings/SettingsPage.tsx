@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import type { GatewayConfig, VaultKeyEntry, ModelInfo } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ALL_PROVIDERS, PROVIDER_CATEGORIES, getProviderDef } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
+import { Star } from "lucide-react";
 
-type SettingsTab = "gateway" | "providers" | "vault" | "appearance" | "general";
+type SettingsTab = "gateway" | "providers" | "appearance" | "general";
 
 export function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("gateway");
@@ -14,7 +16,6 @@ export function SettingsPage() {
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: "gateway", label: "Gateway" },
     { id: "providers", label: "Providers" },
-    { id: "vault", label: "Vault" },
     { id: "appearance", label: "Appearance" },
     { id: "general", label: "General" },
   ];
@@ -48,7 +49,6 @@ export function SettingsPage() {
       <div className="flex-1 overflow-y-auto p-6">
         {activeTab === "gateway" && <GatewayTab />}
         {activeTab === "providers" && <ProvidersTab />}
-        {activeTab === "vault" && <VaultTab />}
         {activeTab === "appearance" && <AppearanceTab />}
         {activeTab === "general" && <GeneralTab />}
       </div>
@@ -142,6 +142,9 @@ function ProvidersTab() {
   const [editModelsLoading, setEditModelsLoading] = useState(false);
   const [editModelSearchTerm, setEditModelSearchTerm] = useState("");
 
+  // Gateway config for default provider indication
+  const [config, setConfig] = useState<GatewayConfig | null>(null);
+
   const newProviderDef = getProviderDef(newProvider);
 
   const fetchKeys = useCallback(async () => {
@@ -155,7 +158,16 @@ function ProvidersTab() {
     }
   }, []);
 
-  useEffect(() => { fetchKeys(); }, [fetchKeys]);
+  const fetchConfig = useCallback(async () => {
+    try {
+      const result = await invoke<GatewayConfig>("get_config");
+      setConfig(result);
+    } catch {
+      // Gateway may not be running
+    }
+  }, []);
+
+  useEffect(() => { fetchKeys(); fetchConfig(); }, [fetchKeys, fetchConfig]);
 
   // Fetch available models for a provider from Gateway API
   const fetchModels = useCallback(async (providerId: string): Promise<ModelInfo[]> => {
@@ -195,6 +207,7 @@ function ProvidersTab() {
       setNewKey("");
       setNewModels([]);
       await fetchKeys();
+      await fetchConfig();
     } catch (e) {
       alert(`Failed to add key: ${e}`);
     }
@@ -207,6 +220,20 @@ function ProvidersTab() {
       await fetchKeys();
     } catch (e) {
       alert(`Failed to remove key: ${e}`);
+    }
+  };
+
+  // Set a configured provider as the default for the Gateway
+  const handleSetDefaultProvider = async (provider: string) => {
+    try {
+      const entry = keys.find((k) => k.provider === provider);
+      await invoke("update_config", {
+        defaultProvider: provider,
+        defaultModel: entry?.models?.[0] || entry?.default_model || undefined,
+      });
+      await fetchConfig();
+    } catch (e) {
+      alert(`Failed to set default provider: ${e}`);
     }
   };
 
@@ -248,6 +275,7 @@ function ProvidersTab() {
       console.log("[handleEditSave] success");
       setShowEditDialog(null);
       await fetchKeys();
+      await fetchConfig();
     } catch (e) {
       console.error("[handleEditSave] error:", e);
       alert(`Failed to update key: ${e}`);
@@ -310,6 +338,18 @@ function ProvidersTab() {
                           </div>
                           {keyEntry ? (
                             <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => handleSetDefaultProvider(provider.id)}
+                                className={cn(
+                                  "rounded p-0.5",
+                                  config?.default_provider === provider.id
+                                    ? "text-amber-500"
+                                    : "text-zinc-400 hover:text-amber-500 dark:hover:text-amber-400",
+                                )}
+                                title={config?.default_provider === provider.id ? "Default provider" : "Set as default provider"}
+                              >
+                                <Star className="h-3.5 w-3.5" />
+                              </button>
                               <span className="text-xs text-green-600 dark:text-green-400">Active</span>
                               <span className="text-xs text-zinc-400">Key: {keyEntry.key_preview}</span>
                               <button
@@ -610,15 +650,9 @@ function ProvidersTab() {
   );
 }
 
-/** Vault key management */
-function VaultTab() {
-  return <ProvidersTab />;
-}
-
 /** Appearance settings */
 function AppearanceTab() {
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
-  const [fontSize, setFontSize] = useState(1.0);
+  const { theme, setTheme, fontSize, setFontSize } = useSettingsStore();
 
   const fontSizes = [
     { label: "S", value: 0.875 },
@@ -627,19 +661,6 @@ function AppearanceTab() {
     { label: "XL", value: 1.25 },
     { label: "XXL", value: 1.375 },
   ];
-
-  useEffect(() => {
-    // Apply dark class to html element
-    if (theme === "dark") {
-      document.documentElement.classList.add("dark");
-    } else if (theme === "light") {
-      document.documentElement.classList.remove("dark");
-    } else {
-      // System preference
-      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      document.documentElement.classList.toggle("dark", prefersDark);
-    }
-  }, [theme]);
 
   return (
     <div className="max-w-lg space-y-6">

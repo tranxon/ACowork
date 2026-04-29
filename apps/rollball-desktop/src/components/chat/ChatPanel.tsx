@@ -8,6 +8,7 @@ import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Chec
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
+import { ThinkBlock } from "./ThinkBlock";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
@@ -189,6 +190,36 @@ export function ChatPanel() {
   );
 }
 
+/**
+ * Parse <think>...</think> tags from assistant content.
+ *
+ * Returns the think content, reply content, and whether the think tag is closed.
+ * If the content does not start with <think>, all content is treated as reply.
+ */
+function parseThinkContent(content: string): {
+  thinkContent: string | null;
+  replyContent: string;
+  thinkClosed: boolean;
+} {
+  if (!content.startsWith("<think>")) {
+    return { thinkContent: null, replyContent: content, thinkClosed: false };
+  }
+
+  const closeIndex = content.indexOf("</think>");
+
+  if (closeIndex === -1) {
+    // Think tag is still open — everything after <think> is think content
+    const thinkContent = content.slice(7); // length of "<think>"
+    return { thinkContent, replyContent: "", thinkClosed: false };
+  }
+
+  // Think tag is closed
+  const thinkContent = content.slice(7, closeIndex);
+  const replyContent = content.slice(closeIndex + 8); // length of "</think>"
+
+  return { thinkContent, replyContent, thinkClosed: true };
+}
+
 /** Single message bubble */
 function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStreaming: boolean }) {
   const [expanded, setExpanded] = useState(false);
@@ -204,14 +235,26 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
   }
 
   if (message.type === "assistant") {
+    const { thinkContent, replyContent, thinkClosed } = parseThinkContent(message.content);
+    const hasReplyStarted = thinkClosed && replyContent.length > 0;
+    const showPlaceholder = !message.content;
+
     return (
       <div className="flex justify-start">
         <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200">
-          {message.content ? (
-            <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+          {thinkContent !== null && (
+            <ThinkBlock
+              content={thinkContent}
+              isStreaming={isStreaming}
+              hasReplyStarted={hasReplyStarted}
+            />
+          )}
+          {replyContent && (
+            <div className={`prose prose-sm prose-zinc max-w-none dark:prose-invert ${thinkContent !== null ? "mt-2" : ""}`}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{replyContent}</ReactMarkdown>
             </div>
-          ) : (
+          )}
+          {showPlaceholder && (
             <span className="text-zinc-400">Thinking...</span>
           )}
           {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}

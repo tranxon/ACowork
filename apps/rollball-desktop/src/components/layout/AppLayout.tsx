@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
 import { AgentList } from "../agent-list/AgentList";
@@ -6,14 +6,26 @@ import { ChatPanel } from "../chat/ChatPanel";
 import { ResultsPanel } from "../results/ResultsPanel";
 import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { ModelsPage } from "../models/ModelsPage";
 import { SettingsPage } from "../settings/SettingsPage";
+
+const MIN_SIDEBAR_WIDTH = 160;
+const MAX_SIDEBAR_WIDTH = 400;
+const DEFAULT_SIDEBAR_WIDTH = 240;
+const SIDEBAR_WIDTH_KEY = "rollball-sidebar-width";
 
 export function AppLayout() {
   const [currentView, setCurrentView] = useState<NavView>("chat");
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    return stored ? Math.min(Math.max(parseInt(stored, 10), MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH) : DEFAULT_SIDEBAR_WIDTH;
+  });
   const gatewayStatus = useGatewayStore((s) => s.status);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
+  const isResizing = useRef(false);
+  const startX = useRef(0);
+  const startWidth = useRef(DEFAULT_SIDEBAR_WIDTH);
+  const currentWidthRef = useRef(DEFAULT_SIDEBAR_WIDTH);
 
   // Check Gateway health on mount and periodically
   useEffect(() => {
@@ -30,6 +42,32 @@ export function AppLayout() {
     setResultsCollapsed((prev) => !prev);
   }, []);
 
+  // Sidebar resize handlers
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing.current) return;
+    const delta = e.clientX - startX.current;
+    const newWidth = Math.min(Math.max(startWidth.current + delta, MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH);
+    currentWidthRef.current = newWidth;
+    setSidebarWidth(newWidth);
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    if (!isResizing.current) return;
+    isResizing.current = false;
+    document.removeEventListener("mousemove", handleMouseMove);
+    document.removeEventListener("mouseup", handleMouseUp);
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(currentWidthRef.current));
+  }, [handleMouseMove]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    isResizing.current = true;
+    startX.current = e.clientX;
+    startWidth.current = sidebarWidth;
+    currentWidthRef.current = sidebarWidth;
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  }, [handleMouseMove, handleMouseUp, sidebarWidth]);
+
   return (
     <div className="flex h-full w-full flex-col">
       {/* Gateway disconnected banner */}
@@ -43,8 +81,16 @@ export function AppLayout() {
         {/* Content area based on current view */}
         {currentView === "chat" && (
           <div className="flex flex-1 overflow-hidden">
-            {/* Agent list — 240px */}
-            <AgentList />
+            {/* Agent list — resizable */}
+            <AgentList width={sidebarWidth} />
+
+            {/* Resize handle */}
+            <div
+              className="w-1 shrink-0 cursor-col-resize hover:bg-blue-400/50 active:bg-blue-400/70 transition-colors select-none"
+              onMouseDown={handleMouseDown}
+              role="separator"
+              aria-label="Resize sidebar"
+            />
 
             {/* Chat panel — elastic */}
             <ChatPanel />
@@ -63,7 +109,6 @@ export function AppLayout() {
           </div>
         )}
 
-        {currentView === "models" && <ModelsPage />}
         {currentView === "settings" && <SettingsPage />}
 
         {currentView === "skills" && (

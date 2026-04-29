@@ -7,7 +7,11 @@ import { cn } from "../../lib/utils";
 import { Bot, Play, Square, Trash2, Info, Copy, Plus } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
-export function AgentList() {
+interface AgentListProps {
+  width?: number;
+}
+
+export function AgentList({ width }: AgentListProps) {
   const { agents, selectedAgentId, loading, fetchAgents, selectAgent, startAgent, stopAgent, uninstallAgent } =
     useAgentStore();
   const { addToast } = useToast();
@@ -141,7 +145,10 @@ export function AgentList() {
   const contextAgent = agents.find((a) => a.agent_id === contextMenu?.agentId);
 
   return (
-    <div className="flex w-[240px] flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+    <div
+      className="flex flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+      style={{ width: width ?? 240 }}
+    >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <span className="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
