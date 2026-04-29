@@ -28,6 +28,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.tmp/
 
 # Node.js
 **/node_modules/
