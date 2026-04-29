@@ -272,7 +272,8 @@ async fn handle_ws_text(
     };
 
     if client_msg.msg_type == "model_switch" {
-        // Handle model switch: persist per-agent preference AND push to running agent
+        // Handle model switch: push to running agent via IPC
+        // Only running agents can switch models — persistence is handled by Agent Runtime
         let model = match client_msg.model {
             Some(ref m) if !m.is_empty() => m.clone(),
             _ => {
@@ -285,30 +286,8 @@ async fn handle_ws_text(
             }
         };
 
-        tracing::info!(agent = %agent_id, model = %model, "Processing model_switch");
+        tracing::info!(agent = %agent_id, model = %model, "Forwarding model_switch to agent");
 
-        // 1. Persist per-agent model preference to workspace .agent_model.json
-        //    This ensures the preference survives even if the agent is not running
-        {
-            let gw = state.gateway_state.read().await;
-            if let Some(info) = gw.installed_agents.get(&*agent_id) {
-                let workspace = std::path::Path::new(&info.install_path).join("workspace");
-                let model_path = workspace.join(".agent_model.json");
-                let entry = serde_json::json!({
-                    "model": model,
-                    "updated_at": chrono::Utc::now().to_rfc3339(),
-                });
-                if let Ok(json) = serde_json::to_string_pretty(&entry) {
-                    if let Err(e) = std::fs::write(&model_path, &json) {
-                        tracing::warn!("Failed to write .agent_model.json for {}: {}", agent_id, e);
-                    } else {
-                        tracing::info!(agent = %agent_id, model = %model, "Persisted per-agent model preference");
-                    }
-                }
-            }
-        }
-
-        // 2. Push to running agent via IPC (if connected)
         let message_id = format!("msg-{}", uuid::Uuid::new_v4());
         let mut pushed_ok = false;
         if let Some(session_mgr) = &state.session_mgr {
@@ -326,20 +305,24 @@ async fn handle_ws_text(
             }
         }
 
-        // Always confirm to the client (persistence succeeded even if agent is not running)
-        let ack = serde_json::json!({
-            "type": "ack",
-            "message_id": message_id,
-        });
-        let _ = socket.send(Message::Text(ack.to_string().into())).await;
-        let confirmed = serde_json::json!({
-            "type": "model_confirmed",
-            "model": model,
-        });
-        let _ = socket.send(Message::Text(confirmed.to_string().into())).await;
-
-        if !pushed_ok {
-            tracing::info!(agent = %agent_id, "Agent not running, model_switch persisted for next start");
+        if pushed_ok {
+            let ack = serde_json::json!({
+                "type": "ack",
+                "message_id": message_id,
+            });
+            let _ = socket.send(Message::Text(ack.to_string().into())).await;
+            let confirmed = serde_json::json!({
+                "type": "model_confirmed",
+                "model": model,
+            });
+            let _ = socket.send(Message::Text(confirmed.to_string().into())).await;
+        } else {
+            let err = serde_json::json!({
+                "type": "error",
+                "message": format!("Agent {} is not running, cannot switch model", agent_id),
+                "message_id": message_id,
+            });
+            let _ = socket.send(Message::Text(err.to_string().into())).await;
         }
         return;
     }

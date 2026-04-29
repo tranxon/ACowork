@@ -141,8 +141,8 @@ export function ChatPanel() {
 
       {/* Input area */}
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
-        {/* Model switcher */}
-        {availableModels.length > 1 && (
+        {/* Model switcher — only enabled when agent is running */}
+        {availableModels.length > 1 && selectedAgent?.running && (
           <div className="mb-2 flex items-center gap-2">
             <span className="text-[10px] text-zinc-400">Model:</span>
             <select
