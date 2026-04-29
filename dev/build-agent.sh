@@ -21,7 +21,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Default values
-OUTPUT_DIR="${PROJECT_ROOT}/agent-packages"
+OUTPUT_DIR="${PROJECT_ROOT}/examples/agent-packages"
 KEY_DIR="${PROJECT_ROOT}/examples/.signing-keys"
 
 # Parse arguments
