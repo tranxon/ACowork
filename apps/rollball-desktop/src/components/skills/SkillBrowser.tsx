@@ -87,99 +87,102 @@ export function SkillBrowser() {
         </div>
       )}
 
-      {/* Main content: list + detail */}
+      {/* Main content: drawer-style master-detail toggle */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left sidebar — skill list */}
-        <div className="flex w-[35%] min-w-[240px] max-w-[360px] flex-col overflow-hidden border-r border-zinc-200 dark:border-zinc-800">
-          {/* Search */}
-          <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search skills..."
-              className="w-full rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
-            />
-          </div>
+        {selectedSkillName === null ? (
+          /* List view */
+          <div className="flex flex-1 flex-col overflow-hidden">
+            {/* Search */}
+            <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search skills..."
+                className="w-full rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
+              />
+            </div>
 
-          {/* Skill list */}
-          <div className="flex-1 overflow-y-auto">
-            {loading && skills.length === 0 && (
-              <div className="flex h-full items-center justify-center">
-                <RefreshCw className="h-5 w-5 animate-spin text-zinc-400 dark:text-zinc-500" />
+            {/* Skill list */}
+            <div className="flex-1 overflow-y-auto">
+              {loading && skills.length === 0 && (
+                <div className="flex h-full items-center justify-center">
+                  <RefreshCw className="h-5 w-5 animate-spin text-zinc-400 dark:text-zinc-500" />
+                </div>
+              )}
+
+              {!loading && filteredSkills.length === 0 && (
+                <div className="flex h-full items-center justify-center text-sm text-zinc-400 dark:text-zinc-500">
+                  {searchQuery ? "No matching skills" : "No skills available"}
+                </div>
+              )}
+
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {filteredSkills.map((skill) => {
+                  const isSelected = skill.name === selectedSkillName;
+                  return (
+                    <button
+                      key={skill.name}
+                      onClick={() => handleSelectSkill(skill.name)}
+                      className={cn(
+                        "flex w-full flex-col gap-1.5 px-4 py-3 text-left transition-colors",
+                        isSelected
+                          ? "bg-zinc-100 dark:bg-zinc-800"
+                          : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
+                      )}
+                    >
+                      <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                        {skill.name}
+                      </span>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        {skill.description}
+                      </p>
+                      {skill.triggers.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {skill.triggers.slice(0, 3).map((t) => (
+                            <span
+                              key={t}
+                              className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                            >
+                              {t}
+                            </span>
+                          ))}
+                          {skill.triggers.length > 3 && (
+                            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                              +{skill.triggers.length - 3}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
-            )}
+            </div>
 
-            {!loading && filteredSkills.length === 0 && (
-              <div className="flex h-full items-center justify-center text-sm text-zinc-400 dark:text-zinc-500">
-                {searchQuery ? "No matching skills" : "No skills available"}
-              </div>
-            )}
-
-            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {filteredSkills.map((skill) => {
-                const isSelected = skill.name === selectedSkillName;
-                return (
-                  <button
-                    key={skill.name}
-                    onClick={() => handleSelectSkill(skill.name)}
-                    className={cn(
-                      "flex w-full flex-col gap-1.5 px-4 py-3 text-left transition-colors",
-                      isSelected
-                        ? "bg-zinc-100 dark:bg-zinc-800"
-                        : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
-                    )}
-                  >
-                    <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                      {skill.name}
-                    </span>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {skill.description}
-                    </p>
-                    {skill.triggers.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {skill.triggers.slice(0, 3).map((t) => (
-                          <span
-                            key={t}
-                            className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
-                          >
-                            {t}
-                          </span>
-                        ))}
-                        {skill.triggers.length > 3 && (
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                            +{skill.triggers.length - 3}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
+            {/* List footer */}
+            <div className="flex items-center justify-between border-t border-zinc-200 px-4 py-2 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+              <span>
+                {total > 0 ? (
+                  <>
+                    {filteredSkills.length} of {total}
+                  </>
+                ) : (
+                  "No skills"
+                )}
+              </span>
             </div>
           </div>
-
-          {/* List footer */}
-          <div className="flex items-center justify-between border-t border-zinc-200 px-4 py-2 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-            <span>
-              {total > 0 ? (
-                <>
-                  {filteredSkills.length} of {total}
-                </>
-              ) : (
-                "No skills"
-              )}
-            </span>
+        ) : (
+          /* Detail view */
+          <div className="flex flex-1 flex-col overflow-hidden">
+            <SkillDetail
+              detail={selectedSkillDetail}
+              loading={loading && selectedSkillName !== null && selectedSkillDetail === null}
+              onBack={() => useSkillStore.getState().deselectSkill()}
+            />
           </div>
-        </div>
-
-        {/* Right panel — skill detail */}
-        <div className="flex flex-1 flex-col overflow-hidden">
-          <SkillDetail
-            detail={selectedSkillDetail}
-            loading={loading && selectedSkillName !== null && selectedSkillDetail === null}
-          />
-        </div>
+        )}
       </div>
     </div>
   );

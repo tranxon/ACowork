@@ -22,6 +22,7 @@ interface SkillStore {
   selectSkill: (agentId: string, skillName: string) => Promise<void>;
   fetchExecutionHistory: (agentId: string, skillName: string, page?: number) => Promise<void>;
   clearSkills: () => void;
+  deselectSkill: () => void;
 }
 
 export const useSkillStore = create<SkillStore>((set) => ({
@@ -80,5 +81,12 @@ export const useSkillStore = create<SkillStore>((set) => ({
       selectedSkillDetail: null,
       executionHistory: null,
       error: null,
+    }),
+
+  deselectSkill: () =>
+    set({
+      selectedSkillName: null,
+      selectedSkillDetail: null,
+      executionHistory: null,
     }),
 }));

@@ -84,7 +84,7 @@ export function MemoryNodeList({
   const end = Math.min(page * pageSize, total);
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden border-r border-zinc-200 dark:border-zinc-800">
+    <div className="flex flex-1 flex-col overflow-hidden">
       {/* List header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-2 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
         <span>

@@ -7,8 +7,6 @@ import { ResultsPanel } from "../results/ResultsPanel";
 import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { SettingsPage } from "../settings/SettingsPage";
-import { MemoryPanel } from "../memory/MemoryPanel";
-import { SkillBrowser } from "../skills/SkillBrowser";
 import { ToolApprovalModal } from "../tools/ToolApprovalModal";
 
 const MIN_SIDEBAR_WIDTH = 160;
@@ -89,11 +87,16 @@ export function AppLayout() {
 
             {/* Resize handle */}
             <div
-              className="w-1 shrink-0 cursor-col-resize hover:bg-blue-400/50 active:bg-blue-400/70 transition-colors select-none"
+              className="group relative w-px shrink-0 cursor-col-resize select-none"
               onMouseDown={handleMouseDown}
               role="separator"
               aria-label="Resize sidebar"
-            />
+            >
+              {/* Visible divider line */}
+              <div className="absolute inset-y-0 left-0 w-px bg-zinc-200 dark:bg-zinc-800" />
+              {/* Hover/active area for resize */}
+              <div className="absolute inset-y-0 -left-2 w-[7px] group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
+            </div>
 
             {/* Chat panel — elastic */}
             <ChatPanel />
@@ -113,10 +116,6 @@ export function AppLayout() {
         )}
 
         {currentView === "settings" && <SettingsPage />}
-
-        {currentView === "memory" && <MemoryPanel />}
-
-        {currentView === "skills" && <SkillBrowser />}
       </div>
 
       {/* Global tool approval modal */}

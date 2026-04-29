@@ -291,11 +291,20 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         exceeded_action: "warn".to_string(),
     };
 
-    // Step 8: Create AgentLoop with optional streaming chunk channel
+    // Step 8: Create AgentLoop with optional streaming chunk channel and tool event channel
     // In Gateway mode, each StreamEvent::Content delta is forwarded through
     // the on_chunk mpsc channel, then relayed to Gateway via TYPE_STREAM_CHUNK.
+    // Tool events (ToolCall/ToolResult) are forwarded through on_tool_event
+    // and relayed to Gateway via agent_tool_call/agent_tool_result intents.
     let (chunk_tx, chunk_rx) = if ipc_client.is_some() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::ChunkEvent>(256);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let (tool_event_tx, tool_event_rx) = if ipc_client.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::ToolEvent>(64);
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -308,6 +317,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         active_tools,
         budget,
         chunk_tx,
+        tool_event_tx,
     );
 
     // Step 9: Run the appropriate loop based on connection mode
@@ -382,6 +392,68 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
             None
         };
 
+        // Spawn tool event relay task: consumes ToolEvent from mpsc channel and
+        // forwards each event to Gateway via IntentSend (agent_tool_call / agent_tool_result).
+        // Uses a dedicated IPC connection, following the same pattern as chunk_relay.
+        let tool_event_relay = if let Some(mut tool_event_rx) = tool_event_rx {
+            let agent_id = agent_id.clone();
+            let version = version.clone();
+            let socket_path = socket_path.clone();
+            Some(tokio::spawn(async move {
+                let mut te_client = crate::ipc::client::GatewayClient::new(&socket_path);
+                if let Err(e) = te_client.connect_and_register_with_role(&agent_id, &version, "tool-event-relay").await {
+                    tracing::error!("Tool event relay IPC connection failed: {}", e);
+                    return;
+                }
+                tracing::info!("Tool event relay connected to Gateway");
+
+                while let Some(event) = tool_event_rx.recv().await {
+                    let (action, params) = match event {
+                        crate::agent::loop_::ToolEvent::ToolCall { name, args, id } => {
+                            // Parse args JSON for structured forwarding; fallback to raw string
+                            let parsed_args: serde_json::Value = serde_json::from_str(&args)
+                                .unwrap_or_else(|_| serde_json::json!({ "raw": args }));
+                            ("agent_tool_call", serde_json::json!({
+                                "name": name,
+                                "params": parsed_args,
+                                "tool_call_id": id,
+                            }))
+                        }
+                        crate::agent::loop_::ToolEvent::ToolResult { name, result, tool_call_id } => {
+                            // Parse result JSON for structured forwarding; fallback to raw string
+                            let parsed_result: serde_json::Value = serde_json::from_str(&result)
+                                .unwrap_or_else(|_| serde_json::json!({ "content": result }));
+                            ("agent_tool_result", serde_json::json!({
+                                "name": name,
+                                "result": parsed_result,
+                                "tool_call_id": tool_call_id,
+                            }))
+                        }
+                    };
+
+                    if let Err(e) = te_client
+                        .send_intent("http-ws", action, params, true)
+                        .await
+                    {
+                        tracing::warn!("Tool event relay send failed: {}, reconnecting...", e);
+                        match try_reconnect_chunk_relay(
+                            &socket_path, &agent_id, &version, &mut te_client,
+                        ).await {
+                            Ok(()) => {
+                                tracing::info!("Tool event relay reconnected");
+                            }
+                            Err(e2) => {
+                                tracing::error!("Tool event relay reconnect failed: {}", e2);
+                            }
+                        }
+                    }
+                }
+                tracing::debug!("Tool event relay task ended");
+            }))
+        } else {
+            None
+        };
+
         let result = run_gateway_loop(
             agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone(),
             socket_path.clone(), agent_id.clone(), version.clone(),
@@ -389,6 +461,10 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
 
         // Chunk relay task will end when chunk_rx is dropped (agent_loop dropped)
         if let Some(handle) = chunk_relay {
+            let _ = handle.await;
+        }
+        // Tool event relay task will end when tool_event_rx is dropped
+        if let Some(handle) = tool_event_relay {
             let _ = handle.await;
         }
 
@@ -686,6 +762,14 @@ async fn run_gateway_loop(
                         match agent_loop.run(&content, &context_builder).await {
                             Ok(response_text) => {
                                 tracing::info!("Agent response: {}", &response_text[..response_text.len().min(100)]);
+
+                                // TODO(conversation-persist): Persist user message + assistant response
+                                // to Grafeo memory engine for long-term recall.
+                                // Requires Grafeo persistence interface integration:
+                                //   1. Write user message as EpisodicNode
+                                //   2. Write assistant response as EpisodicNode
+                                //   3. Trigger consolidation scheduler after N messages
+                                // Blocked on: Grafeo write API from Runtime process
 
                                 // Send response back to Gateway via bridge channel
                                 // Target is the HTTP client that originated the message

@@ -1,6 +1,6 @@
 import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { X, Trash2 } from "lucide-react";
+import { ArrowLeft, Trash2 } from "lucide-react";
 
 interface MemoryNodeDetailProps {
   node: MemoryNodeResponse;
@@ -75,9 +75,17 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
   };
 
   return (
-    <div className="flex w-[360px] shrink-0 flex-col overflow-hidden border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="flex flex-1 flex-col overflow-hidden bg-white dark:bg-zinc-900">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+        <button
+          onClick={onClose}
+          className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          aria-label="Back to list"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to List
+        </button>
         <div className="flex items-center gap-2">
           <span
             className={cn(
@@ -92,13 +100,6 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
           </span>
           <span className="text-xs text-zinc-400 dark:text-zinc-500">#{node.node_id}</span>
         </div>
-        <button
-          onClick={onClose}
-          className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
-          aria-label="Close detail"
-        >
-          <X className="h-4 w-4" />
-        </button>
       </div>
 
       {/* Content */}

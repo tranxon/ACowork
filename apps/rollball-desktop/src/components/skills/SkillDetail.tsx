@@ -1,35 +1,77 @@
 import type { SkillDetailResponse } from "../../lib/types";
-import { Loader2 } from "lucide-react";
-
+import { Loader2, ArrowLeft } from "lucide-react";
 
 interface SkillDetailProps {
   detail: SkillDetailResponse | null;
   loading: boolean;
+  onBack?: () => void;
 }
 
-export function SkillDetail({ detail, loading }: SkillDetailProps) {
+export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-zinc-400 dark:text-zinc-500" />
+      <div className="flex h-full flex-col overflow-hidden">
+        {onBack && (
+          <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+            <button
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              aria-label="Back to list"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              Back to List
+            </button>
+          </div>
+        )}
+        <div className="flex flex-1 items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-zinc-400 dark:text-zinc-500" />
+        </div>
       </div>
     );
   }
 
   if (!detail) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-center">
-          <p className="text-sm text-zinc-400 dark:text-zinc-500">
-            Select a skill to view details
-          </p>
+      <div className="flex h-full flex-col overflow-hidden">
+        {onBack && (
+          <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+            <button
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              aria-label="Back to list"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              Back to List
+            </button>
+          </div>
+        )}
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-center">
+            <p className="text-sm text-zinc-400 dark:text-zinc-500">
+              Select a skill to view details
+            </p>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto p-6">
+    <div className="flex h-full flex-col overflow-hidden">
+      {/* Back header */}
+      {onBack && (
+        <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <button
+            onClick={onBack}
+            className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            aria-label="Back to list"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to List
+          </button>
+        </div>
+      )}
+      <div className="flex-1 overflow-y-auto p-6">
       {/* Basic info card */}
       <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
         <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
@@ -111,6 +153,7 @@ export function SkillDetail({ detail, loading }: SkillDetailProps) {
           No execution history available
         </p>
       </div>
+    </div>
     </div>
   );
 }

@@ -32,6 +32,8 @@ pub fn chat_routes() -> Router<AppState> {
     Router::new()
         .route("/api/agents/{id}/message", post(send_message))
         .route("/api/agents/{id}/stream", get(agent_stream_ws))
+        .route("/api/agents/{id}/conversations", get(get_conversations))
+        .route("/api/agents/{id}/conversations/latest", get(get_latest_conversation))
 }
 
 // ── Request/Response types ────────────────────────────────────────────
@@ -53,6 +55,48 @@ pub struct SendMessageResponse {
     pub message_id: String,
     /// Delivery status
     pub status: String,
+}
+
+/// A single conversation session summary
+#[derive(Serialize)]
+pub struct ConversationSummary {
+    /// Session identifier
+    pub session_id: String,
+    /// Unix timestamp (seconds) when the session started
+    pub started_at: i64,
+    /// Number of messages in the session
+    pub message_count: u32,
+    /// Unix timestamp (seconds) of the most recent message
+    pub last_message_at: i64,
+}
+
+/// Response for listing conversation sessions
+#[derive(Serialize)]
+pub struct ConversationsListResponse {
+    /// List of conversation sessions
+    pub conversations: Vec<ConversationSummary>,
+}
+
+/// A single message within a conversation
+#[derive(Serialize)]
+pub struct ConversationMessage {
+    /// Role: "user" | "assistant" | "tool"
+    pub role: String,
+    /// Message content
+    pub content: String,
+    /// Unix timestamp (seconds)
+    pub timestamp: i64,
+    /// Turn index within the session
+    pub turn_index: u32,
+}
+
+/// Response for the latest conversation
+#[derive(Serialize)]
+pub struct LatestConversationResponse {
+    /// Session identifier
+    pub session_id: String,
+    /// Messages in the conversation, sorted by turn_index
+    pub messages: Vec<ConversationMessage>,
 }
 
 /// WebSocket client message (inbound from Desktop App)
@@ -155,6 +199,185 @@ pub async fn send_message(
             status: "sent".to_string(),
         }),
     ))
+}
+
+/// `GET /api/agents/:id/conversations` — list conversation sessions for an agent
+///
+/// Returns a list of conversation sessions grouped by session_id,
+/// with message counts and time range for each session.
+pub async fn get_conversations(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<ConversationsListResponse>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
+        }
+    }
+
+    // Retrieve memory store
+    let memory_store = {
+        let gw = state.gateway_state.read().await;
+        gw.memory_store.clone()
+    };
+
+    let conversations = match memory_store {
+        Some(store) => match store.get_episodes(None, 10000) {
+            Ok(episodes) => {
+                // Filter episodes by agent_id prefix to avoid cross-agent pollution
+                let prefix = format!("{}#", agent_id);
+                let episodes: Vec<_> = episodes
+                    .into_iter()
+                    .filter(|ep| ep.session_id.starts_with(&prefix))
+                    .collect();
+
+                // Group episodes by session_id
+                let mut session_map: std::collections::HashMap<
+                    String,
+                    Vec<rollball_memory::Episode>,
+                > = std::collections::HashMap::new();
+                for ep in episodes {
+                    session_map
+                        .entry(ep.session_id.clone())
+                        .or_default()
+                        .push(ep);
+                }
+
+                let mut conversations: Vec<ConversationSummary> = session_map
+                    .into_iter()
+                    .map(|(session_id, mut eps)| {
+                        eps.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                        let started_at =
+                            eps.first().map(|e| e.timestamp.timestamp()).unwrap_or(0);
+                        let last_message_at =
+                            eps.last().map(|e| e.timestamp.timestamp()).unwrap_or(0);
+                        ConversationSummary {
+                            session_id,
+                            started_at,
+                            message_count: eps.len() as u32,
+                            last_message_at,
+                        }
+                    })
+                    .collect();
+
+                // Sort by most recent message descending
+                conversations.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
+                conversations
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get episodes for agent {}: {}", agent_id, e);
+                vec![]
+            }
+        },
+        None => vec![],
+    };
+
+    Ok(Json(ConversationsListResponse { conversations }))
+}
+
+/// `GET /api/agents/:id/conversations/latest` — get the most recent conversation
+///
+/// Returns the full message history of the latest session,
+/// ordered by turn_index ascending.
+pub async fn get_latest_conversation(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<LatestConversationResponse>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
+        }
+    }
+
+    // Retrieve memory store
+    let memory_store = {
+        let gw = state.gateway_state.read().await;
+        gw.memory_store.clone()
+    };
+
+    let (session_id, messages) = match memory_store {
+        Some(store) => match store.get_episodes(None, 10000) {
+            Ok(episodes) => {
+                // Filter episodes by agent_id prefix to avoid cross-agent pollution
+                let prefix = format!("{}#", agent_id);
+                let episodes: Vec<_> = episodes
+                    .into_iter()
+                    .filter(|ep| ep.session_id.starts_with(&prefix))
+                    .collect();
+
+                if episodes.is_empty() {
+                    (String::new(), vec![])
+                } else {
+                    // Find the session with the most recent message
+                    let mut session_latest: std::collections::HashMap<String, i64> =
+                        std::collections::HashMap::new();
+                    for ep in &episodes {
+                        let ts = ep.timestamp.timestamp();
+                        let current = session_latest
+                            .entry(ep.session_id.clone())
+                            .or_insert(ts);
+                        if ts > *current {
+                            *current = ts;
+                        }
+                    }
+
+                    let latest_session = session_latest
+                        .into_iter()
+                        .max_by_key(|(_, ts)| *ts)
+                        .map(|(sid, _)| sid)
+                        .unwrap_or_default();
+
+                    if latest_session.is_empty() {
+                        (String::new(), vec![])
+                    } else {
+                        let mut session_eps: Vec<rollball_memory::Episode> = episodes
+                            .into_iter()
+                            .filter(|ep| ep.session_id == latest_session)
+                            .collect();
+
+                        // Sort by turn_index ascending, then timestamp ascending
+                        session_eps.sort_by(|a, b| {
+                            a.turn_index
+                                .cmp(&b.turn_index)
+                                .then_with(|| a.timestamp.cmp(&b.timestamp))
+                        });
+
+                        let messages: Vec<ConversationMessage> = session_eps
+                            .into_iter()
+                            .map(|ep| ConversationMessage {
+                                role: ep.role,
+                                content: ep.content,
+                                timestamp: ep.timestamp.timestamp(),
+                                turn_index: ep.turn_index,
+                            })
+                            .collect();
+
+                        (latest_session, messages)
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get episodes for agent {}: {}", agent_id, e);
+                (String::new(), vec![])
+            }
+        },
+        None => (String::new(), vec![]),
+    };
+
+    Ok(Json(LatestConversationResponse {
+        session_id,
+        messages,
+    }))
 }
 
 /// `GET /api/agents/:id/stream` — WebSocket upgrade for streaming chat

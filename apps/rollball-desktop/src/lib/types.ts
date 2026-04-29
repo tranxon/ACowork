@@ -109,7 +109,7 @@ export interface TokenUsage {
 }
 
 /** Navigation view type */
-export type NavView = "chat" | "agents" | "memory" | "skills" | "settings";
+export type NavView = "chat" | "settings";
 
 /** Theme type */
 export type Theme = "light" | "dark" | "system";
