@@ -157,7 +157,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     //   This satisfies PRD GTW-05 and SEC-07 (no env-var key distribution).
     //
     // In Standalone mode: use manifest suggested_provider + env vars (development only).
-    let (provider, resolved_model) = if let Some(ref mut client) = ipc_client {
+    let (provider, resolved_model, available_models) = if let Some(ref mut client) = ipc_client {
         // Gateway mode: LLMConfigDelivery is required
         match client.recv_llm_config().await {
             Ok(llm_config) => {
@@ -185,7 +185,8 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                     );
                     fallback
                 });
-                (p, resolved)
+                let models = llm_config.models.clone();
+                (p, resolved, models)
             }
             Err(e) => {
                 // CRITICAL: In Gateway mode, no LLM config means the agent cannot function.
@@ -196,7 +197,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                 );
                 // Return a provider that returns clear error messages on any request
                 let p = crate::providers::router::create_noop_provider();
-                (p, "no-model".to_string())
+                (p, "no-model".to_string(), vec![])
             }
         }
     } else {
@@ -210,7 +211,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
             source = "manifest + env",
             "Provider initialized (standalone mode)"
         );
-        (p, loaded.manifest.llm.suggested_model.clone())
+        (p, loaded.manifest.llm.suggested_model.clone(), vec![])
     };
 
     // Step 4: Build tool registry + activate by manifest
@@ -253,7 +254,32 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
             manifest_model = %loaded.manifest.llm.suggested_model,
             "Applying Gateway model override"
         );
-        context_builder = context_builder.with_override_model(resolved_model);
+        context_builder = context_builder.with_override_model(resolved_model.clone());
+    }
+
+    // Step 6.5: Restore per-agent model preference from workspace
+    //
+    // If the agent previously selected a different model (via model_switch),
+    // it was persisted to .agent_model.json in the workspace.
+    // On cold start, restore that preference if the model is still available.
+    if let Some(saved_model) = load_agent_model(&config.work_dir) {
+        if available_models.contains(&saved_model) {
+            if saved_model != resolved_model {
+                tracing::info!(
+                    saved_model = %saved_model,
+                    gateway_model = %resolved_model,
+                    "Restoring per-agent model preference from workspace"
+                );
+                context_builder.set_override_model(saved_model.clone());
+            }
+        } else {
+            tracing::warn!(
+                saved_model = %saved_model,
+                available = ?available_models,
+                "Saved model no longer available, removing .agent_model.json"
+            );
+            remove_agent_model(&config.work_dir);
+        }
     }
 
     // Step 7: Create budget (unlimited for standalone mode)
@@ -329,7 +355,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
             None
         };
 
-        let result = run_gateway_loop(agent_loop, inbound_tx, &mut client, context_builder).await;
+        let result = run_gateway_loop(agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone()).await;
 
         // Chunk relay task will end when chunk_rx is dropped (agent_loop dropped)
         if let Some(handle) = chunk_relay {
@@ -555,6 +581,7 @@ async fn run_gateway_loop(
     _inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
     ipc_client: &mut crate::ipc::client::GatewayClient,
     mut context_builder: crate::agent::context::ContextBuilder,
+    work_dir: String,
 ) -> Result<()> {
     use rollball_core::protocol::GatewayResponse;
 
@@ -593,12 +620,14 @@ async fn run_gateway_loop(
                         // If budget query fails (e.g. provider not tracked), proceed anyway
 
                         // Handle model_switch: update context_builder's model override
+                        // and persist to workspace so the preference survives restarts
                         if action == "model_switch" {
                             if let Some(model) = params.get("model").and_then(|v| v.as_str()) {
                                 context_builder.set_override_model(model.to_string());
+                                save_agent_model(&work_dir, model);
                                 tracing::info!(
                                     model = %model,
-                                    "Model switched via model_switch message"
+                                    "Model switched via model_switch message (persisted to workspace)"
                                 );
                             } else {
                                 tracing::warn!(
@@ -724,5 +753,89 @@ mod tests {
             client.is_none(),
             "Should gracefully fallback to None on connection failure"
         );
+    }
+}
+
+// ── Per-agent model persistence ──────────────────────────────────────────
+
+/// Agent model preference file stored in the workspace directory.
+///
+/// When the user switches models via model_switch, the Agent Runtime persists
+/// the selection to this file so it survives restarts. On cold start, the Runtime
+/// reads this file and restores the preference if the model is still available
+/// in the LLMConfigDelivery.models list.
+const AGENT_MODEL_FILE: &str = ".agent_model.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AgentModelEntry {
+    /// The model identifier selected by the user
+    model: String,
+    /// ISO 8601 timestamp of when the model was last changed
+    updated_at: String,
+}
+
+/// Load the per-agent model preference from the workspace.
+///
+/// Returns `Some(model)` if the file exists and parses correctly, otherwise `None`.
+fn load_agent_model(work_dir: &str) -> Option<String> {
+    let path = std::path::Path::new(work_dir).join(AGENT_MODEL_FILE);
+    if !path.exists() {
+        return None;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            match serde_json::from_str::<AgentModelEntry>(&content) {
+                Ok(entry) => {
+                    tracing::info!(
+                        model = %entry.model,
+                        updated_at = %entry.updated_at,
+                        "Loaded per-agent model preference from workspace"
+                    );
+                    Some(entry.model)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse {}: {}", AGENT_MODEL_FILE, e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read {}: {}", AGENT_MODEL_FILE, e);
+            None
+        }
+    }
+}
+
+/// Save the per-agent model preference to the workspace.
+///
+/// Called when a model_switch message is received. Overwrites any existing entry.
+fn save_agent_model(work_dir: &str, model: &str) {
+    let entry = AgentModelEntry {
+        model: model.to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let path = std::path::Path::new(work_dir).join(AGENT_MODEL_FILE);
+    match serde_json::to_string_pretty(&entry) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!("Failed to write {}: {}", AGENT_MODEL_FILE, e);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to serialize {}: {}", AGENT_MODEL_FILE, e);
+        }
+    }
+}
+
+/// Remove the per-agent model preference file from the workspace.
+///
+/// Called when the saved model is no longer available in the current provider's
+/// model list (e.g. provider was changed or model was removed).
+fn remove_agent_model(work_dir: &str) {
+    let path = std::path::Path::new(work_dir).join(AGENT_MODEL_FILE);
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!("Failed to remove {}: {}", AGENT_MODEL_FILE, e);
+        }
     }
 }

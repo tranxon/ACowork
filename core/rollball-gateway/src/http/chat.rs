@@ -310,6 +310,12 @@ async fn handle_ws_text(
                 "message_id": message_id,
             });
             let _ = socket.send(Message::Text(ack.to_string().into())).await;
+            // Also send model_confirmed so the Desktop App can update its UI
+            let confirmed = serde_json::json!({
+                "type": "model_confirmed",
+                "model": model,
+            });
+            let _ = socket.send(Message::Text(confirmed.to_string().into())).await;
         } else {
             let err = serde_json::json!({
                 "type": "error",

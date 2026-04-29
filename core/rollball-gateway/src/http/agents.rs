@@ -27,6 +27,7 @@ pub fn agent_routes() -> Router<AppState> {
         .route("/api/agents/install", post(install_agent))
         .route("/api/agents/{id}/start", post(start_agent))
         .route("/api/agents/{id}/stop", post(stop_agent))
+        .route("/api/agents/{id}/model", get(get_agent_model))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -68,6 +69,17 @@ pub struct InstallRequest {
 #[derive(Serialize)]
 pub struct MessageResponse {
     pub message: String,
+}
+
+/// Agent model info response
+#[derive(Serialize)]
+pub struct AgentModelResponse {
+    /// Provider name (e.g. "minimax", "openai")
+    pub provider: String,
+    /// Currently active model for this agent
+    pub model: String,
+    /// All available models for this provider
+    pub available_models: Vec<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -254,6 +266,78 @@ pub async fn stop_agent(
 
     Ok(Json(MessageResponse {
         message: format!("Agent stopped: {}", agent_id),
+    }))
+}
+
+/// `GET /api/agents/:id/model` — get the current active model for an agent
+///
+/// Reads the per-agent model preference from the workspace `.agent_model.json` file.
+/// If no per-agent preference exists, falls back to the Gateway config default_model,
+/// then the Vault entry's default_model (models[0]).
+pub async fn get_agent_model(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentModelResponse>, (StatusCode, Json<ApiError>)> {
+    let gw = state.gateway_state.read().await;
+
+    // Verify agent exists
+    let info = gw.installed_agents.get(&agent_id)
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+
+    // Resolve provider and models from Gateway config / Vault
+    let default_provider = gw.config.as_ref()
+        .and_then(|c| c.default_provider.as_deref())
+        .map(|s| s.to_string())
+        .or_else(|| gw.vault.list_providers().first().cloned());
+
+    let provider_name = match default_provider {
+        Some(name) => name,
+        None => return Err(ApiError::not_found("No provider configured in Vault")),
+    };
+
+    let vault_entry = gw.vault.get_provider(&provider_name)
+        .map_err(|e| ApiError::internal(&format!("Vault error: {}", e)))?;
+
+    let config_default_model = gw.config.as_ref()
+        .and_then(|c| c.default_model.as_deref());
+
+    // Gateway-level default model (config > Vault default_model)
+    let gateway_model = config_default_model
+        .map(|m| m.to_string())
+        .or(vault_entry.default_model.clone())
+        .unwrap_or_default();
+
+    // Try reading per-agent model preference from workspace
+    let workspace = std::path::Path::new(&info.install_path).join("workspace");
+    let model_path = workspace.join(".agent_model.json");
+    let active_model = if model_path.exists() {
+        match std::fs::read_to_string(&model_path) {
+            Ok(content) => {
+                // Parse only the "model" field
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&content) {
+                    obj.get("model")
+                        .and_then(|v| v.as_str())
+                        .map(|m| m.to_string())
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Use per-agent preference if available and valid, otherwise gateway default
+    let resolved_model = match active_model {
+        Some(ref m) if vault_entry.models.contains(m) => m.clone(),
+        _ => gateway_model,
+    };
+
+    Ok(Json(AgentModelResponse {
+        provider: provider_name,
+        model: resolved_model,
+        available_models: vault_entry.models,
     }))
 }
 
