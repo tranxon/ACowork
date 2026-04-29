@@ -3,9 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
-// cn utility available for future styling
-// import { cn } from "../../lib/utils";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle } from "lucide-react";
+import { cn } from "../../lib/utils";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
@@ -143,20 +142,12 @@ export function ChatPanel() {
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
         {/* Model switcher — only enabled when agent is running */}
         {availableModels.length > 1 && selectedAgent?.running && (
-          <div className="mb-2 flex items-center gap-2">
-            <span className="text-[10px] text-zinc-400">Model:</span>
-            <select
-              value={currentModel ?? ""}
-              onChange={(e) => selectedAgentId && setCurrentModel(e.target.value, selectedAgentId)}
-              className="rounded border border-zinc-200 bg-white px-2 py-0.5 text-xs text-zinc-700 outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:focus:border-zinc-500"
-            >
-              {availableModels.map((m) => (
-                <option key={m} value={m}>
-                  {m}{currentProvider ? ` (${currentProvider})` : ""}
-                </option>
-              ))}
-            </select>
-          </div>
+          <ModelMenu
+            models={availableModels}
+            currentModel={currentModel}
+            currentProvider={currentProvider}
+            onSelect={(m) => selectedAgentId && setCurrentModel(m, selectedAgentId)}
+          />
         )}
         <div className="flex gap-2">
           <textarea
@@ -279,4 +270,99 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
   }
 
   return null;
+}
+
+/** Popup-style model selector with provider shown in gray */
+function ModelMenu({
+  models,
+  currentModel,
+  currentProvider,
+  onSelect,
+}: {
+  models: string[];
+  currentModel: string | null;
+  currentProvider: string | null;
+  onSelect: (model: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative mb-2 inline-block">
+      {/* Trigger button */}
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className={cn(
+          "flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
+          "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
+          "dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700",
+          open && "ring-1 ring-zinc-300 dark:ring-zinc-600",
+        )}
+      >
+        <span className="font-medium">{currentModel ?? "Model"}</span>
+        {currentProvider && (
+          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{currentProvider}</span>
+        )}
+        <ChevronDown className="h-3 w-3 text-zinc-400" />
+      </button>
+
+      {/* Popup menu */}
+      {open && (
+        <div
+          className={cn(
+            "absolute bottom-full left-0 z-50 mb-1 min-w-[180px] overflow-hidden rounded-lg border shadow-lg",
+            "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
+          )}
+        >
+          <div className="px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+            Switch Model
+          </div>
+          {models.map((m) => {
+            const isActive = m === currentModel;
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => {
+                  onSelect(m);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 px-2.5 py-1.5 text-xs transition-colors",
+                  isActive
+                    ? "bg-zinc-100 text-zinc-900 dark:bg-zinc-700 dark:text-white"
+                    : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
+                )}
+              >
+                <span className="w-3.5 shrink-0">
+                  {isActive && <Check className="h-3 w-3 text-blue-500" />}
+                </span>
+                <span className={cn("font-medium", isActive && "text-blue-600 dark:text-blue-400")}>
+                  {m}
+                </span>
+                {currentProvider && (
+                  <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">
+                    {currentProvider}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
