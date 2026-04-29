@@ -48,7 +48,8 @@ export function ChatPanel() {
       connectStream(selectedAgentId, "http://127.0.0.1:19876");
       // Restore per-agent model: check local cache first, then fetch from Gateway
       if (agentModels[selectedAgentId]) {
-        // Already cached locally
+        // Restore from local cache
+        useChatStore.setState({ currentModel: agentModels[selectedAgentId] });
       } else {
         loadAgentModel(selectedAgentId);
       }
