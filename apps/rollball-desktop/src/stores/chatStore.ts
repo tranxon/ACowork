@@ -167,14 +167,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set({ messages: [], tokenUsage: null });
   },
   setCurrentModel: (model: string, agentId: string) => {
-    set((state) => ({
-      currentModel: model,
-      agentModels: { ...state.agentModels, [agentId]: model },
-    }));
+    // Optimistically update UI only — don't cache until confirmed by backend
+    const prevModel = get().currentModel;
+    set({ currentModel: model });
     // Send model_switch message to Agent via WebSocket when user changes model
     const ws = get().ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "model_switch", model }));
+      ws.send(JSON.stringify({ type: "model_switch", model, agentId, _prevModel: prevModel }));
+    } else {
+      // No WebSocket — revert immediately
+      set({ currentModel: prevModel });
     }
   },
   setAvailableModels: (models: string[]) => {
@@ -288,15 +290,30 @@ function handleMessageEvent(
     }
 
     case "model_confirmed": {
-      // Gateway confirms the model switch was forwarded to the Agent
+      // Gateway confirms the model switch was forwarded to the Agent Runtime
       const confirmedModel = data.model as string;
+      const confirmedAgentId = data.agentId as string | undefined;
       console.log("[ChatStore] Model switch confirmed:", confirmedModel);
+      // Now persist to agentModels cache
+      if (confirmedAgentId && confirmedModel) {
+        set((state) => ({
+          agentModels: { ...state.agentModels, [confirmedAgentId]: confirmedModel },
+        }));
+      }
       break;
     }
 
     case "error": {
       const errorMsg = data.message as string;
       console.error("[ChatStore] Server error:", errorMsg);
+      // If model_switch failed, revert the optimistic currentModel update
+      if (errorMsg && errorMsg.includes("cannot switch model")) {
+        // Revert: reload the model from the backend
+        const agentId = data.agentId as string | undefined;
+        if (agentId) {
+          get().loadAgentModel(agentId);
+        }
+      }
       // Add system error message
       const errMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
