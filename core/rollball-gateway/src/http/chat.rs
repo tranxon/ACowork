@@ -314,6 +314,7 @@ async fn handle_ws_text(
             let confirmed = serde_json::json!({
                 "type": "model_confirmed",
                 "model": model,
+                "agentId": agent_id,
             });
             let _ = socket.send(Message::Text(confirmed.to_string().into())).await;
         } else {
@@ -321,6 +322,7 @@ async fn handle_ws_text(
                 "type": "error",
                 "message": format!("Agent {} is not running, cannot switch model", agent_id),
                 "message_id": message_id,
+                "agentId": agent_id,
             });
             let _ = socket.send(Message::Text(err.to_string().into())).await;
         }
