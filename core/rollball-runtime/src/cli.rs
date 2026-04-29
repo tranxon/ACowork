@@ -634,7 +634,7 @@ async fn run_gateway_loop(
                         }
                     }
                     // Ignore other push messages (CapabilityUpdate, etc.)
-                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url } => {
+                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: _ } => {
                         tracing::info!(
                             provider = %provider,
                             model = ?model,

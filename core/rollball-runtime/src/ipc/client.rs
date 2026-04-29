@@ -28,6 +28,8 @@ pub struct LlmConfigReceived {
     pub api_key: Option<String>,
     /// Base URL override (optional)
     pub base_url: Option<String>,
+    /// Available models for this provider (user-selected)
+    pub models: Vec<String>,
 }
 
 /// IPC client for Gateway communication
@@ -185,10 +187,12 @@ impl GatewayClient {
                     model,
                     api_key,
                     base_url,
+                    models,
                 }))) => {
                     tracing::info!(
                         provider = %provider,
                         model = ?model,
+                        models = ?models,
                         "Received LLMConfigDelivery from Gateway"
                     );
                     return Ok(LlmConfigReceived {
@@ -196,6 +200,7 @@ impl GatewayClient {
                         model,
                         api_key: Some(api_key),
                         base_url,
+                        models,
                     });
                 }
                 Ok(Ok(Some(_other))) => {

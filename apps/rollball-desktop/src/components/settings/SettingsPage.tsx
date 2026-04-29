@@ -188,7 +188,8 @@ function ProvidersTab() {
         provider: newProvider,
         key: newKey,
         baseUrl: newBaseUrl || undefined,
-        defaultModel: newModels.length > 0 ? newModels[0] : undefined,
+        defaultModel: undefined,
+        models: newModels.length > 0 ? newModels : undefined,
       });
       setShowAddDialog(false);
       setNewKey("");
@@ -214,7 +215,7 @@ function ProvidersTab() {
     const def = getProviderDef(provider);
     setEditKey(keyEntry?.key_preview ?? "");
     setEditBaseUrl(keyEntry?.base_url ?? def?.baseUrl ?? "");
-    setEditModels(keyEntry?.default_model ? [keyEntry.default_model] : []);
+    setEditModels(keyEntry?.models?.length ? keyEntry.models : keyEntry?.default_model ? [keyEntry.default_model] : []);
     setEditModelSearchTerm("");
     setShowEditDialog(provider);
     // Fetch models
@@ -231,7 +232,8 @@ function ProvidersTab() {
         provider: showEditDialog,
         key: editKey,
         baseUrl: editBaseUrl || undefined,
-        defaultModel: editModels.length > 0 ? editModels[0] : undefined,
+        defaultModel: undefined,
+        models: editModels.length > 0 ? editModels : undefined,
       });
       setShowEditDialog(null);
       await fetchKeys();
@@ -283,10 +285,11 @@ function ProvidersTab() {
                         <div className="flex items-center justify-between">
                           <div className="min-w-0 flex-1">
                             <span className="text-sm font-medium">{provider.name}</span>
-                            {keyEntry?.default_model && (
+                            {keyEntry?.models?.length ? (
+                              <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.models.join(", ")}</span>
+                            ) : keyEntry?.default_model ? (
                               <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.default_model}</span>
-                            )}
-                            {!keyEntry?.default_model && keyEntry && (
+                            ) : keyEntry && (
                               <span className="ml-2 text-xs text-zinc-400">{provider.exampleModels[0] ?? "—"}</span>
                             )}
                             {!keyEntry && provider.description && (

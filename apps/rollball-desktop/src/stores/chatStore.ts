@@ -8,11 +8,15 @@ interface ChatStore {
   sending: boolean;
   ws: WebSocket | null;
   tokenUsage: TokenUsage | null;
+  currentModel: string | null;
+  availableModels: string[];
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => void;
   disconnectStream: () => void;
   clearMessages: () => void;
+  setCurrentModel: (model: string) => void;
+  setAvailableModels: (models: string[]) => void;
 }
 
 /** Derive WebSocket URL from Gateway HTTP base URL */
@@ -28,6 +32,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sending: false,
   ws: null,
   tokenUsage: null,
+  currentModel: null,
+  availableModels: [],
 
   connectStream: (agentId: string, gatewayUrl: string = DEFAULT_GATEWAY_URL) => {
     // Close existing connection
@@ -150,6 +156,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   clearMessages: () => {
     set({ messages: [], tokenUsage: null });
+  },
+  setCurrentModel: (model: string) => {
+    set({ currentModel: model });
+  },
+  setAvailableModels: (models: string[]) => {
+    set({ availableModels: models, currentModel: models[0] ?? null });
   },
 }));
 

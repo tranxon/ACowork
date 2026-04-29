@@ -1249,10 +1249,10 @@ async fn handle_agent_hello(
         // chunk-relay connections don't need LLM config — they only send TYPE_STREAM_CHUNK.
         if connection_role == "main" {
             let llm_config = resolve_llm_config_for_agent(agent_id, state).await;
-        if let Some((provider, model, api_key, base_url)) = llm_config {
+        if let Some((provider, model, api_key, base_url, models)) = llm_config {
             tracing::info!(
-                "Pushing LLMConfigDelivery to agent={}: provider={} model={:?}",
-                agent_id, provider, model
+                "Pushing LLMConfigDelivery to agent={}: provider={} model={:?} models={:?}",
+                agent_id, provider, model, models
             );
             // Use push_message (async) to deliver LLM config via the session's push channel
             let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
@@ -1260,6 +1260,7 @@ async fn handle_agent_hello(
                 model,
                 api_key,
                 base_url,
+                models,
             }).await;
             if !push_result {
                 tracing::warn!("Failed to push LLMConfigDelivery to {} (channel closed)", conn_id);
@@ -1299,7 +1300,7 @@ async fn handle_agent_hello(
 pub async fn resolve_llm_config_for_agent(
     _agent_id: &str,
     state: &SharedState,
-) -> Option<(String, Option<String>, String, Option<String>)> {
+) -> Option<(String, Option<String>, String, Option<String>, Vec<String>)> {
     let state_guard = state.read().await;
 
     // Try default_provider from Gateway config first
@@ -1341,6 +1342,7 @@ pub async fn resolve_llm_config_for_agent(
                 model,
                 entry.api_key,
                 entry.base_url,
+                entry.models,
             ))
         }
         Err(e) => {

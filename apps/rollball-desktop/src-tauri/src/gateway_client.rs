@@ -170,19 +170,27 @@ impl GatewayClient {
         Ok(keys)
     }
 
-    /// `POST /api/vault/keys` (with optional base_url and default_model)
+    /// `POST /api/vault/keys` (with optional base_url, default_model, and models)
     pub async fn add_key(
         &self,
         provider: &str,
         key: &str,
         base_url: Option<&str>,
         default_model: Option<&str>,
+        models: Option<&[String]>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::json!({ "provider": provider, "key": key });
         if let Some(url) = base_url {
             body["base_url"] = serde_json::Value::String(url.to_string());
         }
-        if let Some(model) = default_model {
+        // Send models list if provided; otherwise fallback to default_model
+        if let Some(models_list) = models {
+            if !models_list.is_empty() {
+                body["models"] = serde_json::Value::Array(
+                    models_list.iter().map(|m| serde_json::Value::String(m.clone())).collect()
+                );
+            }
+        } else if let Some(model) = default_model {
             body["default_model"] = serde_json::Value::String(model.to_string());
         }
         let resp = self
@@ -206,19 +214,27 @@ impl GatewayClient {
         Ok(result)
     }
 
-    /// `PUT /api/vault/keys/:provider` (with optional base_url and default_model)
+    /// `PUT /api/vault/keys/:provider` (with optional base_url, default_model, and models)
     pub async fn update_key(
         &self,
         provider: &str,
         key: &str,
         base_url: Option<&str>,
         default_model: Option<&str>,
+        models: Option<&[String]>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::json!({ "key": key });
         if let Some(url) = base_url {
             body["base_url"] = serde_json::Value::String(url.to_string());
         }
-        if let Some(model) = default_model {
+        // Send models list if provided; otherwise fallback to default_model
+        if let Some(models_list) = models {
+            if !models_list.is_empty() {
+                body["models"] = serde_json::Value::Array(
+                    models_list.iter().map(|m| serde_json::Value::String(m.clone())).collect()
+                );
+            }
+        } else if let Some(model) = default_model {
             body["default_model"] = serde_json::Value::String(model.to_string());
         }
         let resp = self
@@ -343,7 +359,7 @@ pub struct SendMessageResponse {
     pub status: String,
 }
 
-/// Vault key entry (masked, with optional base_url and default_model)
+/// Vault key entry (masked, with optional base_url, default_model, and models list)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultKeyEntry {
     pub provider: String,
@@ -354,6 +370,9 @@ pub struct VaultKeyEntry {
     /// Configured default model (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Selected models list (may be empty)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 
 /// Config response

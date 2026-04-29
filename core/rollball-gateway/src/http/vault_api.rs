@@ -36,6 +36,9 @@ pub struct VaultKeyEntryResponse {
     /// Configured default model (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Selected models list (may be empty)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 
 /// Add key request (supports full provider configuration)
@@ -47,8 +50,13 @@ pub struct AddKeyRequest {
     #[serde(default)]
     pub base_url: Option<String>,
     /// Optional default model for this provider (e.g. "deepseek-chat")
+    /// Kept for backward compatibility — prefer using `models` instead.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Selected models for this provider (from models.dev).
+    /// models[0] is the default/active model. Takes precedence over default_model.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 /// Update key request (supports full provider configuration)
@@ -59,8 +67,13 @@ pub struct UpdateKeyRequest {
     #[serde(default)]
     pub base_url: Option<String>,
     /// Optional default model for this provider (e.g. "deepseek-chat")
+    /// Kept for backward compatibility — prefer using `models` instead.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Selected models for this provider (from models.dev).
+    /// models[0] is the default/active model. Takes precedence over default_model.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 /// Generic message response
@@ -80,16 +93,17 @@ pub async fn list_keys(
         .map_err(|e| ApiError::internal(&format!("Failed to list keys: {}", e)))?;
 
     let response: Vec<VaultKeyEntryResponse> = entries.iter().map(|k| {
-        // Try to get the full provider entry for base_url/default_model
-        let (base_url, default_model) = match gw.vault.get_provider(&k.provider) {
-            Ok(entry) => (entry.base_url.clone(), entry.default_model.clone()),
-            Err(_) => (None, None),
+        // Try to get the full provider entry for base_url/default_model/models
+        let (base_url, default_model, models) = match gw.vault.get_provider(&k.provider) {
+            Ok(entry) => (entry.base_url.clone(), entry.default_model.clone(), entry.models.clone()),
+            Err(_) => (None, None, Vec::new()),
         };
         VaultKeyEntryResponse {
             provider: k.provider.clone(),
             key_preview: k.key_preview.clone(),
             base_url,
             default_model,
+            models,
         }
     }).collect();
 
@@ -119,10 +133,18 @@ pub async fn add_key(
     }
 
     let mut gw = state.gateway_state.write().await;
+    // Resolve models: prefer `models` field; fallback to `default_model` for backward compat
+    let resolved_models = if !body.models.is_empty() {
+        body.models.clone()
+    } else if let Some(ref m) = body.default_model {
+        vec![m.clone()]
+    } else {
+        vec![]
+    };
     gw.vault.store_provider(
         &body.provider,
         body.base_url.as_deref(),
-        body.default_model.as_deref(),
+        &resolved_models,
         &body.key,
     ).map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
@@ -172,10 +194,18 @@ pub async fn update_key(
     let mut gw = state.gateway_state.write().await;
     // Remove old entry, store new with full config
     let _ = gw.vault.remove_key(&provider);
+    // Resolve models: prefer `models` field; fallback to `default_model` for backward compat
+    let resolved_models = if !body.models.is_empty() {
+        body.models.clone()
+    } else if let Some(ref m) = body.default_model {
+        vec![m.clone()]
+    } else {
+        vec![]
+    };
     gw.vault.store_provider(
         &provider,
         body.base_url.as_deref(),
-        body.default_model.as_deref(),
+        &resolved_models,
         &body.key,
     ).map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
@@ -210,7 +240,7 @@ async fn hot_push_llm_config(state: &AppState) {
     };
 
     for agent_id in agent_ids {
-        if let Some((provider, model, api_key, base_url)) =
+        if let Some((provider, model, api_key, base_url, models)) =
             resolve_llm_config_for_agent(&agent_id, &state.gateway_state).await
         {
             let mgr = session_mgr.lock().await;
@@ -220,6 +250,7 @@ async fn hot_push_llm_config(state: &AppState) {
                     model: model.clone(),
                     api_key: api_key.clone(),
                     base_url: base_url.clone(),
+                    models: models.clone(),
                 }).await;
                 if push_result {
                     tracing::info!(

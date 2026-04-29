@@ -12,7 +12,7 @@ import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, availableModels, setCurrentModel, setAvailableModels } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
@@ -20,18 +20,27 @@ export function ChatPanel() {
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
 
-  // Check if Vault has at least one API key configured
+  // Load available models from Vault keys
   useEffect(() => {
-    const checkVault = async () => {
+    const loadModels = async () => {
       try {
         const keys = await invoke<VaultKeyEntry[]>("list_keys");
+        const allModels: string[] = [];
+        for (const key of keys) {
+          if (key.models?.length) {
+            allModels.push(...key.models);
+          } else if (key.default_model) {
+            allModels.push(key.default_model);
+          }
+        }
+        setAvailableModels([...new Set(allModels)]);
         setHasLlmConfig(keys.length > 0);
       } catch {
-        setHasLlmConfig(false);
+        // Gateway may not be running
       }
     };
-    checkVault();
-  }, [gatewayStatus]); // re-check when gateway reconnects
+    loadModels();
+  }, [gatewayStatus, setAvailableModels]);
 
   // Connect WebSocket when agent changes
   useEffect(() => {
@@ -130,6 +139,21 @@ export function ChatPanel() {
 
       {/* Input area */}
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+        {/* Model switcher */}
+        {availableModels.length > 1 && (
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-[10px] text-zinc-400">Model:</span>
+            <select
+              value={currentModel ?? ""}
+              onChange={(e) => setCurrentModel(e.target.value)}
+              className="rounded border border-zinc-200 bg-white px-2 py-0.5 text-xs text-zinc-700 outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:focus:border-zinc-500"
+            >
+              {availableModels.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="flex gap-2">
           <textarea
             value={inputValue}

@@ -175,6 +175,9 @@ pub enum GatewayResponse {
         api_key: String,
         /// Base URL override (optional, provider-specific)
         base_url: Option<String>,
+        /// Available models for this provider (user-selected from models.dev).
+        /// The agent can switch between these models at runtime.
+        models: Vec<String>,
     },
     /// Identity query result from System Agent
     IdentityQueryResult {

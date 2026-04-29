@@ -5,7 +5,7 @@
 //!
 //! Storage format (encrypted):
 //!   Legacy: plain text API key string
-//!   Current: JSON { "api_key": "...", "base_url": "...", "default_model": "..." }
+//!   Current: JSON { "api_key": "...", "base_url": "...", "default_model": "...", "models": ["..."] }
 //! The `get_key` method handles both formats transparently.
 
 use crate::error::GatewayError;
@@ -21,8 +21,13 @@ pub struct ProviderEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// Default model for this provider (empty = use model from manifest)
+    /// Kept for backward compatibility — prefer using `models` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Available models for this provider (user-selected from models.dev).
+    /// `models[0]` is the default/active model, consistent with `default_model`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 
 /// Key entry for HTTP API listing (masked preview)
@@ -84,23 +89,25 @@ impl VaultFacade {
     /// Store a provider entry (encrypted on disk)
     ///
     /// Stores the full provider configuration as JSON:
-    /// `{ "api_key": "...", "base_url": "...", "default_model": "..." }`
+    /// `{ "api_key": "...", "base_url": "...", "models": ["..."] }`
     pub fn store_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
-        self.store_provider(provider, None, None, api_key)
+        self.store_provider(provider, None, &[], api_key)
     }
 
-    /// Store a full provider entry with optional base_url and default_model
+    /// Store a full provider entry with optional base_url and models list
     pub fn store_provider(
         &mut self,
         provider: &str,
         base_url: Option<&str>,
-        default_model: Option<&str>,
+        models: &[String],
         api_key: &str,
     ) -> Result<(), GatewayError> {
+        let default_model = models.first().cloned();
         let entry = ProviderEntry {
             api_key: api_key.to_string(),
             base_url: base_url.map(|s| s.to_string()),
-            default_model: default_model.map(|s| s.to_string()),
+            default_model,
+            models: models.to_vec(),
         };
         let json = serde_json::to_string(&entry)
             .map_err(|e| GatewayError::Vault(format!("Failed to serialize provider entry: {}", e)))?;
@@ -131,6 +138,7 @@ impl VaultFacade {
             api_key: raw.to_string(),
             base_url: None,
             default_model: None,
+            models: Vec::new(),
         })
     }
 
@@ -268,11 +276,12 @@ mod tests {
         let dir = temp_vault_dir("store_provider");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault.store_provider("deepseek", Some("https://api.deepseek.com/v1"), Some("deepseek-chat"), "sk-abc").unwrap();
+        vault.store_provider("deepseek", Some("https://api.deepseek.com/v1"), &["deepseek-chat".to_string()], "sk-abc").unwrap();
         let entry = vault.get_provider("deepseek").unwrap();
         assert_eq!(entry.api_key, "sk-abc");
         assert_eq!(entry.base_url, Some("https://api.deepseek.com/v1".to_string()));
         assert_eq!(entry.default_model, Some("deepseek-chat".to_string()));
+        assert_eq!(entry.models, vec!["deepseek-chat"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -281,11 +290,12 @@ mod tests {
         let dir = temp_vault_dir("store_provider_min");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault.store_provider("openai", None, None, "sk-test").unwrap();
+        vault.store_provider("openai", None, &[], "sk-test").unwrap();
         let entry = vault.get_provider("openai").unwrap();
         assert_eq!(entry.api_key, "sk-test");
         assert_eq!(entry.base_url, None);
         assert_eq!(entry.default_model, None);
+        assert!(entry.models.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

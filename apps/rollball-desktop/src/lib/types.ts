@@ -42,6 +42,8 @@ export interface VaultKeyEntry {
   base_url?: string;
   /** Optional default model for this provider */
   default_model?: string;
+  /** Selected models list (may be empty) */
+  models?: string[];
 }
 
 /** Gateway config response */
