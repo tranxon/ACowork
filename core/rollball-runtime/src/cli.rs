@@ -231,7 +231,14 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         .iter()
         .map(|t| {
             let spec = t.spec();
-            (spec.name.clone(), serde_json::to_value(&spec).unwrap_or_default())
+            let serialized = serde_json::to_value(&spec).unwrap_or_default();
+            tracing::warn!(
+                tool = %spec.name,
+                has_parameters = serialized.get("parameters").is_some(),
+                has_input_schema = serialized.get("input_schema").is_some(),
+                "DEBUG: Tool spec serialized fields check"
+            );
+            (spec.name.clone(), serialized)
         })
         .collect();
     let tool_definitions = crate::agent::context::build_tool_definitions(
@@ -761,7 +768,8 @@ async fn run_gateway_loop(
                         // Process the message through the agent loop
                         match agent_loop.run(&content, &context_builder).await {
                             Ok(response_text) => {
-                                tracing::info!("Agent response: {}", &response_text[..response_text.len().min(100)]);
+                                let preview: String = response_text.chars().take(100).collect();
+                                tracing::info!("Agent response: {}", preview);
 
                                 // TODO(conversation-persist): Persist user message + assistant response
                                 // to Grafeo memory engine for long-term recall.

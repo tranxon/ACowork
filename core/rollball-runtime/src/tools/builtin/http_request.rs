@@ -147,9 +147,10 @@ impl HttpRequestTool {
                 };
 
                 let truncated = if content.len() > 50_000 {
+                    let trunc: String = content.chars().take(50_000).collect();
                     format!(
                         "{}\n\n... (truncated, {} chars total)",
-                        &content[..50_000],
+                        trunc,
                         content.len()
                     )
                 } else {

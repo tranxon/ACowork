@@ -117,7 +117,7 @@ function StatRow({ label, value }: { label: string; value?: string }) {
   return (
     <div className="flex justify-between py-1">
       <span className="text-zinc-500">{label}</span>
-      <span className="font-mono text-zinc-700 dark:text-zinc-300">{value ?? "\u2014"}</span>
+      <span className="font-mono text-zinc-700 dark:text-zinc-300">{value ?? "—"}</span>
     </div>
   );
 }
@@ -126,11 +126,11 @@ function ToolCallItem({ message }: { message: ChatMessage }) {
   const [expanded, setExpanded] = useState(false);
   const isCall = message.type === "tool_call";
   const statusIcon =
-    message.toolStatus === "success" ? "\u2705" : message.toolStatus === "error" ? "\u274C" : "\u23F3";
+    message.toolStatus === "success" ? "✅" : message.toolStatus === "error" ? "" : "⏳";
 
   const summary = isCall
-    ? `\uD83D\uDD27 ${message.toolName ?? "tool"}`
-    : `\u2192 ${message.toolName ?? "tool"} result`;
+    ? `${message.toolName ?? "tool"}`
+    : `${message.toolName ?? "tool"} result`;
 
   return (
     <div className="rounded-md bg-white p-2 text-xs dark:bg-zinc-800">
@@ -139,14 +139,12 @@ function ToolCallItem({ message }: { message: ChatMessage }) {
         className="flex w-full items-center justify-between text-left"
       >
         <span className="flex items-center gap-1">
-          {isCall && <span className="text-blue-500">\u25B6</span>}
-          {!isCall && <span className="text-green-500">\u25CF</span>}
           <span className="font-medium text-zinc-700 dark:text-zinc-300">{summary}</span>
         </span>
         <span className="flex items-center gap-1.5 text-zinc-400">
           {message.duration && <span>{(message.duration / 1000).toFixed(1)}s</span>}
           <span>{statusIcon}</span>
-          <span className="text-[10px]">{expanded ? "\u25BC" : "\u25B6"}</span>
+          <span className="text-[10px]">{expanded ? "▼" : "▶"}</span>
         </span>
       </button>
       {expanded && message.content && (

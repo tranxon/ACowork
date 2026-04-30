@@ -143,9 +143,47 @@ export function ChatPanel() {
             </div>
           )}
           <div className="space-y-2">
-            {messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} isStreaming={msg.id === streamingMessageId} />
-            ))}
+            {(() => {
+              // Reorder messages: ensure assistant messages come after tool calls/results
+              // in the same conversation turn
+              const reordered = [...messages];
+              
+              // Group messages by conversation turn (between user messages)
+              const turns: ChatMessage[][] = [];
+              let currentTurn: ChatMessage[] = [];
+              
+              for (const msg of reordered) {
+                if (msg.type === "user") {
+                  if (currentTurn.length > 0) {
+                    turns.push(currentTurn);
+                  }
+                  currentTurn = [msg];
+                } else {
+                  currentTurn.push(msg);
+                }
+              }
+              if (currentTurn.length > 0) {
+                turns.push(currentTurn);
+              }
+              
+              // Within each turn, move assistant messages to the end
+              const finalMessages: ChatMessage[] = [];
+              for (const turn of turns) {
+                const userMsg = turn.find(m => m.type === "user");
+                const assistantMsgs = turn.filter(m => m.type === "assistant");
+                const toolMsgs = turn.filter(m => m.type === "tool_call" || m.type === "tool_result");
+                const otherMsgs = turn.filter(m => m.type !== "user" && m.type !== "assistant" && m.type !== "tool_call" && m.type !== "tool_result");
+                
+                if (userMsg) finalMessages.push(userMsg);
+                finalMessages.push(...toolMsgs);
+                finalMessages.push(...assistantMsgs);
+                finalMessages.push(...otherMsgs);
+              }
+              
+              return finalMessages.map((msg) => (
+                <MessageBubble key={msg.id} message={msg} isStreaming={msg.id === streamingMessageId} />
+              ));
+            })()}
           </div>
           <div ref={messagesEndRef} />
         </div>
@@ -259,6 +297,7 @@ export function ChatPanel() {
  *
  * Returns the think content, reply content, and whether the think tag is closed.
  * If the content does not start with <think>, all content is treated as reply.
+ * The <think> and </think> tags are stripped from the output.
  */
 function parseThinkContent(content: string): {
   thinkContent: string | null;
@@ -279,7 +318,10 @@ function parseThinkContent(content: string): {
 
   // Think tag is closed
   const thinkContent = content.slice(7, closeIndex);
-  const replyContent = content.slice(closeIndex + 8); // length of "</think>"
+  let replyContent = content.slice(closeIndex + 8); // length of "</think>"
+  
+  // Trim leading whitespace/newlines from reply content
+  replyContent = replyContent.trimStart();
 
   return { thinkContent, replyContent, thinkClosed: true };
 }
@@ -340,21 +382,15 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
   if (message.type === "tool_call") {
     return (
       <div className="flex justify-start">
-        <div className="max-w-[85%] rounded-lg rounded-bl-sm border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-900 dark:bg-blue-950">
-          <button
-            className="flex w-full items-center gap-1.5 text-xs font-medium text-blue-700 dark:text-blue-300"
-            onClick={() => setExpanded(!expanded)}
-          >
-            <Wrench className="h-3 w-3" />
-            {message.toolName}
-            {expanded ? <ChevronDown className="ml-auto h-3 w-3" /> : <ChevronRight className="ml-auto h-3 w-3" />}
-          </button>
-          {expanded && (
-            <pre className="mt-2 overflow-x-auto rounded bg-white/50 p-2 text-xs dark:bg-black/20">
-              {message.content}
-            </pre>
-          )}
-        </div>
+        <button
+          className="flex w-full max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <Wrench className="h-3 w-3 shrink-0" />
+          <span className="font-medium">{message.toolName}</span>
+          <span className="truncate text-zinc-400 dark:text-zinc-500">{message.content.substring(0, 50)}{message.content.length > 50 ? "..." : ""}</span>
+          {expanded ? <ChevronDown className="ml-auto h-3 w-3 shrink-0" /> : <ChevronRight className="ml-auto h-3 w-3 shrink-0" />}
+        </button>
       </div>
     );
   }
@@ -362,21 +398,21 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
   if (message.type === "tool_result") {
     return (
       <div className="flex justify-start">
-        <div className="max-w-[85%] rounded-lg rounded-bl-sm border border-green-200 bg-green-50 px-3 py-2 dark:border-green-900 dark:bg-green-950">
-          <button
-            className="flex w-full items-center gap-1.5 text-xs font-medium text-green-700 dark:text-green-300"
-            onClick={() => setExpanded(!expanded)}
-          >
-            <Wrench className="h-3 w-3" />
-            {message.toolName} → Result
-            {expanded ? <ChevronDown className="ml-auto h-3 w-3" /> : <ChevronRight className="ml-auto h-3 w-3" />}
-          </button>
-          {expanded && (
-            <pre className="mt-2 overflow-x-auto rounded bg-white/50 p-2 text-xs dark:bg-black/20">
-              {message.content}
-            </pre>
-          )}
-        </div>
+        <button
+          className="flex w-full max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <Wrench className="h-3 w-3 shrink-0" />
+          <span className="font-medium">{message.toolName}</span>
+          <span className="text-zinc-400 dark:text-zinc-500">→ Result</span>
+          <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">Click to view</span>
+          {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
+        </button>
+        {expanded && (
+          <pre className="mt-1 max-w-[85%] overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
+            {message.content}
+          </pre>
+        )}
       </div>
     );
   }

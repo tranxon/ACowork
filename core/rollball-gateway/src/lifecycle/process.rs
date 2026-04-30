@@ -64,8 +64,10 @@ pub async fn spawn_agent_process(
         .arg(workspace)
         .arg("--gateway-socket")
         .arg(gateway_socket)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg("--log-level")
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
 
     // On Unix, create a new process group so we can kill the entire group later
     #[cfg(unix)]

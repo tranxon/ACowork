@@ -313,7 +313,7 @@ impl LoopDetector {
     /// Simple hash for result content (FNV-like)
     fn simple_hash(&self, s: &str) -> u64 {
         // Use first 256 chars + length for hash
-        let content = if s.len() > 256 { &s[..256] } else { s };
+        let content: String = s.chars().take(256).collect();
         let mut hash: u64 = 14695981039346656037; // FNV offset basis
         for byte in content.bytes() {
             hash ^= byte as u64;

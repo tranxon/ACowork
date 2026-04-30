@@ -283,17 +283,27 @@ fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<AnthropicToo
     tools.map(|items| {
         items
             .iter()
-            .map(|tool| AnthropicToolSpec {
-                name: tool["name"].as_str().unwrap_or("unknown").to_string(),
-                description: tool
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                input_schema: tool
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or(serde_json::json!({"type": "object", "properties": {}})),
+            .map(|tool| {
+                let name = tool["name"].as_str().unwrap_or("unknown").to_string();
+                tracing::debug!(
+                    tool = %name,
+                    has_parameters = tool.get("parameters").is_some(),
+                    has_input_schema = tool.get("input_schema").is_some(),
+                    tool_keys = ?tool.as_object().map(|o| o.keys().collect::<Vec<_>>()),
+                    "Anthropic convert_tools field check"
+                );
+                AnthropicToolSpec {
+                    name,
+                    description: tool
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    input_schema: tool
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or(serde_json::json!({"type": "object", "properties": {}})),
+                }
             })
             .collect()
     })
@@ -372,6 +382,14 @@ impl Provider for AnthropicProvider {
             stream: None,
         };
 
+        // Log request payload for debugging tool definitions
+        tracing::debug!(
+            request_len = serde_json::to_string(&anthropic_request).map(|s| s.len()).unwrap_or(0),
+            model = %anthropic_request.model,
+            has_tools = anthropic_request.tools.is_some(),
+            "Anthropic chat request"
+        );
+
         let url = format!("{}/v1/messages", self.base_url);
 
         let api_key = self.api_key.as_ref().ok_or_else(|| {
@@ -438,6 +456,14 @@ impl Provider for AnthropicProvider {
             tools: convert_tools(request.tools.as_deref()),
             stream: Some(true),
         };
+
+        // Log request payload for debugging tool definitions
+        tracing::debug!(
+            request_len = serde_json::to_string(&anthropic_request).map(|s| s.len()).unwrap_or(0),
+            model = %anthropic_request.model,
+            has_tools = anthropic_request.tools.is_some(),
+            "Anthropic chat_stream request"
+        );
 
         let url = format!("{}/v1/messages", self.base_url);
 
@@ -618,7 +644,7 @@ fn parse_anthropic_sse_line(
                 if let Some(partial_json) = delta.partial_json
                     && !partial_json.is_empty()
                 {
-                    return Some(StreamEvent::ToolCallChunk(partial_json));
+                    return Some(StreamEvent::ToolCallChunk { index: 0, arguments: partial_json });
                 }
             }
             None
@@ -886,7 +912,7 @@ mod tests {
             &mut tool_name,
         );
         assert!(event.is_some());
-        if let Some(StreamEvent::ToolCallChunk(chunk)) = event {
+        if let Some(StreamEvent::ToolCallChunk { arguments: chunk, .. }) = event {
             assert!(chunk.contains("expr"));
         } else {
             panic!("Expected ToolCallChunk event");

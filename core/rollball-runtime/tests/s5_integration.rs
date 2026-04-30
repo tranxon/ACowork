@@ -324,7 +324,7 @@ async fn test_s5_streaming_events_structure() {
             arguments: String::new(),
         },
     });
-    let tool_chunk_event = StreamEvent::ToolCallChunk(r#"{"city":"Shanghai"}"#.to_string());
+    let tool_chunk_event = StreamEvent::ToolCallChunk { index: 0, arguments: r#"{"city":"Shanghai"}"#.to_string() };
     let error_event = StreamEvent::Error("test error".to_string());
 
     // Verify all stream event types are constructible
