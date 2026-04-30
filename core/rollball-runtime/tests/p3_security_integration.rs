@@ -23,7 +23,7 @@ use rollball_runtime::security::file_provenance::{FileProvenance, FileSource};
 use rollball_runtime::security::shell_risk::{assess_shell_risk, ShellRisk};
 use rollball_runtime::tools::permission::validate_permission;
 use rollball_runtime::tools::permission_checker::{CheckResult, PermissionChecker};
-use rollball_runtime::tools::wrappers::{PathGuardedTool, PermissionCheckedTool};
+use rollball_runtime::tools::wrappers::{PathGuardedTool, PermissionCheckedTool, WorkspaceDir, WorkspaceAccess};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -482,7 +482,10 @@ async fn test_redteam_path_traversal_blocked() {
     }
 
     let inner = Arc::new(FileReadTool);
-    let tool = PathGuardedTool::new(inner, "/workspace/agent-data");
+    let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+        path: "/workspace/agent-data".to_string(),
+        access: WorkspaceAccess::ReadWrite,
+    }]);
 
     // Various path traversal techniques
     let traversal_attacks = vec![
@@ -501,7 +504,7 @@ async fn test_redteam_path_traversal_blocked() {
             "Path traversal '{}' should be blocked by PathGuardedTool",
             attack_path
         );
-        assert!(result.error.unwrap().contains("outside allowed directory"));
+        assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
     }
 }
 

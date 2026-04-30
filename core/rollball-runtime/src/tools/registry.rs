@@ -8,7 +8,7 @@ use rollball_core::tools::traits::Tool;
 use rollball_core::AgentManifest;
 use std::sync::Arc;
 
-use crate::tools::wrappers::{PathGuardedTool, PermissionCheckedTool, RateLimitedTool};
+use crate::tools::wrappers::{PathGuardedTool, PermissionCheckedTool, RateLimitedTool, WorkspaceDir, WorkspaceAccess};
 
 /// Tool registry
 pub struct ToolRegistry {
@@ -40,7 +40,8 @@ impl ToolRegistry {
     ///
     /// Steps:
     /// 1. If manifest.tools is non-empty, filter to only declared tools
-    /// 2. Apply security decorators: PermissionChecked → PathGuarded → RateLimited
+    /// 2. Load workspace directories from `.agent_workspaces.json`
+    /// 3. Apply security decorators: PermissionChecked → PathGuarded → RateLimited
     pub fn activate(
         &self,
         manifest: &AgentManifest,
@@ -59,6 +60,9 @@ impl ToolRegistry {
                 .collect()
         };
 
+        // Load workspace directories from .agent_workspaces.json
+        let allowed_dirs = load_workspace_dirs(work_dir);
+
         // Apply security decorators
         filtered
             .into_iter()
@@ -70,7 +74,7 @@ impl ToolRegistry {
                 )) as Arc<dyn Tool>;
 
                 // Layer 2: Path guard (for filesystem tools)
-                let path_guarded = Arc::new(PathGuardedTool::new(perm_checked, work_dir)) as Arc<dyn Tool>;
+                let path_guarded = Arc::new(PathGuardedTool::new(perm_checked, allowed_dirs.clone())) as Arc<dyn Tool>;
 
                 // Layer 3: Rate limit
                 Arc::new(RateLimitedTool::new(path_guarded, max_calls_per_minute)) as Arc<dyn Tool>
@@ -225,5 +229,100 @@ mod tests {
     fn test_registry_default() {
         let reg = ToolRegistry::default();
         assert!(reg.all().is_empty());
+    }
+}
+
+/// Load workspace directories from `.agent_workspaces.json`
+///
+/// Returns the configured workspace directories, or falls back to the agent's
+/// work_dir if no workspace config exists.
+fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct WorkspaceConfig {
+        version: String,
+        #[serde(default)]
+        additional_dirs: Vec<WorkspaceDirEntry>,
+    }
+
+    #[derive(Deserialize)]
+    struct WorkspaceDirEntry {
+        id: String,
+        path: String,
+        alias: Option<String>,
+        access: String,
+        added_at: String,
+    }
+
+    let config_path = std::path::Path::new(work_dir)
+        .join(".agent_workspaces.json");
+
+    if !config_path.exists() {
+        // Fallback: use work_dir as the only allowed directory (read-write)
+        tracing::warn!(
+            work_dir,
+            config_path = %config_path.display(),
+            "No .agent_workspaces.json found, using work_dir as default"
+        );
+        return vec![WorkspaceDir {
+            path: work_dir.to_string(),
+            access: WorkspaceAccess::ReadWrite,
+        }];
+    }
+
+    match std::fs::read_to_string(&config_path) {
+        Ok(content) => match serde_json::from_str::<WorkspaceConfig>(&content) {
+            Ok(config) => {
+                let mut dirs: Vec<WorkspaceDir> = config
+                    .additional_dirs
+                    .into_iter()
+                    .map(|entry| WorkspaceDir {
+                        path: entry.path,
+                        access: if entry.access == "read-write" {
+                            WorkspaceAccess::ReadWrite
+                        } else {
+                            WorkspaceAccess::ReadOnly
+                        },
+                    })
+                    .collect();
+
+                // Always include work_dir as the base directory
+                dirs.push(WorkspaceDir {
+                    path: work_dir.to_string(),
+                    access: WorkspaceAccess::ReadWrite,
+                });
+
+                tracing::info!(
+                    work_dir,
+                    count = dirs.len(),
+                    dirs = ?dirs.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
+                    "Loaded workspace directories from .agent_workspaces.json"
+                );
+                dirs
+            }
+            Err(e) => {
+                tracing::error!(
+                    work_dir,
+                    error = %e,
+                    "Failed to parse .agent_workspaces.json, using work_dir as default"
+                );
+                vec![WorkspaceDir {
+                    path: work_dir.to_string(),
+                    access: WorkspaceAccess::ReadWrite,
+                }]
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                work_dir,
+                error = %e,
+                "Failed to read .agent_workspaces.json, using work_dir as default"
+            );
+            vec![WorkspaceDir {
+                path: work_dir.to_string(),
+                access: WorkspaceAccess::ReadWrite,
+            }]
+        }
     }
 }

@@ -4,7 +4,7 @@ import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
 import { cn } from "../../lib/utils";
-import { Bot, Play, Square, Trash2, Info, Copy, Plus } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 interface AgentListProps {

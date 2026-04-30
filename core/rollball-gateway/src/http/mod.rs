@@ -15,3 +15,4 @@ pub mod cron_api;
 pub mod models_api;
 pub mod memory_api;
 pub mod skills_api;
+pub mod workspaces;

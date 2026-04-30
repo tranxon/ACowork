@@ -11,6 +11,7 @@ import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { SkillBrowser } from "../skills/SkillBrowser";
+import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
@@ -217,7 +218,7 @@ export function ChatPanel() {
       </div>
 
       {/* Unified input container with toolbar */}
-      <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 overflow-hidden">
+      <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50">
         {/* Textarea area — borderless, transparent background */}
         <textarea
           value={inputValue}
@@ -253,6 +254,8 @@ export function ChatPanel() {
                 onSelect={(m) => selectedAgentId && setCurrentModel(m, selectedAgentId)}
               />
             )}
+            {/* Workspace button */}
+            <WorkspaceSelector />
             {/* Memory button */}
             <button
               className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors ${

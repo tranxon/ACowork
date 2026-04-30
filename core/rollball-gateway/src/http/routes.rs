@@ -172,6 +172,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::models_api::models_routes())
         .merge(crate::http::memory_api::memory_routes())
         .merge(crate::http::skills_api::skills_routes())
+        .merge(crate::http::workspaces::workspace_routes())
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)

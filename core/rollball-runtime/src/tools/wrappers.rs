@@ -70,80 +70,107 @@ impl Tool for RateLimitedTool {
     }
 }
 
+/// Workspace directory entry
+#[derive(Clone, Debug)]
+pub struct WorkspaceDir {
+    pub path: String,
+    pub access: WorkspaceAccess,
+}
+
+/// Access level for a workspace directory
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkspaceAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
 /// Path-guarded tool wrapper
 ///
 /// Restricts filesystem tool access to paths within the agent's
-/// allowed working directory. Validates path parameters before
+/// allowed working directories. Validates path parameters before
 /// executing the inner tool.
 pub struct PathGuardedTool {
     inner: Arc<dyn Tool>,
-    allowed_dir: String,
+    allowed_dirs: Vec<WorkspaceDir>,
 }
 
 impl PathGuardedTool {
-    pub fn new(inner: Arc<dyn Tool>, allowed_dir: &str) -> Self {
+    pub fn new(inner: Arc<dyn Tool>, allowed_dirs: Vec<WorkspaceDir>) -> Self {
         Self {
             inner,
-            allowed_dir: allowed_dir.to_string(),
+            allowed_dirs,
         }
     }
 
-    /// Validate that a path is within the allowed directory
+    /// Validate that a path is within any of the allowed directories
     ///
     /// Security: prevents path traversal attacks (e.g., "../../etc/passwd")
     /// and prefix-suffix attacks (e.g., "/tmp/agent-workdir-eval/secret").
     /// Uses path component normalization instead of filesystem canonicalize
     /// so it works for paths that don't exist yet.
     fn validate_path(&self, path: &str) -> Result<(), String> {
-        let allowed = std::path::Path::new(&self.allowed_dir);
+        if self.allowed_dirs.is_empty() {
+            return Err("No workspace directories configured for this agent".to_string());
+        }
+
         let target = std::path::Path::new(path);
 
-        // Resolve relative paths against allowed dir
-        let target_normalized = if target.is_absolute() {
-            target.to_path_buf()
-        } else {
-            allowed.join(target)
-        };
+        // Check against each allowed directory
+        for dir in &self.allowed_dirs {
+            let allowed = std::path::Path::new(&dir.path);
 
-        // Normalize path components to resolve ".." and reject traversal
-        let normalized = Self::normalize_path(&target_normalized);
+            // Resolve relative paths against this allowed dir
+            let target_normalized = if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                allowed.join(target)
+            };
 
-        // Reject if normalization failed (e.g., ".." escaped root)
-        if normalized.is_none() {
-            return Err(format!(
-                "Path '{}' contains directory traversal outside allowed directory",
-                path
-            ));
+            // Normalize path components to resolve ".." and reject traversal
+            let normalized = Self::normalize_path(&target_normalized);
+
+            // Reject if normalization failed (e.g., ".." escaped root)
+            if normalized.is_none() {
+                continue; // Try next allowed dir
+            }
+
+            let normalized = normalized.unwrap();
+
+            // Also normalize the allowed dir for consistent comparison
+            let allowed_normalized = Self::normalize_path(allowed)
+                .unwrap_or_else(|| allowed.to_path_buf());
+
+            // Convert to string and normalize separators for cross-platform comparison
+            let target_str = Self::normalize_separators(&normalized.to_string_lossy());
+            let allowed_str = Self::normalize_separators(&allowed_normalized.to_string_lossy());
+
+            tracing::debug!(
+                target_path = %target_str,
+                allowed_path = %allowed_str,
+                "PathGuardedTool: validating path"
+            );
+
+            // Ensure target starts with allowed dir + separator to prevent
+            // prefix-suffix attacks (e.g., "/tmp/agent-workdir-eval" matching "/tmp/agent-workdir")
+            if target_str.starts_with(&allowed_str) {
+                // Verify the prefix match ends at a path boundary
+                let suffix = &target_str[allowed_str.len()..];
+                if suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('\\') {
+                    return Ok(()); // Path is within this allowed directory
+                }
+            }
         }
 
-        let normalized = normalized.unwrap();
+        // Path is outside all allowed directories
+        Err(format!(
+            "Path '{}' is outside all allowed workspace directories",
+            path
+        ))
+    }
 
-        // Also normalize the allowed dir for consistent comparison
-        let allowed_normalized = Self::normalize_path(allowed)
-            .unwrap_or_else(|| allowed.to_path_buf());
-
-        let target_str = normalized.to_string_lossy();
-        let allowed_str = allowed_normalized.to_string_lossy();
-
-        // Ensure target starts with allowed dir + separator to prevent
-        // prefix-suffix attacks (e.g., "/tmp/agent-workdir-eval" matching "/tmp/agent-workdir")
-        if !target_str.starts_with(allowed_str.as_ref()) {
-            return Err(format!(
-                "Path '{}' is outside allowed directory '{}'",
-                path, self.allowed_dir
-            ));
-        }
-
-        // Verify the prefix match ends at a path boundary
-        let suffix = &target_str[allowed_str.len()..];
-        if !suffix.is_empty() && !suffix.starts_with('/') && !suffix.starts_with('\\') {
-            return Err(format!(
-                "Path '{}' is outside allowed directory '{}'",
-                path, self.allowed_dir
-            ));
-        }
-
-        Ok(())
+    /// Normalize path separators to forward slashes for consistent comparison
+    fn normalize_separators(path: &str) -> String {
+        path.replace('\\', "/")
     }
 
     /// Normalize a path by resolving ".." components without touching the filesystem.
@@ -322,7 +349,10 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_allows_within_dir() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-workdir".to_string(),
+            access: WorkspaceAccess::ReadWrite,
+        }]);
         let result = tool
             .execute(serde_json::json!({ "path": "/tmp/agent-workdir/file.txt" }))
             .await
@@ -333,19 +363,25 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_blocks_outside_dir() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-workdir".to_string(),
+            access: WorkspaceAccess::ReadWrite,
+        }]);
         let result = tool
             .execute(serde_json::json!({ "path": "/etc/passwd" }))
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("outside allowed directory"));
+        assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
     }
 
     #[tokio::test]
     async fn test_path_guarded_relative_path() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-workdir".to_string(),
+            access: WorkspaceAccess::ReadWrite,
+        }]);
         let result = tool
             .execute(serde_json::json!({ "path": "subdir/file.txt" }))
             .await
@@ -356,7 +392,10 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_non_filesystem_tool() {
         let inner = Arc::new(EchoTool);
-        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-workdir".to_string(),
+            access: WorkspaceAccess::ReadWrite,
+        }]);
         // echo is not a filesystem tool, so no path check
         let result = tool
             .execute(serde_json::json!({ "path": "/etc/passwd" }))
@@ -368,26 +407,32 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_blocks_traversal() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-workdir".to_string(),
+            access: WorkspaceAccess::ReadWrite,
+        }]);
         // Path traversal via ".." resolves to /etc/passwd which is outside allowed dir
         let result = tool
             .execute(serde_json::json!({ "path": "/tmp/agent-workdir/../../etc/passwd" }))
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("outside allowed directory"));
+        assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
     }
 
     #[tokio::test]
     async fn test_path_guarded_blocks_prefix_suffix_attack() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, "/tmp/agent-workdir");
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-workdir".to_string(),
+            access: WorkspaceAccess::ReadWrite,
+        }]);
         // Prefix-suffix attack: "/tmp/agent-workdir-eval" starts with "/tmp/agent-workdir"
         let result = tool
             .execute(serde_json::json!({ "path": "/tmp/agent-workdir-eval/secret" }))
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("outside allowed directory"));
+        assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
     }
 }
