@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { ChevronRight } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export interface ThinkBlockProps {
   /** Raw text content inside the <think> tags */
@@ -42,8 +44,10 @@ export function ThinkBlock({ content, isStreaming, hasReplyStarted }: ThinkBlock
         <span>Thinking{isStreaming && !hasReplyStarted ? "..." : ""}</span>
       </button>
       {showExpanded && (
-        <div className="mt-1 rounded-r bg-gray-50 pl-3 text-sm italic text-gray-600 dark:bg-zinc-800/50 dark:text-gray-400 border-l-2 border-gray-300 dark:border-gray-600">
-          {content.trim() || "…"}
+        <div className="mt-1 rounded bg-zinc-50 dark:bg-zinc-800/50 p-3 text-sm text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+          <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content.trim() || "…"}</ReactMarkdown>
+          </div>
         </div>
       )}
     </div>

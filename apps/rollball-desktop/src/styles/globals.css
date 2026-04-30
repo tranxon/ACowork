@@ -3,6 +3,9 @@
 /* Enable class-based dark mode for Tailwind v4 */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Enable typography plugin for Markdown rendering */
+@plugin "@tailwindcss/typography";
+
 /* Design Tokens — prd-ui-ux.md §2.1 */
 :root {
   /* Colors */

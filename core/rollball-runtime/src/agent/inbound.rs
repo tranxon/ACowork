@@ -50,6 +50,10 @@ pub enum InboundMessage {
         action: String,
         params: serde_json::Value,
     },
+    /// Interrupt signal to stop the current agent loop iteration
+    Interrupt {
+        reason: String,
+    },
 }
 
 impl InboundMessage {
@@ -99,6 +103,9 @@ impl InboundMessage {
                     *params = truncate_json_to_bytes(params, effective_limit);
                     truncated = true;
                 }
+            }
+            InboundMessage::Interrupt { .. } => {
+                // Interrupt messages don't need size limits
             }
         }
         (self, truncated)

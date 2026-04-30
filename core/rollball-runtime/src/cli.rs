@@ -3,6 +3,7 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use crate::agent::inbound::InboundMessage;
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 
@@ -692,7 +693,7 @@ async fn run_chat_loop(
 #[allow(clippy::too_many_arguments)]
 async fn run_gateway_loop(
     mut agent_loop: crate::agent::loop_::AgentLoop,
-    _inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
+    inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
     ipc_client: &mut crate::ipc::client::GatewayClient,
     mut context_builder: crate::agent::context::ContextBuilder,
     work_dir: String,
@@ -750,6 +751,21 @@ async fn run_gateway_loop(
                                 tracing::warn!(
                                     "model_switch message missing 'model' field, ignoring"
                                 );
+                            }
+                            continue;
+                        }
+
+                        // Handle interrupt: send interrupt signal to agent loop
+                        if action == "interrupt" {
+                            let reason = params.get("reason")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            tracing::info!(reason = %reason, "Forwarding interrupt signal to agent loop");
+                            
+                            // Send interrupt to agent loop via inbound channel
+                            if inbound_tx.send(InboundMessage::Interrupt { reason }).await.is_err() {
+                                tracing::warn!("Failed to send interrupt signal — agent loop may have exited");
                             }
                             continue;
                         }
