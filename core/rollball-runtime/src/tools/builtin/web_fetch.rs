@@ -32,8 +32,8 @@ impl Tool for WebFetchTool {
                 let html = resp.text().await.unwrap_or_default();
                 // Simple HTML-to-text: strip tags
                 let text = strip_html_tags(&html);
-                let truncated = if text.len() > 10000 { &text[..10000] } else { &text };
-                Ok(ToolResult { ok: true, content: truncated.to_string(), error: None, token_usage: None })
+                let truncated: String = text.chars().take(10000).collect();
+                Ok(ToolResult { ok: true, content: truncated, error: None, token_usage: None })
             }
             Err(e) => Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Fetch failed: {e}")), token_usage: None }),
         }

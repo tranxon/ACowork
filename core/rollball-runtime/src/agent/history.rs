@@ -145,7 +145,8 @@ impl HistoryManager {
             if idx < self.messages.len() {
                 let content = &self.messages[idx].content;
                 let summary = if content.len() > 200 {
-                    format!("[folded] {}", &content[..200])
+                    let trunc: String = content.chars().take(200).collect();
+                    format!("[folded] {}", trunc)
                 } else {
                     format!("[folded] {content}")
                 };

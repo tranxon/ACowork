@@ -207,8 +207,8 @@ pub enum StreamEvent {
     Content(String),
     /// Tool call start
     ToolCallStart(ToolCall),
-    /// Tool call chunk
-    ToolCallChunk(String),
+    /// Tool call argument chunk (index identifies which tool call, arguments is incremental JSON fragment)
+    ToolCallChunk { index: u64, arguments: String },
     /// Stream finished
     Finished(ChatResponse),
     /// Error occurred

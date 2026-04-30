@@ -419,13 +419,8 @@ impl AgentLoop {
         let mut tool_calls: Option<Vec<ToolCall>> = None;
         let mut usage = None;
 
-        // ToolCallChunk accumulation buffer: indexed by tool_call ID
-        // TODO: ToolCallChunk currently carries only a String with no ID field,
-        // so we cannot reliably associate chunks with specific tool calls.
-        // When the provider API adds an ID field to chunks, update this logic
-        // to accumulate arguments per tool call. For now, we rely on
-        // ToolCallStart + Finished events for complete tool call data.
-        let mut _tool_call_buffer: HashMap<String, ToolCall> = HashMap::new();
+        // ToolCallChunk accumulation buffer: indexed by tool_call index (from SSE stream)
+        let mut tool_call_args_buffer: HashMap<u64, String> = HashMap::new();
 
         while let Some(event) = stream.next().await {
             match event {
@@ -442,17 +437,13 @@ impl AgentLoop {
                     }
                 }
                 StreamEvent::ToolCallStart(tc) => {
-                    // Store the initial tool call in the buffer for chunk accumulation
-                    let id = tc.id.clone();
-                    _tool_call_buffer.insert(id, tc.clone());
+                    tracing::info!(tool_name = %tc.function.name, tool_id = %tc.id, initial_args = %tc.function.arguments, "ToolCallStart received");
                     tool_calls.get_or_insert_with(Vec::new).push(tc);
                 }
-                StreamEvent::ToolCallChunk(_chunk) => {
-                    // TODO: Once ToolCallChunk carries a tool_call ID field,
-                    // look up the corresponding entry in _tool_call_buffer
-                    // and append the chunk data to the tool call's arguments.
-                    // Current limitation: String chunk cannot be associated
-                    // with a specific tool call when multiple are streamed.
+                StreamEvent::ToolCallChunk { index, arguments } => {
+                    tracing::debug!(index, chunk_len = arguments.len(), "ToolCallChunk received");
+                    // Accumulate argument chunks by index
+                    tool_call_args_buffer.entry(index).or_default().push_str(&arguments);
                 }
                 StreamEvent::Finished(resp) => {
                     // Use final response data; prefer stream-accumulated content
@@ -462,8 +453,17 @@ impl AgentLoop {
                     if resp.tool_calls.is_some() {
                         // Prefer Finished event's tool_calls as they are complete
                         tool_calls = resp.tool_calls;
+                    } else if tool_calls.is_some() {
+                        // Finished has no tool_calls — apply accumulated argument chunks
+                        // from the stream to the ToolCallStart entries
+                        if let Some(ref mut tcs) = tool_calls {
+                            for (i, tc) in tcs.iter_mut().enumerate() {
+                                if let Some(args) = tool_call_args_buffer.get(&(i as u64)) {
+                                    tc.function.arguments = args.clone();
+                                }
+                            }
+                        }
                     }
-                    // If Finished has no tool_calls, fall back to buffer data
                     usage = resp.usage;
                     break;
                 }
@@ -487,6 +487,22 @@ impl AgentLoop {
                         }
                     }
                     return Err(RuntimeError::Provider(e));
+                }
+            }
+        }
+
+        // Post-stream: Apply accumulated argument chunks to tool calls
+        // This handles the case where the OpenAI SSE stream ends without
+        // a Finished event (common with OpenAI-compatible APIs like MiniMax).
+        if tool_calls.is_some() && !tool_call_args_buffer.is_empty() {
+            if let Some(ref mut tcs) = tool_calls {
+                for (i, tc) in tcs.iter_mut().enumerate() {
+                    if let Some(args) = tool_call_args_buffer.get(&(i as u64)) {
+                        if tc.function.arguments.is_empty() || tc.function.arguments == "{}" {
+                            tracing::info!(tool_name = %tc.function.name, index = i, accumulated_len = args.len(), "Applying accumulated arguments to tool call");
+                            tc.function.arguments = args.clone();
+                        }
+                    }
                 }
             }
         }

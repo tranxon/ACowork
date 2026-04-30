@@ -252,6 +252,12 @@ fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<NativeToolSp
             .iter()
             .map(|tool| {
                 let name = tool["name"].as_str().unwrap_or("unknown").to_string();
+                tracing::debug!(
+                    tool = %name,
+                    has_parameters = tool.get("parameters").is_some(),
+                    tool_keys = ?tool.as_object().map(|o| o.keys().collect::<Vec<_>>()),
+                    "OpenAI convert_tools field check"
+                );
                 let description = tool
                     .get("description")
                     .and_then(serde_json::Value::as_str)
@@ -319,6 +325,14 @@ impl Provider for OpenAIProvider {
             stream: None,
         };
 
+        // Log request payload for debugging tool definitions
+        tracing::debug!(
+            request_len = serde_json::to_string(&native_request).map(|s| s.len()).unwrap_or(0),
+            model = %native_request.model,
+            has_tools = native_request.tools.is_some(),
+            "OpenAI chat request"
+        );
+
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut req_builder = self.http_client.post(&url);
@@ -365,6 +379,24 @@ impl Provider for OpenAIProvider {
             tools: convert_tools(request.tools.as_deref()),
             stream: Some(true),
         };
+
+        // Log request payload for debugging tool definitions
+        tracing::info!(
+            model = %native_request.model,
+            has_tools = native_request.tools.is_some(),
+            tool_count = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            "OpenAI chat_stream request"
+        );
+        if let Some(ref tools) = native_request.tools {
+            for tool in tools {
+                tracing::info!(
+                    tool_name = %tool.function.name,
+                    has_parameters = !tool.function.parameters.is_null(),
+                    param_keys = ?tool.function.parameters.get("properties").map(|p| p.as_object().map(|o| o.keys().collect::<Vec<_>>())),
+                    "OpenAI request tool definition"
+                );
+            }
+        }
 
         let url = format!("{}/chat/completions", self.base_url);
 
@@ -489,7 +521,8 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
                         }));
                     }
                     if let Some(args) = func.arguments {
-                        return Some(StreamEvent::ToolCallChunk(args));
+                        let idx = tc_delta.index.unwrap_or(0);
+                        return Some(StreamEvent::ToolCallChunk { index: idx, arguments: args });
                     }
                 }
             }
@@ -589,5 +622,66 @@ mod tests {
         }));
         assert!(resp.tool_calls.is_some());
         assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
+    }
+
+    #[test]
+    fn test_convert_tools_reads_parameters_field() {
+        // Simulate ToolSpec serialized with #[serde(rename = "parameters")]
+        let tool_json = serde_json::json!({
+            "name": "shell",
+            "description": "Execute shell commands",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    }
+                },
+                "required": ["command"]
+            }
+        });
+
+        let tools = vec![tool_json];
+        let native = convert_tools(Some(&tools)).unwrap();
+
+        assert_eq!(native.len(), 1);
+        assert_eq!(native[0].kind, "function");
+        assert_eq!(native[0].function.name, "shell");
+        assert_eq!(native[0].function.description, "Execute shell commands");
+
+        // Verify parameters were correctly extracted
+        let params = &native[0].function.parameters;
+        assert!(params.get("properties").is_some());
+        assert!(params.get("properties").unwrap().get("command").is_some());
+
+        // Verify the serialized NativeToolSpec has correct structure
+        let serialized = serde_json::to_value(&native[0]).unwrap();
+        assert_eq!(serialized.get("type").unwrap(), "function");
+        let function = serialized.get("function").unwrap();
+        assert!(function.get("parameters").is_some());
+        assert!(function.get("name").is_some());
+
+        println!("Serialized NativeToolSpec: {}", serde_json::to_string_pretty(&serialized).unwrap());
+    }
+
+    #[test]
+    fn test_convert_tools_fallback_when_parameters_missing() {
+        // Tool JSON without parameters field — should fallback to empty object
+        let tool_json = serde_json::json!({
+            "name": "no_params_tool",
+            "description": "A tool without parameters"
+        });
+
+        let tools = vec![tool_json];
+        let native = convert_tools(Some(&tools)).unwrap();
+
+        assert_eq!(native.len(), 1);
+        assert_eq!(native[0].function.name, "no_params_tool");
+        // Should fallback to empty object schema
+        assert_eq!(
+            native[0].function.parameters,
+            serde_json::json!({"type": "object", "properties": {}})
+        );
     }
 }

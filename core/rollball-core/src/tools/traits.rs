@@ -14,6 +14,7 @@ pub struct ToolSpec {
     /// Human-readable description
     pub description: String,
     /// JSON Schema for input parameters
+    #[serde(rename = "parameters")]
     pub input_schema: Value,
 }
 
@@ -52,4 +53,51 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with given parameters
     async fn execute(&self, params: Value) -> Result<ToolResult>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_spec_serialization_uses_parameters() {
+        let spec = ToolSpec {
+            name: "shell".to_string(),
+            description: "test".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string"
+                    }
+                },
+                "required": ["command"]
+            }),
+        };
+
+        let serialized = serde_json::to_value(&spec).unwrap();
+
+        // 验证序列化后使用 "parameters" 而不是 "input_schema"
+        assert!(
+            serialized.get("parameters").is_some(),
+            "Should have 'parameters' field"
+        );
+        assert!(
+            serialized.get("input_schema").is_none(),
+            "Should NOT have 'input_schema' field"
+        );
+
+        // 验证 parameters 内容正确
+        let params = serialized.get("parameters").unwrap();
+        assert!(params
+            .get("properties")
+            .unwrap()
+            .get("command")
+            .is_some());
+
+        println!(
+            "Serialized JSON: {}",
+            serde_json::to_string_pretty(&serialized).unwrap()
+        );
+    }
 }
