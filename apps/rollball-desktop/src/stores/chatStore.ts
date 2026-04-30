@@ -16,9 +16,12 @@ interface ChatStore {
   /** Per-agent model memory: agent_id → model name */
   agentModels: Record<string, string>;
   availableModels: string[];
+  /** Current agent ID for stop functionality */
+  currentAgentId: string | null;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => Promise<void>;
+  stopCurrentMessage: () => Promise<void>;
   disconnectStream: () => void;
   clearMessages: () => void;
   setCurrentModel: (model: string, agentId: string) => void;
@@ -80,8 +83,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   currentProvider: null,
   agentModels: {},
   availableModels: [],
+  currentAgentId: null,
 
   connectStream: (agentId: string, gatewayUrl: string = DEFAULT_GATEWAY_URL) => {
+    // Update currentAgentId for stop functionality
+    set({ currentAgentId: agentId });
+    
     // Cancel any pending reconnect
     resetReconnect();
 
@@ -143,7 +150,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Don't set ws: null here — onclose will fire after onerror
     };
 
-    set({ ws, streamingMessageId: null, tokenUsage: null });
+    set({ ws, streamingMessageId: null, tokenUsage: null, currentAgentId: agentId });
   },
 
   sendMessage: async (content: string, agentId: string) => {
@@ -246,6 +253,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sending: false,
       }));
     }
+  },
+
+  stopCurrentMessage: async () => {
+    const { currentAgentId, streamingMessageId, ws } = get();
+    if (!currentAgentId || !streamingMessageId) {
+      console.warn("[ChatStore] No active streaming message to stop");
+      return;
+    }
+
+    console.log("[ChatStore] Stopping current message for agent:", currentAgentId);
+
+    // Send stop command via WebSocket if available
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "stop", agentId: currentAgentId }));
+    }
+
+    // Also send via HTTP API as fallback
+    try {
+      await fetch(`http://127.0.0.1:19876/api/agents/${currentAgentId}/stop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (error) {
+      console.warn("[ChatStore] HTTP stop request failed:", error);
+    }
+
+    // Update UI state immediately
+    set({ sending: false, streamingMessageId: null });
   },
 
   disconnectStream: () => {

@@ -168,7 +168,10 @@ impl AgentLoop {
             }
 
             // ⓪ Drain inbound queue (non-blocking)
-            self.drain_inbound_queue();
+            if self.drain_inbound_queue() {
+                tracing::info!("Agent loop interrupted by inbound interrupt signal");
+                return Ok("Agent stopped by user request.".to_string());
+            }
 
             // ① Budget pre-check
             let estimated_tokens = self.history.estimate_total_tokens() + 500; // +500 for new response
@@ -343,7 +346,7 @@ impl AgentLoop {
     /// Injects external messages (user, system, intent) into history
     /// before each loop iteration. Applies size limits to prevent
     /// token explosion from oversized payloads.
-    fn drain_inbound_queue(&mut self) {
+    fn drain_inbound_queue(&mut self) -> bool {
         while let Ok(msg) = self.inbound_rx.try_recv() {
             // Enforce size limits before injecting
             let (msg, _truncated) = msg.enforce_size_limit();
@@ -374,8 +377,13 @@ impl AgentLoop {
                         tool_calls: None,
                     });
                 }
+                InboundMessage::Interrupt { reason } => {
+                    tracing::info!(reason = %reason, "Received interrupt signal");
+                    return true; // Signal to stop the agent loop
+                }
             }
         }
+        false
     }
 
     /// Call LLM with streaming, accumulating content and tool calls.

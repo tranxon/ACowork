@@ -557,6 +557,42 @@ async fn handle_ws_text(
         return;
     }
 
+    if client_msg.msg_type == "stop" {
+        // Handle stop: send interrupt signal to running agent via IPC
+        tracing::info!(agent = %agent_id, "Forwarding stop signal to agent");
+
+        let mut pushed_ok = false;
+        if let Some(session_mgr) = &state.session_mgr {
+            let mgr = session_mgr.lock().await;
+            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
+                let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
+                    from: "http-ws".to_string(),
+                    action: "interrupt".to_string(),
+                    params: serde_json::json!({
+                        "reason": "user_requested",
+                    }),
+                };
+                pushed_ok = session.push_message(intent).await;
+            }
+        }
+
+        if pushed_ok {
+            let ack = serde_json::json!({
+                "type": "stopped",
+                "agentId": agent_id,
+            });
+            let _ = socket.send(Message::Text(ack.to_string().into())).await;
+        } else {
+            let err = serde_json::json!({
+                "type": "error",
+                "message": format!("Agent {} is not running, cannot stop", agent_id),
+                "agentId": agent_id,
+            });
+            let _ = socket.send(Message::Text(err.to_string().into())).await;
+        }
+        return;
+    }
+
     if client_msg.msg_type != "message" {
         let err = serde_json::json!({
             "type": "error",

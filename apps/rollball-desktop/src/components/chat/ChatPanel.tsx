@@ -4,7 +4,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
@@ -15,7 +15,7 @@ import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
@@ -280,14 +280,18 @@ export function ChatPanel() {
             </button>
           </div>
 
-          {/* Right: send button */}
+          {/* Right: send/stop button */}
           <button
-            className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
-            onClick={handleSend}
-            disabled={inputDisabled || !inputValue.trim()}
-            aria-label="Send message"
+            className={`rounded-lg p-1.5 transition-colors ${
+              sending
+                ? "text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900/30 hover:text-blue-600 dark:hover:text-blue-400"
+                : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
+            }`}
+            onClick={sending ? () => stopCurrentMessage() : handleSend}
+            disabled={!sending && (inputDisabled || !inputValue.trim())}
+            aria-label={sending ? "Stop generation" : "Send message"}
           >
-            <Send size={16} />
+            {sending ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
           </button>
         </div>
       </div>
@@ -301,27 +305,45 @@ export function ChatPanel() {
  * Returns the think content, reply content, and whether the think tag is closed.
  * If the content does not start with <think>, all content is treated as reply.
  * The <think> and </think> tags are stripped from the output.
+ * Handles multiple <think> blocks by extracting the first one and stripping all others.
  */
 function parseThinkContent(content: string): {
   thinkContent: string | null;
   replyContent: string;
   thinkClosed: boolean;
 } {
-  if (!content.startsWith("<think>")) {
+  // Find the first <think> block
+  const firstThinkStart = content.indexOf("<think>");
+
+  if (firstThinkStart === -1) {
+    // No <think> tag found — treat entire content as reply
     return { thinkContent: null, replyContent: content, thinkClosed: false };
   }
 
-  const closeIndex = content.indexOf("</think>");
+  // Find the closing </think> for the first <think>
+  const firstThinkEnd = content.indexOf("</think>", firstThinkStart);
 
-  if (closeIndex === -1) {
-    // Think tag is still open — everything after <think> is think content
-    const thinkContent = content.slice(7); // length of "<think>"
+  if (firstThinkEnd === -1) {
+    // <think> tag is still open — everything after <think> is think content
+    const thinkContent = content.slice(firstThinkStart + 7); // length of "<think>"
     return { thinkContent, replyContent: "", thinkClosed: false };
   }
 
-  // Think tag is closed
-  const thinkContent = content.slice(7, closeIndex);
-  let replyContent = content.slice(closeIndex + 8); // length of "</think>"
+  // Extract think content (between first <think> and its closing </think>)
+  const thinkContent = content.slice(firstThinkStart + 7, firstThinkEnd);
+
+  // Extract reply content (after the first </think>)
+  // Also strip any remaining <think>...</think> tags from the reply
+  let replyContent = content.slice(firstThinkEnd + 8); // length of "</think>"
+  
+  // Remove any remaining <think>...</think> blocks from reply content
+  const thinkRegex = new RegExp('<think>[\\s\\S]*?</think>', 'g');
+  replyContent = replyContent.replace(thinkRegex, "");
+  // Remove any unclosed <think> at the end
+  const lastUnclosedThink = replyContent.lastIndexOf("<think>");
+  if (lastUnclosedThink !== -1 && replyContent.indexOf("</think>", lastUnclosedThink + 7) === -1) {
+    replyContent = replyContent.slice(0, lastUnclosedThink);
+  }
   
   // Trim leading whitespace/newlines from reply content
   replyContent = replyContent.trimStart();
