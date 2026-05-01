@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy, FileText, Terminal } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
@@ -15,7 +15,7 @@ import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
@@ -23,6 +23,78 @@ export function ChatPanel() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+
+  // Memoize sorted messages to avoid unnecessary re-renders
+  const sortedMessages = useMemo(() => {
+    // Reorder messages: ensure assistant messages come after tool calls/results
+    // in the same conversation turn
+    const reordered = [...messages];
+
+    // Group messages by conversation turn (between user messages)
+    const turns: ChatMessage[][] = [];
+    let currentTurn: ChatMessage[] = [];
+
+    for (const msg of reordered) {
+      if (msg.type === "user") {
+        if (currentTurn.length > 0) {
+          turns.push(currentTurn);
+        }
+        currentTurn = [msg];
+      } else {
+        currentTurn.push(msg);
+      }
+    }
+    if (currentTurn.length > 0) {
+      turns.push(currentTurn);
+    }
+
+    // Within each turn, move assistant messages to the end
+    const finalMessages: ChatMessage[] = [];
+    for (const turn of turns) {
+      const userMsg = turn.find(m => m.type === "user");
+      const assistantMsgs = turn.filter(m => m.type === "assistant");
+      const toolMsgs = turn.filter(m => m.type === "tool_call" || m.type === "tool_result");
+      const otherMsgs = turn.filter(m => m.type !== "user" && m.type !== "assistant" && m.type !== "tool_call" && m.type !== "tool_result");
+
+      if (userMsg) finalMessages.push(userMsg);
+      finalMessages.push(...toolMsgs);
+      finalMessages.push(...assistantMsgs);
+      finalMessages.push(...otherMsgs);
+    }
+
+    return finalMessages;
+  }, [messages]);
+
+  // Group consecutive tool calls for compact display
+  const displayMessages = useMemo(() => {
+    const grouped: Array<ChatMessage | { type: 'tool_group'; id: string; items: ChatMessage[] }> = [];
+    let currentGroup: ChatMessage[] = [];
+
+    for (const msg of sortedMessages) {
+      if (msg.type === "tool_call" || msg.type === "tool_result") {
+        currentGroup.push(msg);
+      } else {
+        if (currentGroup.length > 0) {
+          grouped.push({
+            type: 'tool_group',
+            id: `group-${currentGroup[0].id}`,
+            items: currentGroup,
+          });
+          currentGroup = [];
+        }
+        grouped.push(msg);
+      }
+    }
+    if (currentGroup.length > 0) {
+      grouped.push({
+        type: 'tool_group',
+        id: `group-${currentGroup[0].id}`,
+        items: currentGroup,
+      });
+    }
+
+    return grouped;
+  }, [sortedMessages]);
 
   // Load available models from Vault keys
   useEffect(() => {
@@ -144,47 +216,15 @@ export function ChatPanel() {
             </div>
           )}
           <div className="space-y-2">
-            {(() => {
-              // Reorder messages: ensure assistant messages come after tool calls/results
-              // in the same conversation turn
-              const reordered = [...messages];
-              
-              // Group messages by conversation turn (between user messages)
-              const turns: ChatMessage[][] = [];
-              let currentTurn: ChatMessage[] = [];
-              
-              for (const msg of reordered) {
-                if (msg.type === "user") {
-                  if (currentTurn.length > 0) {
-                    turns.push(currentTurn);
-                  }
-                  currentTurn = [msg];
-                } else {
-                  currentTurn.push(msg);
-                }
+            {displayMessages.map((item) => {
+              if ('type' in item && item.type === 'tool_group') {
+                return <ToolCallGroup key={item.id} items={item.items} />;
               }
-              if (currentTurn.length > 0) {
-                turns.push(currentTurn);
-              }
-              
-              // Within each turn, move assistant messages to the end
-              const finalMessages: ChatMessage[] = [];
-              for (const turn of turns) {
-                const userMsg = turn.find(m => m.type === "user");
-                const assistantMsgs = turn.filter(m => m.type === "assistant");
-                const toolMsgs = turn.filter(m => m.type === "tool_call" || m.type === "tool_result");
-                const otherMsgs = turn.filter(m => m.type !== "user" && m.type !== "assistant" && m.type !== "tool_call" && m.type !== "tool_result");
-                
-                if (userMsg) finalMessages.push(userMsg);
-                finalMessages.push(...toolMsgs);
-                finalMessages.push(...assistantMsgs);
-                finalMessages.push(...otherMsgs);
-              }
-              
-              return finalMessages.map((msg) => (
+              const msg = item as ChatMessage;
+              return (
                 <MessageBubble key={msg.id} message={msg} isStreaming={msg.id === streamingMessageId} />
-              ));
-            })()}
+              );
+            })}
           </div>
           <div ref={messagesEndRef} />
         </div>
@@ -250,7 +290,6 @@ export function ChatPanel() {
               <ModelMenu
                 models={availableModels}
                 currentModel={currentModel}
-                currentProvider={currentProvider}
                 onSelect={(m) => selectedAgentId && setCurrentModel(m, selectedAgentId)}
               />
             )}
@@ -349,6 +388,170 @@ function parseThinkContent(content: string): {
   replyContent = replyContent.trimStart();
 
   return { thinkContent, replyContent, thinkClosed: true };
+}
+
+/** Aggregated tool call group with smart summary */
+function ToolCallGroup({ items }: { items: ChatMessage[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const [expandedItem, setExpandedItem] = useState<number | null>(null);
+
+  // Group by tool name and count
+  const toolCounts = items.reduce((acc, msg) => {
+    if (msg.type === "tool_call" && msg.toolName) {
+      acc[msg.toolName] = (acc[msg.toolName] || 0) + 1;
+    }
+    return acc;
+  }, {} as Record<string, number>);
+
+  // Determine primary tool and count
+  const primaryTool = Object.entries(toolCounts)[0];
+  if (!primaryTool) return null;
+  const [toolName, count] = primaryTool;
+
+  // Generate human-readable action name
+  const actionMap: Record<string, string> = {
+    "file_read": "Read",
+    "file_write": "Write",
+    "file_edit": "Edit",
+    "shell": "Run",
+    "web_search": "Search",
+    "web_fetch": "Fetch",
+  };
+  const actionName = actionMap[toolName] || toolName;
+
+  // Generate summary
+  const callItems = items.filter(m => m.type === "tool_call");
+  const summaryItems = callItems.slice(0, 3).map(item => {
+    const params = JSON.parse(item.content || "{}");
+    if (toolName === "file_read" || toolName === "file_write" || toolName === "file_edit") {
+      return params.path?.split(/[\\/]/).pop() || "file";
+    } else if (toolName === "shell") {
+      const cmd = params.command || "";
+      return cmd.split(' ')[0] || "cmd";
+    }
+    return item.toolName || "tool";
+  });
+
+  const hasMore = callItems.length > 3;
+  const summary = summaryItems.join(", ") + (hasMore ? ` + ${callItems.length - 3} more` : "");
+
+  // Icon based on tool type
+  const Icon = toolName === "shell" ? Terminal : FileText;
+
+  // Pair tool_call with its corresponding tool_result
+  const pairedItems: Array<{ call: ChatMessage; result?: ChatMessage }> = [];
+  let currentCall: ChatMessage | null = null;
+  
+  for (const item of items) {
+    if (item.type === "tool_call") {
+      if (currentCall) {
+        pairedItems.push({ call: currentCall });
+      }
+      currentCall = item;
+    } else if (item.type === "tool_result" && currentCall) {
+      pairedItems.push({ call: currentCall, result: item });
+      currentCall = null;
+    }
+  }
+  if (currentCall) {
+    pairedItems.push({ call: currentCall });
+  }
+
+  return (
+    <div className="space-y-1">
+      {/* Collapsed/Summary card */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+      >
+        <Icon className="h-4 w-4 shrink-0 text-zinc-400" />
+        <span className="font-medium">
+          {actionName} {count} {count === 1 ? "call" : "calls"}
+        </span>
+        <span className="truncate text-zinc-500 dark:text-zinc-500">
+          {summary}
+        </span>
+        {expanded ? (
+          <ChevronDown className="ml-auto h-4 w-4 shrink-0" />
+        ) : (
+          <ChevronRight className="ml-auto h-4 w-4 shrink-0" />
+        )}
+      </button>
+
+      {/* Expanded details - paired call + result */}
+      {expanded && (
+        <div className="ml-4 space-y-1 border-l-2 border-zinc-200 pl-4 dark:border-zinc-700">
+          {pairedItems.map((pair, idx) => {
+            const isExpanded = expandedItem === idx;
+            const { call, result } = pair;
+            
+            return (
+              <div key={call.id} className="space-y-1">
+                {/* Tool call row */}
+                <button
+                  onClick={() => setExpandedItem(isExpanded ? null : idx)}
+                  className="flex w-full items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  <Wrench className="h-3 w-3 shrink-0" />
+                  <span className="font-medium">{call.toolName}</span>
+                  <span className="min-w-0 flex-1 break-all text-zinc-500 dark:text-zinc-500">
+                    {(() => {
+                      try {
+                        const params = JSON.parse(call.content || "{}");
+                        if (toolName === "file_read" || toolName === "file_write" || toolName === "file_edit") {
+                          return params.path || call.content.substring(0, 60);
+                        } else if (toolName === "shell") {
+                          return params.command || call.content.substring(0, 60);
+                        }
+                        return call.content.substring(0, 60);
+                      } catch {
+                        return call.content.substring(0, 60);
+                      }
+                    })()}
+                    {call.content.length > 60 ? "..." : ""}
+                  </span>
+                  {isExpanded ? (
+                    <ChevronDown className="h-3 w-3 shrink-0" />
+                  ) : (
+                    <ChevronRight className="h-3 w-3 shrink-0" />
+                  )}
+                </button>
+
+                {/* Expanded details */}
+                {isExpanded && (
+                  <div className="ml-5 space-y-2">
+                    {/* Call details */}
+                    <div>
+                      <div className="mb-1 text-[10px] font-medium text-zinc-500">Arguments:</div>
+                      <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[10px] text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
+                        {call.content}
+                      </pre>
+                    </div>
+                    
+                    {/* Result if exists */}
+                    {result && (
+                      <div>
+                        <div className="mb-1 flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                          <Check className="h-3 w-3" />
+                          Result ({result.content.length} chars)
+                        </div>
+                        <pre className="overflow-x-auto rounded bg-emerald-50/30 p-2 text-[10px] text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400">
+                          {result.content.length > 500 
+                            ? result.content.substring(0, 500) + "\n\n... (truncated)"
+                            : result.content
+                          }
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Wrapper that provides right-click context menu for copying text */
@@ -544,12 +747,10 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
 function ModelMenu({
   models,
   currentModel,
-  currentProvider,
   onSelect,
 }: {
   models: string[];
   currentModel: string | null;
-  currentProvider: string | null;
   onSelect: (model: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -618,11 +819,7 @@ function ModelMenu({
                 <span className={cn("font-medium", isActive && "text-blue-600 dark:text-blue-400")}>
                   {m}
                 </span>
-                {currentProvider && (
-                  <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">
-                    {currentProvider}
-                  </span>
-                )}
+
               </button>
             );
           })}

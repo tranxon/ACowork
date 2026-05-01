@@ -17,6 +17,7 @@ export function WorkspaceSelector() {
   const [open, setOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   // Load workspaces when agent changes
@@ -70,7 +71,8 @@ export function WorkspaceSelector() {
   };
   
   const handleDelete = useCallback(async (id: string, name: string) => {
-    if (!selectedAgentId) return;
+    if (!selectedAgentId || deletingId) return;
+    setDeletingId(id);
     try {
       const response = await fetch(`${gatewayUrl}/api/agents/${selectedAgentId}/workspaces/${id}`, {
         method: "DELETE",
@@ -83,9 +85,11 @@ export function WorkspaceSelector() {
       }
     } catch (error) {
       addToast({ type: "error", message: `Failed to remove workspace: ${String(error)}` });
+    } finally {
+      setDeletingId(null);
     }
     setConfirmDelete(null);
-  }, [selectedAgentId, gatewayUrl, addToast, fetchWorkspaces]);
+  }, [selectedAgentId, gatewayUrl, addToast, fetchWorkspaces, deletingId]);
   
   const handleToggleAccess = useCallback(async (dir: WorkspaceDir) => {
     if (!selectedAgentId) return;
@@ -237,7 +241,8 @@ export function WorkspaceSelector() {
                                   e.stopPropagation();
                                   void handleDelete(dir.id, displayName);
                                 }}
-                                className="rounded bg-red-500 px-1.5 py-0.5 text-[10px] text-white hover:bg-red-600"
+                                disabled={deletingId !== null}
+                                className="rounded bg-red-500 px-1.5 py-0.5 text-[10px] text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 ✓
                               </button>
@@ -257,7 +262,8 @@ export function WorkspaceSelector() {
                                 e.stopPropagation();
                                 setConfirmDelete(dir.id);
                               }}
-                              className="rounded p-1 text-zinc-400 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
+                              disabled={deletingId !== null}
+                              className="rounded p-1 text-zinc-400 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
                               title="Remove workspace"
                             >
                               <Trash2 className="h-3 w-3" />
