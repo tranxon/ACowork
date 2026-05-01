@@ -1271,6 +1271,38 @@ async fn handle_agent_hello(
                 agent_id
             );
         }
+
+        // Push workspace context to the Agent Runtime.
+        // This delivers the formatted workspace configuration so the agent
+        // can inject it into the LLM system prompt.
+        let install_path = {
+            let state_guard = state.read().await;
+            state_guard.installed_agents.get(agent_id)
+                .map(|info| info.install_path.clone())
+        };
+        if let Some(ref install_path) = install_path {
+            if let Some((context_text, current_workspace_id, current_workspace_path)) =
+                crate::http::workspaces::resolve_workspace_context(install_path)
+            {
+                tracing::info!(
+                    "Pushing WorkspaceContextUpdate to agent={}: current_id={:?} current_path={:?}",
+                    agent_id, current_workspace_id, current_workspace_path
+                );
+                let push_result = session.push_message(GatewayResponse::WorkspaceContextUpdate {
+                    context_text,
+                    current_workspace_id,
+                    current_workspace_path,
+                }).await;
+                if !push_result {
+                    tracing::warn!("Failed to push WorkspaceContextUpdate to {} (channel closed)", conn_id);
+                }
+            } else {
+                tracing::debug!(
+                    "No workspace config for agent={}, skipping WorkspaceContextUpdate push",
+                    agent_id
+                );
+            }
+        }
         } // end if connection_role == "main"
 
         GatewayResponse::AgentHelloResult {

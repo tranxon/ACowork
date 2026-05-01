@@ -1,55 +1,33 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
+import type { WorkspaceDir } from "../../stores/workspaceStore";
 import { useToast } from "../common/ToastProvider";
 import { WorkspaceManager } from "./WorkspaceManager";
-import { ChevronDown, FolderOpen, Plus, Settings2, Search } from "lucide-react";
+import { ChevronDown, FolderOpen, Settings2, Search, Check } from "lucide-react";
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
-
-interface WorkspaceDir {
-  id: string;
-  path: string;
-  alias?: string;
-  access: "read-only" | "read-write";
-  added_at: string;
-}
 
 export function WorkspaceSelector() {
   const { selectedAgentId } = useAgentStore();
   const { gatewayUrl } = useSettingsStore();
   const { addToast } = useToast();
-  const [workspaces, setWorkspaces] = useState<WorkspaceDir[]>([]);
-  const [loading, setLoading] = useState(false);
+  const { workspaces, currentWorkspaceId, loading, fetchWorkspaces, setCurrentWorkspace } =
+    useWorkspaceStore();
   const [open, setOpen] = useState(false);
   const [showManager, setShowManager] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
-  const loadWorkspaces = useCallback(async () => {
-    if (!selectedAgentId) return;
-    setLoading(true);
-    try {
-      const response = await fetch(`${gatewayUrl}/api/agents/${selectedAgentId}/workspaces`);
-      if (response.ok) {
-        const data = await response.json();
-        setWorkspaces(data.workspaces || []);
-      }
-    } catch {
-      // Silently fail — workspace is optional
-    } finally {
-      setLoading(false);
-    }
-  }, [gatewayUrl, selectedAgentId]);
-
   // Load workspaces when agent changes
   useEffect(() => {
     if (!selectedAgentId) {
-      setWorkspaces([]);
+      useWorkspaceStore.getState().reset();
       return;
     }
-    void loadWorkspaces();
-  }, [selectedAgentId, loadWorkspaces]);
+    void fetchWorkspaces(selectedAgentId);
+  }, [selectedAgentId, fetchWorkspaces]);
 
   // Close on outside click
   useEffect(() => {
@@ -73,13 +51,15 @@ export function WorkspaceSelector() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             path: selected,
-            alias: selected.split(/[\/\\]/).pop() || undefined,
+            alias: selected.split(/[\/\\]/).filter(Boolean).pop() || undefined,
             access: "read-only",
           }),
         });
         if (response.ok) {
           addToast({ type: "success", message: "Workspace added" });
-          await loadWorkspaces();
+          if (selectedAgentId) {
+            void fetchWorkspaces(selectedAgentId);
+          }
         }
       }
     } catch {
@@ -89,9 +69,9 @@ export function WorkspaceSelector() {
   };
 
   const handleSelect = async (dir: WorkspaceDir) => {
-    // Future: switch active workspace context
+    if (!selectedAgentId) return;
+    await setCurrentWorkspace(selectedAgentId, dir.id);
     setOpen(false);
-    // TODO: emit workspace change event
   };
 
   const filteredWorkspaces = workspaces.filter((w) =>
@@ -108,7 +88,6 @@ export function WorkspaceSelector() {
           type="button"
           onClick={() => {
             setOpen(!open);
-            if (!open) void loadWorkspaces();
           }}
           className={cn(
             "inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors",
@@ -117,7 +96,15 @@ export function WorkspaceSelector() {
           )}
         >
           <FolderOpen size={14} />
-          <span>{workspaces.length > 0 ? workspaces[0].alias || workspaces[0].path.split(/[\/\\]/).pop() : "Workspace"}</span>
+          <span>
+            {currentWorkspaceId
+              ? (() => {
+                  const w = workspaces.find((ws) => ws.id === currentWorkspaceId);
+                  if (!w) return "Select Workspace";
+                  return w.alias || w.path.split(/[\/\\]/).filter(Boolean).pop() || w.path;
+                })()
+              : "Select Workspace"}
+          </span>
           <ChevronDown className="h-3 w-3 text-zinc-400" />
         </button>
 
@@ -176,17 +163,22 @@ export function WorkspaceSelector() {
                       <FolderOpen className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400" />
                       <div className="flex-1 truncate">
                         <div className="font-medium text-zinc-800 dark:text-zinc-200">
-                          {dir.alias || dir.path.split(/[\/\\]/).pop() || dir.path}
+                          {dir.alias || dir.path.split(/[\/\\]/).filter(Boolean).pop() || dir.path}
                         </div>
                         <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
                           {dir.path}
                         </div>
                       </div>
-                      {dir.access === "read-write" && (
-                        <span className="shrink-0 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
-                          RW
-                        </span>
-                      )}
+                      <div className="flex shrink-0 items-center gap-1">
+                        {dir.id === currentWorkspaceId && (
+                          <Check className="h-3.5 w-3.5 text-emerald-500" />
+                        )}
+                        {dir.access === "read-write" && (
+                          <span className="shrink-0 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-medium text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
+                            RW
+                          </span>
+                        )}
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -210,7 +202,7 @@ export function WorkspaceSelector() {
           agentId={selectedAgentId}
           onClose={() => {
             setShowManager(false);
-            void loadWorkspaces();
+            void fetchWorkspaces(selectedAgentId);
           }}
         />
       )}

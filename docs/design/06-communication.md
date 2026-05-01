@@ -612,6 +612,23 @@ Gateway 返回完整信息：
 
 Agent Runtime 收到更新后，刷新本地缓存的 capability 视图，并在下一轮迭代的上下文构建中反映变化。
 
+### 2.5 WorkspaceContextUpdate（工作区上下文更新）
+
+Gateway → Runtime 单播推送。携带已格式化的工作区上下文文本，用于注入 LLM 的 System Prompt。
+
+```json
+{
+  "type": "workspace_context_update",
+  "context_text": "## Workspace Environment\n...",
+  "current_workspace_id": "ws-abc123",
+  "current_workspace_path": "/home/user/projects/my-project"
+}
+```
+
+**触发时机**：
+- Agent 会话启动时主动推送
+- 用户通过 Desktop App 切换当前工作区时推送
+
 ## 3. 设计决策记录
 
 | 决策 | 选择 | 理由 |

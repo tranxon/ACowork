@@ -843,6 +843,18 @@ async fn run_gateway_loop(
                         });
                         agent_loop.update_provider(new_provider, resolved);
                     }
+                    GatewayResponse::WorkspaceContextUpdate {
+                        context_text,
+                        current_workspace_id,
+                        current_workspace_path,
+                    } => {
+                        tracing::info!(
+                            current_id = ?current_workspace_id,
+                            current_path = ?current_workspace_path,
+                            "Received WorkspaceContextUpdate from Gateway — updating workspace context"
+                        );
+                        context_builder.set_workspace_context(context_text);
+                    }
                     _ => {
                         tracing::debug!("Ignoring non-IntentReceived Gateway message");
                     }

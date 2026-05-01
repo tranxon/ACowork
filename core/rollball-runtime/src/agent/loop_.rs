@@ -421,6 +421,12 @@ impl AgentLoop {
     ) -> Result<ChatResponse> {
         let retry_on_overflow = context_builder.is_some();
 
+        tracing::debug!(
+            system_prompt_len = chat_request.messages.first().map(|m| m.content.len()).unwrap_or(0),
+            tools_count = chat_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            messages_count = chat_request.messages.len(),
+            "Sending LLM request"
+        );
         let stream = self.provider.chat_stream(chat_request.clone()).await?;
         let mut stream = Box::into_pin(stream);
         let mut accumulated_content = String::new();

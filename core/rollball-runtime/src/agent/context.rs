@@ -14,6 +14,8 @@ pub struct ContextBuilder {
     system_prompt: String,
     /// Identity context (from Gateway injection)
     identity_context: Option<String>,
+    /// Workspace context (from Gateway WorkspaceContextUpdate push)
+    workspace_context: Option<String>,
     /// Tool definitions as JSON
     tool_definitions: Option<Vec<serde_json::Value>>,
     /// Model override from Gateway LLMConfigDelivery (takes precedence over manifest suggested_model)
@@ -26,6 +28,7 @@ impl ContextBuilder {
         Self {
             system_prompt,
             identity_context: None,
+            workspace_context: None,
             tool_definitions: None,
             override_model: None,
         }
@@ -34,6 +37,12 @@ impl ContextBuilder {
     /// Set identity context (from Gateway)
     pub fn with_identity(mut self, identity: Option<String>) -> Self {
         self.identity_context = identity;
+        self
+    }
+
+    /// Set workspace context (from Gateway WorkspaceContextUpdate)
+    pub fn with_workspace_context(mut self, workspace: Option<String>) -> Self {
+        self.workspace_context = workspace;
         self
     }
 
@@ -60,6 +69,15 @@ impl ContextBuilder {
         self.override_model = Some(model);
     }
 
+    /// Update workspace context in-place (from Gateway WorkspaceContextUpdate push)
+    pub fn set_workspace_context(&mut self, context_text: String) {
+        tracing::info!(
+            context_len = context_text.len(),
+            "ContextBuilder workspace context updated via WorkspaceContextUpdate"
+        );
+        self.workspace_context = Some(context_text);
+    }
+
     /// Build the complete ChatRequest for the LLM
     pub fn build(
         &self,
@@ -74,6 +92,11 @@ impl ContextBuilder {
         // 2. Identity context (if available)
         if let Some(ref identity) = self.identity_context {
             system_content.push_str(&format!("\n\n## User Identity\n{identity}"));
+        }
+
+        // 2.2 Workspace context (if available, from Gateway push)
+        if let Some(ref workspace) = self.workspace_context {
+            system_content.push_str(&format!("\n\n{workspace}"));
         }
 
         // 2.5 Autobiographical context (Phase 1: skip, Phase 2: from Grafeo)
