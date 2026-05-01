@@ -191,17 +191,23 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                 MessageRole::Tool => "tool",
             };
 
-            // Handle tool messages
-            if matches!(m.role, MessageRole::Tool)
-                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                let tool_call_id = value
-                    .get("tool_call_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string);
-                let content = value
-                    .get("content")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string);
+            // Handle tool messages — prefer dedicated tool_call_id field,
+            // fall back to parsing from content JSON for backward compatibility
+            if matches!(m.role, MessageRole::Tool) {
+                let tool_call_id = m.tool_call_id.clone().or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(&m.content)
+                        .ok()
+                        .and_then(|v| v.get("tool_call_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                });
+                let content = if m.tool_call_id.is_some() {
+                    // tool_call_id is a separate field — content is the actual result
+                    if m.content.is_empty() { None } else { Some(m.content.clone()) }
+                } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                    // Legacy format: content JSON contains tool_call_id and content
+                    value.get("content").and_then(serde_json::Value::as_str).map(ToString::to_string)
+                } else {
+                    Some(m.content.clone())
+                };
                 return NativeMessage {
                     role: role.to_string(),
                     content,
@@ -263,10 +269,24 @@ fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<NativeToolSp
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let parameters = tool
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+                let parameters = match tool.get("parameters") {
+                    Some(p) if p.is_object() => p.clone(),
+                    Some(p) => {
+                        tracing::warn!(
+                            tool_name = %name,
+                            parameters_type = ?p,
+                            "Tool parameters is not a JSON object, using default schema"
+                        );
+                        serde_json::json!({"type": "object", "properties": {}})
+                    }
+                    None => {
+                        tracing::warn!(
+                            tool_name = %name,
+                            "Tool definition missing 'parameters' field, using default schema"
+                        );
+                        serde_json::json!({"type": "object", "properties": {}})
+                    }
+                };
 
                 NativeToolSpec {
                     kind: "function".to_string(),
@@ -350,6 +370,29 @@ impl Provider for OpenAIProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+
+            // Detailed diagnostics for 400 Bad Request errors
+            if status.as_u16() == 400 {
+                tracing::error!(
+                    tools_count = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+                    messages_count = native_request.messages.len(),
+                    last_message_role = ?native_request.messages.last().map(|m| &m.role),
+                    error_body = %body,
+                    "LLM returned 400 Bad Request - detailed diagnostics"
+                );
+                if body.contains("invalid function arguments") {
+                    // Log the last assistant message's tool_calls for diagnosis
+                    if let Some(last_assistant) = native_request.messages.iter().rev()
+                        .find(|m| m.role == "assistant")
+                    {
+                        tracing::error!(
+                            last_assistant_tool_calls = ?last_assistant.tool_calls,
+                            "Diagnosing invalid function arguments - last assistant tool_calls"
+                        );
+                    }
+                }
+            }
+
             return Err(rollball_core::RollballError::Provider(rollball_core::ProviderError::from_status_code(status.as_u16(), format!("OpenAI API error: {status} — {body}"))));
         }
 
@@ -415,6 +458,29 @@ impl Provider for OpenAIProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+
+            // Detailed diagnostics for 400 Bad Request errors
+            if status.as_u16() == 400 {
+                tracing::error!(
+                    tools_count = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+                    messages_count = native_request.messages.len(),
+                    last_message_role = ?native_request.messages.last().map(|m| &m.role),
+                    error_body = %body,
+                    "LLM returned 400 Bad Request - detailed diagnostics"
+                );
+                if body.contains("invalid function arguments") {
+                    // Log the last assistant message's tool_calls for diagnosis
+                    if let Some(last_assistant) = native_request.messages.iter().rev()
+                        .find(|m| m.role == "assistant")
+                    {
+                        tracing::error!(
+                            last_assistant_tool_calls = ?last_assistant.tool_calls,
+                            "Diagnosing invalid function arguments - last assistant tool_calls"
+                        );
+                    }
+                }
+            }
+
             return Err(rollball_core::RollballError::Provider(rollball_core::ProviderError::from_status_code(status.as_u16(), format!("OpenAI API error: {status} — {body}"))));
         }
 
@@ -543,12 +609,14 @@ mod tests {
                 role: MessageRole::System,
                 content: "You are helpful.".to_string(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: None,
             },
             ChatMessage {
                 role: MessageRole::User,
                 content: "Hello".to_string(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: None,
             },
         ];
@@ -565,6 +633,7 @@ mod tests {
             role: MessageRole::Assistant,
             content: "".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_123".to_string(),
                 call_type: "function".to_string(),

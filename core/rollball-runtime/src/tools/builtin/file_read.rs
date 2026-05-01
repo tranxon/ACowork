@@ -43,6 +43,14 @@ impl Tool for FileReadTool {
         }
 
         let full_path = Path::new(&self.work_dir).join(path);
+        tracing::debug!(
+            work_dir = %self.work_dir,
+            input_path = %path,
+            full_path = %full_path.display(),
+            exists = full_path.exists(),
+            "file_read: resolving path"
+        );
+
         match tokio::fs::read_to_string(&full_path).await {
             Ok(content) => {
                 // Handle line range if specified
@@ -64,7 +72,16 @@ impl Tool for FileReadTool {
 
                 Ok(ToolResult { ok: true, content: result, error: None, token_usage: None })
             }
-            Err(e) => Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to read file: {e}")), token_usage: None }),
+            Err(e) => {
+                tracing::warn!(
+                    work_dir = %self.work_dir,
+                    input_path = %path,
+                    full_path = %full_path.display(),
+                    error = %e,
+                    "file_read: failed to read file"
+                );
+                Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to read file: {e}")), token_usage: None })
+            }
         }
     }
 }

@@ -1,7 +1,7 @@
 //! CLI definitions for Agent Runtime
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::agent::inbound::InboundMessage;
 use crate::config::RuntimeConfig;
@@ -79,16 +79,50 @@ impl Cli {
         rt.block_on(async_main(config))
     }
 
-    /// Initialize tracing subscriber
+    /// Initialize tracing subscriber with both stderr and file output.
+    ///
+    /// Logs are written to stderr (for Gateway capture) AND to
+    /// `{work_dir}/logs/runtime.log` for user inspection.
     fn init_tracing(&self) {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new(&self.log_level)),
-            )
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(&self.log_level));
+
+        // Ensure the log directory exists under work_dir
+        let log_dir = std::path::Path::new(&self.work_dir).join("logs");
+        if let Err(e) = std::fs::create_dir_all(&log_dir) {
+            // Fall back to stderr-only if we cannot create the log directory
+            eprintln!(
+                "WARN: failed to create log directory {:?}: {}; falling back to stderr-only",
+                log_dir, e
+            );
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_file(false)
+                .init();
+            return;
+        }
+
+        let file_appender =
+            tracing_appender::rolling::never(&log_dir, "runtime.log");
+
+        let stderr_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_thread_ids(false)
-            .with_file(false)
+            .with_file(false);
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(file_appender)
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_file(true)
+            .with_ansi(false);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stderr_layer)
+            .with(file_layer)
             .init();
     }
 }

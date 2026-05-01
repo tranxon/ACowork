@@ -107,11 +107,25 @@ impl ContextBuilder {
             role: MessageRole::System,
             content: system_content,
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         });
 
         // 7. Conversation history
-        messages.extend(history.messages().iter().cloned());
+        // Filter out System messages from history — only the first system message
+        // (created above) should exist. Some LLM providers (e.g. MiniMax) reject
+        // system messages at non-first positions.
+        messages.extend(
+            history
+                .messages()
+                .iter()
+                .filter(|m| !matches!(m.role, MessageRole::System))
+                .cloned(),
+        );
+
+        // 7.5 Sanitize messages before sending to LLM
+        // This fixes corrupted tool_call data that would cause 400 errors
+        HistoryManager::sanitize_messages(&mut messages);
 
         ChatRequest {
             model: self.override_model.clone().unwrap_or_else(|| manifest.llm.suggested_model.clone()),
@@ -168,6 +182,7 @@ mod tests {
             role: MessageRole::User,
             content: "Hello".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         });
 

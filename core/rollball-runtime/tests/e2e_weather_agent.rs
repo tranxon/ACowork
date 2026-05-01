@@ -155,7 +155,7 @@ async fn test_e2e_weather_simple_query() {
     let config = weather_config();
     let budget = weather_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context_builder = ContextBuilder::new(system_prompt());
 
     let result = agent_loop.run("What's the weather in Shanghai?", &context_builder).await;
@@ -208,7 +208,7 @@ async fn test_e2e_weather_with_memory_store() {
     let config = weather_config();
     let budget = weather_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context_builder = ContextBuilder::new(system_prompt());
 
     let result = agent_loop.run("What's the weather in Beijing? Remember this city!", &context_builder).await;
@@ -240,7 +240,7 @@ async fn test_e2e_weather_text_only_response() {
     let config = weather_config();
     let budget = weather_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context_builder = ContextBuilder::new(system_prompt());
 
     let result = agent_loop.run("Hello!", &context_builder).await;

@@ -293,7 +293,7 @@ async fn test_s56_calendar_create_event() {
         exceeded_action: "warn".to_string(),
     };
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context = ContextBuilder::new(
         "You are a Calendar Agent. Help manage calendar events.".to_string(),
     );
@@ -330,7 +330,7 @@ async fn test_s56_calendar_query_events() {
         exceeded_action: "warn".to_string(),
     };
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context = ContextBuilder::new(
         "You are a Calendar Agent. Help manage calendar events.".to_string(),
     );
@@ -367,7 +367,7 @@ async fn test_s56_calendar_delete_event() {
         exceeded_action: "warn".to_string(),
     };
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context = ContextBuilder::new(
         "You are a Calendar Agent. Help manage calendar events.".to_string(),
     );
@@ -586,7 +586,7 @@ async fn test_s56_weather_to_calendar_collaboration() {
         exceeded_action: "warn".to_string(),
     };
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context = ContextBuilder::new(
         "You are a Weather Agent. Check weather and create calendar alerts when needed.".to_string(),
     );
@@ -791,7 +791,7 @@ async fn test_s56_doc_writer_multi_step_outline_and_write() {
         exceeded_action: "warn".to_string(),
     };
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context = ContextBuilder::new(
         "You are a Document Writing Agent. Break down tasks into steps.".to_string(),
     );
@@ -838,7 +838,7 @@ async fn test_s56_doc_writer_revise_section() {
         exceeded_action: "warn".to_string(),
     };
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context = ContextBuilder::new(
         "You are a Document Writing Agent. Revise sections as requested.".to_string(),
     );

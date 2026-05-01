@@ -244,23 +244,28 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
             }
             MessageRole::Tool => {
                 // Anthropic tool results: user message with tool_result content block
-                // Our tool messages have content as JSON with tool_call_id and content fields
-                let (tool_call_id, result_content) = if let Ok(value) =
-                    serde_json::from_str::<serde_json::Value>(&msg.content)
-                {
-                    let id = value
-                        .get("tool_call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let content = value
-                        .get("content")
+                // Prefer dedicated tool_call_id field; fall back to content JSON for legacy
+                let tool_call_id = msg.tool_call_id.clone().unwrap_or_else(|| {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        value.get("tool_call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                });
+                let result_content = if msg.tool_call_id.is_some() {
+                    // New format: content is the actual result
+                    msg.content.clone()
+                } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                    // Legacy format: content JSON contains tool_call_id and content
+                    value.get("content")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&msg.content)
-                        .to_string();
-                    (id, content)
+                        .to_string()
                 } else {
-                    ("unknown".to_string(), msg.content.clone())
+                    msg.content.clone()
                 };
 
                 converted.push(AnthropicMessage {
@@ -704,18 +709,21 @@ mod tests {
                 role: MessageRole::System,
                 content: "You are helpful.".to_string(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: None,
             },
             ChatMessage {
                 role: MessageRole::User,
                 content: "Hello".to_string(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: None,
             },
             ChatMessage {
                 role: MessageRole::Assistant,
                 content: "Hi there!".to_string(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: None,
             },
         ];
@@ -733,6 +741,7 @@ mod tests {
             role: MessageRole::Assistant,
             content: "".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: Some(vec![ToolCall {
                 id: "toolu_123".to_string(),
                 call_type: "function".to_string(),
@@ -758,6 +767,7 @@ mod tests {
             role: MessageRole::Tool,
             content: r#"{"tool_call_id":"toolu_123","content":"Sunny, 25°C"}"#.to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         }];
 
@@ -928,6 +938,7 @@ mod tests {
             role: MessageRole::User,
             content: "Hello world".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         }];
 
@@ -946,6 +957,7 @@ mod tests {
             role: MessageRole::User,
             content: "你好世界".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         }];
 

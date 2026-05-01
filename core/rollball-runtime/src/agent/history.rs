@@ -1,8 +1,10 @@
-//! Conversation history management (FIFO trimming + Tool Result folding)
+//! Conversation history management (FIFO trimming + Tool Result folding + Sanitization)
 //!
 //! Adapted from zeroclaw/src/agent/history.rs
 //! Rollball deviation: uses rollball-core ChatMessage types; token estimation
 //! uses char-based approximation instead of tiktoken.
+
+use std::collections::HashSet;
 
 use rollball_core::providers::traits::{ChatMessage, MessageRole};
 
@@ -216,6 +218,131 @@ impl HistoryManager {
         tracing::warn!(removed, "Emergency trim performed");
         removed
     }
+
+    /// Sanitize message history to remove or fix corrupted entries.
+    ///
+    /// This prevents LLM 400 errors caused by invalid tool_call data when
+    /// conversation history is replayed after an agent restart.
+    ///
+    /// Cleaning rules (applied in order):
+    /// 1. Fix invalid tool_call arguments — replace non-JSON with `{}`
+    /// 2. Remove orphaned tool result messages — no matching tool_call
+    /// 3. Remove orphaned tool_calls — no matching tool result
+    /// 4. Remove empty assistant messages — no content and no tool_calls
+    /// 5. Remove non-first system messages — some LLM providers only allow
+    ///    system role at the first position (e.g. MiniMax)
+    ///
+    /// This method is idempotent: calling it multiple times produces the same result.
+    pub fn sanitize_messages(messages: &mut Vec<ChatMessage>) {
+        // Step 1: Fix invalid tool_call arguments
+        for msg in messages.iter_mut() {
+            if let Some(ref mut tool_calls) = msg.tool_calls {
+                for tc in tool_calls.iter_mut() {
+                    if serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_err() {
+                        tracing::warn!(
+                            tool_call_id = %tc.id,
+                            tool_name = %tc.function.name,
+                            invalid_args = %tc.function.arguments,
+                            "Sanitizing invalid tool_call arguments to empty object"
+                        );
+                        tc.function.arguments = "{}".to_string();
+                    }
+                }
+            }
+        }
+
+        // Step 2: Collect valid tool_call_ids from assistant messages
+        let valid_tool_call_ids: HashSet<String> = messages
+            .iter()
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flat_map(|tcs| tcs.iter().map(|tc| tc.id.clone()))
+            .collect();
+
+        // Step 3: Remove orphaned tool result messages
+        messages.retain(|msg| {
+            if msg.role == MessageRole::Tool {
+                if let Some(ref tcid) = msg.tool_call_id {
+                    if !valid_tool_call_ids.contains(tcid) {
+                        tracing::warn!(
+                            tool_call_id = %tcid,
+                            "Removing orphaned tool result message"
+                        );
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+
+        // Step 4: Collect tool result IDs to find orphaned tool_calls
+        let tool_result_ids: HashSet<String> = messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+
+        // Remove tool_calls without corresponding tool results
+        for msg in messages.iter_mut() {
+            if let Some(ref mut tool_calls) = msg.tool_calls {
+                let before = tool_calls.len();
+                tool_calls.retain(|tc| {
+                    if !tool_result_ids.contains(&tc.id) {
+                        tracing::warn!(
+                            tool_call_id = %tc.id,
+                            tool_name = %tc.function.name,
+                            "Removing tool_call without corresponding result"
+                        );
+                        return false;
+                    }
+                    true
+                });
+                // If all tool_calls were removed, clear the field
+                if tool_calls.is_empty() && before > 0 {
+                    msg.tool_calls = None;
+                }
+            }
+        }
+
+        // Step 5: Remove empty assistant messages (no content + no tool_calls)
+        messages.retain(|msg| {
+            if msg.role == MessageRole::Assistant {
+                let has_content = !msg.content.is_empty();
+                let has_tool_calls = msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                if !has_content && !has_tool_calls {
+                    tracing::warn!("Removing empty assistant message");
+                    return false;
+                }
+            }
+            true
+        });
+
+        // Step 6: Remove system messages that are not at position 0
+        // Some LLM providers only allow system role at the first position.
+        let before_len = messages.len();
+        let mut first_system_seen = false;
+        messages.retain(|m| {
+            if matches!(m.role, MessageRole::System) {
+                if !first_system_seen {
+                    first_system_seen = true;
+                    true
+                } else {
+                    tracing::warn!(
+                        content_preview = %m.content.chars().take(80).collect::<String>(),
+                        "sanitize: removing non-first system message"
+                    );
+                    false
+                }
+            } else {
+                true
+            }
+        });
+        if messages.len() < before_len {
+            tracing::warn!(
+                removed = before_len - messages.len(),
+                "sanitize: removed non-first system messages"
+            );
+        }
+    }
 }
 
 /// Estimate tokens from text content (rough: 4 chars per token)
@@ -232,6 +359,7 @@ mod tests {
             role,
             content: content.to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         }
     }
@@ -288,5 +416,210 @@ mod tests {
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens("hello"), 2); // 5/4 = 1.25, ceil = 2
         assert_eq!(estimate_tokens(""), 0);
+    }
+
+    // ── sanitize_messages tests ─────────────────────────────────────────
+
+    use rollball_core::providers::traits::{FunctionCall, ToolCall};
+
+    fn make_tool_call(id: &str, name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    fn make_tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Tool,
+            content: content.to_string(),
+            name: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_calls: None,
+        }
+    }
+
+    #[test]
+    fn test_sanitize_fixes_invalid_arguments() {
+        let mut messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "".to_string(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    make_tool_call("tc_1", "read_file", "not valid json{{"),
+                    make_tool_call("tc_2", "write_file", r#"{"path":"/tmp"}"#),
+                ]),
+            },
+            make_tool_result("tc_1", "result 1"),
+            make_tool_result("tc_2", "result 2"),
+        ];
+
+        HistoryManager::sanitize_messages(&mut messages);
+
+        let assistant = &messages[0];
+        let tool_calls = assistant.tool_calls.as_ref().unwrap();
+        // Invalid arguments should be fixed to `{}`
+        assert_eq!(tool_calls[0].function.arguments, "{}");
+        // Valid arguments should be unchanged
+        assert_eq!(tool_calls[1].function.arguments, r#"{"path":"/tmp"}"#);
+    }
+
+    #[test]
+    fn test_sanitize_removes_orphaned_tool_result() {
+        let mut messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "I'll help you".to_string(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    make_tool_call("tc_1", "read_file", "{}"),
+                ]),
+            },
+            make_tool_result("tc_1", "result 1"),
+            make_tool_result("tc_orphan", "orphaned result"),
+        ];
+
+        HistoryManager::sanitize_messages(&mut messages);
+
+        // Only tc_1's result should remain
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].tool_call_id, Some("tc_1".to_string()));
+    }
+
+    #[test]
+    fn test_sanitize_removes_orphaned_tool_call() {
+        let mut messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "".to_string(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    make_tool_call("tc_1", "read_file", "{}"),
+                    make_tool_call("tc_2", "write_file", "{}"),
+                ]),
+            },
+            make_tool_result("tc_1", "result 1"),
+            // tc_2 has no result
+        ];
+
+        HistoryManager::sanitize_messages(&mut messages);
+
+        let assistant = &messages[0];
+        let tool_calls = assistant.tool_calls.as_ref().unwrap();
+        // Only tc_1 should remain
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "tc_1");
+    }
+
+    #[test]
+    fn test_sanitize_removes_empty_assistant_message() {
+        let mut messages = vec![
+            make_message(MessageRole::User, "Hello"),
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "".to_string(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            make_message(MessageRole::User, "World"),
+        ];
+
+        HistoryManager::sanitize_messages(&mut messages);
+
+        // Empty assistant message should be removed
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[1].role, MessageRole::User);
+    }
+
+    #[test]
+    fn test_sanitize_preserves_order() {
+        let mut messages = vec![
+            make_message(MessageRole::System, "System"),
+            make_message(MessageRole::User, "Hello"),
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "Let me check".to_string(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    make_tool_call("tc_1", "search", "{}"),
+                ]),
+            },
+            make_tool_result("tc_1", "Found it"),
+            make_message(MessageRole::Assistant, "Here's the answer"),
+        ];
+
+        HistoryManager::sanitize_messages(&mut messages);
+
+        // All messages should be preserved in order
+        assert_eq!(messages.len(), 5);
+        assert!(matches!(messages[0].role, MessageRole::System));
+        assert!(matches!(messages[1].role, MessageRole::User));
+        assert!(matches!(messages[2].role, MessageRole::Assistant));
+        assert!(matches!(messages[3].role, MessageRole::Tool));
+        assert!(matches!(messages[4].role, MessageRole::Assistant));
+    }
+
+    #[test]
+    fn test_sanitize_is_idempotent() {
+        let mut messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "".to_string(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    make_tool_call("tc_1", "read_file", "not json"),
+                ]),
+            },
+            make_tool_result("tc_1", "result 1"),
+        ];
+
+        HistoryManager::sanitize_messages(&mut messages);
+        let first_result = messages.clone();
+
+        HistoryManager::sanitize_messages(&mut messages);
+
+        // Second call should produce same result
+        assert_eq!(messages.len(), first_result.len());
+        for (a, b) in messages.iter().zip(first_result.iter()) {
+            assert_eq!(a.role, b.role);
+            assert_eq!(a.content, b.content);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_clears_tool_calls_when_all_orphaned() {
+        let mut messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "Let me check".to_string(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    make_tool_call("tc_1", "search", "{}"),
+                    make_tool_call("tc_2", "read", "{}"),
+                ]),
+            },
+        ];
+        // No tool results at all — both tool_calls should be removed
+
+        HistoryManager::sanitize_messages(&mut messages);
+
+        let assistant = &messages[0];
+        // tool_calls should be cleared to None since all were orphaned
+        assert!(assistant.tool_calls.is_none());
+        // Content should be preserved since it's non-empty
+        assert_eq!(assistant.content, "Let me check");
     }
 }

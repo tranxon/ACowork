@@ -152,6 +152,7 @@ impl AgentLoop {
             role: MessageRole::User,
             content: user_message.to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         });
 
@@ -184,10 +185,12 @@ impl AgentLoop {
                             return Err(RuntimeError::BudgetExceeded(reason));
                         }
                         "warn" => {
+                            // Changed from System to User — MiniMax API rejects non-first system messages
                             self.history.append(ChatMessage {
-                                role: MessageRole::System,
-                                content: format!("Warning: {reason}"),
-                                name: None,
+                                role: MessageRole::User,
+                                content: format!("[System Warning] {reason}"),
+                                name: Some("system".to_string()),
+                                tool_call_id: None,
                                 tool_calls: None,
                             });
                         }
@@ -220,6 +223,7 @@ impl AgentLoop {
                     role: MessageRole::Assistant,
                     content: response.content,
                     name: None,
+                    tool_call_id: None,
                     tool_calls: None,
                 });
 
@@ -245,6 +249,7 @@ impl AgentLoop {
                 role: MessageRole::Assistant,
                 content: response.content.clone(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: Some(deduped_calls.clone()),
             });
 
@@ -283,12 +288,9 @@ impl AgentLoop {
             for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
                 let tool_result_message = ChatMessage {
                     role: MessageRole::Tool,
-                    content: serde_json::json!({
-                        "tool_call_id": tc.id,
-                        "content": result_content,
-                    })
-                    .to_string(),
+                    content: result_content.clone(),
                     name: Some(tc.function.name.clone()),
+                    tool_call_id: Some(tc.id.clone()),
                     tool_calls: None,
                 };
 
@@ -310,10 +312,12 @@ impl AgentLoop {
                         tracing::warn!(message = %message, level = ?level, "Loop detected");
                         match level {
                             ResponseLevel::Warning => {
+                                // Changed from System to User — MiniMax API rejects non-first system messages
                                 self.history.append(ChatMessage {
-                                    role: MessageRole::System,
-                                    content: message,
-                                    name: None,
+                                    role: MessageRole::User,
+                                    content: format!("[System Warning] {message}"),
+                                    name: Some("system".to_string()),
+                                    tool_call_id: None,
                                     tool_calls: None,
                                 });
                             }
@@ -356,15 +360,18 @@ impl AgentLoop {
                         role: MessageRole::User,
                         content: text,
                         name: None,
+                        tool_call_id: None,
                         tool_calls: None,
                     });
                 }
                 InboundMessage::SystemNotification { notification_type, data } => {
                     tracing::info!("System notification: {} = {:?}", notification_type, data);
+                    // Changed from System to User — MiniMax API rejects non-first system messages
                     self.history.append(ChatMessage {
-                        role: MessageRole::System,
+                        role: MessageRole::User,
                         content: format!("[system:{}] {}", notification_type, data),
-                        name: None,
+                        name: Some("system".to_string()),
+                        tool_call_id: None,
                         tool_calls: None,
                     });
                 }
@@ -374,6 +381,7 @@ impl AgentLoop {
                         role: MessageRole::User,
                         content: format!("[intent:{}:{}] {}", from, action, params),
                         name: None,
+                        tool_call_id: None,
                         tool_calls: None,
                     });
                 }
@@ -541,6 +549,12 @@ impl AgentLoop {
             return Vec::new();
         }
 
+        tracing::info!(
+            tool_calls_count = tool_calls.len(),
+            tools = ?tool_calls.iter().map(|t| &t.function.name).collect::<Vec<_>>(),
+            "Executing tool calls"
+        );
+
         // Phase 1: Permission check (batch)
         // Check each tool independently; denied tools get error results,
         // allowed tools proceed to parallel execution.
@@ -702,8 +716,18 @@ async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> S
 
     match tool {
         Some(tool) => {
-            let params: serde_json::Value = serde_json::from_str(params_str)
-                .unwrap_or(serde_json::Value::Object(Default::default()));
+            let params: serde_json::Value = match serde_json::from_str(params_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        params_str = %params_str,
+                        error = %e,
+                        "Failed to parse tool call arguments as JSON, using empty object"
+                    );
+                    serde_json::Value::Object(Default::default())
+                }
+            };
 
             match tool.execute(params).await {
                 Ok(result) => {

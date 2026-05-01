@@ -53,8 +53,22 @@ impl Tool for ShellTool {
             });
         }
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
+        // Detect platform at runtime and choose shell accordingly
+        let (shell, shell_arg) = if std::env::consts::OS == "windows" {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+
+        tracing::debug!(
+            command = %command,
+            shell = %shell,
+            work_dir = %self.work_dir,
+            "shell: executing command"
+        );
+
+        let output = tokio::process::Command::new(shell)
+            .arg(shell_arg)
             .arg(command)
             .current_dir(&self.work_dir)
             .output()
@@ -78,12 +92,19 @@ impl Tool for ShellTool {
                     token_usage: None,
                 })
             }
-            Err(e) => Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some(format!("Failed to execute command: {e}")),
-                token_usage: None,
-            }),
+            Err(e) => {
+                tracing::warn!(
+                    command = %command,
+                    error = %e,
+                    "shell: failed to execute command"
+                );
+                Ok(ToolResult {
+                    ok: false,
+                    content: String::new(),
+                    error: Some(format!("Failed to execute command: {e}")),
+                    token_usage: None,
+                })
+            }
         }
     }
 }

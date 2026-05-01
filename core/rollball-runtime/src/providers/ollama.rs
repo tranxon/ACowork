@@ -288,6 +288,7 @@ mod tests {
                 role: MessageRole::User,
                 content: "Hello".to_string(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: None,
             },
         ];

@@ -131,7 +131,7 @@ async fn test_s5_intent_cross_agent_call() {
         monthly_cost_usd: None,
         exceeded_action: "warn".to_string(),
     };
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let context_builder = ContextBuilder::new("You are a weather agent.".to_string());
 
     let result = agent_loop

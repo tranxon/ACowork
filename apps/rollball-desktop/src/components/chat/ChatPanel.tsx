@@ -501,12 +501,12 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <div className="flex justify-start">
         <button
-          className="flex w-full max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="flex w-full max-w-[85%] items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
           onClick={() => setExpanded(!expanded)}
         >
-          <Wrench className="h-3 w-3 shrink-0" />
+          <Wrench className="mt-0.5 h-3 w-3 shrink-0" />
           <span className="font-medium">{message.toolName}</span>
-          <span className="truncate text-zinc-400 dark:text-zinc-500">{message.content.substring(0, 50)}{message.content.length > 50 ? "..." : ""}</span>
+          <span className="min-w-0 break-all text-zinc-400 dark:text-zinc-500">{message.content}</span>
           {expanded ? <ChevronDown className="ml-auto h-3 w-3 shrink-0" /> : <ChevronRight className="ml-auto h-3 w-3 shrink-0" />}
         </button>
       </div>
@@ -581,9 +581,6 @@ function ModelMenu({
         )}
       >
         <span className="font-medium">{currentModel ?? "Model"}</span>
-        {currentProvider && (
-          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{currentProvider}</span>
-        )}
         <ChevronDown className="h-3 w-3 text-zinc-400" />
       </button>
 

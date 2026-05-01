@@ -36,13 +36,30 @@ impl Tool for FileWriteTool {
         if path.is_empty() { return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing 'path'".to_string()), token_usage: None }); }
 
         let full_path = Path::new(&self.work_dir).join(path);
+        tracing::debug!(
+            work_dir = %self.work_dir,
+            input_path = %path,
+            full_path = %full_path.display(),
+            exists = full_path.exists(),
+            "file_write: resolving path"
+        );
+
         if let Some(parent) = full_path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
 
         match tokio::fs::write(&full_path, content).await {
             Ok(()) => Ok(ToolResult { ok: true, content: format!("Written {} bytes to {path}", content.len()), error: None, token_usage: None }),
-            Err(e) => Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to write file: {e}")), token_usage: None }),
+            Err(e) => {
+                tracing::warn!(
+                    work_dir = %self.work_dir,
+                    input_path = %path,
+                    full_path = %full_path.display(),
+                    error = %e,
+                    "file_write: failed to write file"
+                );
+                Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to write file: {e}")), token_usage: None })
+            }
         }
     }
 }

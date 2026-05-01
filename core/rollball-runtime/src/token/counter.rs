@@ -397,6 +397,7 @@ mod tests {
             role: MessageRole::User,
             content: "Hello world".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         };
         let count = counter.count_message(&msg, "gpt-4");
@@ -411,6 +412,7 @@ mod tests {
             role: MessageRole::User,
             content: "Hello".to_string(),
             name: Some("Alice".to_string()),
+            tool_call_id: None,
             tool_calls: None,
         };
         let count_without_name = counter.count_text("Hello", "gpt-4") + 2; // role + boundary
@@ -425,6 +427,7 @@ mod tests {
             role: MessageRole::Assistant,
             content: "".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_123".to_string(),
                 call_type: "function".to_string(),
@@ -446,12 +449,14 @@ mod tests {
             role: MessageRole::System,
             content: "You are a helpful assistant. Be concise and accurate.".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         };
         let user = ChatMessage {
             role: MessageRole::User,
             content: "Hello".to_string(),
             name: None,
+            tool_call_id: None,
             tool_calls: None,
         };
 
@@ -470,6 +475,7 @@ mod tests {
                 role: MessageRole::User,
                 content: "What is the weather?".to_string(),
                 name: None,
+                tool_call_id: None,
                 tool_calls: None,
             },
         ];

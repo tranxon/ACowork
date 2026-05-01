@@ -41,9 +41,26 @@ impl Tool for FileEditTool {
         }
 
         let full_path = Path::new(&self.work_dir).join(path);
+        tracing::debug!(
+            work_dir = %self.work_dir,
+            input_path = %path,
+            full_path = %full_path.display(),
+            exists = full_path.exists(),
+            "file_edit: resolving path"
+        );
+
         let content = match tokio::fs::read_to_string(&full_path).await {
             Ok(c) => c,
-            Err(e) => return Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to read file: {e}")), token_usage: None }),
+            Err(e) => {
+                tracing::warn!(
+                    work_dir = %self.work_dir,
+                    input_path = %path,
+                    full_path = %full_path.display(),
+                    error = %e,
+                    "file_edit: failed to read file"
+                );
+                return Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to read file: {e}")), token_usage: None })
+            }
         };
 
         let count = content.matches(old_text).count();
@@ -57,7 +74,16 @@ impl Tool for FileEditTool {
         let new_content = content.replacen(old_text, new_text, 1);
         match tokio::fs::write(&full_path, &new_content).await {
             Ok(()) => Ok(ToolResult { ok: true, content: format!("Replaced in {path}"), error: None, token_usage: None }),
-            Err(e) => Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to write file: {e}")), token_usage: None }),
+            Err(e) => {
+                tracing::warn!(
+                    work_dir = %self.work_dir,
+                    input_path = %path,
+                    full_path = %full_path.display(),
+                    error = %e,
+                    "file_edit: failed to write file"
+                );
+                Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to write file: {e}")), token_usage: None })
+            }
         }
     }
 }
