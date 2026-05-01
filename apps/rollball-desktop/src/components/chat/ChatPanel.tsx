@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry } from "../../lib/types";
@@ -137,7 +137,7 @@ export function ChatPanel() {
       )}
       {/* Messages area with drawer overlay */}
       <div className="relative flex-1 overflow-hidden">
-        <div className="h-full overflow-y-auto px-4 py-3" role="log" aria-label="Chat messages">
+        <div className="h-full overflow-y-auto px-4 py-3 select-text cursor-text" role="log" aria-label="Chat messages">
           {messages.length === 0 && (
             <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
               Start a conversation with {selectedAgent.name}
@@ -351,17 +351,106 @@ function parseThinkContent(content: string): {
   return { thinkContent, replyContent, thinkClosed: true };
 }
 
+/** Wrapper that provides right-click context menu for copying text */
+function MessageContentWrapper({ children }: { children: React.ReactNode }) {
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const selection = window.getSelection();
+    const selectedText = selection?.toString().trim();
+    
+    // Only show context menu if there's selected text
+    if (selectedText) {
+      setContextMenu({ x: e.clientX, y: e.clientY });
+    }
+  }, []);
+
+  const handleCopy = useCallback(async () => {
+    const selection = window.getSelection();
+    const selectedText = selection?.toString();
+    if (selectedText) {
+      try {
+        await navigator.clipboard.writeText(selectedText);
+      } catch (err) {
+        // Fallback for older browsers
+        const textArea = document.createElement("textarea");
+        textArea.value = selectedText;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
+      }
+    }
+    setContextMenu(null);
+  }, []);
+
+  // Close context menu on outside click (but not on right-click)
+  useEffect(() => {
+    if (!contextMenu) return;
+    
+    const handleClick = (e: MouseEvent) => {
+      // Check if click is outside the context menu
+      const target = e.target as Node;
+      if (wrapperRef.current && !wrapperRef.current.contains(target)) {
+        setContextMenu(null);
+      }
+    };
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+    
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [contextMenu]);
+
+  return (
+    <>
+      <div ref={wrapperRef} onContextMenu={handleContextMenu}>{children}</div>
+      {contextMenu && (
+        <div
+          ref={wrapperRef}
+          className="fixed z-[100] min-w-[120px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onContextMenu={(e) => e.stopPropagation()}
+        >
+          <button
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            onClick={handleCopy}
+          >
+            <Copy size={14} />
+            <span>复制</span>
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 /** Single message bubble */
 function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStreaming: boolean }) {
   const [expanded, setExpanded] = useState(false);
 
   if (message.type === "user") {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[70%] rounded-lg rounded-br-sm bg-zinc-800 px-3 py-2 text-sm text-white dark:bg-zinc-700">
-          {message.content}
+      <MessageContentWrapper>
+        <div className="flex justify-end">
+          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-zinc-800 px-3 py-2 text-sm text-white dark:bg-zinc-700 select-text">
+            {message.content}
+          </div>
         </div>
-      </div>
+      </MessageContentWrapper>
     );
   }
 
@@ -371,36 +460,40 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     const showPlaceholder = !message.content;
 
     return (
-      <div className="flex justify-start">
-        <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200">
-          {thinkContent !== null && (
-            <ThinkBlock
-              content={thinkContent}
-              isStreaming={isStreaming}
-              hasReplyStarted={hasReplyStarted}
-            />
-          )}
-          {replyContent && (
-            <div className={`prose prose-sm prose-zinc max-w-none dark:prose-invert ${thinkContent !== null ? "mt-2" : ""}`}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{replyContent}</ReactMarkdown>
-            </div>
-          )}
-          {showPlaceholder && (
-            <span className="text-zinc-400">Thinking...</span>
-          )}
-          {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
+      <MessageContentWrapper>
+        <div className="flex justify-start">
+          <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200 select-text">
+            {thinkContent !== null && (
+              <ThinkBlock
+                content={thinkContent}
+                isStreaming={isStreaming}
+                hasReplyStarted={hasReplyStarted}
+              />
+            )}
+            {replyContent && (
+              <div className={`prose prose-sm prose-zinc max-w-none dark:prose-invert ${thinkContent !== null ? "mt-2" : ""} select-text`}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{replyContent}</ReactMarkdown>
+              </div>
+            )}
+            {showPlaceholder && (
+              <span className="text-zinc-400">Thinking...</span>
+            )}
+            {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
+          </div>
         </div>
-      </div>
+      </MessageContentWrapper>
     );
   }
 
   if (message.type === "system") {
     return (
-      <div className="flex justify-center">
-        <div className="rounded bg-zinc-100 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-          {message.content}
+      <MessageContentWrapper>
+        <div className="flex justify-center">
+          <div className="rounded bg-zinc-100 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400 select-text">
+            {message.content}
+          </div>
         </div>
-      </div>
+      </MessageContentWrapper>
     );
   }
 
@@ -422,23 +515,25 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
 
   if (message.type === "tool_result") {
     return (
-      <div className="flex justify-start">
-        <button
-          className="flex w-full max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          onClick={() => setExpanded(!expanded)}
-        >
-          <Wrench className="h-3 w-3 shrink-0" />
-          <span className="font-medium">{message.toolName}</span>
-          <span className="text-zinc-400 dark:text-zinc-500">→ Result</span>
-          <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">Click to view</span>
-          {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
-        </button>
-        {expanded && (
-          <pre className="mt-1 max-w-[85%] overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
-            {message.content}
-          </pre>
-        )}
-      </div>
+      <MessageContentWrapper>
+        <div className="flex justify-start">
+          <button
+            className="flex w-full max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            onClick={() => setExpanded(!expanded)}
+          >
+            <Wrench className="h-3 w-3 shrink-0" />
+            <span className="font-medium">{message.toolName}</span>
+            <span className="text-zinc-400 dark:text-zinc-500">→ Result</span>
+            <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">Click to view</span>
+            {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
+          </button>
+          {expanded && (
+            <pre className="mt-1 max-w-[85%] overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400 select-text">
+              {message.content}
+            </pre>
+          )}
+        </div>
+      </MessageContentWrapper>
     );
   }
 

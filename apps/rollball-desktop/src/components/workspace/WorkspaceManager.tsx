@@ -163,7 +163,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                     <div className="flex items-center gap-2">
                       <FolderOpen className="h-4 w-4 text-zinc-400" />
                       <span className="font-medium text-zinc-900 dark:text-zinc-100">
-                        {dir.alias || dir.path.split(/[\/\\]/).pop() || dir.path}
+                        {dir.alias || dir.path.split(/[\/\\]/).filter(Boolean).pop() || dir.path}
                       </span>
                     </div>
                     <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{dir.path}</p>
@@ -186,7 +186,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
 
                     {/* Delete Button */}
                     <button
-                      onClick={() => setDeleteConfirm({ open: true, id: dir.id, name: dir.alias || dir.path.split(/[\/\\]/).pop() || dir.path })}
+                      onClick={() => setDeleteConfirm({ open: true, id: dir.id, name: dir.alias || dir.path.split(/[\/\\]/).filter(Boolean).pop() || dir.path })}
                       className="rounded-md p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
                       title="Remove workspace"
                     >
@@ -269,7 +269,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths }: { onClose: () => vo
       if (selected) {
         setPath(selected);
         if (!alias) {
-          setAlias(selected.split(/[\/\\]/).pop() || "");
+          setAlias(selected.split(/[\/\\]/).filter(Boolean).pop() || "");
         }
       }
     } catch (error) {

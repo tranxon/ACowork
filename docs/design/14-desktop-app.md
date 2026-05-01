@@ -273,6 +273,24 @@ Step 5: 安装第一个 Agent
 | 外观 | 主题（亮/暗）、语言、字体大小 |
 | 通用 | 日志级别、数据目录位置、更新检查 |
 
+### 4.5 工作区管理
+
+#### 工作区选择器交互规格
+
+**当前工作区选择**：
+- 下拉菜单中，当前选中的工作区条目显示 checkmark (✓) 图标
+- 下拉按钮显示当前选中工作区的别名/路径（而非固定显示第一个）
+- 选择新工作区后，调用 `PUT /api/agents/{agent_id}/workspaces/current` 持久化选择
+- 同时更新选择统计（`select_count`、`last_selected_at`），用于权重排序
+
+**Agent 切换联动**：
+- 当用户切换到不同 Agent 时，自动重新加载该 Agent 的工作区列表
+- 恢复该 Agent 上次的当前工作区选择
+
+**状态管理**：
+- 使用独立的 `workspaceStore`（Zustand）管理工作区状态
+- 包含 `workspaces` 列表、`currentWorkspaceId`、`loading` 状态
+
 ## 5. 开发者模式功能
 
 开发者模式在用户模式基础上叠加调试能力。所有调试协议的详细定义见 [10-debug-protocol.md](./10-debug-protocol.md)。

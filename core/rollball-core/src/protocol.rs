@@ -217,6 +217,20 @@ pub enum GatewayResponse {
         /// List of cron entries
         entries: Vec<CronEntryInfo>,
     },
+    /// Workspace context update (Gateway → Runtime, push)
+    ///
+    /// Pushes the formatted workspace context text to the Agent Runtime
+    /// so it can inject it into the LLM system prompt. Sent at two times:
+    ///   A) After AgentHello handshake (initial workspace config)
+    ///   B) When the user switches the current workspace (hot update)
+    WorkspaceContextUpdate {
+        /// Formatted workspace context text (Markdown, ready for LLM injection)
+        context_text: String,
+        /// ID of the currently selected workspace (if any)
+        current_workspace_id: Option<String>,
+        /// Absolute path of the currently selected workspace (if any)
+        current_workspace_path: Option<String>,
+    },
 }
 
 /// Cron entry info (for IPC responses)
