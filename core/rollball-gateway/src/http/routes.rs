@@ -46,6 +46,8 @@ pub enum BridgeEventType {
     MemoryUpdated,
     /// Skill execution event
     SkillExecuted,
+    /// Iteration limit reached — agent paused, awaiting user decision
+    IterationLimitPaused,
 }
 
 impl BridgeEventType {
@@ -61,6 +63,7 @@ impl BridgeEventType {
             "tool_approval_needed" => Some(Self::ToolApprovalNeeded),
             "memory_updated" => Some(Self::MemoryUpdated),
             "skill_executed" => Some(Self::SkillExecuted),
+            "iteration_limit_paused" => Some(Self::IterationLimitPaused),
             _ => None,
         }
     }
@@ -81,6 +84,7 @@ impl BridgeEventType {
             Self::Error => "error",
             Self::MemoryUpdated => "memory_updated",
             Self::SkillExecuted => "skill_executed",
+            Self::IterationLimitPaused => "iteration_limit_paused",
         }
     }
 }

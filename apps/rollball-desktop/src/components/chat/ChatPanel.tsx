@@ -15,7 +15,7 @@ import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory, iterationLimitPaused, continueExecution } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
@@ -226,6 +226,25 @@ export function ChatPanel() {
               );
             })}
           </div>
+          {/* Iteration limit pause — Continue button */}
+          {iterationLimitPaused && (
+            <div className="flex items-center justify-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/20">
+              <span className="text-sm text-amber-700 dark:text-amber-300">
+                Iteration limit reached ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
+              </span>
+              <button
+                onClick={() => {
+                  if (selectedAgentId) {
+                    continueExecution(selectedAgentId);
+                  }
+                }}
+                className="flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 transition-colors"
+              >
+                <Play className="h-3.5 w-3.5" />
+                Continue
+              </button>
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
 

@@ -55,7 +55,7 @@ fn default_log_level() -> String {
 }
 
 fn default_max_iterations() -> u32 {
-    20
+    50
 }
 
 fn default_iteration_timeout_ms() -> u64 {

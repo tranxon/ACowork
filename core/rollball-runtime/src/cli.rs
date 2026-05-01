@@ -471,6 +471,13 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                                 "tool_call_id": tool_call_id,
                             }))
                         }
+                        crate::agent::loop_::ToolEvent::IterationLimitPaused { iteration, max_iterations } => {
+                            ("iteration_limit_paused", serde_json::json!({
+                                "iteration": iteration,
+                                "max_iterations": max_iterations,
+                                "message": format!("Iteration limit reached ({}/{}). Click Continue to keep going.", iteration, max_iterations),
+                            }))
+                        }
                     };
 
                     if let Err(e) = te_client
@@ -800,6 +807,19 @@ async fn run_gateway_loop(
                             // Send interrupt to agent loop via inbound channel
                             if inbound_tx.send(InboundMessage::Interrupt { reason }).await.is_err() {
                                 tracing::warn!("Failed to send interrupt signal — agent loop may have exited");
+                            }
+                            continue;
+                        }
+
+                        if action == "continue_execution" {
+                            let reason = params.get("reason")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("user_requested")
+                                .to_string();
+                            tracing::info!(reason = %reason, "Forwarding continue_execution signal to agent loop");
+
+                            if inbound_tx.send(InboundMessage::ContinueExecution { reason }).await.is_err() {
+                                tracing::warn!("Failed to send continue signal — agent loop may have exited");
                             }
                             continue;
                         }

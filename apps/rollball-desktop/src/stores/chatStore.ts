@@ -18,6 +18,8 @@ interface ChatStore {
   availableModels: string[];
   /** Current agent ID for stop functionality */
   currentAgentId: string | null;
+  /** Whether the agent loop is paused at iteration limit, awaiting user continue */
+  iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => Promise<void>;
@@ -26,6 +28,8 @@ interface ChatStore {
   clearMessages: () => void;
   setCurrentModel: (model: string, agentId: string) => void;
   setAvailableModels: (models: string[]) => void;
+  /** Continue agent execution after iteration limit pause */
+  continueExecution: (agentId: string) => Promise<void>;
   /** Load model for a specific agent from Gateway API, returns the model name */
   loadAgentModel: (agentId: string) => Promise<string | null>;
   /** Load conversation history for a specific agent from Gateway API */
@@ -84,6 +88,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   agentModels: {},
   availableModels: [],
   currentAgentId: null,
+  iterationLimitPaused: null,
 
   connectStream: (agentId: string, gatewayUrl: string = DEFAULT_GATEWAY_URL) => {
     // Update currentAgentId for stop functionality
@@ -315,6 +320,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setAvailableModels: (models: string[]) => {
     set({ availableModels: models, currentModel: models[0] ?? null });
   },
+  continueExecution: async (agentId: string) => {
+    try {
+      const resp = await fetch(`http://127.0.0.1:19876/api/agents/${agentId}/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (resp.ok) {
+        set({ iterationLimitPaused: null, sending: true });
+      }
+    } catch (error) {
+      console.error("[ChatStore] Failed to send continue signal:", error);
+    }
+  },
   loadAgentModel: async (agentId: string): Promise<string | null> => {
     try {
       const resp = await fetch(`http://127.0.0.1:19876/api/agents/${agentId}/model`);
@@ -496,6 +514,22 @@ function handleMessageEvent(
     case "skill_executed":
       console.log("[WS] Skill executed event:", data);
       break;
+
+    case "iteration_limit_paused": {
+      const { iteration, max_iterations, message } = data as {
+        iteration: number;
+        max_iterations: number;
+        message: string;
+      };
+      set({
+        iterationLimitPaused: {
+          iteration,
+          maxIterations: max_iterations,
+          message,
+        },
+      });
+      break;
+    }
 
     default:
       console.log("[ChatStore] Unknown event type:", eventType, data);

@@ -231,6 +231,19 @@ pub enum GatewayResponse {
         /// Absolute path of the currently selected workspace (if any)
         current_workspace_path: Option<String>,
     },
+    /// Iteration limit reached — agent loop paused, awaiting user decision.
+    ///
+    /// The Runtime pushes this when `iteration >= max_iterations`.
+    /// The Gateway relays it to the Desktop App so the user can choose
+    /// to continue (which resets the iteration counter) or stop.
+    IterationLimitPaused {
+        /// Current iteration count when the limit was hit
+        iteration: u32,
+        /// Configured max_iterations limit
+        max_iterations: u32,
+        /// Human-readable message
+        message: String,
+    },
 }
 
 /// Cron entry info (for IPC responses)

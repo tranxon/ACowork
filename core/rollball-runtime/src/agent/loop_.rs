@@ -63,6 +63,13 @@ pub enum ToolEvent {
         /// Tool call ID matching the original ToolCall
         tool_call_id: String,
     },
+    /// Iteration limit reached — agent loop paused, awaiting user decision
+    IterationLimitPaused {
+        /// Current iteration count when the limit was hit
+        iteration: u32,
+        /// Configured max_iterations limit
+        max_iterations: u32,
+    },
 }
 
 /// Agent loop runner
@@ -160,12 +167,90 @@ impl AgentLoop {
 
         loop {
             iteration += 1;
-            tracing::info!(iteration, "Starting loop iteration");
+            tracing::info!(
+                iteration,
+                history_token_count = self.history.token_count(),
+                history_message_count = self.history.len(),
+                history_max_tokens = self.config.history_max_tokens,
+                "Starting loop iteration"
+            );
 
-            // ⑨ Iteration limit check
+            // ⑨ Iteration limit check — pause and await user decision
             if iteration > self.config.max_iterations {
-                tracing::warn!(iteration, "Max iterations reached");
-                return Ok("Maximum iterations reached. The agent stopped to prevent infinite looping.".to_string());
+                tracing::warn!(
+                    iteration,
+                    max_iterations = self.config.max_iterations,
+                    "Max iterations reached, pausing for user decision"
+                );
+
+                // Notify Gateway/Desktop App that iteration limit was reached
+                if let Some(ref tx) = self.on_tool_event {
+                    let _ = tx.try_send(ToolEvent::IterationLimitPaused {
+                        iteration,
+                        max_iterations: self.config.max_iterations,
+                    });
+                }
+
+                // Wait for ContinueExecution or Interrupt from inbound queue
+                loop {
+                    match self.inbound_rx.recv().await {
+                        Some(InboundMessage::ContinueExecution { reason }) => {
+                            tracing::info!(
+                                reason = %reason,
+                                "User chose to continue, resetting iteration counter"
+                            );
+                            iteration = 0; // Reset counter
+                            
+                            // Trim history before resuming to avoid context window overflow
+                            self.history.preemptive_trim(self.config.history_max_tokens);
+                            
+                            break; // Resume main loop
+                        }
+                        Some(InboundMessage::Interrupt { reason }) => {
+                            tracing::info!(reason = %reason, "User chose to stop during iteration limit pause");
+                            return Ok("Agent stopped by user request after reaching iteration limit.".to_string());
+                        }
+                        Some(other) => {
+                            // Other messages (UserMessage, etc.) — inject into history
+                            let (msg, _) = other.enforce_size_limit();
+                            match msg {
+                                InboundMessage::UserMessage(text) => {
+                                    self.history.append(ChatMessage {
+                                        role: MessageRole::User,
+                                        content: text,
+                                        name: None,
+                                        tool_call_id: None,
+                                        tool_calls: None,
+                                    });
+                                }
+                                InboundMessage::SystemNotification { notification_type, data } => {
+                                    self.history.append(ChatMessage {
+                                        role: MessageRole::User,
+                                        content: format!("[system:{}] {}", notification_type, data),
+                                        name: Some("system".to_string()),
+                                        tool_call_id: None,
+                                        tool_calls: None,
+                                    });
+                                }
+                                InboundMessage::IntentMessage { from, action, params } => {
+                                    self.history.append(ChatMessage {
+                                        role: MessageRole::User,
+                                        content: format!("[intent:{}:{}] {}", from, action, params),
+                                        name: None,
+                                        tool_call_id: None,
+                                        tool_calls: None,
+                                    });
+                                }
+                                _ => {} // ContinueExecution and Interrupt handled above
+                            }
+                        }
+                        None => {
+                            // Channel closed — treat as stop
+                            tracing::warn!("Inbound channel closed during iteration limit pause, stopping");
+                            return Ok("Agent stopped: inbound channel closed.".to_string());
+                        }
+                    }
+                }
             }
 
             // ⓪ Drain inbound queue (non-blocking)
@@ -201,6 +286,14 @@ impl AgentLoop {
 
             // ② Build context
             let chat_request = context_builder.build(&self.manifest, &self.history);
+
+            tracing::info!(
+                request_messages_count = chat_request.messages.len(),
+                request_model = %chat_request.model,
+                request_max_tokens = ?chat_request.max_tokens,
+                request_tools_count = chat_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+                "Built chat request for LLM"
+            );
 
             // ②.5 Preemptive trim
             self.history.preemptive_trim(self.config.history_max_tokens);
@@ -268,7 +361,46 @@ impl AgentLoop {
             }
 
             // ⑤ Tool dispatch — parallel execution (S1.7)
-            let tool_results = self.execute_tools_parallel(&deduped_calls).await;
+            // ⑤.1 Pre-execution loop detection: block repeated calls before wasting an iteration
+            let mut calls_to_execute: Vec<ToolCall> = Vec::new();
+            let mut blocked_indices: Vec<usize> = Vec::new();
+            for (idx, tc) in deduped_calls.iter().enumerate() {
+                match self.loop_detector.peek_check(&tc.function.name, &tc.function.arguments) {
+                    LoopDetectionResult::NoLoop => {
+                        calls_to_execute.push(tc.clone());
+                    }
+                    LoopDetectionResult::LoopDetected { level, .. } => {
+                        match level {
+                            ResponseLevel::Warning => {
+                                // Warning is handled post-execution; allow the call
+                                calls_to_execute.push(tc.clone());
+                            }
+                            ResponseLevel::Block | ResponseLevel::Break => {
+                                tracing::warn!(
+                                    tool = %tc.function.name,
+                                    level = ?level,
+                                    "Loop detected (pre-execution), blocking tool call"
+                                );
+                                blocked_indices.push(idx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let executed_results = self.execute_tools_parallel(&calls_to_execute).await;
+
+            // Merge executed results with pre-blocked results, preserving original order
+            let blocked_msg = "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach.";
+            let mut tool_results: Vec<String> = Vec::with_capacity(deduped_calls.len());
+            let mut executed_iter = executed_results.into_iter();
+            for idx in 0..deduped_calls.len() {
+                if blocked_indices.contains(&idx) {
+                    tool_results.push(blocked_msg.to_string());
+                } else {
+                    tool_results.push(executed_iter.next().unwrap_or_default());
+                }
+            }
 
             // Emit ToolResult events after execution
             if let Some(ref tx) = self.on_tool_event {
@@ -388,6 +520,11 @@ impl AgentLoop {
                 InboundMessage::Interrupt { reason } => {
                     tracing::info!(reason = %reason, "Received interrupt signal");
                     return true; // Signal to stop the agent loop
+                }
+                InboundMessage::ContinueExecution { .. } => {
+                    // Continue is only meaningful during iteration limit pause;
+                    // during normal drain, ignore it.
+                    tracing::debug!("Ignoring ContinueExecution during normal drain");
                 }
             }
         }
