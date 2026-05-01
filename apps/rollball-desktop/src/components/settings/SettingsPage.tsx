@@ -133,6 +133,7 @@ function ProvidersTab() {
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelSearchTerm, setModelSearchTerm] = useState("");
+  const [modelCapabilityFilter, setModelCapabilityFilter] = useState<string[]>([]);
 
   // Edit dialog state
   const [editKey, setEditKey] = useState("");
@@ -144,6 +145,15 @@ function ProvidersTab() {
 
   // Gateway config for default provider indication
   const [config, setConfig] = useState<GatewayConfig | null>(null);
+
+  // Dynamic provider list from Gateway API
+  const [dynamicProviders, setDynamicProviders] = useState<{
+    id: string;
+    name: string;
+    models?: ModelInfo[];
+    modelCount?: number;
+  }[]>([]);
+  const [dynamicProvidersLoading, setDynamicProvidersLoading] = useState(false);
 
   const newProviderDef = getProviderDef(newProvider);
 
@@ -167,7 +177,27 @@ function ProvidersTab() {
     }
   }, []);
 
-  useEffect(() => { fetchKeys(); fetchConfig(); }, [fetchKeys, fetchConfig]);
+  // Fetch dynamic provider list from Gateway API
+  const fetchDynamicProviders = useCallback(async () => {
+    setDynamicProvidersLoading(true);
+    try {
+      const response = await fetch("http://127.0.0.1:19876/api/models");
+      if (response.ok) {
+        const data = await response.json();
+        setDynamicProviders(data.providers ?? []);
+      }
+    } catch {
+      // Fallback to static providers if Gateway API fails
+    } finally {
+      setDynamicProvidersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { 
+    fetchKeys(); 
+    fetchConfig(); 
+    fetchDynamicProviders(); 
+  }, [fetchKeys, fetchConfig, fetchDynamicProviders]);
 
   // Fetch available models for a provider from Gateway API
   const fetchModels = useCallback(async (providerId: string): Promise<ModelInfo[]> => {
@@ -311,73 +341,120 @@ function ProvidersTab() {
         <div className="py-8 text-center text-xs text-zinc-400">Loading...</div>
       ) : (
         <div className="space-y-3">
-          {PROVIDER_CATEGORIES.map((cat) => {
-            const catProviders = ALL_PROVIDERS.filter((p) => p.category === cat.id);
-            if (catProviders.length === 0) return null;
-            return (
-              <div key={cat.id}>
-                <h3 className="mb-2 text-xs font-medium text-zinc-500">{cat.label}</h3>
-                <div className="space-y-2">
-                  {catProviders.map((provider) => {
-                    const keyEntry = keys.find((k) => k.provider === provider.id);
-                    return (
-                      <div key={provider.id} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
-                        <div className="flex items-center justify-between">
-                          <div className="min-w-0 flex-1">
-                            <span className="text-sm font-medium">{provider.name}</span>
-                            {keyEntry?.models?.length ? (
-                              <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.models.join(", ")}</span>
-                            ) : keyEntry?.default_model ? (
-                              <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.default_model}</span>
-                            ) : keyEntry && (
-                              <span className="ml-2 text-xs text-zinc-400">{provider.exampleModels[0] ?? "—"}</span>
-                            )}
-                            {!keyEntry && provider.description && (
-                              <span className="ml-2 text-xs text-zinc-400">— {provider.description}</span>
-                            )}
-                          </div>
-                          {keyEntry ? (
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => handleSetDefaultProvider(provider.id)}
-                                className={cn(
-                                  "rounded p-0.5",
-                                  config?.default_provider === provider.id
-                                    ? "text-amber-500"
-                                    : "text-zinc-400 hover:text-amber-500 dark:hover:text-amber-400",
-                                )}
-                                title={config?.default_provider === provider.id ? "Default provider" : "Set as default provider"}
-                              >
-                                <Star className="h-3.5 w-3.5" />
-                              </button>
-                              <span className="text-xs text-green-600 dark:text-green-400">Active</span>
-                              <span className="text-xs text-zinc-400">Key: {keyEntry.key_preview}</span>
-                              <button
-                                onClick={() => handleEdit(provider.id)}
-                                className="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                              >
-                                Edit
-                              </button>
-                              <button
-                                onClick={() => handleRemove(provider.id)}
-                                className="text-xs text-red-500 hover:text-red-700"
-                              >
-                                Remove
-                              </button>
-                            </div>
-                          ) : !provider.needsApiKey ? (
-                            <span className="text-xs text-zinc-400">No API key needed</span>
+          {/* Configured Providers (top section) */}
+          {keys.length > 0 && (
+            <div>
+              <h3 className="mb-2 text-xs font-medium text-zinc-500">Configured Providers</h3>
+              <div className="space-y-2">
+                {keys.map((keyEntry) => {
+                  const provider = ALL_PROVIDERS.find((p) => p.id === keyEntry.provider) || 
+                    dynamicProviders.find((p) => p.id === keyEntry.provider);
+                  const providerName = provider?.name || keyEntry.provider;
+                  
+                  return (
+                    <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 flex-1">
+                          <span className="text-sm font-medium">{providerName}</span>
+                          {keyEntry.models?.length ? (
+                            <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.models.join(", ")}</span>
+                          ) : keyEntry.default_model ? (
+                            <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.default_model}</span>
                           ) : (
-                            <span className="text-xs text-zinc-400">Not configured</span>
+                            <span className="ml-2 text-xs text-zinc-400">—</span>
                           )}
                         </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleSetDefaultProvider(keyEntry.provider)}
+                            className={cn(
+                              "rounded p-0.5",
+                              config?.default_provider === keyEntry.provider
+                                ? "text-amber-500"
+                                : "text-zinc-400 hover:text-amber-500 dark:hover:text-amber-400",
+                            )}
+                            title={config?.default_provider === keyEntry.provider ? "Default provider" : "Set as default provider"}
+                          >
+                            <Star className="h-3.5 w-3.5" />
+                          </button>
+                          <span className="text-xs text-green-600 dark:text-green-400">Active</span>
+                          <span className="text-xs text-zinc-400">Key: {keyEntry.key_preview}</span>
+                          <button
+                            onClick={() => handleEdit(keyEntry.provider)}
+                            className="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleRemove(keyEntry.provider)}
+                            className="text-xs text-red-500 hover:text-red-700"
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </div>
-                    );
-                  })}
-                </div>
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
+            </div>
+          )}
+
+          {/* Divider */}
+          {keys.length > 0 && (
+            <div className="border-t border-zinc-200 dark:border-zinc-700" />
+          )}
+
+          {/* Available Providers (bottom section) */}
+          <div>
+            <h3 className="mb-2 text-xs font-medium text-zinc-500">
+              Available Providers {dynamicProvidersLoading && "(loading...)"}
+            </h3>
+            <div className="space-y-2">
+              {/* Use dynamic providers if available, otherwise fallback to static */}
+              {(dynamicProviders.length > 0 ? dynamicProviders : ALL_PROVIDERS).map((item) => {
+                const providerId = item.id;
+                const providerName = item.name || providerId;
+                const keyEntry = keys.find((k) => k.provider === providerId);
+                const modelCount = 'modelCount' in item ? item.modelCount : ('models' in item ? item.models?.length : undefined);
+                
+                // Skip if already configured (shown in top section)
+                if (keyEntry) return null;
+                
+                // Skip local providers that don't need API keys
+                const providerDef = getProviderDef(providerId);
+                if (providerDef && !providerDef.needsApiKey) return null;
+                
+                return (
+                  <div key={providerId} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0 flex-1">
+                        <span className="text-sm font-medium">{providerName}</span>
+                        {modelCount && (
+                          <span className="ml-2 text-xs text-zinc-400">{modelCount} models available</span>
+                        )}
+                        {!modelCount && providerDef?.description && (
+                          <span className="ml-2 text-xs text-zinc-400">— {providerDef.description}</span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => {
+                          setNewProvider(providerId);
+                          const def = getProviderDef(providerId);
+                          setNewBaseUrl(def?.baseUrl ?? "");
+                          fetchModels(providerId).then((models) => setAvailableModels(models));
+                          setShowAddDialog(true);
+                        }}
+                        className="rounded-md bg-zinc-100 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                      >
+                        Add Key
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
 
@@ -436,6 +513,41 @@ function ProvidersTab() {
                 <label className="mb-1 block text-xs text-zinc-500">
                   Default Model {newModels.length > 0 && <span className="text-blue-500">({newModels.length} selected)</span>}
                 </label>
+                
+                {/* Capability filters */}
+                <div className="mb-2 flex gap-2">
+                  <button
+                    onClick={() => setModelCapabilityFilter(
+                      modelCapabilityFilter.includes('tool_call') 
+                        ? modelCapabilityFilter.filter(f => f !== 'tool_call')
+                        : [...modelCapabilityFilter, 'tool_call']
+                    )}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-[10px] font-medium",
+                      modelCapabilityFilter.includes('tool_call')
+                        ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                    )}
+                  >
+                    🔧 Tool Calling
+                  </button>
+                  <button
+                    onClick={() => setModelCapabilityFilter(
+                      modelCapabilityFilter.includes('reasoning') 
+                        ? modelCapabilityFilter.filter(f => f !== 'reasoning')
+                        : [...modelCapabilityFilter, 'reasoning']
+                    )}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-[10px] font-medium",
+                      modelCapabilityFilter.includes('reasoning')
+                        ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
+                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                    )}
+                  >
+                    🧠 Reasoning
+                  </button>
+                </div>
+                
                 {/* Selected models as tags */}
                 {newModels.length > 0 && (
                   <div className="mb-1 flex flex-wrap gap-1">
@@ -460,11 +572,22 @@ function ProvidersTab() {
                     <div className="px-3 py-2 text-xs text-zinc-400">Loading models...</div>
                   ) : (
                     availableModels
-                      .filter((m) =>
-                        !modelSearchTerm ||
-                        m.id.toLowerCase().includes(modelSearchTerm.toLowerCase()) ||
-                        m.name.toLowerCase().includes(modelSearchTerm.toLowerCase())
-                      )
+                      .filter((m) => {
+                        // Filter by search term
+                        const matchesSearch = !modelSearchTerm ||
+                          m.id.toLowerCase().includes(modelSearchTerm.toLowerCase()) ||
+                          m.name.toLowerCase().includes(modelSearchTerm.toLowerCase());
+                        
+                        // Filter by capabilities
+                        const matchesCapabilities = modelCapabilityFilter.length === 0 ||
+                          modelCapabilityFilter.every(filter => {
+                            if (filter === 'tool_call') return m.tool_call === true;
+                            if (filter === 'reasoning') return m.reasoning === true;
+                            return true;
+                          });
+                        
+                        return matchesSearch && matchesCapabilities;
+                      })
                       .map((m) => (
                         <label
                           key={m.id}
@@ -476,9 +599,19 @@ function ProvidersTab() {
                             onChange={() => toggleModel(m.id, newModels, setNewModels)}
                             className="accent-blue-600"
                           />
-                          <span className="flex-1 truncate">{m.name || m.id}</span>
-                          {m.reasoning && <span className="text-[10px] text-zinc-400">reasoning</span>}
-                          {m.tool_call && <span className="text-[10px] text-zinc-400">tools</span>}
+                          <div className="flex flex-1 flex-col gap-0.5">
+                            <span className="truncate">{m.name || m.id}</span>
+                            <div className="flex gap-2 text-[10px] text-zinc-400">
+                              {m.context_window && (
+                                <span>{(m.context_window / 1000).toFixed(0)}K context</span>
+                              )}
+                              {m.max_tokens && (
+                                <span>{(m.max_tokens / 1000).toFixed(1)}K max output</span>
+                              )}
+                              {m.reasoning && <span>🧠 reasoning</span>}
+                              {m.tool_call && <span>🔧 tools</span>}
+                            </div>
+                          </div>
                         </label>
                       ))
                   )}
@@ -603,9 +736,19 @@ function ProvidersTab() {
                             onChange={() => toggleModel(m.id, editModels, setEditModels)}
                             className="accent-blue-600"
                           />
-                          <span className="flex-1 truncate">{m.name || m.id}</span>
-                          {m.reasoning && <span className="text-[10px] text-zinc-400">reasoning</span>}
-                          {m.tool_call && <span className="text-[10px] text-zinc-400">tools</span>}
+                          <div className="flex flex-1 flex-col gap-0.5">
+                            <span className="truncate">{m.name || m.id}</span>
+                            <div className="flex gap-2 text-[10px] text-zinc-400">
+                              {m.context_window && (
+                                <span>{(m.context_window / 1000).toFixed(0)}K context</span>
+                              )}
+                              {m.max_tokens && (
+                                <span>{(m.max_tokens / 1000).toFixed(1)}K max output</span>
+                              )}
+                              {m.reasoning && <span>🧠 reasoning</span>}
+                              {m.tool_call && <span>🔧 tools</span>}
+                            </div>
+                          </div>
                         </label>
                       ))
                   )}

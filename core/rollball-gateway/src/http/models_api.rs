@@ -43,6 +43,12 @@ pub struct ModelInfo {
     pub attachment: Option<bool>,
     #[serde(default)]
     pub release_date: Option<String>,
+    /// Context window size (total tokens: input + output)
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// Maximum output tokens
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
 }
 
 /// Provider info with its models
@@ -154,6 +160,17 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
 
     let mut models = Vec::new();
     for (id, model_data) in models_obj {
+        // Extract limit info if present
+        let context_window = model_data
+            .get("limit")
+            .and_then(|v| v.get("context"))
+            .and_then(|v| v.as_u64());
+        
+        let max_tokens = model_data
+            .get("limit")
+            .and_then(|v| v.get("output"))
+            .and_then(|v| v.as_u64());
+        
         let model = ModelInfo {
             id: id.clone(),
             name: model_data
@@ -172,6 +189,8 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
                 .get("release_date")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            context_window,
+            max_tokens,
         };
         models.push(model);
     }

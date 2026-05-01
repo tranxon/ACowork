@@ -123,6 +123,10 @@ export interface ModelInfo {
   tool_call?: boolean;
   attachment?: boolean;
   release_date?: string;
+  /** Context window size (total tokens: input + output) */
+  context_window?: number;
+  /** Maximum output tokens */
+  max_tokens?: number;
 }
 
 /** Provider models response from Gateway API */
