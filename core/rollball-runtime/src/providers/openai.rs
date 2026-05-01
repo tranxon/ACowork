@@ -428,6 +428,9 @@ impl Provider for OpenAIProvider {
             model = %native_request.model,
             has_tools = native_request.tools.is_some(),
             tool_count = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            messages_count = native_request.messages.len(),
+            max_tokens = ?native_request.max_tokens,
+            request_payload_size = serde_json::to_string(&native_request).map(|s| s.len()).unwrap_or(0),
             "OpenAI chat_stream request"
         );
         if let Some(ref tools) = native_request.tools {

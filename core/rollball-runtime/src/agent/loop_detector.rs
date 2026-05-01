@@ -7,6 +7,21 @@
 
 use std::collections::HashMap;
 
+/// Normalize tool parameters to ensure consistent comparison across platforms.
+///
+/// - Parses and re-serializes JSON to remove whitespace differences.
+/// - Falls back to normalizing path separators (`\` → `/`).
+fn normalize_params(params: &str) -> String {
+    // Try to normalize JSON
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(params) {
+        if let Ok(normalized) = serde_json::to_string(&json) {
+            return normalized;
+        }
+    }
+    // Fallback: normalize path separators
+    params.replace('\\', "/")
+}
+
 /// Loop detection result
 #[derive(Debug, Clone)]
 pub enum LoopDetectionResult {
@@ -119,6 +134,16 @@ impl LoopDetector {
         Self::new(LoopDetectionConfig::default())
     }
 
+    /// Peek-check whether the next tool call would trigger a loop without modifying state.
+    ///
+    /// Used for pre-execution blocking: if this returns `Block` or `Break`,
+    /// the caller should skip execution and return an error result instead.
+    pub fn peek_check(&self, tool_name: &str, params: &str) -> LoopDetectionResult {
+        self.peek_exact_repeat(tool_name, params)
+            .or_else(|| self.peek_ping_pong(tool_name))
+            .unwrap_or(LoopDetectionResult::NoLoop)
+    }
+
     /// Check the latest tool call for loop patterns
     /// Call this after step ⑥ (append to history)
     pub fn check(&mut self, tool_name: &str, params: &str, result_content: &str) -> LoopDetectionResult {
@@ -144,7 +169,76 @@ impl LoopDetector {
         LoopDetectionResult::NoLoop
     }
 
+    /// Peek exact-repeat detection without modifying state.
+    fn peek_exact_repeat(&self, tool_name: &str, params: &str) -> Option<LoopDetectionResult> {
+        let params = normalize_params(params);
+        let signature = format!("{tool_name}:{params}");
+
+        if self.exact_repeat_state.last_signature.as_ref() == Some(&signature)
+            && self.exact_repeat_state.count >= self.config.exact_repeat_threshold
+        {
+            let key = "exact_repeat";
+            let hit_val = self.hit_counts.get(key).copied().unwrap_or(0) + 1;
+            let level = self.response_level(hit_val);
+            let message = format!(
+                "Detected repeated call to [{tool_name}] with same parameters ({hit_val} consecutive hits)"
+            );
+
+            return Some(LoopDetectionResult::LoopDetected {
+                pattern: LoopPattern::ExactRepeat,
+                level,
+                count: self.exact_repeat_state.count,
+                message,
+            });
+        }
+
+        None
+    }
+
+    /// Peek ping-pong detection without modifying state.
+    fn peek_ping_pong(&self, tool_name: &str) -> Option<LoopDetectionResult> {
+        // Simulate adding the current tool name
+        let mut simulated_history = self.ping_pong_state.history.clone();
+        simulated_history.push(tool_name.to_string());
+
+        let max_len = (self.config.ping_pong_threshold * 2) as usize;
+        if simulated_history.len() > max_len {
+            let drain_count = simulated_history.len() - max_len;
+            simulated_history.drain(0..drain_count);
+        }
+
+        if simulated_history.len() >= 4 {
+            let len = simulated_history.len();
+            let a = &simulated_history[len - 4];
+            let b = &simulated_history[len - 3];
+            let c = &simulated_history[len - 2];
+            let d = &simulated_history[len - 1];
+
+            if a == c && b == d && a != b {
+                let cycles = self.count_ping_pong_cycles(&simulated_history);
+                if cycles >= self.config.ping_pong_threshold {
+                    let key = "ping_pong";
+                    let hit_val = self.hit_counts.get(key).copied().unwrap_or(0) + 1;
+                    let level = self.response_level(hit_val);
+                    let message = format!(
+                        "Detected ping-pong between [{a}] and [{b}] ({cycles} cycles)"
+                    );
+
+                    return Some(LoopDetectionResult::LoopDetected {
+                        pattern: LoopPattern::PingPong,
+                        level,
+                        count: cycles,
+                        message,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
     fn check_exact_repeat(&mut self, tool_name: &str, params: &str) -> Option<LoopDetectionResult> {
+        let params = normalize_params(params);
         let signature = format!("{tool_name}:{params}");
 
         if self.exact_repeat_state.last_signature.as_ref() == Some(&signature) {

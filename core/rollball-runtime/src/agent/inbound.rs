@@ -54,6 +54,12 @@ pub enum InboundMessage {
     Interrupt {
         reason: String,
     },
+    /// Continue execution after iteration limit was reached.
+    /// Resets the iteration counter and resumes the agent loop.
+    ContinueExecution {
+        /// Reason for continuing (optional, for logging)
+        reason: String,
+    },
 }
 
 impl InboundMessage {
@@ -106,6 +112,9 @@ impl InboundMessage {
             }
             InboundMessage::Interrupt { .. } => {
                 // Interrupt messages don't need size limits
+            }
+            InboundMessage::ContinueExecution { .. } => {
+                // Continue messages don't need size limits
             }
         }
         (self, truncated)

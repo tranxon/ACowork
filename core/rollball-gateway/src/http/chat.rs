@@ -34,6 +34,7 @@ pub fn chat_routes() -> Router<AppState> {
         .route("/api/agents/{id}/stream", get(agent_stream_ws))
         .route("/api/agents/{id}/conversations", get(get_conversations))
         .route("/api/agents/{id}/conversations/latest", get(get_latest_conversation))
+        .route("/api/agents/{id}/continue", post(continue_execution))
 }
 
 // ── Request/Response types ────────────────────────────────────────────
@@ -722,4 +723,62 @@ mod tests {
             assert!(!id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
         }
     }
+}
+
+// ── Continue Execution API ────────────────────────────────────────────
+
+/// Continue agent execution after iteration limit was reached.
+///
+/// This sends a `ContinueExecution` signal to the Agent Runtime via IPC,
+/// which resets the iteration counter and resumes the agent loop.
+pub async fn continue_execution(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    // Validate agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
+    }
+
+    // Forward continue_execution to agent via IPC
+    if let Some(ref session_mgr) = state.session_mgr {
+        let mgr = session_mgr.lock().await;
+        if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
+            let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
+                from: "http-api".to_string(),
+                action: "continue_execution".to_string(),
+                params: serde_json::json!({
+                    "reason": "user_requested",
+                }),
+            };
+            let pushed = session.push_message(intent).await;
+            if !pushed {
+                return Err(ApiError::internal("Failed to deliver continue signal to agent"));
+            }
+        } else {
+            return Err(ApiError::service_unavailable(&format!(
+                "Agent {} is not yet connected",
+                agent_id
+            )));
+        }
+    } else {
+        return Err(ApiError::internal("Session manager not available"));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "continued",
+            "agent_id": agent_id,
+        })),
+    ))
 }

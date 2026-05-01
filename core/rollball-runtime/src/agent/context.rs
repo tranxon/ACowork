@@ -7,6 +7,7 @@ use rollball_core::manifest::AgentManifest;
 use rollball_core::providers::traits::{ChatMessage, ChatRequest, MessageRole};
 
 use crate::agent::history::HistoryManager;
+use crate::token::ModelRegistry;
 
 /// Context builder for LLM requests
 pub struct ContextBuilder {
@@ -127,11 +128,33 @@ impl ContextBuilder {
         // This fixes corrupted tool_call data that would cause 400 errors
         HistoryManager::sanitize_messages(&mut messages);
 
+        // Determine the model to use
+        let model = self.override_model.clone().unwrap_or_else(|| manifest.llm.suggested_model.clone());
+
+        // Auto-set max_tokens based on model capabilities if not explicitly configured
+        let max_tokens = manifest.llm.max_tokens.or_else(|| {
+            let registry = ModelRegistry::new();
+            if let Some(recommended) = registry.get_recommended_max_tokens(&model) {
+                tracing::info!(
+                    model = %model,
+                    recommended_max_tokens = recommended,
+                    "Auto-setting max_tokens based on model capabilities"
+                );
+                Some(recommended)
+            } else {
+                tracing::warn!(
+                    model = %model,
+                    "Unknown model, using conservative default max_tokens=2048"
+                );
+                Some(2048) // Conservative default for unknown models
+            }
+        });
+
         ChatRequest {
-            model: self.override_model.clone().unwrap_or_else(|| manifest.llm.suggested_model.clone()),
+            model,
             messages,
             temperature: manifest.llm.temperature,
-            max_tokens: manifest.llm.max_tokens,
+            max_tokens,
             tools: self.tool_definitions.clone(),
         }
     }

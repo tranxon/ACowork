@@ -6,5 +6,7 @@
 //! - Tier 3: Heuristic estimation (English words×1.3, CJK chars×0.6), error < 15%
 
 pub mod counter;
+pub mod model_config;
 
 pub use counter::{TokenCounter, TokenCountTier, BudgetAllocation};
+pub use model_config::ModelRegistry;
