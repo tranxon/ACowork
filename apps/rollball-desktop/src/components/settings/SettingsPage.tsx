@@ -325,16 +325,6 @@ function ProvidersTab() {
     <div className="max-w-lg space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium">Provider Management</h2>
-        <button
-          onClick={() => {
-            setShowAddDialog(true);
-            // Pre-fetch models for default provider
-            fetchModels("openai").then((models) => setAvailableModels(models));
-          }}
-          className="rounded-md bg-zinc-800 px-3 py-1 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
-        >
-          + Add Key
-        </button>
       </div>
 
       {loading ? (
@@ -462,24 +452,15 @@ function ProvidersTab() {
       {showAddDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
-            <h3 className="mb-4 text-sm font-semibold">Add API Key</h3>
+            <h3 className="mb-4 text-sm font-semibold">Add API Key: {newProviderDef?.name || newProvider}</h3>
 
             <div className="space-y-3">
+              {/* Provider display (read-only) */}
               <div>
                 <label className="mb-1 block text-xs text-zinc-500">Provider</label>
-                <select
-                  value={newProvider}
-                  onChange={(e) => handleAddProviderChange(e.target.value)}
-                  className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-                >
-                  {PROVIDER_CATEGORIES.map((cat) => (
-                    <optgroup key={cat.id} label={cat.label}>
-                      {ALL_PROVIDERS.filter((p) => p.category === cat.id).map((p) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
+                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                  {newProviderDef?.name || newProvider}
+                </div>
               </div>
 
               {newProviderDef?.needsApiKey && (
