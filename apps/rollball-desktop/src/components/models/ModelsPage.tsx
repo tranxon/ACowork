@@ -257,7 +257,7 @@ export function ModelsPage() {
                   ))}
                 </select>
               </div>
-              {newProviderDef?.needsApiKey && (
+              {(newProviderDef?.needsApiKey ?? true) && (
                 <div>
                   <label className="mb-1 block text-xs text-zinc-500">API Key</label>
                   <input
@@ -364,7 +364,7 @@ export function ModelsPage() {
               </button>
               <button
                 onClick={handleAdd}
-                disabled={newProviderDef?.needsApiKey ? !newKey.trim() : false}
+                disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false}
                 className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 Save

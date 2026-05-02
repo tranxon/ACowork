@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import type { ToolApprovalNeededEvent } from "../lib/types";
-
-const GATEWAY_URL = "http://127.0.0.1:19876";
+import { getGatewayUrl } from "../lib/config";
 
 interface PermissionStore {
   // Pending approval request queue
@@ -51,7 +50,7 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
   approve: async (agentId, requestId, action) => {
     set({ loading: true });
     try {
-      const res = await fetch(`${GATEWAY_URL}/api/agents/${agentId}/permissions/approve`, {
+      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/permissions/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ request_id: requestId, action }),

@@ -258,7 +258,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
 
 // ─── Add Workspace Dialog ──────────────────────────────────────────────────
 
-function AddWorkspaceDialog({ onClose, onAdd, recentPaths }: { onClose: () => void; onAdd: (path: string, alias: string, access: "read-only" | "read-write") => void; recentPaths: string[] }) {
+function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onClose: () => void; onAdd: (path: string, alias: string, access: "read-only" | "read-write") => void; recentPaths: string[] }) {
   const [path, setPath] = useState("");
   const [alias, setAlias] = useState("");
   const [access, setAccess] = useState<"read-only" | "read-write">("read-only");

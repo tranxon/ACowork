@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentDetail } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { getGatewayUrl } from "../../lib/config";
 
 interface AgentDetailDialogProps {
   open: boolean;
@@ -33,7 +34,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
       .finally(() => setLoading(false));
 
     // Fetch model info from Gateway API
-    fetch(`http://127.0.0.1:19876/api/agents/${agentId}/model`)
+    fetch(`${getGatewayUrl()}/api/agents/${agentId}/model`)
       .then((resp) => resp.ok ? resp.json() as Promise<AgentModelInfo> : null)
       .then((data) => setModelInfo(data))
       .catch(() => setModelInfo(null));

@@ -7,6 +7,7 @@
 //! - Permission, Identity, Budget types
 //! - Unified error types
 
+pub mod defaults;
 pub mod manifest;
 pub mod protocol;
 pub mod transport;

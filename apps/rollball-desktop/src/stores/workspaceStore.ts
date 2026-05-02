@@ -1,8 +1,6 @@
 import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
-
-/** Default Gateway HTTP base URL */
-const DEFAULT_GATEWAY_URL = "http://127.0.0.1:19876";
+import { DEFAULT_GATEWAY_URL } from "../lib/config";
 
 /** Single workspace directory entry — matches Gateway API response */
 interface WorkspaceDir {

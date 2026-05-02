@@ -5,8 +5,7 @@ import type {
   MemoryStatsResponse,
   DeleteNodeResponse,
 } from "../lib/types";
-
-const GATEWAY_URL = "http://127.0.0.1:19876";
+import { getGatewayUrl } from "../lib/config";
 
 interface MemoryFilters {
   type: "All" | "Knowledge" | "Episodic" | "Procedural" | "Autobiographical";
@@ -61,7 +60,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       if (filters.keyword) params.set("keyword", filters.keyword);
       if (filters.timeRange !== "all") params.set("time_range", filters.timeRange);
 
-      const res = await fetch(`${GATEWAY_URL}/api/agents/${agentId}/memory/nodes?${params}`);
+      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes?${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: MemoryNodesListResponse = await res.json();
       set({ nodes: data.nodes, total: data.total, loading: false });
@@ -72,7 +71,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   fetchStats: async (agentId) => {
     try {
-      const res = await fetch(`${GATEWAY_URL}/api/agents/${agentId}/memory/stats`);
+      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/stats`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: MemoryStatsResponse = await res.json();
       set({ stats: data });
@@ -83,7 +82,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   deleteNode: async (agentId, nodeId) => {
     try {
-      const res = await fetch(`${GATEWAY_URL}/api/agents/${agentId}/memory/nodes/${nodeId}`, {
+      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes/${nodeId}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -105,7 +104,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
   consolidate: async (agentId, force = false) => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch(`${GATEWAY_URL}/api/agents/${agentId}/memory/consolidate`, {
+      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/consolidate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ force }),

@@ -4,8 +4,7 @@ import type {
   SkillDetailResponse,
   SkillExecutionHistoryResponse,
 } from "../lib/types";
-
-const GATEWAY_URL = "http://127.0.0.1:19876";
+import { getGatewayUrl } from "../lib/config";
 
 interface SkillStore {
   skills: SkillListEntry[];
@@ -37,7 +36,7 @@ export const useSkillStore = create<SkillStore>((set) => ({
   fetchSkills: async (agentId) => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch(`${GATEWAY_URL}/api/agents/${agentId}/skills?page=1&size=100`);
+      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/skills?page=1&size=100`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       set({ skills: data.skills, total: data.total, loading: false });
@@ -50,7 +49,7 @@ export const useSkillStore = create<SkillStore>((set) => ({
     set({ selectedSkillName: skillName, selectedSkillDetail: null, executionHistory: null });
     try {
       const res = await fetch(
-        `${GATEWAY_URL}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}`,
+        `${getGatewayUrl()}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}`,
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const detail: SkillDetailResponse = await res.json();
@@ -63,7 +62,7 @@ export const useSkillStore = create<SkillStore>((set) => ({
   fetchExecutionHistory: async (agentId, skillName, page = 1) => {
     try {
       const res = await fetch(
-        `${GATEWAY_URL}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}/history?page=${page}&size=50`,
+        `${getGatewayUrl()}/api/agents/${agentId}/skills/${encodeURIComponent(skillName)}/history?page=${page}&size=50`,
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: SkillExecutionHistoryResponse = await res.json();

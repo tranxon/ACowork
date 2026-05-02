@@ -6,6 +6,7 @@ import type { GatewayConfig, VaultKeyEntry, ModelInfo } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ALL_PROVIDERS, getProviderDef } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
+import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
 import { Star } from "lucide-react";
 
 type SettingsTab = "gateway" | "providers" | "appearance" | "general";
@@ -76,7 +77,7 @@ function GatewayTab() {
           <label className="mb-1 block text-xs text-zinc-500">Address</label>
           <input
             type="text"
-            value="http://127.0.0.1:19876"
+            value={DEFAULT_GATEWAY_URL}
             readOnly
             className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
           />
@@ -131,7 +132,7 @@ function ProvidersTab() {
   const [newBaseUrl, setNewBaseUrl] = useState("");
   const [newModels, setNewModels] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsLoading, _setModelsLoading] = useState(false);
   const [modelSearchTerm, setModelSearchTerm] = useState("");
   const [modelCapabilityFilter, setModelCapabilityFilter] = useState<string[]>([]);
 
@@ -152,6 +153,7 @@ function ProvidersTab() {
     name: string;
     models?: ModelInfo[];
     modelCount?: number;
+    api?: string;
   }[]>([]);
   const [dynamicProvidersLoading, setDynamicProvidersLoading] = useState(false);
 
@@ -182,7 +184,7 @@ function ProvidersTab() {
     // Check localStorage cache first
     const CACHE_KEY = "rollball_models_cache";
     const CACHE_TIMESTAMP_KEY = "rollball_models_cache_timestamp";
-    const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+    const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
     
     let hasValidCache = false;
     
@@ -223,7 +225,7 @@ function ProvidersTab() {
     
     // Fetch from Gateway API (background refresh)
     try {
-      const response = await fetch("http://127.0.0.1:19876/api/models");
+      const response = await fetch(`${getGatewayUrl()}/api/models`);
       if (response.ok) {
         const data = await response.json();
         setDynamicProviders(data.providers ?? []);
@@ -267,7 +269,7 @@ function ProvidersTab() {
     // Check localStorage cache for this provider
     const CACHE_KEY = `rollball_models_${providerId}`;
     const CACHE_TIMESTAMP_KEY = `rollball_models_${providerId}_timestamp`;
-    const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+    const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
     
     try {
       const cachedData = localStorage.getItem(CACHE_KEY);
@@ -358,8 +360,9 @@ function ProvidersTab() {
   const handleEdit = async (provider: string) => {
     const keyEntry = keys.find((k) => k.provider === provider);
     const def = getProviderDef(provider);
+    const dynamicProvider = dynamicProviders.find((p) => p.id === provider);
     setEditKey(keyEntry?.key_preview ?? "");
-    setEditBaseUrl(keyEntry?.base_url ?? def?.baseUrl ?? "");
+    setEditBaseUrl(keyEntry?.base_url ?? def?.baseUrl ?? dynamicProvider?.api ?? "");
     setEditModels(keyEntry?.models?.length ? keyEntry.models : keyEntry?.default_model ? [keyEntry.default_model] : []);
     setEditModelSearchTerm("");
     setShowEditDialog(provider);
@@ -548,7 +551,8 @@ function ProvidersTab() {
                         onClick={() => {
                           setNewProvider(providerId);
                           const def = getProviderDef(providerId);
-                          setNewBaseUrl(def?.baseUrl ?? "");
+                          const dynamicProvider = dynamicProviders.find((p) => p.id === providerId);
+                          setNewBaseUrl(def?.baseUrl ?? dynamicProvider?.api ?? "");
                           fetchModels(providerId).then((models) => setAvailableModels(models));
                           setShowAddDialog(true);
                         }}
@@ -580,7 +584,7 @@ function ProvidersTab() {
                 </div>
               </div>
 
-              {newProviderDef?.needsApiKey && (
+              {(newProviderDef?.needsApiKey ?? true) && (
                 <div>
                   <label className="mb-1 block text-xs text-zinc-500">API Key</label>
                   <input
@@ -593,18 +597,22 @@ function ProvidersTab() {
                 </div>
               )}
 
-              {newProviderDef?.editableBaseUrl && (
-                <div>
-                  <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
-                  <input
-                    type="text"
-                    value={newBaseUrl}
-                    onChange={(e) => setNewBaseUrl(e.target.value)}
-                    placeholder="https://..."
-                    className="w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-                  />
-                </div>
-              )}
+              {(() => {
+                const dynamicProviderApi = dynamicProviders.find((p) => p.id === newProvider)?.api;
+                const showBaseUrl = newProviderDef?.editableBaseUrl ?? (!!dynamicProviderApi);
+                return showBaseUrl ? (
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
+                    <input
+                      type="text"
+                      value={newBaseUrl}
+                      onChange={(e) => setNewBaseUrl(e.target.value)}
+                      placeholder="https://..."
+                      className="w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                    />
+                  </div>
+                ) : null;
+              })()}
 
               {/* Model selection (multi-select) */}
               <div>
@@ -750,7 +758,7 @@ function ProvidersTab() {
               </button>
               <button
                 onClick={handleAdd}
-                disabled={newProviderDef?.needsApiKey ? !newKey.trim() : false}
+                disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false}
                 className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 Save

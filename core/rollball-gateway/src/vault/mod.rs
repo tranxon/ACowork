@@ -9,6 +9,7 @@
 //! The `get_key` method handles both formats transparently.
 
 use crate::error::GatewayError;
+use rollball_core::providers::vault_key_candidates;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
@@ -123,27 +124,39 @@ impl VaultFacade {
     ///
     /// Handles both the current JSON format and the legacy plain-text format.
     /// Legacy entries (plain API key) are returned with base_url=None, default_model=None.
+    ///
+    /// If the provider is not found under its canonical ID, falls back to
+    /// trying legacy alias names (e.g. "zhipuai" → try "glm", "zhipu").
     pub fn get_provider(&self, provider: &str) -> Result<ProviderEntry, GatewayError> {
-        let secret = self.vault.retrieve(provider)
-            .map_err(|e| GatewayError::Vault(format!("Failed to retrieve key for '{}': {}", provider, e)))?;
-        let raw = secret.expose_secret();
-
-        // Try JSON format first (current)
-        if let Ok(entry) = serde_json::from_str::<ProviderEntry>(raw) {
-            return Ok(entry);
+        let candidates = vault_key_candidates(provider);
+        for candidate in &candidates {
+            match self.vault.retrieve(candidate) {
+                Ok(secret) => {
+                    let raw = secret.expose_secret();
+                    // Try JSON format first (current)
+                    if let Ok(entry) = serde_json::from_str::<ProviderEntry>(raw) {
+                        return Ok(entry);
+                    }
+                    // Legacy format: plain text API key
+                    return Ok(ProviderEntry {
+                        api_key: raw.to_string(),
+                        base_url: None,
+                        default_model: None,
+                        models: Vec::new(),
+                    });
+                }
+                Err(_) => continue, // Try next candidate
+            }
         }
-
-        // Legacy format: plain text API key
-        Ok(ProviderEntry {
-            api_key: raw.to_string(),
-            base_url: None,
-            default_model: None,
-            models: Vec::new(),
-        })
+        Err(GatewayError::Vault(format!(
+            "No key found for provider '{}' (tried: {:?})",
+            provider, candidates
+        )))
     }
 
     /// Get just the API key for a provider (one-time distribution, decrypted)
     /// Backward-compatible: works with both JSON and legacy format.
+    /// Also tries alias names if the canonical ID is not found in Vault.
     pub fn get_key(&self, provider: &str) -> Result<String, GatewayError> {
         let entry = self.get_provider(provider)?;
         Ok(entry.api_key)
@@ -184,10 +197,28 @@ impl VaultFacade {
     }
 
     /// Remove a key for a provider
+    ///
+    /// Also removes any entries stored under legacy alias names for the
+    /// same canonical provider, ensuring a clean removal.
     pub fn remove_key(&mut self, provider: &str) -> Result<(), GatewayError> {
-        self.vault.delete(provider)
-            .map_err(|e| GatewayError::Vault(format!("Failed to remove key for '{}': {}", provider, e)))?;
-        self.provider_names.retain(|p| p != provider);
+        let candidates = vault_key_candidates(provider);
+        let mut removed_any = false;
+        for candidate in &candidates {
+            if self.vault.exists(candidate) {
+                self.vault.delete(candidate)
+                    .map_err(|e| GatewayError::Vault(format!(
+                        "Failed to remove key for '{}': {}", candidate, e
+                    )))?;
+                self.provider_names.retain(|p| p != candidate);
+                removed_any = true;
+            }
+        }
+        if !removed_any {
+            return Err(GatewayError::Vault(format!(
+                "No key found for provider '{}' (tried: {:?})",
+                provider, candidates
+            )));
+        }
         Ok(())
     }
 }
@@ -311,6 +342,88 @@ mod tests {
         assert_eq!(entry.api_key, "sk-legacy-key");
         assert_eq!(entry.base_url, None);
         assert_eq!(entry.default_model, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_alias_get_provider_glm_to_zhipuai() {
+        let dir = temp_vault_dir("alias_glm");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        // Store under old alias "glm"
+        vault.store_key("glm", "sk-glm-key").unwrap();
+        // Retrieve using canonical "zhipuai" — should find "glm" via alias
+        let entry = vault.get_provider("zhipuai").unwrap();
+        assert_eq!(entry.api_key, "sk-glm-key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_alias_get_provider_qwen_to_alibaba() {
+        let dir = temp_vault_dir("alias_qwen");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        // Store under old alias "qwen"
+        vault.store_key("qwen", "sk-qwen-key").unwrap();
+        // Retrieve using canonical "alibaba" — should find "qwen" via alias
+        let entry = vault.get_provider("alibaba").unwrap();
+        assert_eq!(entry.api_key, "sk-qwen-key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_alias_get_provider_moonshot_to_moonshotai() {
+        let dir = temp_vault_dir("alias_moonshot");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        // Store under old alias "moonshot"
+        vault.store_key("moonshot", "sk-moonshot-key").unwrap();
+        // Retrieve using canonical "moonshotai" — should find "moonshot" via alias
+        let entry = vault.get_provider("moonshotai").unwrap();
+        assert_eq!(entry.api_key, "sk-moonshot-key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_alias_canonical_takes_priority() {
+        let dir = temp_vault_dir("alias_priority");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        // Store under both canonical and alias
+        vault.store_key("zhipuai", "sk-canonical-key").unwrap();
+        vault.store_key("glm", "sk-alias-key").unwrap();
+        // Canonical should take priority
+        let entry = vault.get_provider("zhipuai").unwrap();
+        assert_eq!(entry.api_key, "sk-canonical-key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_alias_remove_cleans_all() {
+        let dir = temp_vault_dir("alias_remove");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        // Store under both canonical and alias
+        vault.store_key("zhipuai", "sk-canonical-key").unwrap();
+        vault.store_key("glm", "sk-alias-key").unwrap();
+        // Remove using canonical name — should clean up both
+        vault.remove_key("zhipuai").unwrap();
+        // Both should be gone
+        assert!(vault.get_provider("zhipuai").is_err());
+        assert!(vault.get_provider("glm").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_alias_reverse_lookup() {
+        let dir = temp_vault_dir("alias_reverse");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        // Store under canonical "zhipuai"
+        vault.store_key("zhipuai", "sk-zhipuai-key").unwrap();
+        // Retrieve using old alias "glm" — should still find "zhipuai"
+        let entry = vault.get_provider("glm").unwrap();
+        assert_eq!(entry.api_key, "sk-zhipuai-key");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

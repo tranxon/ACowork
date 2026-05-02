@@ -4,6 +4,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
+import { getGatewayUrl } from "../../lib/config";
 import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy, FileText, Terminal } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -124,7 +125,7 @@ export function ChatPanel() {
     useChatStore.getState().clearMessages();
 
     if (selectedAgentId && selectedAgent?.running) {
-      connectStream(selectedAgentId, "http://127.0.0.1:19876");
+      connectStream(selectedAgentId, getGatewayUrl());
       // Always load model from Gateway API (reads per-agent .agent_model.json)
       loadAgentModel(selectedAgentId);
       // Load conversation history for the new agent

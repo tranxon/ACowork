@@ -159,9 +159,9 @@ const DEEPSEEK: ProviderDef = {
   description: "DeepSeek V3 / R1",
 };
 
-const GLM: ProviderDef = {
-  id: "glm",
-  name: "GLM (智谱)",
+const ZHIPUAI: ProviderDef = {
+  id: "zhipuai",
+  name: "智谱AI (GLM)",
   category: "china",
   baseUrl: "https://open.bigmodel.cn/api/paas/v4",
   editableBaseUrl: true,
@@ -169,12 +169,12 @@ const GLM: ProviderDef = {
   keyPlaceholder: "id.secret",
   exampleModels: ["glm-4-plus", "glm-4-flash", "glm-4v-plus"],
   needsApiKey: true,
-  aliases: ["zhipu"],
+  aliases: ["glm", "zhipu", "zhipuai"],
   description: "Key format: id.secret (JWT auto-generated)",
 };
 
-const MOONSHOT: ProviderDef = {
-  id: "moonshot",
+const MOONSHOTAI: ProviderDef = {
+  id: "moonshotai",
   name: "Moonshot (Kimi)",
   category: "china",
   baseUrl: "https://api.moonshot.cn/v1",
@@ -183,12 +183,12 @@ const MOONSHOT: ProviderDef = {
   keyPlaceholder: "sk-...",
   exampleModels: ["moonshot-v1-128k", "moonshot-v1-32k", "kimi-k2"],
   needsApiKey: true,
-  aliases: ["kimi"],
+  aliases: ["moonshot", "kimi", "moonshotai"],
 };
 
-const QWEN: ProviderDef = {
-  id: "qwen",
-  name: "Qwen (通义千问)",
+const ALIBABA: ProviderDef = {
+  id: "alibaba",
+  name: "阿里云 (Qwen)",
   category: "china",
   baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   editableBaseUrl: true,
@@ -196,7 +196,7 @@ const QWEN: ProviderDef = {
   keyPlaceholder: "sk-...",
   exampleModels: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen3-235b-a22b"],
   needsApiKey: true,
-  aliases: ["dashscope", "alibaba"],
+  aliases: ["qwen", "dashscope", "alibaba"],
   description: "Alibaba Cloud LLM",
 };
 
@@ -272,9 +272,9 @@ export const ALL_PROVIDERS: ProviderDef[] = [
   AZURE,
   // China domestic
   DEEPSEEK,
-  GLM,
-  MOONSHOT,
-  QWEN,
+  ZHIPUAI,
+  MOONSHOTAI,
+  ALIBABA,
   MINIMAX,
   DOUBAO,
   // Local

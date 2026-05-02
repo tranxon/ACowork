@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { ChatMessage, TokenUsage, ToolApprovalNeededEvent } from "../lib/types";
 import { usePermissionStore } from "./permissionStore";
+import { getGatewayUrl } from "../lib/config";
 
 interface ChatStore {
   messages: ChatMessage[];
@@ -40,8 +41,6 @@ interface ChatStore {
 function toWsUrl(httpUrl: string, agentId: string): string {
   return `${httpUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/agents/${agentId}/stream`;
 }
-
-const DEFAULT_GATEWAY_URL = "http://127.0.0.1:19876";
 
 /** Reconnect state — tracked outside zustand to avoid re-render loops */
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,7 +89,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   currentAgentId: null,
   iterationLimitPaused: null,
 
-  connectStream: (agentId: string, gatewayUrl: string = DEFAULT_GATEWAY_URL) => {
+  connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
     // Update currentAgentId for stop functionality
     set({ currentAgentId: agentId });
     
@@ -276,7 +275,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Also send via HTTP API as fallback
     try {
-      await fetch(`http://127.0.0.1:19876/api/agents/${currentAgentId}/stop`, {
+      await fetch(`${getGatewayUrl()}/api/agents/${currentAgentId}/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
@@ -322,7 +321,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
   continueExecution: async (agentId: string) => {
     try {
-      const resp = await fetch(`http://127.0.0.1:19876/api/agents/${agentId}/continue`, {
+      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/continue`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
@@ -335,7 +334,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
   loadAgentModel: async (agentId: string): Promise<string | null> => {
     try {
-      const resp = await fetch(`http://127.0.0.1:19876/api/agents/${agentId}/model`);
+      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/model`);
       if (!resp.ok) return null;
       const data = await resp.json() as { provider: string; model: string; available_models: string[] };
       if (data.model) {
@@ -353,7 +352,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
   loadConversationHistory: async (agentId: string) => {
     try {
-      const resp = await fetch(`http://127.0.0.1:19876/api/agents/${agentId}/conversations/latest`);
+      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/conversations/latest`);
       if (!resp.ok) return;
       const data = await resp.json() as { session_id?: string; messages?: Array<{ role: string; content: string; timestamp: number; turn_index: number }> };
 

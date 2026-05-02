@@ -1,8 +1,7 @@
 //! Gateway HTTP API client for models.dev integration
 
 import type { ProviderModelsResponse, ProviderListEntry } from "./types";
-
-const DEFAULT_GATEWAY_URL = "http://127.0.0.1:19876";
+import { DEFAULT_GATEWAY_URL } from "./config";
 
 /** Fetch all providers from Gateway's models cache */
 export async function fetchProviders(

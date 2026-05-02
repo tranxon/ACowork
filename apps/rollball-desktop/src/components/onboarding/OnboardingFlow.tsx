@@ -5,6 +5,7 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
 import { ALL_PROVIDERS, PROVIDER_CATEGORIES, LOCAL_PROVIDERS, getProviderDef } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
+import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 import type { ModelInfo } from "../../lib/types";
 
 const TOTAL_STEPS = 5;
@@ -141,7 +142,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
           <label className="mb-1 block text-xs text-zinc-500">Gateway Address</label>
           <input
             type="text"
-            value="http://127.0.0.1:19876"
+            value={DEFAULT_GATEWAY_URL}
             readOnly
             className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
           />

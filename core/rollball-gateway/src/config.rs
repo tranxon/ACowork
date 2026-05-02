@@ -6,6 +6,7 @@
 //! 3. Config file (gateway.toml)
 //! 4. Defaults (lowest priority)
 
+use rollball_core::defaults;
 use serde::{Deserialize, Serialize};
 use directories::ProjectDirs;
 use crate::cli::Cli;
@@ -78,9 +79,9 @@ pub struct HttpConfig {
 }
 
 fn default_http_enabled() -> bool { true }
-fn default_http_host() -> String { "127.0.0.1".to_string() }
-fn default_http_port() -> u16 { 19876 }
-fn default_http_port_max() -> u16 { 19878 }
+fn default_http_host() -> String { defaults::GATEWAY_HTTP_HOST.to_string() }
+fn default_http_port() -> u16 { defaults::GATEWAY_HTTP_PORT }
+fn default_http_port_max() -> u16 { defaults::GATEWAY_HTTP_PORT_MAX }
 
 impl Default for HttpConfig {
     fn default() -> Self {

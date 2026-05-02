@@ -141,6 +141,8 @@ export interface ProviderListEntry {
   id: string;
   name: string;
   model_count: number;
+  /** Provider's base API URL (from models.dev or offline data) */
+  api?: string;
 }
 
 // ── Memory types ──────────────────────────────────────────────────────

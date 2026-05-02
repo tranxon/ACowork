@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Theme } from "../lib/types";
+import { DEFAULT_GATEWAY_URL } from "../lib/config";
 
 const STORAGE_KEY_THEME = "rollball-theme";
 const STORAGE_KEY_FONT_SIZE = "rollball-font-size";
@@ -60,7 +61,7 @@ export const useSettingsStore = create<SettingsStore>((set) => {
   return {
     theme: initialTheme,
     fontSize: initialFontSize,
-    gatewayUrl: "http://127.0.0.1:19876",
+    gatewayUrl: DEFAULT_GATEWAY_URL,
     logLevel: "info",
 
     setTheme: (theme) => {

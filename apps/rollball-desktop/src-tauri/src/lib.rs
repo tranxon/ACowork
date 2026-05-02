@@ -98,7 +98,7 @@ async fn auto_install_system_agent(app: &tauri::AppHandle) -> Result<(), Box<dyn
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;
-    let gateway_url = "http://127.0.0.1:19876";
+    let gateway_url = rollball_core::defaults::GATEWAY_HTTP_URL;
 
     for i in 0..60 {
         if client.get(format!("{}/health", gateway_url)).send().await.is_ok() {

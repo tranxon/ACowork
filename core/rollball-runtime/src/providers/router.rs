@@ -14,6 +14,15 @@ use crate::providers::ollama::OllamaProvider;
 /// Default base URL for MiniMax OpenAI-compatible API
 const MINIMAX_DEFAULT_BASE_URL: &str = "https://api.minimax.chat/v1";
 
+/// Default base URL for ZhipuAI (智谱) OpenAI-compatible API
+const ZHIPUAI_DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
+
+/// Default base URL for Moonshot AI (月之暗面) OpenAI-compatible API
+const MOONSHOT_DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
+
+/// Default base URL for Alibaba/DashScope (通义千问) OpenAI-compatible API
+const ALIBABA_DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
 /// Create a provider based on the provider name from manifest
 pub fn create_provider(
     provider_name: &str,
@@ -42,6 +51,45 @@ pub fn create_provider(
                 OllamaProvider::with_base_url(Some(url))
             } else {
                 OllamaProvider::new()
+            };
+            Arc::new(provider)
+        }
+        // ZhipuAI (智谱) — new ID: zhipuai, old IDs: zhipu, glm
+        "zhipuai" | "zhipu" | "glm" => {
+            tracing::info!(provider = provider_name, "Using ZhipuAI OpenAI-compatible provider");
+            let provider = if let Some(url) = base_url {
+                OpenAIProvider::with_base_url(Some(url), api_key)
+            } else {
+                OpenAIProvider::with_base_url(
+                    Some(ZHIPUAI_DEFAULT_BASE_URL),
+                    api_key,
+                )
+            };
+            Arc::new(provider)
+        }
+        // Moonshot AI (月之暗面) — new ID: moonshotai, old IDs: moonshot, kimi
+        "moonshotai" | "moonshot" | "kimi" => {
+            tracing::info!(provider = provider_name, "Using Moonshot OpenAI-compatible provider");
+            let provider = if let Some(url) = base_url {
+                OpenAIProvider::with_base_url(Some(url), api_key)
+            } else {
+                OpenAIProvider::with_base_url(
+                    Some(MOONSHOT_DEFAULT_BASE_URL),
+                    api_key,
+                )
+            };
+            Arc::new(provider)
+        }
+        // Alibaba/DashScope (通义千问) — new ID: alibaba, old IDs: qwen, dashscope
+        "alibaba" | "qwen" | "dashscope" => {
+            tracing::info!(provider = provider_name, "Using Alibaba/DashScope OpenAI-compatible provider");
+            let provider = if let Some(url) = base_url {
+                OpenAIProvider::with_base_url(Some(url), api_key)
+            } else {
+                OpenAIProvider::with_base_url(
+                    Some(ALIBABA_DEFAULT_BASE_URL),
+                    api_key,
+                )
             };
             Arc::new(provider)
         }
@@ -85,9 +133,9 @@ pub fn default_model_for_provider(provider: &str) -> String {
         "anthropic" | "claude" => "claude-sonnet-4-20250514".to_string(),
         "google" | "gemini" => "gemini-2.5-flash".to_string(),
         "deepseek" => "deepseek-chat".to_string(),
-        "zhipu" | "glm" => "glm-4-flash".to_string(),
-        "moonshot" | "kimi" => "moonshot-v1-128k".to_string(),
-        "qwen" | "dashscope" | "alibaba" => "qwen-max".to_string(),
+        "zhipuai" | "zhipu" | "glm" => "glm-4-flash".to_string(),
+        "moonshotai" | "moonshot" | "kimi" => "moonshot-v1-128k".to_string(),
+        "alibaba" | "qwen" | "dashscope" => "qwen-max".to_string(),
         "groq" => "llama-4-scout-17b-16e-instruct".to_string(),
         "minimax" => "MiniMax-M2.5".to_string(),
         "mistral" => "mistral-large-latest".to_string(),

@@ -1,15 +1,16 @@
 //! Gateway HTTP client
 //!
-//! Encapsulates all Gateway HTTP API calls. The Desktop App does NOT
-//! depend on any rollball internal crate — it communicates with the
-//! platform exclusively through Gateway HTTP API and Debug Protocol
-//! WebSocket.
+//! Encapsulates all Gateway HTTP API calls. The Desktop App communicates
+//! with the platform primarily through Gateway HTTP API and Debug Protocol
+//! WebSocket. It references rollball_core::defaults for shared constants
+//! (host, port, URL) to avoid hardcoded duplication.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use rollball_core::defaults;
 
-/// Default Gateway base URL
-const DEFAULT_BASE_URL: &str = "http://127.0.0.1:19876";
+/// Default Gateway base URL (from shared core constants)
+const DEFAULT_BASE_URL: &str = defaults::GATEWAY_HTTP_URL;
 
 /// Gateway HTTP client
 pub struct GatewayClient {
