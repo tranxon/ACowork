@@ -8,7 +8,7 @@ import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
 import { Star } from "lucide-react";
-import { inputReadonly, inputBase, inputMono, selectBase, dialogButtonPrimary, dialogButtonSecondary, testResultBase, testResultSuccess, testResultError } from "../../lib/ui-styles";
+import { inputReadonly, inputBase, selectBase } from "../../lib/ui-styles";
 
 type SettingsTab = "gateway" | "providers" | "appearance" | "general";
 

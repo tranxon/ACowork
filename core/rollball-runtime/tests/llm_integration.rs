@@ -74,10 +74,9 @@ fn serialize_builtin_tools(work_dir: &str, agent_id: &str) -> Vec<serde_json::Va
         .iter()
         .map(|t| {
             let spec = t.spec();
-            serde_json::to_value(&spec).expect(&format!(
-                "Failed to serialize ToolSpec for '{}'",
-                spec.name
-            ))
+            serde_json::to_value(&spec).unwrap_or_else(|_| {
+                panic!("Failed to serialize ToolSpec for '{}'", spec.name)
+            })
         })
         .collect()
 }
@@ -125,7 +124,7 @@ fn build_tool_definitions_by_names(
     let tool_jsons: Vec<serde_json::Value> = tools
         .iter()
         .filter(|t| names.iter().any(|n| *n == t.name()))
-        .map(|t| serde_json::to_value(&t.spec()).unwrap())
+        .map(|t| serde_json::to_value(t.spec()).unwrap())
         .collect();
     convert_to_openai_tools(&tool_jsons)
 }

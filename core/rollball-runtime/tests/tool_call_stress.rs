@@ -309,11 +309,11 @@ async fn stress_test_tool_spec_serialization_roundtrip() {
         for round in 0..rounds {
             // Serialize
             let json = serde_json::to_value(&spec)
-                .expect(&format!("Serialize failed for '{}' round {}", spec.name, round));
+                .unwrap_or_else(|_| panic!("Serialize failed for '{}' round {}", spec.name, round));
 
             // Deserialize
             let deserialized: ToolSpec = serde_json::from_value(json)
-                .expect(&format!("Deserialize failed for '{}' round {}", spec.name, round));
+                .unwrap_or_else(|_| panic!("Deserialize failed for '{}' round {}", spec.name, round));
 
             // Verify fields match
             assert_eq!(

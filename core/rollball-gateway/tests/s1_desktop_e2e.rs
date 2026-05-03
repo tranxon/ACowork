@@ -171,11 +171,11 @@ impl GatewayProcess {
                     anyhow::bail!("Gateway exited with status: {}", status);
                 }
                 Ok(None) => {
-                    if let Ok(resp) = http_get(&format!("{}/health", GATEWAY_URL)) {
-                        if resp.contains("status") {
-                            println!("Gateway started on port {}", GATEWAY_PORT);
-                            return Ok(Self { child: Some(child), temp_dir: temp_dir.to_path_buf() });
-                        }
+                    if let Ok(resp) = http_get(&format!("{}/health", GATEWAY_URL))
+                        && resp.contains("status")
+                    {
+                        println!("Gateway started on port {}", GATEWAY_PORT);
+                        return Ok(Self { child: Some(child), temp_dir: temp_dir.to_path_buf() });
                     }
                 }
                 Err(e) => anyhow::bail!("Failed to check Gateway: {}", e),
@@ -203,7 +203,7 @@ fn wait_for_gateway() -> anyhow::Result<()> {
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build()?;
     let start = std::time::Instant::now();
     while start.elapsed() < GATEWAY_STARTUP_TIMEOUT {
-        if client.get(&format!("{}/health", GATEWAY_URL)).send().is_ok() { return Ok(()); }
+        if client.get(format!("{}/health", GATEWAY_URL)).send().is_ok() { return Ok(()); }
         std::thread::sleep(Duration::from_millis(500));
     }
     anyhow::bail!("Gateway not responding")
@@ -267,13 +267,12 @@ fn install_and_start_system_agent(temp: &Path) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + AGENT_STARTUP_TIMEOUT;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1000));
-        if let Ok(resp) = http_get(&format!("{}/api/agents/com.rollball.system", GATEWAY_URL)) {
-            if let Ok(agent) = serde_json::from_str::<serde_json::Value>(&resp) {
-                if agent.get("running").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    println!("System Agent is running");
-                    return Ok(());
-                }
-            }
+        if let Ok(resp) = http_get(&format!("{}/api/agents/com.rollball.system", GATEWAY_URL))
+            && let Ok(agent) = serde_json::from_str::<serde_json::Value>(&resp)
+            && agent.get("running").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            println!("System Agent is running");
+            return Ok(());
         }
     }
     anyhow::bail!("System Agent failed to start within {}s", AGENT_STARTUP_TIMEOUT.as_secs())

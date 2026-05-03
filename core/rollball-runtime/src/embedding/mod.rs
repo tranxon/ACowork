@@ -143,26 +143,26 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         // Try primary provider first
-        if let Some(ref primary) = self.primary {
-            if !self.should_skip_primary() {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(self.config.timeout_ms),
-                    primary.embed(text),
-                )
-                .await
-                {
-                    Ok(Ok(embedding)) => {
-                        self.record_primary_success();
-                        return Ok(embedding);
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!(error = %e, "Primary embedding provider failed");
-                        self.record_primary_failure();
-                    }
-                    Err(_) => {
-                        tracing::warn!(timeout_ms = self.config.timeout_ms, "Primary embedding provider timed out");
-                        self.record_primary_failure();
-                    }
+        if let Some(ref primary) = self.primary
+            && !self.should_skip_primary()
+        {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(self.config.timeout_ms),
+                primary.embed(text),
+            )
+            .await
+            {
+                Ok(Ok(embedding)) => {
+                    self.record_primary_success();
+                    return Ok(embedding);
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "Primary embedding provider failed");
+                    self.record_primary_failure();
+                }
+                Err(_) => {
+                    tracing::warn!(timeout_ms = self.config.timeout_ms, "Primary embedding provider timed out");
+                    self.record_primary_failure();
                 }
             }
         }
@@ -180,27 +180,27 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
 
         for chunk in texts.chunks(self.config.max_batch_size) {
             // Try primary provider first
-            if let Some(ref primary) = self.primary {
-                if !self.should_skip_primary() {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(self.config.timeout_ms * chunk.len() as u64),
-                        primary.embed_batch(chunk),
-                    )
-                    .await
-                    {
-                        Ok(Ok(embeddings)) => {
-                            self.record_primary_success();
-                            all_embeddings.extend(embeddings);
-                            continue;
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!(error = %e, "Primary batch embedding failed");
-                            self.record_primary_failure();
-                        }
-                        Err(_) => {
-                            tracing::warn!("Primary batch embedding timed out");
-                            self.record_primary_failure();
-                        }
+            if let Some(ref primary) = self.primary
+                && !self.should_skip_primary()
+            {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(self.config.timeout_ms * chunk.len() as u64),
+                    primary.embed_batch(chunk),
+                )
+                .await
+                {
+                    Ok(Ok(embeddings)) => {
+                        self.record_primary_success();
+                        all_embeddings.extend(embeddings);
+                        continue;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Primary batch embedding failed");
+                        self.record_primary_failure();
+                    }
+                    Err(_) => {
+                        tracing::warn!("Primary batch embedding timed out");
+                        self.record_primary_failure();
                     }
                 }
             }

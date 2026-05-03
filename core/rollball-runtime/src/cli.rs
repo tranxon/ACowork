@@ -358,6 +358,30 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         (None, None)
     };
 
+    // Step 2.5: Initialize conversation session
+    let work_dir_path = std::path::Path::new(&config.work_dir);
+    let conversations_dir = work_dir_path.join("conversations");
+    std::fs::create_dir_all(&conversations_dir)?;
+
+    // find_latest_session expects the conversations directory (it scans it directly).
+    // ConversationSession::new/resume expect the workspace root (they join "conversations" internally).
+    let conversation_session = if let Some(latest_id) = crate::conversation::find_latest_session(&conversations_dir) {
+        tracing::info!(session_id = %latest_id, "Resuming latest conversation session");
+        Some(crate::conversation::ConversationSession::resume(work_dir_path, &latest_id)?)
+    } else {
+        let new_id = crate::conversation::generate_session_id();
+        tracing::info!(session_id = %new_id, "Creating new conversation session");
+        Some(crate::conversation::ConversationSession::new(work_dir_path, &new_id, &config.agent_id)?)
+    };
+
+    // Spawn background session scan
+    let conversations_dir_clone = conversations_dir.clone();
+    let _session_scan_handle = tokio::spawn(async move {
+        let handle = crate::conversation::scan_sessions_async(conversations_dir_clone);
+        let sessions = handle.await.unwrap_or_default();
+        tracing::info!(count = sessions.len(), "Background session scan complete");
+    });
+
     let (mut agent_loop, inbound_tx) = AgentLoop::new(
         config.clone(),
         loaded.manifest.clone(),
@@ -366,6 +390,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         budget,
         chunk_tx,
         tool_event_tx,
+        conversation_session,
     );
 
     // Inject Gateway model capabilities into AgentLoop (sole holder)
@@ -772,6 +797,13 @@ async fn run_gateway_loop(
     // Retrieve the provider name for budget queries
     let budget_provider = agent_loop.manifest().llm.suggested_provider.clone();
 
+    // S1.14: Track the current session ID for session query responses
+    // The ConversationSession is owned by AgentLoop, so we track the
+    // session_id separately here for responding to Gateway queries.
+    let mut current_session_id = agent_loop.current_session_id()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
     tracing::info!("Gateway message loop started");
 
     // Main message loop — receive messages from Gateway and process them
@@ -846,6 +878,27 @@ async fn run_gateway_loop(
                             if inbound_tx.send(InboundMessage::ContinueExecution { reason }).await.is_err() {
                                 tracing::warn!("Failed to send continue signal — agent loop may have exited");
                             }
+                            continue;
+                        }
+
+                        // S1.14: Session query actions from Gateway HTTP API
+                        // Gateway pushes these IntentReceived actions when the Desktop App
+                        // requests session/conversation data. Runtime processes them using
+                        // conversation.rs functions and sends results back via IntentSend.
+                        if action == "list_sessions" {
+                            handle_list_sessions(&work_dir, ipc_client, &params).await;
+                            continue;
+                        }
+                        if action == "get_session_messages" {
+                            handle_get_session_messages(&work_dir, ipc_client, &params).await;
+                            continue;
+                        }
+                        if action == "create_session" {
+                            handle_create_session(&work_dir, &agent_id_for_reconnect, &mut current_session_id, ipc_client, &params).await;
+                            continue;
+                        }
+                        if action == "get_current_session_id" {
+                            handle_get_current_session_id(ipc_client, &params, &current_session_id).await;
                             continue;
                         }
 
@@ -981,6 +1034,234 @@ async fn run_gateway_loop(
     Ok(())
 }
 
+// ── S1.14: Session query handlers ─────────────────────────────────────────────
+
+/// Handle "list_sessions" action from Gateway (S1.14)
+///
+/// Scans the conversations directory for JSONL session files,
+/// converts the results to SessionInfoDto, and sends them back
+/// to Gateway via IntentSend with action "session_response".
+async fn handle_list_sessions(
+    work_dir: &str,
+    ipc_client: &mut crate::ipc::client::GatewayClient,
+    params: &serde_json::Value,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let conversations_dir = std::path::PathBuf::from(work_dir).join("conversations");
+    let handle = crate::conversation::scan_sessions_async(conversations_dir);
+    let sessions = match handle.await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("Failed to scan sessions: {}", e);
+            vec![]
+        }
+    };
+
+    let session_dtos: Vec<rollball_core::protocol::SessionInfoDto> = sessions
+        .into_iter()
+        .map(|s| rollball_core::protocol::SessionInfoDto {
+            session_id: s.session_id,
+            created_at: s.created_at,
+            message_count: s.message_count,
+            title: s.title,
+        })
+        .collect();
+
+    let data = serde_json::json!({
+        "sessions": session_dtos,
+    });
+
+    send_session_response(ipc_client, &request_id, data).await;
+}
+
+/// Handle "get_session_messages" action from Gateway (S1.14)
+///
+/// Reads paginated messages from the specified session's JSONL file
+/// and sends them back to Gateway via IntentSend.
+async fn handle_get_session_messages(
+    work_dir: &str,
+    ipc_client: &mut crate::ipc::client::GatewayClient,
+    params: &serde_json::Value,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let session_id = params.get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let cursor = params.get("cursor")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let limit = params.get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as u32;
+
+    let direction = params.get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("backward")
+        .to_string();
+
+    if session_id.is_empty() {
+        let data = serde_json::json!({
+            "error": "session_id is required",
+        });
+        send_session_response(ipc_client, &request_id, data).await;
+        return;
+    }
+
+    let file_path = std::path::PathBuf::from(work_dir)
+        .join("conversations")
+        .join(format!("{}.jsonl", session_id));
+
+    if !file_path.exists() {
+        let data = serde_json::json!({
+            "error": format!("Session {} not found", session_id),
+        });
+        send_session_response(ipc_client, &request_id, data).await;
+        return;
+    }
+
+    match crate::conversation::read_messages_paginated(
+        &file_path,
+        cursor,
+        limit,
+        &direction,
+    ) {
+        Ok(paginated) => {
+            let message_dtos: Vec<rollball_core::protocol::ConversationEntryDto> = paginated
+                .messages
+                .into_iter()
+                .map(|m| rollball_core::protocol::ConversationEntryDto {
+                    id: m.id,
+                    ts: m.ts,
+                    role: m.role,
+                    content: m.content,
+                    metadata: m.metadata,
+                })
+                .collect();
+
+            let data = serde_json::json!({
+                "messages": message_dtos,
+                "cursor": paginated.cursor,
+                "has_more": paginated.has_more,
+            });
+            send_session_response(ipc_client, &request_id, data).await;
+        }
+        Err(e) => {
+            tracing::error!("Failed to read session messages: {}", e);
+            let data = serde_json::json!({
+                "error": format!("Failed to read messages: {}", e),
+            });
+            send_session_response(ipc_client, &request_id, data).await;
+        }
+    }
+}
+
+/// Handle "create_session" action from Gateway (S1.14)
+///
+/// Creates a new ConversationSession and updates the tracked session ID.
+async fn handle_create_session(
+    work_dir: &str,
+    agent_id: &str,
+    current_session_id: &mut String,
+    ipc_client: &mut crate::ipc::client::GatewayClient,
+    params: &serde_json::Value,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let new_session_id = crate::conversation::generate_session_id();
+
+    match crate::conversation::ConversationSession::new(
+        std::path::Path::new(work_dir),  // Pass workspace root — new() joins "conversations" internally
+        &new_session_id,
+        agent_id,
+    ) {
+        Ok(_session) => {
+            tracing::info!(
+                new_session_id = %new_session_id,
+                old_session_id = %current_session_id,
+                "Created new conversation session via Gateway request"
+            );
+            *current_session_id = new_session_id.clone();
+
+            let data = serde_json::json!({
+                "session_id": new_session_id,
+            });
+            send_session_response(ipc_client, &request_id, data).await;
+        }
+        Err(e) => {
+            tracing::error!("Failed to create new session: {}", e);
+            let data = serde_json::json!({
+                "error": format!("Failed to create session: {}", e),
+            });
+            send_session_response(ipc_client, &request_id, data).await;
+        }
+    }
+}
+
+/// Handle "get_current_session_id" action from Gateway (S1.14)
+///
+/// Returns the currently active session ID.
+async fn handle_get_current_session_id(
+    ipc_client: &mut crate::ipc::client::GatewayClient,
+    params: &serde_json::Value,
+    current_session_id: &str,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let session_id = if current_session_id.is_empty() {
+        None
+    } else {
+        Some(current_session_id.to_string())
+    };
+
+    let data = serde_json::json!({
+        "session_id": session_id,
+    });
+    send_session_response(ipc_client, &request_id, data).await;
+}
+
+/// Send a session response back to Gateway via IntentSend (S1.14)
+///
+/// Wraps the response data with the request_id and sends it
+/// as an IntentSend with action "session_response" targeting "http-api".
+async fn send_session_response(
+    ipc_client: &mut crate::ipc::client::GatewayClient,
+    request_id: &str,
+    data: serde_json::Value,
+) {
+    let params = serde_json::json!({
+        "request_id": request_id,
+        "data": data,
+    });
+
+    if let Err(e) = ipc_client
+        .send_intent("http-api", "session_response", params, true)
+        .await
+    {
+        tracing::error!(
+            request_id = %request_id,
+            error = %e,
+            "Failed to send session response to Gateway"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,10 +1373,10 @@ fn save_agent_model(work_dir: &str, model: &str) {
 /// model list (e.g. provider was changed or model was removed).
 fn remove_agent_model(work_dir: &str) {
     let path = std::path::Path::new(work_dir).join(AGENT_MODEL_FILE);
-    if path.exists() {
-        if let Err(e) = std::fs::remove_file(&path) {
-            tracing::warn!("Failed to remove {}: {}", AGENT_MODEL_FILE, e);
-        }
+    if path.exists()
+        && let Err(e) = std::fs::remove_file(&path)
+    {
+        tracing::warn!("Failed to remove {}: {}", AGENT_MODEL_FILE, e);
     }
 }
 

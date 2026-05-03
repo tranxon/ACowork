@@ -50,6 +50,8 @@ pub struct IpcServer {
     /// the response is broadcast via this channel so the HTTP WebSocket handler
     /// can stream it back to the Desktop App.
     bridge_tx: Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
+    /// Pending session requests for IPC response correlation (S1.14)
+    session_pending: Option<crate::http::routes::SessionPendingRequests>,
 }
 
 /// Default broadcast channel capacity for capability updates
@@ -67,6 +69,7 @@ impl IpcServer {
             capability_tx,
             external_session_mgr: None,
             bridge_tx: None,
+            session_pending: None,
         }
     }
 
@@ -79,6 +82,7 @@ impl IpcServer {
             capability_tx,
             external_session_mgr: None,
             bridge_tx: None,
+            session_pending: None,
         }
     }
 
@@ -91,6 +95,12 @@ impl IpcServer {
     /// Set bridge channel for forwarding Agent responses to HTTP/WebSocket clients
     pub fn with_bridge_tx(mut self, bridge_tx: tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>) -> Self {
         self.bridge_tx = Some(bridge_tx);
+        self
+    }
+
+    /// Set pending session requests map for IPC response correlation (S1.14)
+    pub fn with_session_pending(mut self, pending: crate::http::routes::SessionPendingRequests) -> Self {
+        self.session_pending = Some(pending);
         self
     }
 
@@ -123,6 +133,7 @@ impl IpcServer {
         let perm_store = Arc::clone(&self.perm_store);
         let capability_tx = self.capability_tx.clone();
         let bridge_tx = self.bridge_tx.clone();
+        let session_pending = self.session_pending.clone();
 
         loop {
             let conn = server.accept().await?;
@@ -136,12 +147,13 @@ impl IpcServer {
             let perm_store = Arc::clone(&perm_store);
             let cap_rx = capability_tx.subscribe();
             let bridge_tx = bridge_tx.clone();
+            let session_pending = session_pending.clone();
 
             tokio::spawn(async move {
                 // Session is created inside handle_connection with push channel
 
                 if let Err(e) =
-                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store, cap_rx, bridge_tx).await
+                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store, cap_rx, bridge_tx, session_pending).await
                 {
                     tracing::warn!("Connection {} error: {}", conn_id, e);
                 }
@@ -165,6 +177,7 @@ impl IpcServer {
 /// 1. Incoming requests from the Agent (recv_frame)
 /// 2. Server-push messages (IntentReceived)
 /// 3. CapabilityUpdate broadcast messages
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut conn: Box<dyn AsyncTransportConnection>,
     conn_id: &str,
@@ -173,6 +186,7 @@ async fn handle_connection(
     perm_store: &SharedPermissionStore,
     mut cap_rx: tokio::sync::broadcast::Receiver<GatewayResponse>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
+    session_pending: Option<crate::http::routes::SessionPendingRequests>,
 ) -> Result<(), RollballError> {
     // Create server-push channel for this connection
     let (push_tx, mut push_rx) = tokio::sync::mpsc::channel::<GatewayResponse>(32);
@@ -200,7 +214,7 @@ async fn handle_connection(
                     tracing::debug!("Received request from {}: {:?}", conn_id, request);
 
                     let response =
-                        dispatch_request(request, conn_id, &state, session_mgr, perm_store, &bridge_tx).await;
+                        dispatch_request(request, conn_id, &state, session_mgr, perm_store, &bridge_tx, &session_pending).await;
 
                     let resp_frame =
                         Frame::from_message(Frame::TYPE_RESPONSE, &response)
@@ -275,6 +289,7 @@ async fn dispatch_request(
     session_mgr: &SharedSessionMgr,
     perm_store: &SharedPermissionStore,
     bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
+    session_pending: &Option<crate::http::routes::SessionPendingRequests>,
 ) -> GatewayResponse {
     match request {
         GatewayRequest::KeyRelease { provider } => {
@@ -286,6 +301,15 @@ async fn dispatch_request(
             params,
             async_,
         } => {
+            // S1.14: Check if this is a session response from Runtime
+            if action == "session_response" {
+                if let Some(pending) = session_pending {
+                    handle_session_response(&params, pending).await;
+                }
+                return GatewayResponse::IntentDelivered {
+                    message_id: format!("msg-session-resp-{}", chrono::Utc::now().timestamp_millis()),
+                };
+            }
             handle_intent_send(&target, &action, &params, async_, conn_id, state, session_mgr, perm_store, bridge_tx)
                 .await
         }
@@ -328,6 +352,74 @@ async fn dispatch_request(
         GatewayRequest::AgentHello { agent_id, version, connection_role } => {
             handle_agent_hello(&agent_id, &version, &connection_role, conn_id, state, session_mgr).await
         }
+        // S1.14: Session query requests from Runtime
+        // These are currently placeholder handlers. The actual session data
+        // flows through IntentReceived/IntentSend with "session_response" action.
+        // These variants exist for protocol completeness and future use
+        // when Gateway maintains a session cache.
+        GatewayRequest::ListSessions => {
+            GatewayResponse::SessionList { sessions: vec![] }
+        }
+        GatewayRequest::GetSessionMessages { session_id, .. } => {
+            tracing::warn!(
+                session_id = %session_id,
+                "GetSessionMessages via GatewayRequest — session data is on the Runtime side, returning empty"
+            );
+            GatewayResponse::SessionMessages {
+                messages: vec![],
+                cursor: None,
+                has_more: false,
+            }
+        }
+        GatewayRequest::CreateSession => {
+            GatewayResponse::SessionCreated {
+                session_id: String::new(),
+            }
+        }
+        GatewayRequest::GetCurrentSessionId => {
+            GatewayResponse::CurrentSessionId { session_id: None }
+        }
+    }
+}
+
+/// Handle session response from Runtime (S1.14)
+///
+/// When the Runtime processes a session query (triggered by Gateway's IntentReceived
+/// push), it sends the result back via IntentSend with action "session_response".
+/// This function extracts the request_id from the params, finds the pending
+/// oneshot sender, and fulfills it — which unblocks the HTTP handler awaiting
+/// the result.
+async fn handle_session_response(
+    params: &serde_json::Value,
+    pending: &crate::http::routes::SessionPendingRequests,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if request_id.is_empty() {
+        tracing::warn!("Session response missing request_id, ignoring");
+        return;
+    }
+
+    tracing::debug!(request_id = %request_id, "Received session response from Runtime");
+
+    let mut map = pending.lock().await;
+    if let Some(sender) = map.remove(request_id) {
+        // Forward the entire params as the response value
+        // The HTTP handler will extract the specific fields it needs
+        let response_value = params.get("data").cloned().unwrap_or(serde_json::Value::Null);
+        if sender.send(response_value).is_err() {
+            tracing::warn!(
+                request_id = %request_id,
+                "Session response oneshot already closed — HTTP handler may have timed out"
+            );
+        }
+    } else {
+        tracing::warn!(
+            request_id = %request_id,
+            "Session response has no pending request — may have timed out"
+        );
     }
 }
 

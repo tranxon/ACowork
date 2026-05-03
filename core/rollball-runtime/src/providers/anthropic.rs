@@ -686,10 +686,10 @@ fn parse_anthropic_sse_line(
         "message_start" => {
             // Extract input_tokens from message_start's usage for later combination
             // with output_tokens from message_delta.
-            if let Some(ref msg) = event.message {
-                if let Some(ref usage) = msg.usage {
-                    *accumulated_input_tokens = usage.input_tokens.unwrap_or(0);
-                }
+            if let Some(ref msg) = event.message
+                && let Some(ref usage) = msg.usage
+            {
+                *accumulated_input_tokens = usage.input_tokens.unwrap_or(0);
             }
             None
         }

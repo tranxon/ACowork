@@ -12,7 +12,7 @@
 //!                     { "type": "done", "message_id": "...", "usage": {...} }
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
     response::IntoResponse,
@@ -34,6 +34,8 @@ pub fn chat_routes() -> Router<AppState> {
         .route("/api/agents/{id}/stream", get(agent_stream_ws))
         .route("/api/agents/{id}/conversations", get(get_conversations))
         .route("/api/agents/{id}/conversations/latest", get(get_latest_conversation))
+        .route("/api/agents/{id}/sessions", get(list_sessions).post(create_session))
+        .route("/api/agents/{id}/sessions/{session_id}/messages", get(get_session_messages))
         .route("/api/agents/{id}/continue", post(continue_execution))
 }
 
@@ -204,8 +206,9 @@ pub async fn send_message(
 
 /// `GET /api/agents/:id/conversations` — list conversation sessions for an agent
 ///
-/// Returns a list of conversation sessions grouped by session_id,
-/// with message counts and time range for each session.
+/// S1.14: Forwards the query to Runtime via IPC (IntentReceived push)
+/// and waits for the response. Falls back to the legacy Grafeo-based
+/// implementation if the agent is not running via IPC.
 pub async fn get_conversations(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -221,70 +224,62 @@ pub async fn get_conversations(
         }
     }
 
-    // Retrieve memory store
-    let memory_store = {
-        let gw = state.gateway_state.read().await;
-        gw.memory_store.clone()
-    };
+    // S1.14: Try IPC forwarding first (if agent is running)
+    if let Some(ref session_mgr) = state.session_mgr {
+        let request_id = format!("sess-list-{}", uuid::Uuid::new_v4());
+        let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
+            from: "http-api".to_string(),
+            action: "list_sessions".to_string(),
+            params: serde_json::json!({
+                "request_id": request_id,
+            }),
+        };
 
-    let conversations = match memory_store {
-        Some(store) => match store.get_episodes(None, 10000) {
-            Ok(episodes) => {
-                // Filter episodes by agent_id prefix to avoid cross-agent pollution
-                let prefix = format!("{}#", agent_id);
-                let episodes: Vec<_> = episodes
-                    .into_iter()
-                    .filter(|ep| ep.session_id.starts_with(&prefix))
-                    .collect();
+        let pushed = {
+            let mgr = session_mgr.lock().await;
+            if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
+                session.push_message(intent).await
+            } else {
+                false
+            }
+        }; // mgr dropped here
 
-                // Group episodes by session_id
-                let mut session_map: std::collections::HashMap<
-                    String,
-                    Vec<rollball_memory::Episode>,
-                > = std::collections::HashMap::new();
-                for ep in episodes {
-                    session_map
-                        .entry(ep.session_id.clone())
-                        .or_default()
-                        .push(ep);
+        if pushed {
+            // Wait for Runtime response via IPC
+            match wait_for_session_response(&state, &request_id).await {
+                Ok(data) => {
+                    // Convert SessionInfoDto to ConversationSummary
+                    let sessions: Vec<rollball_core::protocol::SessionInfoDto> =
+                        data.get("sessions")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                    let conversations: Vec<ConversationSummary> = sessions
+                        .into_iter()
+                        .map(|s| ConversationSummary {
+                            session_id: s.session_id,
+                            started_at: parse_iso8601_to_unix(&s.created_at),
+                            message_count: s.message_count,
+                            last_message_at: parse_iso8601_to_unix(&s.created_at),
+                        })
+                        .collect();
+                    return Ok(Json(ConversationsListResponse { conversations }));
                 }
-
-                let mut conversations: Vec<ConversationSummary> = session_map
-                    .into_iter()
-                    .map(|(session_id, mut eps)| {
-                        eps.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                        let started_at =
-                            eps.first().map(|e| e.timestamp.timestamp()).unwrap_or(0);
-                        let last_message_at =
-                            eps.last().map(|e| e.timestamp.timestamp()).unwrap_or(0);
-                        ConversationSummary {
-                            session_id,
-                            started_at,
-                            message_count: eps.len() as u32,
-                            last_message_at,
-                        }
-                    })
-                    .collect();
-
-                // Sort by most recent message descending
-                conversations.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
-                conversations
+                Err(e) => {
+                    tracing::warn!("Session IPC query timed out or failed: {}, falling back to Grafeo", e);
+                }
             }
-            Err(e) => {
-                tracing::warn!("Failed to get episodes for agent {}: {}", agent_id, e);
-                vec![]
-            }
-        },
-        None => vec![],
-    };
+        }
+    }
 
+    // Legacy fallback: use Grafeo memory store
+    let conversations = get_conversations_legacy(&state, &agent_id).await;
     Ok(Json(ConversationsListResponse { conversations }))
 }
 
 /// `GET /api/agents/:id/conversations/latest` — get the most recent conversation
 ///
-/// Returns the full message history of the latest session,
-/// ordered by turn_index ascending.
+/// S1.14: Forwards the query to Runtime via IPC. Falls back to the
+/// legacy Grafeo-based implementation if IPC is unavailable.
 pub async fn get_latest_conversation(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -300,81 +295,85 @@ pub async fn get_latest_conversation(
         }
     }
 
-    // Retrieve memory store
-    let memory_store = {
-        let gw = state.gateway_state.read().await;
-        gw.memory_store.clone()
-    };
+    // S1.14: Try IPC forwarding first (if agent is running)
+    if let Some(ref session_mgr) = state.session_mgr {
+        // First, get current session ID
+        let curr_request_id = format!("sess-curr-{}", uuid::Uuid::new_v4());
+        let curr_intent = rollball_core::protocol::GatewayResponse::IntentReceived {
+            from: "http-api".to_string(),
+            action: "get_current_session_id".to_string(),
+            params: serde_json::json!({
+                "request_id": curr_request_id,
+            }),
+        };
 
-    let (session_id, messages) = match memory_store {
-        Some(store) => match store.get_episodes(None, 10000) {
-            Ok(episodes) => {
-                // Filter episodes by agent_id prefix to avoid cross-agent pollution
-                let prefix = format!("{}#", agent_id);
-                let episodes: Vec<_> = episodes
-                    .into_iter()
-                    .filter(|ep| ep.session_id.starts_with(&prefix))
-                    .collect();
+        let curr_pushed = {
+            let mgr = session_mgr.lock().await;
+            if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
+                session.push_message(curr_intent).await
+            } else {
+                false
+            }
+        }; // mgr dropped here
 
-                if episodes.is_empty() {
-                    (String::new(), vec![])
-                } else {
-                    // Find the session with the most recent message
-                    let mut session_latest: std::collections::HashMap<String, i64> =
-                        std::collections::HashMap::new();
-                    for ep in &episodes {
-                        let ts = ep.timestamp.timestamp();
-                        let current = session_latest
-                            .entry(ep.session_id.clone())
-                            .or_insert(ts);
-                        if ts > *current {
-                            *current = ts;
-                        }
-                    }
+        if curr_pushed
+            && let Ok(data) = wait_for_session_response(&state, &curr_request_id).await
+        {
+            let current_session_id = data.get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
-                    let latest_session = session_latest
-                        .into_iter()
-                        .max_by_key(|(_, ts)| *ts)
-                        .map(|(sid, _)| sid)
-                        .unwrap_or_default();
+            if !current_session_id.is_empty() {
+                // Now get the messages for this session
+                let msg_request_id = format!("sess-msgs-{}", uuid::Uuid::new_v4());
+                let msg_intent = rollball_core::protocol::GatewayResponse::IntentReceived {
+                    from: "http-api".to_string(),
+                    action: "get_session_messages".to_string(),
+                    params: serde_json::json!({
+                        "request_id": msg_request_id,
+                        "session_id": current_session_id,
+                        "limit": 100,
+                        "direction": "backward",
+                    }),
+                };
 
-                    if latest_session.is_empty() {
-                        (String::new(), vec![])
+                let msg_pushed = {
+                    let mgr = session_mgr.lock().await;
+                    if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
+                        session.push_message(msg_intent).await
                     } else {
-                        let mut session_eps: Vec<rollball_memory::Episode> = episodes
-                            .into_iter()
-                            .filter(|ep| ep.session_id == latest_session)
-                            .collect();
-
-                        // Sort by turn_index ascending, then timestamp ascending
-                        session_eps.sort_by(|a, b| {
-                            a.turn_index
-                                .cmp(&b.turn_index)
-                                .then_with(|| a.timestamp.cmp(&b.timestamp))
-                        });
-
-                        let messages: Vec<ConversationMessage> = session_eps
-                            .into_iter()
-                            .map(|ep| ConversationMessage {
-                                role: ep.role,
-                                content: ep.content,
-                                timestamp: ep.timestamp.timestamp(),
-                                turn_index: ep.turn_index,
-                            })
-                            .collect();
-
-                        (latest_session, messages)
+                        false
                     }
+                }; // mgr dropped here
+
+                if msg_pushed
+                    && let Ok(msg_data) = wait_for_session_response(&state, &msg_request_id).await
+                {
+                    let messages: Vec<ConversationMessage> = msg_data.get("messages")
+                        .and_then(|v| serde_json::from_value::<Vec<rollball_core::protocol::ConversationEntryDto>>(v.clone()).ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, m)| ConversationMessage {
+                            role: m.role,
+                            content: m.content,
+                            timestamp: parse_iso8601_to_unix(&m.ts),
+                            turn_index: i as u32,
+                        })
+                        .collect();
+
+                    return Ok(Json(LatestConversationResponse {
+                        session_id: current_session_id,
+                        messages,
+                    }));
                 }
             }
-            Err(e) => {
-                tracing::warn!("Failed to get episodes for agent {}: {}", agent_id, e);
-                (String::new(), vec![])
-            }
-        },
-        None => (String::new(), vec![]),
-    };
+        }
+    }
 
+    // Legacy fallback: use Grafeo memory store
+    let (session_id, messages) = get_latest_conversation_legacy(&state, &agent_id).await;
     Ok(Json(LatestConversationResponse {
         session_id,
         messages,
@@ -661,6 +660,7 @@ async fn handle_ws_text(
     let _ = socket.send(Message::Text(ack.to_string().into())).await;
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,4 +781,465 @@ pub async fn continue_execution(
             "agent_id": agent_id,
         })),
     ))
+}
+
+// ── S1.14: Session API endpoints ─────────────────────────────────────────
+
+/// Query parameters for session messages endpoint
+#[derive(Deserialize)]
+pub struct SessionMessagesQuery {
+    /// Cursor for pagination (message ID)
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Maximum number of messages to return (default: 50)
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+    /// Pagination direction: "forward" or "backward" (default: "backward")
+    #[serde(default = "default_direction")]
+    pub direction: String,
+}
+
+fn default_limit() -> u32 {
+    50
+}
+
+fn default_direction() -> String {
+    "backward".to_string()
+}
+
+/// Response for listing sessions
+#[derive(Serialize)]
+pub struct SessionsListResponse {
+    /// List of session summaries
+    pub sessions: Vec<SessionInfoResponse>,
+}
+
+/// Single session info in the response
+#[derive(Serialize)]
+pub struct SessionInfoResponse {
+    /// Session identifier
+    pub session_id: String,
+    /// ISO 8601 creation timestamp
+    pub created_at: String,
+    /// Number of messages in the session
+    pub message_count: u32,
+    /// Optional session title
+    pub title: Option<String>,
+}
+
+/// Response for session messages
+#[derive(Serialize)]
+pub struct SessionMessagesResponse {
+    /// Messages in the current page
+    pub messages: Vec<MessageEntryResponse>,
+    /// Cursor for the next page
+    pub cursor: Option<String>,
+    /// Whether more messages exist
+    pub has_more: bool,
+}
+
+/// Single message in the session messages response
+#[derive(Serialize)]
+pub struct MessageEntryResponse {
+    /// Unique message ID
+    pub id: String,
+    /// ISO 8601 timestamp
+    pub ts: String,
+    /// Message role
+    pub role: String,
+    /// Message content
+    pub content: String,
+    /// Optional metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Response for creating a session
+#[derive(Serialize)]
+pub struct SessionCreatedResponse {
+    /// The newly created session identifier
+    pub session_id: String,
+}
+
+/// `GET /api/agents/{id}/sessions` — list conversation sessions (S1.14)
+///
+/// Forwards the query to Runtime via IPC and returns the session list.
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<SessionsListResponse>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
+    }
+
+    let data = forward_session_query(&state, &agent_id, "list_sessions", serde_json::json!({})).await?;
+
+    let sessions: Vec<SessionInfoResponse> = data.get("sessions")
+        .and_then(|v| serde_json::from_value::<Vec<rollball_core::protocol::SessionInfoDto>>(v.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| SessionInfoResponse {
+            session_id: s.session_id,
+            created_at: s.created_at,
+            message_count: s.message_count,
+            title: s.title,
+        })
+        .collect();
+
+    Ok(Json(SessionsListResponse { sessions }))
+}
+
+/// `GET /api/agents/{id}/sessions/{session_id}/messages` — get paginated session messages (S1.14)
+///
+/// Forwards the query to Runtime via IPC and returns the messages.
+pub async fn get_session_messages(
+    State(state): State<AppState>,
+    Path((agent_id, session_id)): Path<(String, String)>,
+    Query(query): Query<SessionMessagesQuery>,
+) -> Result<Json<SessionMessagesResponse>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
+    }
+
+    let params = serde_json::json!({
+        "session_id": session_id,
+        "cursor": query.cursor,
+        "limit": query.limit,
+        "direction": query.direction,
+    });
+
+    let data = forward_session_query(&state, &agent_id, "get_session_messages", params).await?;
+
+    // Check for error response from Runtime
+    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+        return Err(ApiError::bad_request(error));
+    }
+
+    let messages: Vec<MessageEntryResponse> = data.get("messages")
+        .and_then(|v| serde_json::from_value::<Vec<rollball_core::protocol::ConversationEntryDto>>(v.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| MessageEntryResponse {
+            id: m.id,
+            ts: m.ts,
+            role: m.role,
+            content: m.content,
+            metadata: m.metadata,
+        })
+        .collect();
+
+    let cursor = data.get("cursor").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let has_more = data.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    Ok(Json(SessionMessagesResponse {
+        messages,
+        cursor,
+        has_more,
+    }))
+}
+
+/// `POST /api/agents/{id}/sessions` — create a new conversation session (S1.14)
+///
+/// Forwards the request to Runtime via IPC, which creates a new
+/// ConversationSession and returns the session_id.
+pub async fn create_session(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<(StatusCode, Json<SessionCreatedResponse>), (StatusCode, Json<ApiError>)> {
+    // Verify agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
+    }
+
+    let data = forward_session_query(&state, &agent_id, "create_session", serde_json::json!({})).await?;
+
+    // Check for error response from Runtime
+    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+        return Err(ApiError::internal(error));
+    }
+
+    let session_id = data.get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok((
+        StatusCode::OK,
+        Json(SessionCreatedResponse { session_id }),
+    ))
+}
+
+// ── S1.14: IPC forwarding helpers ──────────────────────────────────────────────
+
+/// Default timeout for waiting for session IPC response (10 seconds)
+const SESSION_IPC_TIMEOUT_SECS: u64 = 10;
+
+/// Forward a session query to Runtime via IPC push and wait for the response.
+///
+/// 1. Creates a oneshot channel and stores the sender in the pending map
+/// 2. Pushes IntentReceived with the query action to Runtime
+/// 3. Waits for Runtime's IntentSend response ("session_response")
+/// 4. Returns the response data
+async fn forward_session_query(
+    state: &AppState,
+    agent_id: &str,
+    action: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    let session_mgr = state.session_mgr.as_ref().ok_or_else(|| {
+        ApiError::internal("Session manager not available")
+    })?;
+
+    let request_id = format!("sess-{}-{}", action, uuid::Uuid::new_v4());
+
+    // Create oneshot channel for response
+    let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+    {
+        let mut pending = state.session_pending.lock().await;
+        pending.insert(request_id.clone(), tx);
+    }
+
+    // Push IntentReceived to Runtime
+    let mgr = session_mgr.lock().await;
+    let (_, session) = mgr.find_by_agent_id(agent_id).ok_or_else(|| {
+        ApiError::service_unavailable(&format!("Agent {} is not yet connected", agent_id))
+    })?;
+
+    let mut query_params = params;
+    query_params["request_id"] = serde_json::json!(request_id);
+
+    let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
+        from: "http-api".to_string(),
+        action: action.to_string(),
+        params: query_params,
+    };
+
+    if !session.push_message(intent).await {
+        // Clean up pending request
+        let mut pending = state.session_pending.lock().await;
+        pending.remove(&request_id);
+        return Err(ApiError::internal("Failed to deliver session query to agent"));
+    }
+    drop(mgr); // Release lock before awaiting
+
+    // Wait for response with timeout
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(SESSION_IPC_TIMEOUT_SECS),
+        rx,
+    ).await {
+        Ok(Ok(data)) => Ok(data),
+        Ok(Err(_)) => {
+            Err(ApiError::internal("Session response channel closed unexpectedly"))
+        }
+        Err(_) => {
+            // Timeout — clean up pending request
+            let mut pending = state.session_pending.lock().await;
+            pending.remove(&request_id);
+            Err(ApiError::internal("Session query timed out — agent did not respond"))
+        }
+    }
+}
+
+/// Wait for a session response from the pending map.
+///
+/// Similar to forward_session_query but for cases where the IntentReceived
+/// has already been pushed (e.g., in get_conversations/get_latest_conversation).
+async fn wait_for_session_response(
+    state: &AppState,
+    request_id: &str,
+) -> Result<serde_json::Value, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+    {
+        let mut pending = state.session_pending.lock().await;
+        pending.insert(request_id.to_string(), tx);
+    }
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(SESSION_IPC_TIMEOUT_SECS),
+        rx,
+    ).await {
+        Ok(Ok(data)) => Ok(data),
+        Ok(Err(_)) => Err("Session response channel closed".to_string()),
+        Err(_) => {
+            let mut pending = state.session_pending.lock().await;
+            pending.remove(request_id);
+            Err("Session query timed out".to_string())
+        }
+    }
+}
+
+/// Parse an ISO 8601 timestamp to Unix epoch seconds.
+///
+/// Returns 0 if parsing fails.
+fn parse_iso8601_to_unix(ts: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0)
+}
+
+// ── Legacy Grafeo-based conversation queries ──────────────────────────────────
+
+/// Legacy implementation of get_conversations using Grafeo memory store.
+async fn get_conversations_legacy(
+    state: &AppState,
+    agent_id: &str,
+) -> Vec<ConversationSummary> {
+    let memory_store = {
+        let gw = state.gateway_state.read().await;
+        gw.memory_store.clone()
+    };
+
+    match memory_store {
+        Some(store) => match store.get_episodes(None, 10000) {
+            Ok(episodes) => {
+                let prefix = format!("{}#", agent_id);
+                let episodes: Vec<_> = episodes
+                    .into_iter()
+                    .filter(|ep| ep.session_id.starts_with(&prefix))
+                    .collect();
+
+                let mut session_map: std::collections::HashMap<
+                    String,
+                    Vec<rollball_memory::Episode>,
+                > = std::collections::HashMap::new();
+                for ep in episodes {
+                    session_map
+                        .entry(ep.session_id.clone())
+                        .or_default()
+                        .push(ep);
+                }
+
+                let mut conversations: Vec<ConversationSummary> = session_map
+                    .into_iter()
+                    .map(|(session_id, mut eps)| {
+                        eps.sort_by_key(|a| a.timestamp);
+                        let started_at =
+                            eps.first().map(|e| e.timestamp.timestamp()).unwrap_or(0);
+                        let last_message_at =
+                            eps.last().map(|e| e.timestamp.timestamp()).unwrap_or(0);
+                        ConversationSummary {
+                            session_id,
+                            started_at,
+                            message_count: eps.len() as u32,
+                            last_message_at,
+                        }
+                    })
+                    .collect();
+
+                conversations.sort_by_key(|b| std::cmp::Reverse(b.last_message_at));
+                conversations
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get episodes for agent {}: {}", agent_id, e);
+                vec![]
+            }
+        },
+        None => vec![],
+    }
+}
+
+/// Legacy implementation of get_latest_conversation using Grafeo memory store.
+async fn get_latest_conversation_legacy(
+    state: &AppState,
+    agent_id: &str,
+) -> (String, Vec<ConversationMessage>) {
+    let memory_store = {
+        let gw = state.gateway_state.read().await;
+        gw.memory_store.clone()
+    };
+
+    match memory_store {
+        Some(store) => match store.get_episodes(None, 10000) {
+            Ok(episodes) => {
+                let prefix = format!("{}#", agent_id);
+                let episodes: Vec<_> = episodes
+                    .into_iter()
+                    .filter(|ep| ep.session_id.starts_with(&prefix))
+                    .collect();
+
+                if episodes.is_empty() {
+                    return (String::new(), vec![]);
+                }
+
+                let mut session_latest: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+                for ep in &episodes {
+                    let ts = ep.timestamp.timestamp();
+                    let current = session_latest
+                        .entry(ep.session_id.clone())
+                        .or_insert(ts);
+                    if ts > *current {
+                        *current = ts;
+                    }
+                }
+
+                let latest_session = session_latest
+                    .into_iter()
+                    .max_by_key(|(_, ts)| *ts)
+                    .map(|(sid, _)| sid)
+                    .unwrap_or_default();
+
+                if latest_session.is_empty() {
+                    return (String::new(), vec![]);
+                }
+
+                let mut session_eps: Vec<rollball_memory::Episode> = episodes
+                    .into_iter()
+                    .filter(|ep| ep.session_id == latest_session)
+                    .collect();
+
+                session_eps.sort_by(|a, b| {
+                    a.turn_index
+                        .cmp(&b.turn_index)
+                        .then_with(|| a.timestamp.cmp(&b.timestamp))
+                });
+
+                let messages: Vec<ConversationMessage> = session_eps
+                    .into_iter()
+                    .map(|ep| ConversationMessage {
+                        role: ep.role,
+                        content: ep.content,
+                        timestamp: ep.timestamp.timestamp(),
+                        turn_index: ep.turn_index,
+                    })
+                    .collect();
+
+                (latest_session, messages)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get episodes for agent {}: {}", agent_id, e);
+                (String::new(), vec![])
+            }
+        },
+        None => (String::new(), vec![]),
+    }
 }

@@ -185,6 +185,79 @@ impl HistoryManager {
         }
     }
 
+    /// Like `preemptive_trim` but returns the messages removed by FIFO.
+    ///
+    /// This is used by `trim_history_to_budget` to capture evicted messages
+    /// for episode distillation. The returned messages are the originals
+    /// (before any folding), so they contain the full conversation content
+    /// that would otherwise be lost.
+    pub fn preemptive_trim_drain(&mut self, context_budget: u64) -> Vec<ChatMessage> {
+        let threshold = (context_budget as f64 * 0.9) as u64;
+        if self.current_tokens <= threshold {
+            return Vec::new();
+        }
+
+        tracing::warn!(
+            current = self.current_tokens,
+            threshold,
+            "Preemptive trim triggered (draining)"
+        );
+
+        // Capture messages before folding so distillation gets original content
+        let first_removable = self
+            .messages
+            .iter()
+            .position(|m| !matches!(m.role, MessageRole::System))
+            .unwrap_or(0);
+
+        self.fold_tool_results();
+
+        if self.current_tokens <= threshold {
+            return Vec::new();
+        }
+
+        // Drain FIFO — same logic as trim_fifo but returns removed messages
+        self.drain_fifo(first_removable)
+    }
+
+    /// FIFO trim that returns the removed messages.
+    ///
+    /// `first_removable` is the index of the first non-system message.
+    fn drain_fifo(&mut self, first_removable: usize) -> Vec<ChatMessage> {
+        if self.current_tokens <= self.max_tokens {
+            return Vec::new();
+        }
+
+        let mut removed_messages = Vec::new();
+        let mut removed_count = 0;
+
+        while self.current_tokens > self.max_tokens
+            && first_removable + removed_count < self.messages.len() - 1
+        {
+            let idx = first_removable + removed_count;
+            if idx < self.messages.len() {
+                let tokens = estimate_tokens(&self.messages[idx].content);
+                self.current_tokens = self.current_tokens.saturating_sub(tokens);
+                removed_messages.push(self.messages[idx].clone());
+                removed_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        if removed_count > 0 {
+            let end = first_removable + removed_count;
+            self.messages.drain(first_removable..end.min(self.messages.len()));
+            tracing::debug!(
+                removed = removed_count,
+                remaining_tokens = self.current_tokens,
+                "FIFO trimmed (drained)"
+            );
+        }
+
+        removed_messages
+    }
+
     /// Emergency trim — drastic measure for context overflow recovery
     /// Keeps only the last 4 non-system messages
     pub fn emergency_trim(&mut self) -> usize {
@@ -302,16 +375,15 @@ impl HistoryManager {
 
         // Step 3: Remove orphaned tool result messages
         messages.retain(|msg| {
-            if msg.role == MessageRole::Tool {
-                if let Some(ref tcid) = msg.tool_call_id {
-                    if !valid_tool_call_ids.contains(tcid) {
-                        tracing::warn!(
-                            tool_call_id = %tcid,
-                            "Removing orphaned tool result message"
-                        );
-                        return false;
-                    }
-                }
+            if msg.role == MessageRole::Tool
+                && let Some(ref tcid) = msg.tool_call_id
+                && !valid_tool_call_ids.contains(tcid)
+            {
+                tracing::warn!(
+                    tool_call_id = %tcid,
+                    "Removing orphaned tool result message"
+                );
+                return false;
             }
             true
         });
@@ -349,7 +421,7 @@ impl HistoryManager {
         messages.retain(|msg| {
             if msg.role == MessageRole::Assistant {
                 let has_content = !msg.content.is_empty();
-                let has_tool_calls = msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
                 if !has_content && !has_tool_calls {
                     tracing::warn!("Removing empty assistant message");
                     return false;

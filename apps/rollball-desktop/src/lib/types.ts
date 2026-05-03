@@ -127,7 +127,7 @@ export interface SendMessageResponse {
 export type GatewayStatus = "connected" | "disconnected" | "error";
 
 /** Chat message types */
-export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result";
+export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "think";
 
 /** Chat message in the UI */
 export interface ChatMessage {
@@ -340,4 +340,33 @@ export interface ApprovalApiResponse {
   request_id: string;
   action: string;
   status: string;
+}
+
+// ── Session types ─────────────────────────────────────────────────────
+
+/** Session summary from Gateway */
+export interface SessionInfo {
+  session_id: string;
+  created_at: string;
+  last_active_at?: string;
+  message_count: number;
+  title: string | null;
+  status?: "active" | "idle" | "ended";
+}
+
+/** A single conversation entry as stored in JSONL */
+export interface ConversationEntry {
+  id: string;
+  ts: string;
+  role: "user" | "assistant" | "think" | "tool_call" | "tool_result" | "system";
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** Paginated messages response from Gateway */
+export interface PaginatedMessages {
+  session_id: string;
+  messages: ConversationEntry[];
+  cursor: string | null;
+  has_more: boolean;
 }

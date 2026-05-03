@@ -228,7 +228,7 @@ impl TokenCounter {
         // English: split into words, each word ~1.3 tokens
         let ascii_words = text
             .split_whitespace()
-            .filter(|w| w.chars().all(|c| c.is_ascii()))
+            .filter(|w| w.is_ascii())
             .count();
 
         let ascii_tokens = (ascii_words as f64 * 1.3).ceil() as u64;

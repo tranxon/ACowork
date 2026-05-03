@@ -134,8 +134,7 @@ model = "gpt-4"
 
 /// 创建不完整的 agent（用于测试校验）
 fn create_incomplete_agent_dir(dir: &Path) -> PathBuf {
-    let manifest = format!(
-        r#"agent_id = "com.example.incomplete"
+    let manifest = r#"agent_id = "com.example.incomplete"
 version = "1.0.0"
 name = "Incomplete Agent"
 description = "Missing prompts"
@@ -144,8 +143,7 @@ runtime_version = "0.1.0"
 
 [llm]
 provider = "openai"
-"#,
-    );
+"#.to_string();
 
     let agent_dir = dir.join("com_example_incomplete");
     fs::create_dir_all(&agent_dir).unwrap();
@@ -268,7 +266,7 @@ fn test_s4_clone_new_agent_has_dev_true() {
 #[tokio::test]
 async fn test_s4_clone_system_agent_forbidden() {
     let temp = temp_dir("clone_system_forbidden");
-    let config = test_gateway_config(&temp);
+    let _config = test_gateway_config(&temp);
     let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
 
     // 创建并注册系统 agent
@@ -315,7 +313,7 @@ fn test_s4_clone_duplicate_agent_id_fails() {
 #[tokio::test]
 async fn test_s4_clone_full_includes_skills() {
     let temp = temp_dir("clone_full_skills");
-    let config = test_gateway_config(&temp);
+    let _config = test_gateway_config(&temp);
     let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
 
     // 创建带 skills 的 agent
@@ -346,7 +344,7 @@ async fn test_s4_clone_full_includes_skills() {
 #[tokio::test]
 async fn test_s4_prepare_complete_manifest_pass() {
     let temp = temp_dir("prepare_complete");
-    let config = test_gateway_config(&temp);
+    let _config = test_gateway_config(&temp);
     let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
 
     // 创建完整 agent
@@ -374,13 +372,13 @@ async fn test_s4_prepare_complete_manifest_pass() {
 #[tokio::test]
 async fn test_s4_prepare_missing_fields_fails() {
     let temp = temp_dir("prepare_missing");
-    let config = test_gateway_config(&temp);
-    let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
+    let _config = test_gateway_config(&temp);
+    let _state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
 
     // 创建不完整的 agent
     // 注意：这个 manifest 缺少 model 字段
     // AgentManifest::from_toml 会失败，这是预期的
-    let agent_dir = create_incomplete_agent_dir(&temp);
+    let _agent_dir = create_incomplete_agent_dir(&temp);
 
     // TODO: 调用 prepare API，应该返回错误（缺少 model 字段）
     // 目前验证前提条件：manifest 文件存在但字段不完整
@@ -390,7 +388,7 @@ async fn test_s4_prepare_missing_fields_fails() {
 #[tokio::test]
 async fn test_s4_prepare_clean_removes_dev_mark() {
     let temp = temp_dir("prepare_clean_dev");
-    let config = test_gateway_config(&temp);
+    let _config = test_gateway_config(&temp);
     let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
 
     // 创建 agent
@@ -424,8 +422,8 @@ async fn test_s4_prepare_clean_removes_dev_mark() {
 #[tokio::test]
 async fn test_s4_prepare_clean_removes_recordings() {
     let temp = temp_dir("prepare_clean_recordings");
-    let config = test_gateway_config(&temp);
-    let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
+    let _config = test_gateway_config(&temp);
+    let _state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
 
     // 创建 agent（已包含 recordings）
     let agent_dir = create_test_agent_dir(&temp, "com.example.recordings");
@@ -454,7 +452,7 @@ async fn test_s4_prepare_clean_removes_recordings() {
 #[tokio::test]
 async fn test_s4_build_package_zip_structure() {
     let temp = temp_dir("build_zip_structure");
-    let config = test_gateway_config(&temp);
+    let _config = test_gateway_config(&temp);
     let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&temp.join("state").to_string_lossy())));
 
     // 创建 agent 目录

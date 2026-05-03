@@ -133,14 +133,15 @@ export function WorkspaceSelector() {
           )}
         >
           <FolderOpen size={14} />
-          <span>
+          <span className="max-w-[120px] truncate">
             {currentWorkspaceId
               ? (() => {
                   const w = workspaces.find((ws) => ws.id === currentWorkspaceId);
-                  if (!w) return "Select Workspace";
-                  return w.alias || w.path.split(/[\/\\]/).filter(Boolean).pop() || w.path;
+                  if (!w) return "Workspace";
+                  const name = w.alias || w.path.split(/[\/\\]/).filter(Boolean).pop() || w.path;
+                  return name.length > 24 ? name.slice(0, 24) + "..." : name;
                 })()
-              : "Select Workspace"}
+              : "Workspace"}
           </span>
           <ChevronDown className="h-3 w-3 text-zinc-400" />
         </button>

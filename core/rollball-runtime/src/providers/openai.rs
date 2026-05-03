@@ -505,15 +505,14 @@ impl Provider for OpenAIProvider {
                     error_body = %body,
                     "LLM returned 400 Bad Request - detailed diagnostics"
                 );
-                if body.contains("invalid function arguments") {
-                    if let Some(last_assistant) = native_request.messages.iter().rev()
+                if body.contains("invalid function arguments")
+                    && let Some(last_assistant) = native_request.messages.iter().rev()
                         .find(|m| m.role == "assistant")
-                    {
-                        tracing::error!(
-                            last_assistant_tool_calls = ?last_assistant.tool_calls,
-                            "Diagnosing invalid function arguments - last assistant tool_calls"
-                        );
-                    }
+                {
+                    tracing::error!(
+                        last_assistant_tool_calls = ?last_assistant.tool_calls,
+                        "Diagnosing invalid function arguments - last assistant tool_calls"
+                    );
                 }
             }
 

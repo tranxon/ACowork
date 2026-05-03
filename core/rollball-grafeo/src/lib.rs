@@ -13,6 +13,7 @@ pub mod consolidation;
 pub mod engineering;
 pub mod episodic;
 pub mod error;
+pub mod export;
 pub mod eval;
 pub mod forgetting;
 pub mod grafeo;
@@ -46,6 +47,7 @@ pub use spreading::{
     get_hint_weights, get_expand_thresholds, config_from_hint,
     validate_expand_config,
 };
+pub use export::FilteredNode;
 pub use types::{
     labels, edge_types, EMBEDDING_DIM,
     ArtifactRef, AutobioCategory, AutobiographicalNode,

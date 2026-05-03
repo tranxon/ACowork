@@ -220,11 +220,43 @@ pub enum GatewayRequest {
         #[serde(default = "default_connection_role")]
         connection_role: String,
     },
+    /// List sessions request (S1.14)
+    ///
+    /// Runtime sends this to Gateway to request a list of
+    /// conversation sessions. Gateway responds with SessionList.
+    ListSessions,
+    /// Get session messages request (S1.14)
+    ///
+    /// Runtime sends this to Gateway to request paginated messages
+    /// for a specific session. Gateway responds with SessionMessages.
+    GetSessionMessages {
+        /// Session identifier to query
+        session_id: String,
+        /// Cursor for pagination (message ID of the last seen message)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        /// Maximum number of messages to return
+        limit: u32,
+        /// Pagination direction: "forward" or "backward"
+        direction: String,
+    },
+    /// Create session request (S1.14)
+    ///
+    /// Runtime sends this to Gateway to signal that a new
+    /// conversation session has been created. Gateway responds
+    /// with SessionCreated.
+    CreateSession,
+    /// Get current session ID request (S1.14)
+    ///
+    /// Runtime sends this to Gateway to query the currently
+    /// active session ID. Gateway responds with CurrentSessionId.
+    GetCurrentSessionId,
 }
 
 /// Gateway Service API response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
 pub enum GatewayResponse {
     /// AgentHello response — confirms registration
     AgentHelloResult {
@@ -379,6 +411,77 @@ pub enum GatewayResponse {
         /// Human-readable message
         message: String,
     },
+    /// Session list result (S1.14)
+    ///
+    /// Sent by Gateway in response to GatewayRequest::ListSessions.
+    /// Carries the list of session summaries.
+    SessionList {
+        /// List of session info DTOs
+        sessions: Vec<SessionInfoDto>,
+    },
+    /// Session messages result (S1.14)
+    ///
+    /// Sent by Gateway in response to GatewayRequest::GetSessionMessages.
+    /// Carries a paginated page of conversation messages.
+    SessionMessages {
+        /// Messages in the current page
+        messages: Vec<ConversationEntryDto>,
+        /// Cursor for the next page (message ID)
+        cursor: Option<String>,
+        /// Whether more messages exist beyond this page
+        has_more: bool,
+    },
+    /// Session created result (S1.14)
+    ///
+    /// Sent by Gateway in response to GatewayRequest::CreateSession.
+    SessionCreated {
+        /// The newly created session identifier
+        session_id: String,
+    },
+    /// Current session ID result (S1.14)
+    ///
+    /// Sent by Gateway in response to GatewayRequest::GetCurrentSessionId.
+    CurrentSessionId {
+        /// The currently active session ID, or None if no session
+        session_id: Option<String>,
+    },
+}
+
+/// Session info DTO for IPC responses (S1.14)
+///
+/// Carries session metadata from Runtime to Gateway
+/// so the HTTP API can return session lists without
+/// directly reading JSONL files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfoDto {
+    /// Session identifier (e.g. "20260503_143022_a1b2c3")
+    pub session_id: String,
+    /// ISO 8601 creation timestamp
+    pub created_at: String,
+    /// Number of messages in the session
+    pub message_count: u32,
+    /// Optional session title
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// Conversation entry DTO for IPC responses (S1.14)
+///
+/// Carries a single message from Runtime to Gateway
+/// for paginated message queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationEntryDto {
+    /// Unique message ID
+    pub id: String,
+    /// ISO 8601 timestamp with millisecond precision
+    pub ts: String,
+    /// Message role: "user" | "assistant" | "think" | "tool_call" | "tool_result" | "system"
+    pub role: String,
+    /// Full message content
+    pub content: String,
+    /// Optional metadata (e.g. tool_call_id, tool_name)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Cron entry info (for IPC responses)

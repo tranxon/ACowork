@@ -86,7 +86,7 @@ async fn test_agent_loop_text_response() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest.clone(), provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest.clone(), provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Hi there!", &context_builder).await;
@@ -108,7 +108,7 @@ async fn test_agent_loop_tool_call_then_text() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest.clone(), provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest.clone(), provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Echo 'test'", &context_builder).await;
@@ -155,7 +155,7 @@ async fn test_agent_loop_deduplication() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest.clone(), provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest.clone(), provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Echo 'dup'", &context_builder).await;

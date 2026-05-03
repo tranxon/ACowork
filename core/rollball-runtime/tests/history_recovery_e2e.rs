@@ -335,7 +335,7 @@ async fn test_agent_restart_with_polluted_history_no_400() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
 
     // Inject polluted history — invalid arguments, orphaned tool result
     {
@@ -373,7 +373,7 @@ async fn test_agent_restart_with_polluted_history_no_400() {
         .collect();
     for tr in &tool_results {
         assert!(
-            tr.tool_call_id.as_ref().map_or(false, |id| id == "tc_bad_args"),
+            tr.tool_call_id.as_ref().is_some_and(|id| id == "tc_bad_args"),
             "Only tc_bad_args result should remain, found: {:?}",
             tr.tool_call_id
         );
@@ -617,7 +617,7 @@ async fn test_llm_tool_call_with_proper_tool_call_id() {
     let builtin_tools = builtin::all_builtin_tools(&work_dir, "com.test.history-recovery");
     let tool_jsons: Vec<serde_json::Value> = builtin_tools
         .iter()
-        .map(|t| serde_json::to_value(&t.spec()).unwrap())
+        .map(|t| serde_json::to_value(t.spec()).unwrap())
         .collect();
     let openai_tools: Vec<serde_json::Value> = tool_jsons
         .iter()

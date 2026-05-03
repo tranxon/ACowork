@@ -161,7 +161,7 @@ async fn test_consolidation_with_generalization() {
             session_id: "sess-1".to_string(),
             turn_index: i,
             role: "assistant".to_string(),
-            content: format!("Let me check the weather for you.\n{{\"name\": \"http_request\", \"arguments\": {{\"url\": \"weather-api\"}}}}"),
+            content: "Let me check the weather for you.\n{\"name\": \"http_request\", \"arguments\": {\"url\": \"weather-api\"}}".to_string(),
             content_type: ContentType::Informational,
             embedding: Some(test_embedding(&format!("weather check {}", i))),
             timestamp: Utc::now(),
@@ -209,7 +209,7 @@ async fn test_consolidation_with_generalization() {
     ).await.unwrap();
 
     assert_eq!(result.upgraded, 1, "One knowledge node should be upgraded");
-    assert!(result.procedural_created >= 0, "Generalization may create procedural nodes");
+    // procedural_created is always >= 0 for unsigned types, so no assert needed
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +423,7 @@ async fn test_e2e_consolidation_pipeline() {
             session_id: format!("sess-{}", i),
             turn_index: 0,
             role: "assistant".to_string(),
-            content: format!("Checking the weather now.\n{{\"name\": \"http_request\"}}"),
+            content: "Checking the weather now.\n{\"name\": \"http_request\"}".to_string(),
             content_type: ContentType::Informational,
             embedding: Some(test_embedding(&format!("weather {}", i))),
             timestamp: Utc::now(),

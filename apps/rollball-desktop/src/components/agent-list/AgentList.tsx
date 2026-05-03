@@ -157,7 +157,7 @@ export function AgentList({ width }: AgentListProps) {
       </div>
 
       {/* Agent list - 微信联系人列表风格 */}
-      <div className="flex-1 overflow-y-auto bg-[#EEEEF0] px-2 py-1 dark:bg-[#2F2F30]" role="list" aria-label="Agent list">
+      <div className="flex-1 overflow-y-auto bg-[#EEEEF0] py-1 dark:bg-[#2F2F30]" role="list" aria-label="Agent list">
         {loading && agents.length === 0 && (
           <div className="flex items-center justify-center py-8">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
@@ -172,7 +172,7 @@ export function AgentList({ width }: AgentListProps) {
             <div
               key={agent.agent_id}
               className={cn(
-                "flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150",
+                "flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors duration-150",
                 selectedAgentId === agent.agent_id
                   ? "bg-[#D8D9DC] dark:bg-[#3D3D3F]"
                   : "hover:bg-[#E2E3E6] dark:hover:bg-[#38383A]",
@@ -181,24 +181,14 @@ export function AgentList({ width }: AgentListProps) {
               onContextMenu={(e) => handleContextMenu(e, agent.agent_id)}
               role="listitem"
             >
-              {/* Avatar with status indicator */}
-              <div className="relative mt-0.5">
-                <div className={cn(
-                  "flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold",
-                  isSystem 
-                    ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white"
-                    : "bg-gradient-to-br from-zinc-400 to-zinc-500 text-white dark:from-zinc-500 dark:to-zinc-600"
-                )}>
-                  {agent.name.charAt(0).toUpperCase()}
-                </div>
-                {/* Status dot */}
-                <div
-                  className={cn(
-                    "absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white dark:border-zinc-900",
-                    agent.running ? "bg-green-500" : "bg-zinc-400 dark:bg-zinc-600"
-                  )}
-                  title={agent.running ? "Running" : "Stopped"}
-                />
+              {/* Avatar */}
+              <div className={cn(
+                "flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold mt-0.5",
+                isSystem 
+                  ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white"
+                  : "bg-gradient-to-br from-zinc-400 to-zinc-500 text-white dark:from-zinc-500 dark:to-zinc-600"
+              )}>
+                {agent.name.charAt(0).toUpperCase()}
               </div>
 
               {/* Content area */}
@@ -212,9 +202,11 @@ export function AgentList({ width }: AgentListProps) {
                     )}
                   </div>
                 </div>
-                {/* Bottom row: version / last activity */}
-                <div className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-500">
-                  {`v${agent.version} · ${lastActivity}`}
+                {/* Bottom row: last activity */}
+                <div className="mt-0.5 truncate text-xs">
+                  <span className={agent.running ? "text-green-600 dark:text-green-400" : "text-zinc-500 dark:text-zinc-500"}>
+                    {lastActivity}
+                  </span>
                 </div>
               </div>
             </div>

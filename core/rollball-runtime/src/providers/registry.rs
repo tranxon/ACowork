@@ -81,6 +81,7 @@ pub enum RoutingStrategy {
 
 impl RoutingStrategy {
     /// Parse from string (e.g., from manifest config)
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "cost_priority" => RoutingStrategy::CostPriority,
@@ -211,10 +212,10 @@ impl ProviderRegistry {
     /// Check if a model supports a specific capability
     pub fn has_capability(&self, provider_name: &str, model: &str, cap: ModelCapability) -> bool {
         let providers = self.providers.read();
-        if let Some(entry) = providers.get(provider_name) {
-            if let Some(caps) = entry.capabilities.get(model) {
-                return caps.contains(&cap);
-            }
+        if let Some(entry) = providers.get(provider_name)
+            && let Some(caps) = entry.capabilities.get(model)
+        {
+            return caps.contains(&cap);
         }
         false
     }
@@ -222,10 +223,10 @@ impl ProviderRegistry {
     /// Get capabilities for a specific model
     pub fn get_capabilities(&self, provider_name: &str, model: &str) -> Vec<ModelCapability> {
         let providers = self.providers.read();
-        if let Some(entry) = providers.get(provider_name) {
-            if let Some(caps) = entry.capabilities.get(model) {
-                return caps.clone();
-            }
+        if let Some(entry) = providers.get(provider_name)
+            && let Some(caps) = entry.capabilities.get(model)
+        {
+            return caps.clone();
         }
         Vec::new()
     }

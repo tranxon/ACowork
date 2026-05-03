@@ -112,6 +112,17 @@ pub struct BridgeEvent {
     pub payload: serde_json::Value,
 }
 
+/// Pending session request map (S1.14)
+///
+/// When the Gateway HTTP API forwards a session query to the Runtime
+/// via IPC (IntentReceived push), it stores a oneshot sender here
+/// keyed by request_id. When the Runtime sends the result back via
+/// IntentSend with action "session_response", the IPC dispatch handler
+/// finds the pending sender and fulfills it, which unblocks the
+/// HTTP handler awaiting the oneshot receiver.
+pub type SessionPendingRequests =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
+
 /// Application state available to all HTTP handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -127,6 +138,8 @@ pub struct AppState {
     pub bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     /// Cache for models.dev API responses
     pub(crate) models_cache: crate::http::models_api::ModelsCache,
+    /// Pending session requests for IPC response correlation (S1.14)
+    pub session_pending: SessionPendingRequests,
 }
 
 impl AppState {
@@ -143,6 +156,7 @@ impl AppState {
             session_mgr,
             bridge_tx,
             models_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            session_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -160,6 +174,7 @@ impl AppState {
             session_mgr,
             bridge_tx,
             models_cache,
+            session_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }

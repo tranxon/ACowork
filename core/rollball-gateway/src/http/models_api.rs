@@ -369,14 +369,14 @@ async fn get_provider_models(
     Path(provider_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     // 1. Try models.dev cache/API
-    if let Ok(data) = fetch_models(&state.models_cache).await {
-        if let Some((name, models)) = resolve_provider(&data, &provider_id) {
-            return Ok(Json(ProviderModels {
-                id: provider_id,
-                name,
-                models,
-            }));
-        }
+    if let Ok(data) = fetch_models(&state.models_cache).await
+        && let Some((name, models)) = resolve_provider(&data, &provider_id)
+    {
+        return Ok(Json(ProviderModels {
+            id: provider_id,
+            name,
+            models,
+        }));
     }
 
     // 2. Try offline data
@@ -421,10 +421,10 @@ pub(crate) async fn lookup_model_capabilities_with_cache(
     model_id: &str,
 ) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
     // 1. Try in-memory cache (may have fresher data from models.dev)
-    if let Ok(data) = fetch_models(cache).await {
-        if let Some(caps) = lookup_model_capabilities_from_data(&data, provider, model_id) {
-            return Some(caps);
-        }
+    if let Ok(data) = fetch_models(cache).await
+        && let Some(caps) = lookup_model_capabilities_from_data(&data, provider, model_id)
+    {
+        return Some(caps);
     }
     // 2. Fall back to offline data
     lookup_model_capabilities(provider, model_id)
@@ -437,10 +437,10 @@ fn lookup_model_capabilities_from_data(
     model_id: &str,
 ) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
     // 1. Try exact provider match first
-    if let Some((_, models)) = resolve_provider(data, provider) {
-        if let Some(model) = models.iter().find(|m| m.id == model_id) {
-            return model_to_capabilities(model);
-        }
+    if let Some((_, models)) = resolve_provider(data, provider)
+        && let Some(model) = models.iter().find(|m| m.id == model_id)
+    {
+        return model_to_capabilities(model);
     }
     // 2. Fallback: cross-provider search by model ID
     //    This handles cases like alibaba-cn proxying moonshotai/kimi-k2.6
@@ -454,7 +454,7 @@ fn cross_provider_lookup(
     model_id: &str,
 ) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
     let bare_id = if model_id.contains('/') {
-        model_id.split('/').last().unwrap_or(model_id)
+        model_id.split('/').next_back().unwrap_or(model_id)
     } else {
         model_id
     };

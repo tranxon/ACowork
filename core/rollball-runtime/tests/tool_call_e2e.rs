@@ -135,7 +135,7 @@ async fn test_tool_definition_parameters_serialization() {
     for tool in &tools {
         let spec = tool.spec();
         let serialized = serde_json::to_value(&spec)
-            .expect(&format!("Failed to serialize ToolSpec for '{}'", spec.name));
+            .unwrap_or_else(|_| panic!("Failed to serialize ToolSpec for '{}'", spec.name));
 
         // Must have "parameters" key (from #[serde(rename = "parameters")])
         assert!(
@@ -214,7 +214,7 @@ async fn test_tool_call_with_valid_json_arguments() {
 
     let provider = Arc::new(MockProvider::tool_call_then_text(
         "file_read",
-        &format!(r#"{{"path": "test.txt"}}"#),
+        r#"{"path": "test.txt"}"#,
         "I read the file successfully.",
     ));
 
@@ -226,7 +226,7 @@ async fn test_tool_call_with_valid_json_arguments() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Read the file test.txt", &context_builder).await;
@@ -268,7 +268,7 @@ async fn test_tool_call_with_invalid_json_arguments() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Read a file", &context_builder).await;
@@ -307,7 +307,7 @@ async fn test_tool_call_with_empty_arguments() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Read a file with no args", &context_builder).await;
@@ -909,7 +909,7 @@ async fn test_provider_error_does_not_crash_runtime() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Hello", &context_builder).await;
@@ -964,7 +964,7 @@ async fn test_multiple_concurrent_tool_calls() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Read both files", &context_builder).await;
@@ -1012,7 +1012,7 @@ async fn test_unknown_tool_returns_error_not_panic() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
     let context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
     let result = agent_loop.run("Use a nonexistent tool", &context_builder).await;
@@ -1153,7 +1153,7 @@ fn test_convert_tools_preserves_all_builtin_tools() {
     // Serialize each tool's spec
     let tool_jsons: Vec<Value> = tools
         .iter()
-        .map(|t| serde_json::to_value(&t.spec()).unwrap())
+        .map(|t| serde_json::to_value(t.spec()).unwrap())
         .collect();
 
     // Convert through the pipeline

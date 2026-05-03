@@ -13,10 +13,10 @@ use std::collections::HashMap;
 /// - Falls back to normalizing path separators (`\` → `/`).
 fn normalize_params(params: &str) -> String {
     // Try to normalize JSON
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(params) {
-        if let Ok(normalized) = serde_json::to_string(&json) {
-            return normalized;
-        }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(params)
+        && let Ok(normalized) = serde_json::to_string(&json)
+    {
+        return normalized;
     }
     // Fallback: normalize path separators
     params.replace('\\', "/")

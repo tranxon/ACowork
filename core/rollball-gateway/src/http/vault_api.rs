@@ -153,12 +153,12 @@ pub async fn add_key(
         return Err(ApiError::bad_request("key must not be empty"));
     }
     // Validate model capabilities if provided
-    if let Some(ref caps) = body.model_capabilities {
-        if caps.context_window == 0 && caps.max_output_tokens == 0 {
-            return Err(ApiError::bad_request(
-                "model_capabilities must have at least one of context_window or max_output_tokens > 0"
-            ));
-        }
+    if let Some(ref caps) = body.model_capabilities
+        && caps.context_window == 0 && caps.max_output_tokens == 0
+    {
+        return Err(ApiError::bad_request(
+            "model_capabilities must have at least one of context_window or max_output_tokens > 0"
+        ));
     }
 
     let mut gw = state.gateway_state.write().await;
@@ -222,12 +222,12 @@ pub async fn update_key(
     }
 
     // Validate model capabilities if provided
-    if let Some(ref caps) = body.model_capabilities {
-        if caps.context_window == 0 && caps.max_output_tokens == 0 {
-            return Err(ApiError::bad_request(
-                "model_capabilities must have at least one of context_window or max_output_tokens > 0"
-            ));
-        }
+    if let Some(ref caps) = body.model_capabilities
+        && caps.context_window == 0 && caps.max_output_tokens == 0
+    {
+        return Err(ApiError::bad_request(
+            "model_capabilities must have at least one of context_window or max_output_tokens > 0"
+        ));
     }
 
     let mut gw = state.gateway_state.write().await;

@@ -2,7 +2,7 @@
 
 > 版本：v1.1 | 更新日期：2026-04-28
 > 前置条件：Phase 4（M15~M19）全部完成
-> 预计周期：17~20 周
+> 预计周期：19~22 周
 > 预计里程碑：M20~M25
 
 ---
@@ -44,20 +44,20 @@
 
 | 阶段 | 主题 | 任务数 | 预期测试 | 预计周期 |
 |------|------|--------|---------|---------|
-| S1 | Desktop App 骨架 + 系统托盘 | 12 | 67 | 5 周 |
+| S1 | Desktop App 骨架 + 系统托盘 + 对话持久化 | 18 | 150 | 7 周 |
 | S2 | Debug Protocol 实现 | 9 | 58 | 4~5 周 |
 | S3 | 开发框架高级能力 | 8 | 48 | 3~4 周 |
 | S4 | 发布工具链 | 7 | 25 | 2 周 |
 | S5 | Phase 4 遗留技术债务 + 集成验证 | 10 | 50 | 3~4 周 |
-| **合计** | | **46** | **248** | **17~20 周** |
+| **合计** | | **52** | **331** | **19~22 周** |
 
 ---
 
-## S1：Desktop App 骨架 + 系统托盘（5 周，12 项任务）
+## S1：Desktop App 骨架 + 系统托盘 + 对话持久化（7 周，17 项任务）
 
-Desktop App 基础设施搭建，用户模式下的完整功能闭环。
+Desktop App 基础设施搭建 + 对话持久化与 Session 机制，用户模式下的完整功能闭环。
 
-**涉及 crate**：新增 `apps/rollball-desktop/`（Tauri 项目）
+**涉及 crate**：新增 `apps/rollball-desktop/`（Tauri 项目）、`rollball-runtime`（Session + Episode 提炼）、`rollball-gateway`（Session API + IPC 转发）、`rollball-memory`（record_distilled）、`rollball-grafeo`（Episode 写入）
 
 ### Wave A：项目初始化与 Gateway 通信（2 周，5 项）
 
@@ -88,7 +88,118 @@ Desktop App 基础设施搭建，用户模式下的完整功能闭环。
 
 > **前置依赖**：S1.10 依赖 Gateway HTTP API 扩展（需 `/api/agents/:id/memory/*` 路由支持）；S1.11 依赖 Skill Registry 已注册 Skill 的查询接口；S1.12 依赖 Phase 3 已实现的 Permission IPC 和 Approval Gate 后端逻辑。
 
-**里程碑 M20：Desktop App 用户模式可用** — 安装 Agent → 对话 → 查看结果 → 设置管理 → 记忆浏览 → Skill 查看 → Tool 审批
+### Wave D：对话持久化与 Session 机制（2 周，6 项）
+
+> 依赖设计文档：`15-conversation-persistence.md`
+
+| 任务 | 内容 | 预期测试 | 验收标准 |
+|------|------|---------|----------|
+| S1.13 Session 机制与 ConversationWriter（Runtime 层） | **Runtime 层新增**：<br>• 新增 `conversation.rs`：`ConversationSession` 结构体，Session 生命周期管理（Created → Active → Idle → Ended）<br>• Session ID 生成：`{timestamp}_{short_uuid}` 格式（timestamp=YYYYMMDD，short_uuid=UUID v4 前 32 bit）<br>• `ConversationWriter`：`mpsc::channel` 单写入者架构（主循环 + 工具线程 → Sender → Writer 线程独占文件句柄）<br>• JSONL 文件写入：首行固定写入 `SessionMetadata`（`_type="session_meta"`），后续行追加 `ConversationLine`<br>• `ConversationLine` 支持 role：user / assistant / think / tool_call / tool_result / system<br>• 每次写入后 `flush()`，确保崩溃恢复<br>• Runtime 启动时异步扫描 `conversations/` 目录构建 session 列表（`tokio::spawn`，立即创建/恢复当前 session 不阻塞） | 8 | Agent 启动能创建 session，对话消息正确写入 JSONL 文件（首行元数据 + 消息行格式正确） |
+| S1.14 Gateway Session API 与 IPC 转发 | **Gateway HTTP API**（新增/变更）：<br>• `GET /api/agents/{id}/conversations` — session 列表（IPC → Runtime 扫描首行元数据）<br>• `GET /api/agents/{id}/conversations/{session_id}/messages` — 分页加载消息（cursor + limit + direction）<br>• `POST /api/agents/{id}/conversations/new` — 创建新 session<br>• `GET /api/agents/{id}/conversations/latest` 变更：数据源从 Grafeo Episode 改为 IPC 转发 Runtime 读取 JSONL<br>• Gateway 不直接读取 JSONL 文件，所有 conversation API 通过 IPC 转发给 Runtime<br>• IPC 消息类型扩展：新增 `ConversationMessages` / `SessionList` 等请求/响应类型 | 6 | API 返回正确的 session 列表和分页消息，Gateway 不触碰 Agent 私有数据 |
+| S1.15 Desktop App Session 选择器 UI | **Desktop UI**：<br>• 聊天框 Memory 按钮改为 Session 按钮<br>• Session 列表面板：最上方 Memory 入口（进入 Grafeo 记忆面板），下方 session 列表（按时间倒序）<br>• 每个 session 显示：title、message_count、status、恢复按钮<br>• 选中 session 后分页加载聊天记录（初始 50 条，向上滚动触发 `loadMore(cursor, direction=backward)`）<br>• 新建 session 功能<br>• `chatStore.ts` 适配新消息格式（支持 think / tool_call / tool_result / system 角色）<br>• think 内容默认折叠，点击展开 | 5 | 能切换 session 查看历史聊天记录，向上滚动加载更多消息，think 块可折叠/展开 |
+| S1.16 Episode 提炼集成（上下文压缩触发 + Session 结束触发） | **Runtime 层新增**：<br>• 新增 `episode_distill.rs`：FIFO 裁剪时对被裁剪的历史消息做 LLM Episode 提炼（替代原每轮 `MemoryManager.record()`）<br>• Session 结束时对整个 session 做摘要 Episode 提炼<br>• 模型选择：从可用 LLM 列表中选 cost 最低的模型；无可用模型时降级为不提炼<br>• LLM 提炼输出结构化字段：summary / intent_type / decision / tool_summary / keywords<br>• Episode 写入 Grafeo（`consolidated=false`）<br>• `MemoryManager.record` → `record_distilled` 接口变更<br>• 提炼 offset 机制：记录已提炼到第几行，防止同一段对话被重复提炼 | 8 | 上下文压缩和 session 结束时能生成 Episode 节点，metadata 字段完整 |
+| S1.17 Agent 打包对话数据隔离 | **PackageManager 打包扩展**：<br>• 打包时展示数据选择 checklist UI<br>• 默认勾选：manifest、prompts、skills、KnowledgeNode(Public)、ProceduralNode、AutobiographicalNode<br>• 默认不勾选：`conversations/`（JSONL 对话文件）、Episode、KnowledgeNode(Private)<br>• 始终排除：`memory/`（Grafeo 原始文件）、`workspace/`、`runtime/`、`*.log`、`*.tmp`<br>• 用户可手动调整，私有数据项旁提示 ⚠️ 隐私风险<br>• Grafeo 节点按类型过滤导出（非 raw DB 文件），仅打包两端节点均被选中的边<br>• 勾选含隐私数据的项后打包前弹出二次确认 | 6 | 打包产物按用户选择正确包含/排除数据，默认排除隐私项 |
+| S1.18 端到端集成测试 | **覆盖 Wave D 全功能点的集成测试**（50 个用例，8 个模块分组）：<br>• A. Session 机制测试（6 项）：首次启动创建、重启恢复、重复创建防护、ID 格式验证、异步扫描性能、Session 结束元数据更新<br>• B. JSONL 写入测试（9 项）：user/assistant/tool_call/tool_result/think 写入、并发顺序、超长消息、损坏恢复、崩溃恢复<br>• C. Gateway Session API 测试（7 项）：session 列表、分页加载（首次/翻页/前向）、空 session、404、IPC 转发验证<br>• D. Desktop Session 选择器 UI 测试（7 项）：按钮展开、Memory 入口、session 切换刷新、新建切换、滚动加载、渐进加载<br>• E. Episode 提炼测试（8 项）：上下文压缩触发、Session 结束触发、cost 最低模型选择、降级不提炼、语义摘要、source_session_id、offset 去重、consolidated 标记<br>• F. Agent 打包数据隔离测试（5 项）：默认包含/排除验证、手动勾选、UI 大小和隐私提示、安装后隔离验证<br>• G. 端到端全链路测试（3 项）：完整对话链路、长对话压缩链路、多 Agent 隔离<br>• H. 边界情况与异常测试（5 项）：目录自动创建、只读权限、磁盘不足、特殊字符、并发安全<br>详见下方 S1.18 详细测试用例 | 50 | 全部 50 个测试用例通过，覆盖 Wave D 所有功能点 |
+
+#### S1.18 端到端集成测试（详细用例）
+
+**覆盖范围**：Wave D（S1.13~S1.17）全部功能点的端到端集成验证，共 50 个测试用例，按 8 个模块分组。
+
+预期测试数：50
+
+##### A. Session 机制测试（6 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T1 | Agent 首次启动自动创建 session | Agent 已安装，conversations/ 目录为空 | 1. 启动 Agent Runtime<br>2. 发送第一条用户消息 | 1. conversations/ 目录下生成 `{timestamp}_{short_uuid}.jsonl` 文件<br>2. JSONL 文件第一行为 SessionMetadata，`_type="session_meta"`，`status="active"`<br>3. session_id 格式为 `{YYYYMMDD}_{8位hex}` |
+| T2 | Agent 重启后恢复最新 session | Agent 有一个 status=active 的 session | 1. 停止 Agent Runtime<br>2. 重新启动 Agent Runtime<br>3. 检查当前 session | 1. 不创建新 session<br>2. 恢复原有的 active session<br>3. JSONL 文件首行元数据 status 仍为 "active" |
+| T3 | 多次启动停止后 session 文件不重复创建 | Agent 已有 session 文件 | 1. 启动 Agent<br>2. 停止 Agent<br>3. 再次启动 Agent<br>4. 重复 3 次<br>5. 检查 conversations/ 目录 | 1. 目录下仍只有 1 个 session JSONL 文件<br>2. 未产生多余或重复的 session 文件 |
+| T4 | Session ID 格式验证 | 无 | 1. 创建多个 session<br>2. 检查文件名和首行 session_id 字段 | 1. 格式为 `{YYYYMMDD}_{8位hex}`<br>2. 同一天创建的不同 session，timestamp 相同但 short_uuid 不同<br>3. 按文件名字典序排列即为时间倒序 |
+| T5 | 异步扫描 conversations 目录性能 | conversations/ 目录下有 100+ 个 JSONL 文件 | 1. 启动 Agent Runtime<br>2. 测量从启动到可接收消息的耗时<br>3. 测量后台扫描完成时间 | 1. Agent 启动不阻塞（可立即对话）<br>2. 启动耗时与 session 数量无关<br>3. 后台扫描完成后 session 列表可用 |
+| T6 | Session 结束后元数据正确更新 | Agent 有一个 active session | 1. 调用 session end 操作（超时/主动关闭）<br>2. 读取 JSONL 文件首行 | 1. 首行 `status` 更新为 "ended"<br>2. 首行 `ended_at` 字段非空，为 ISO 8601 时间戳<br>3. `message_count` 与实际消息行数一致 |
+
+##### B. JSONL 写入测试（9 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T7 | 用户消息正确写入 | Agent 有 active session | 1. 发送用户消息 "帮我分析项目"<br>2. 读取 JSONL 文件 | 1. 文件末尾新增一行<br>2. `role="user"`，`content="帮我分析项目"`<br>3. `id` 为 UUID v4，`ts` 为 ISO 8601 毫秒精度 |
+| T8 | Assistant 响应正确写入 | Agent 有 active session，已发送用户消息 | 1. 等待 LLM 返回完整响应<br>2. 读取 JSONL 文件 | 1. 新增 `role="assistant"` 行<br>2. `content` 包含完整 markdown 文本<br>3. `metadata` 含 `model`、`provider`、`token_count`、`duration_ms` |
+| T9 | Tool call 正确写入 | Agent 有 active session，LLM 返回 tool_calls | 1. LLM 返回含 tool_call 的响应<br>2. 读取 JSONL 文件 | 1. 每个 tool_call 写入独立行，`role="tool_call"`<br>2. `metadata` 含 `tool_name` 和 `tool_call_id`<br>3. `content` 为工具参数 JSON 字符串 |
+| T10 | Tool result 正确写入 | tool_call 行已写入 | 1. 工具执行完成<br>2. 读取 JSONL 文件 | 1. 新增 `role="tool_result"` 行<br>2. `metadata.tool_call_id` 与对应 tool_call 行一致<br>3. `metadata` 含 `tool_name`、`success`、`duration_ms` |
+| T11 | Think 内容正确写入 | LLM 返回含 `antha` 标签的响应 | 1. LLM 返回 think + 正文<br>2. 读取 JSONL 文件 | 1. 先写入 `role="think"` 行（think 标签内容）<br>2. 后写入 `role="assistant"` 行（正文内容）<br>3. think 行 `metadata` 含 `model` 字段 |
+| T12 | 并发工具执行时消息顺序正确 | Agent 调用多个并行工具 | 1. 触发并行工具执行（如同时读 3 个文件）<br>2. 读取 JSONL 文件 | 1. 所有 tool_call 行先于所有 tool_result 行<br>2. 消息行无交错或截断<br>3. Channel 单写入者保证顺序性 |
+| T13 | 超长消息正确写入不截断 | Agent 有 active session | 1. 发送 >100KB 的用户消息<br>2. 接收 LLM >100KB 的响应<br>3. 读取 JSONL 文件 | 1. 用户消息完整写入，无截断<br>2. Assistant 响应完整写入，无截断<br>3. 两行 JSON 均可正确解析 |
+| T14 | JSONL 文件损坏恢复 | Agent 有含多行消息的 JSONL 文件 | 1. 手动修改 JSONL 文件中间某行使其 JSON 无效<br>2. 调用 read_jsonl 读取文件 | 1. 损坏行被跳过，记录警告日志<br>2. 损坏行前后的消息正常读取<br>3. 返回的消息列表按正确顺序排列 |
+| T15 | 进程崩溃后 JSONL 文件完整可读 | Agent 有 active session，已写入多条消息 | 1. 写入若干消息<br>2. 模拟进程崩溃（kill 进程）<br>3. 重新启动后读取 JSONL 文件 | 1. 已写入的消息行完整可读<br>2. 最多丢失崩溃时正在写入的一行<br>3. 文件其余部分不受影响 |
+
+##### C. Gateway Session API 测试（7 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T16 | GET /sessions 返回正确列表 | Agent 有 3+ 个 session（含 active 和 ended） | 1. 调用 `GET /api/agents/{id}/conversations`<br>2. 检查响应 | 1. 返回 200<br>2. sessions 列表按时间倒序排列<br>3. 每个 session 含 session_id、title、message_count、status 字段 |
+| T17 | 分页加载：首次加载最新 50 条 | Agent 有 60+ 条消息的 session | 1. 调用 `GET /api/agents/{id}/conversations/{sid}/messages`（无 cursor）<br>2. 检查响应 | 1. 返回最新 50 条消息<br>2. `has_more=true`<br>3. `cursor` 为最早一条消息的 ID |
+| T18 | 分页加载：cursor 向上翻页 | 已执行 T17，有 cursor 值 | 1. 用 T17 返回的 cursor 调用 `direction=backward`<br>2. 检查响应 | 1. 返回更早的消息<br>2. `has_more` 根据剩余消息量正确设置<br>3. 无重复消息 |
+| T19 | 分页加载：direction=forward | 已知某条消息 ID | 1. 用 cursor 和 `direction=forward` 请求<br>2. 检查响应 | 1. 返回比 cursor 更新的消息<br>2. 消息按时间正序排列 |
+| T20 | 空 session 返回空列表 | 创建新 session，未发送任何消息 | 1. 调用 `GET /api/agents/{id}/conversations/{sid}/messages` | 1. 返回 200<br>2. `messages=[]`<br>3. `has_more=false` |
+| T21 | 不存在的 session_id 返回 404 | 无 | 1. 调用 `GET /api/agents/{id}/conversations/nonexistent_id/messages` | 1. 返回 404<br>2. 错误信息包含 "Session not found" |
+| T22 | IPC 转发验证 | Agent Runtime 正在运行 | 1. 调用 conversation API<br>2. 检查 Gateway 不直接读 JSONL 文件<br>3. 确认请求通过 IPC 转发 | 1. Gateway 日志显示 IPC 请求转发<br>2. 无直接文件 I/O 操作<br>3. Runtime 日志显示收到 IPC 请求并返回数据 |
+
+##### D. Desktop Session 选择器 UI 测试（7 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T23 | Session 按钮点击展开列表 | Desktop App 已连接 Agent | 1. 点击聊天框 Session 按钮 | 1. Session 列表面板展开<br>2. 面板包含 session 列表 |
+| T24 | Session 列表最上方显示 Memory 入口 | Session 列表面板已展开 | 1. 查看面板顶部 | 1. 最上方有 Memory 入口行<br>2. 显示 "Memory" 或图标<br>3. 右侧有进入箭头 |
+| T25 | 点击 Memory 入口进入 Grafeo 记忆面板 | Session 列表面板已展开 | 1. 点击 Memory 入口 | 1. 切换到 Grafeo 记忆面板<br>2. 显示记忆节点列表（Knowledge/Episodic/Procedural） |
+| T26 | 选中不同 session 后聊天记录刷新 | Agent 有 2+ 个 session | 1. 在 Session 列表中点击另一个 session<br>2. 等待加载完成 | 1. 聊天面板清空并加载新 session 的消息<br>2. 消息内容与 JSONL 文件一致 |
+| T27 | 新建 session 后自动切换 | Agent 有一个 active session | 1. 点击"新建对话"<br>2. 等待创建完成 | 1. 自动切换到新 session<br>2. 旧 session 状态变为 "ended"<br>3. 聊天面板清空，显示空对话 |
+| T28 | 向上滚动触发加载更多 | 当前 session 消息数 > 50 | 1. 滚动到聊天面板顶部<br>2. 触发 loadMore | 1. 加载更早的消息<br>2. 消息追加到列表顶部<br>3. 加载指示器显示后消失 |
+| T29 | Session 列表渐进加载 | Agent 有 100+ 个 session | 1. 启动 Desktop App<br>2. 立即查看 Session 列表<br>3. 等待后台扫描完成 | 1. 启动时仅显示当前 session<br>2. 后台扫描完成后列表逐步填充<br>3. 不阻塞 Agent 对话 |
+
+##### E. Episode 提炼测试（8 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T30 | 上下文压缩触发时生成 Episode | Agent 配置了较小的 context window，对话即将触发 FIFO 裁剪 | 1. 持续对话直到触发上下文压缩<br>2. 检查 Grafeo 中新增的 Episode | 1. 新增 Episode 节点<br>2. `consolidated=false`<br>3. `metadata.session_scope="trimmed"` |
+| T31 | Session 结束时生成 Session 级 Episode | Agent 有含多轮对话的 session | 1. 结束当前 session<br>2. 检查 Grafeo 中新增的 Episode | 1. 新增 Episode 节点<br>2. `metadata.session_scope="full_session"`<br>3. 内容为全局摘要（核心主题 + 关键决策 + 工具统计） |
+| T32 | Episode 使用 cost 最低的可用模型提炼 | Agent 配置了多个 LLM 模型，cost 不同 | 1. 触发 Episode 提炼<br>2. 检查 LLM 调用日志 | 1. 提炼调用使用 cost 值最低的模型<br>2. 非 Agent 默认对话模型（除非它也是最便宜的） |
+| T33 | 所有模型不可用时降级不提炼 | 断开所有 LLM 连接或耗尽配额 | 1. 触发上下文压缩<br>2. 检查 Grafeo 和错误日志 | 1. 不抛出错误或 panic<br>2. Grafeo 无新增 Episode<br>3. 日志记录降级信息，等下次触发重试 |
+| T34 | Episode 内容为 LLM 语义摘要 | Episode 已生成 | 1. 读取 Grafeo 中 Episode 节点<br>2. 对比原始 JSONL 对话 | 1. Episode.content 长度远小于原始对话（100~300 字符 vs 数千字符）<br>2. 内容包含 summary/intent_type/decision/tool_summary/keywords 结构化字段<br>3. 非原始对话逐字复制 |
+| T35 | Episode metadata 包含 source_session_id | Episode 已生成 | 1. 读取 Episode.metadata | 1. `source_session_id` 字段非空<br>2. 值与生成该 Episode 的 session_id 一致<br>3. 可通过此字段溯源到原始 JSONL 文件 |
+| T36 | 重复提炼防护：offset 机制 | 已执行过一次 FIFO 裁剪提炼 | 1. 再次触发上下文压缩<br>2. 检查提炼 offset 和新 Episode 内容 | 1. 新提炼从 offset 位置开始，不重复处理已提炼的消息<br>2. 新 Episode 内容不与之前的 Episode 重复 |
+| T37 | consolidated 标记正确 | 已生成 Episode | 1. 检查新生成 Episode 的 consolidated 字段<br>2. 模拟离线巩固处理<br>3. 再次检查 | 1. 新 Episode `consolidated=false`<br>2. 巩固处理后 `consolidated=true`<br>3. 已巩固的 Episode 不会被重复处理 |
+
+##### F. Agent 打包数据隔离测试（5 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T38 | 默认打包包含正确项 | Agent 有完整数据（conversations、Grafeo 节点等） | 1. 使用默认选项（PackageOptions::default）打包<br>2. 解压 .agent 文件检查内容 | 1. 包含 manifest.toml、prompts/、skills/<br>2. 包含 KnowledgeNode(Public)、ProceduralNode、AutobiographicalNode<br>3. 不包含 conversations/、Episode、KnowledgeNode(Private) |
+| T39 | 默认打包排除隐私项 | 同 T38 | 1. 使用默认选项打包<br>2. 检查 .agent 文件 | 1. 不包含 conversations/ 目录<br>2. 不包含 Episode 节点<br>3. 不包含 KnowledgeNode(Private) 节点<br>4. 不包含 memory/、workspace/、runtime/、*.log、*.tmp |
+| T40 | 用户手动勾选私有数据后正确包含 | 同 T38 | 1. 设置 `include_conversations=true`、`include_episodes=true`、`include_private_knowledge=true`<br>2. 打包并解压检查 | 1. 包含 conversations/ 目录下的 JSONL 文件<br>2. 包含 Episode 节点<br>3. 包含 KnowledgeNode(Private) 节点 |
+| T41 | 打包 UI 显示大小和隐私提示 | Desktop App 已打开，Agent 有数据 | 1. 打开打包 checklist UI<br>2. 检查各项显示 | 1. 每项数据旁显示大小<br>2. 隐私项旁显示 ⚠️ 提示<br>3. 勾选隐私项后弹出二次确认 |
+| T42 | 打包产物安装后隔离验证 | 已生成 .agent 包（含/不含 conversations） | 1. 安装 .agent 包到新环境<br>2. 检查目录结构 | 1. conversations/ 目录为空（默认打包）<br>2. Grafeo 仅包含勾选类型的节点<br>3. 无 memory/ 原始文件、无 workspace/、无 *.log |
+
+##### G. 端到端全链路测试（3 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T43 | 完整对话链路 | Desktop App + Gateway + Agent Runtime 均已启动 | 1. 发送消息 "你好"<br>2. 等待 Agent 响应<br>3. 切换到其他 Agent<br>4. 切回原 Agent<br>5. 通过 Session API 加载历史 | 1. JSONL 文件包含 user 和 assistant 行<br>2. 切回后聊天记录完整恢复<br>3. 消息内容与发送时完全一致 |
+| T44 | 长对话链路 | 同 T43 | 1. 发送 50+ 轮对话<br>2. 观察上下文压缩触发<br>3. 检查 Grafeo 和 JSONL 文件 | 1. 上下文压缩自动触发<br>2. Grafeo 新增 Episode（consolidated=false）<br>3. JSONL 文件包含全部 50+ 轮对话消息<br>4. Episode 内容为语义摘要而非原文 |
+| T45 | 多 Agent 隔离 | 两个 Agent（A 和 B）均已安装并运行 | 1. 在 Agent A 中对话<br>2. 在 Agent B 中对话<br>3. 检查 Agent A 的 session/JSONL/Episode<br>4. 检查 Agent B 的 session/JSONL/Episode | 1. Agent A 的 session 列表不含 Agent B 的 session<br>2. Agent A 的 JSONL 文件不含 Agent B 的消息<br>3. Agent A 的 Grafeo 不含 Agent B 的 Episode<br>4. 反之亦然 |
+
+##### H. 边界情况与异常测试（5 项）
+
+| 编号 | 测试用例 | 前置条件 | 操作步骤 | 预期结果 |
+|------|---------|---------|---------|----------|
+| T46 | conversations 目录不存在时自动创建 | 首次安装 Agent，workspace 下无 conversations/ | 1. 启动 Agent Runtime<br>2. 检查 workspace 目录 | 1. conversations/ 目录自动创建<br>2. 新 session JSONL 文件正确生成<br>3. 无错误或 panic |
+| T47 | JSONL 文件权限只读 | Agent 有 active session | 1. 将 JSONL 文件设为只读<br>2. 发送新消息 | 1. 写入失败记录错误日志<br>2. Agent 主循环不崩溃<br>3. 对话功能降级但不断线 |
+| T48 | 磁盘空间不足 | Agent 有 active session | 1. 模拟磁盘满<br>2. 发送新消息触发写入 | 1. 写入失败记录错误日志<br>2. 不产生部分写入的损坏行<br>3. Agent 不崩溃，可优雅降级 |
+| T49 | 极长 session_id 或特殊字符处理 | 无 | 1. 手动在 conversations/ 目录创建含特殊字符的 .jsonl 文件<br>2. 触发目录扫描 | 1. 扫描跳过无效文件名，记录警告<br>2. 不影响正常 session 的读取和列表 |
+| T50 | 多客户端并发连接安全 | Agent Runtime 正在运行 | 1. 从两个 Desktop 客户端同时连接同一 Agent<br>2. 同时发送消息 | 1. Channel 单写入者保证 JSONL 文件写入无竞争<br>2. 消息行无交错<br>3. 无数据丢失或重复 |
+
+> **前置依赖**：S1.13 依赖 `15-conversation-persistence.md` 设计文档；S1.14 依赖 S1.13（Runtime Session 机制就绪）；S1.15 依赖 S1.14（Gateway Session API 就绪）；S1.16 依赖 S1.13（ConversationSession 就绪）和 Grafeo Episode 写入接口；S1.17 依赖 S4.3 打包 API 和 Grafeo 节点查询接口；S1.18 依赖 S1.13~S1.17 全部完成（集成测试需所有功能点实现后验证）。
+
+**里程碑 M20：Desktop App 用户模式可用** — 安装 Agent → 对话 → 查看结果 → 设置管理 → 记忆浏览 → Skill 查看 → Tool 审批 → Session 切换 → 对话持久化 → Episode 提炼
 
 ---
 

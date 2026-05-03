@@ -207,13 +207,13 @@ mod windows_client {
             _ => {
                 // Windows named pipe errors often come as raw OS error codes.
                 // Check for ERROR_PIPE_BUSY (231 = 0xE7) specifically.
-                if let Some(raw_os) = e.raw_os_error() {
-                    if raw_os == 231 {
-                        return RollballError::Ipc(format!(
-                            "Named Pipe '{}' is busy — all pipe instances are in use",
-                            pipe_name
-                        ));
-                    }
+                if let Some(raw_os) = e.raw_os_error()
+                    && raw_os == 231
+                {
+                    return RollballError::Ipc(format!(
+                        "Named Pipe '{}' is busy — all pipe instances are in use",
+                        pipe_name
+                    ));
                 }
                 RollballError::Ipc(format!(
                     "Failed to connect to Named Pipe '{}': {}",

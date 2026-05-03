@@ -25,6 +25,7 @@ use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_detector::{LoopDetectionResult, LoopDetector, ResponseLevel};
 use crate::config::RuntimeConfig;
+use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
 
 /// Streaming chunk event emitted during LLM response generation.
@@ -109,6 +110,8 @@ pub struct AgentLoop {
     /// When a model's max_output_tokens exceeds this value, the value is capped.
     /// Default: 32768 (32K). Set to 0 to disable the limit.
     max_output_tokens_limit: u64,
+    /// Optional conversation session for JSONL persistence.
+    conversation: Option<ConversationSession>,
 }
 
 impl AgentLoop {
@@ -123,6 +126,7 @@ impl AgentLoop {
     ///
     /// If `on_tool_event` is provided, tool execution events (ToolCall/ToolResult)
     /// are forwarded to it so the caller can relay them to the Gateway via IPC.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RuntimeConfig,
         manifest: rollball_core::AgentManifest,
@@ -131,6 +135,7 @@ impl AgentLoop {
         budget: rollball_core::Budget,
         on_chunk: Option<mpsc::Sender<ChunkEvent>>,
         on_tool_event: Option<mpsc::Sender<ToolEvent>>,
+        conversation: Option<ConversationSession>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
         let max_tokens = config.history_max_tokens;
@@ -148,6 +153,7 @@ impl AgentLoop {
             on_tool_event,
             gateway_model_capabilities: HashMap::new(),
             max_output_tokens_limit: 32_768,
+            conversation,
         };
         (loop_, inbound_tx)
     }
@@ -193,13 +199,21 @@ impl AgentLoop {
         self.max_output_tokens_limit = limit;
     }
 
+    /// Get the current conversation session ID (S1.14)
+    ///
+    /// Returns the session ID of the active ConversationSession,
+    /// or None if no session is active.
+    pub fn current_session_id(&self) -> Option<&str> {
+        self.conversation.as_ref().map(|c| c.session_id())
+    }
+
     /// Look up model capabilities by model name.
     /// Falls back to the first entry if the model name is not found.
     fn get_model_capabilities(&self, model_name: Option<&str>) -> Option<&ModelCapabilitiesInfo> {
-        if let Some(name) = model_name {
-            if let Some(caps) = self.gateway_model_capabilities.get(name) {
-                return Some(caps);
-            }
+        if let Some(name) = model_name
+            && let Some(caps) = self.gateway_model_capabilities.get(name)
+        {
+            return Some(caps);
         }
         // Fallback: return any available capabilities
         self.gateway_model_capabilities.values().next()
@@ -221,13 +235,145 @@ impl AgentLoop {
 
     /// Trim history to fit within the context window budget.
     /// Reserves 20% of the budget for new response + overhead.
+    ///
+    /// When messages are evicted, they are captured and asynchronously
+    /// distilled into a `DistilledEpisode` via `EpisodeDistiller`, so that
+    /// the semantic content is preserved in Grafeo even after the messages
+    /// are removed from the context window.
     fn trim_history_to_budget(&mut self) {
         let budget = self.context_trim_budget();
         // Reserve 20% of context window for new response + overhead
         let trim_budget = (budget as f64 * 0.8) as u64;
-        self.history.preemptive_trim(trim_budget);
+        let trimmed_messages = self.history.preemptive_trim_drain(trim_budget);
+
+        // Spawn async distillation for evicted messages (best-effort, non-blocking)
+        if !trimmed_messages.is_empty() {
+            self.spawn_trim_distillation(trimmed_messages);
+        }
+
         // Also truncate any single message that exceeds per-message limit
         self.history.truncate_large_messages(trim_budget / 4);
+    }
+
+    /// Spawn an asynchronous episode distillation task for trimmed messages.
+    ///
+    /// The task runs in the background and writes the distilled episode
+    /// to Grafeo. Failures are logged but never panic or block the main loop.
+    fn spawn_trim_distillation(&self, trimmed_messages: Vec<ChatMessage>) {
+        let session_id = self
+            .conversation
+            .as_ref()
+            .map(|c| c.session_id().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let provider = self.provider.clone();
+        let model_name = self
+            .gateway_model_capabilities
+            .values()
+            .min_by(|a, b| {
+                let cost_a = crate::episode_distill::model_cost_score(a);
+                let cost_b = crate::episode_distill::model_cost_score(b);
+                cost_a
+                    .partial_cmp(&cost_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .and_then(|m| m.name.clone())
+            .unwrap_or_else(|| "default".to_string());
+
+        let msg_count = trimmed_messages.len();
+        tracing::info!(
+            msg_count,
+            session_id = %session_id,
+            model = %model_name,
+            "Spawning episode distillation for trimmed messages"
+        );
+
+        tokio::spawn(async move {
+            match crate::episode_distill::EpisodeDistiller::distill_on_trim(
+                &trimmed_messages,
+                &session_id,
+                provider.as_ref(),
+                &model_name,
+            )
+            .await
+            {
+                Ok(episode) => {
+                    tracing::info!(
+                        summary = %episode.summary,
+                        importance = episode.importance,
+                        "Episode distillation completed for trimmed messages"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Episode distillation failed for trimmed messages (non-fatal)"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Close the conversation session and trigger session-level distillation.
+    ///
+    /// This method:
+    /// 1. Spawns an async distillation task for the entire session
+    /// 2. Closes the conversation writer
+    ///
+    /// Distillation is best-effort and non-blocking.
+    pub async fn close_session_with_distillation(&mut self) -> Result<()> {
+        if let Some(ref conversation) = self.conversation {
+            let session_id = conversation.session_id().to_string();
+            let session_path = conversation.session_path().to_path_buf();
+            let provider = self.provider.clone();
+            let model_name = self
+                .gateway_model_capabilities
+                .values()
+                .min_by(|a, b| {
+                    let cost_a = crate::episode_distill::model_cost_score(a);
+                    let cost_b = crate::episode_distill::model_cost_score(b);
+                    cost_a
+                        .partial_cmp(&cost_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .and_then(|m| m.name.clone())
+                .unwrap_or_else(|| "default".to_string());
+
+            tracing::info!(
+                session_id = %session_id,
+                model = %model_name,
+                "Spawning session-level episode distillation"
+            );
+
+            // Spawn session-level distillation (best-effort, non-blocking)
+            tokio::spawn(async move {
+                match crate::episode_distill::EpisodeDistiller::distill_on_session_end(
+                    &session_path,
+                    &session_id,
+                    provider.as_ref(),
+                    &model_name,
+                )
+                .await
+                {
+                    Ok(episode) => {
+                        tracing::info!(
+                            summary = %episode.summary,
+                            importance = episode.importance,
+                            "Session-level episode distillation completed"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Session-level episode distillation failed (non-fatal)"
+                        );
+                    }
+                }
+            });
+
+            // Close the conversation writer
+            conversation.close().await?;
+        }
+        Ok(())
     }
 
     /// Run the agent loop for a single user message
@@ -240,6 +386,11 @@ impl AgentLoop {
             tool_call_id: None,
             tool_calls: None,
         });
+
+        // Persist user message to JSONL
+        if let Some(ref conversation) = self.conversation {
+            conversation.append_message("user", user_message, None);
+        }
 
         let mut iteration = 0u32;
 
@@ -401,6 +552,16 @@ impl AgentLoop {
             if !has_tool_calls {
                 // Pure text response — normal exit
                 let content = response.content.clone();
+
+                // Persist think block (if present) and assistant response to JSONL
+                if let Some(ref conversation) = self.conversation {
+                    if let Some(think_content) = extract_think_block(&content) {
+                        conversation.append_message("think", &think_content, None);
+                    }
+                    let assistant_text = strip_think_block(&content);
+                    conversation.append_message("assistant", &assistant_text, None);
+                }
+
                 self.history.append(ChatMessage {
                     role: MessageRole::Assistant,
                     content: response.content,
@@ -426,6 +587,13 @@ impl AgentLoop {
                 })
                 .collect();
 
+            // Persist think block (if present) to JSONL
+            if let Some(ref conversation) = self.conversation
+                && let Some(think_content) = extract_think_block(&response.content)
+            {
+                conversation.append_message("think", &think_content, None);
+            }
+
             // Add assistant message with tool_calls to history
             self.history.append(ChatMessage {
                 role: MessageRole::Assistant,
@@ -434,6 +602,17 @@ impl AgentLoop {
                 tool_call_id: None,
                 tool_calls: Some(deduped_calls.clone()),
             });
+
+            // Persist tool calls to JSONL
+            if let Some(ref conversation) = self.conversation {
+                for tc in &deduped_calls {
+                    let metadata = serde_json::json!({
+                        "tool_name": tc.function.name,
+                        "tool_call_id": tc.id,
+                    });
+                    conversation.append_message("tool_call", &tc.function.arguments, Some(metadata));
+                }
+            }
 
             // Emit ToolCall events before execution
             if let Some(ref tx) = self.on_tool_event {
@@ -488,6 +667,17 @@ impl AgentLoop {
                     tool_results.push(blocked_msg.to_string());
                 } else {
                     tool_results.push(executed_iter.next().unwrap_or_default());
+                }
+            }
+
+            // Persist tool results to JSONL
+            if let Some(ref conversation) = self.conversation {
+                for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
+                    let metadata = serde_json::json!({
+                        "tool_name": tc.function.name,
+                        "tool_call_id": tc.id,
+                    });
+                    conversation.append_message("tool_result", result_content, Some(metadata));
                 }
             }
 
@@ -745,15 +935,15 @@ impl AgentLoop {
         // Post-stream: Apply accumulated argument chunks to tool calls
         // This handles the case where the OpenAI SSE stream ends without
         // a Finished event (common with OpenAI-compatible APIs like MiniMax).
-        if tool_calls.is_some() && !tool_call_args_buffer.is_empty() {
-            if let Some(ref mut tcs) = tool_calls {
-                for (i, tc) in tcs.iter_mut().enumerate() {
-                    if let Some(args) = tool_call_args_buffer.get(&(i as u64)) {
-                        if tc.function.arguments.is_empty() || tc.function.arguments == "{}" {
-                            tracing::info!(tool_name = %tc.function.name, index = i, accumulated_len = args.len(), "Applying accumulated arguments to tool call");
-                            tc.function.arguments = args.clone();
-                        }
-                    }
+        if tool_calls.is_some() && !tool_call_args_buffer.is_empty()
+            && let Some(ref mut tcs) = tool_calls
+        {
+            for (i, tc) in tcs.iter_mut().enumerate() {
+                if let Some(args) = tool_call_args_buffer.get(&(i as u64))
+                    && (tc.function.arguments.is_empty() || tc.function.arguments == "{}")
+                {
+                    tracing::info!(tool_name = %tc.function.name, index = i, accumulated_len = args.len(), "Applying accumulated arguments to tool call");
+                    tc.function.arguments = args.clone();
                 }
             }
         }
@@ -930,6 +1120,32 @@ impl AgentLoop {
     }
 }
 
+/// Extract content inside `<think>...</think>` tags if present.
+fn extract_think_block(content: &str) -> Option<String> {
+    let start_tag = "<think>";
+    let end_tag = "</think>";
+    let start = content.find(start_tag)?;
+    let end = content.find(end_tag)?;
+    if end <= start + start_tag.len() {
+        return None;
+    }
+    Some(content[start + start_tag.len()..end].trim().to_string())
+}
+
+/// Remove `<think>...</think>` block from content, returning the remaining text.
+fn strip_think_block(content: &str) -> String {
+    let start_tag = "<think>";
+    let end_tag = "</think>";
+    if let Some(start) = content.find(start_tag)
+        && let Some(end) = content.find(end_tag)
+    {
+        let before = &content[..start];
+        let after = &content[end + end_tag.len()..];
+        return format!("{}{}", before.trim(), after.trim()).trim().to_string();
+    }
+    content.to_string()
+}
+
 /// Execute a single tool call against the tool registry.
 ///
 /// Returns the result content string (success or error message).
@@ -1047,7 +1263,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("ok"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         // Verify inbound sender works
         assert!(_inbound_tx.try_send(InboundMessage::UserMessage("test".to_string())).is_ok());
     }
@@ -1059,7 +1275,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("ok"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         // Just verify construction works
         assert!(_inbound_tx.try_send(InboundMessage::UserMessage("test".to_string())).is_ok());
     }
@@ -1071,7 +1287,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("Hello from standalone!"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -1089,7 +1305,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("Accumulated content here"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -1107,7 +1323,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -1121,7 +1337,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -1141,7 +1357,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_err());
@@ -1163,7 +1379,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -1177,7 +1393,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &context_builder).await;
         assert!(result.is_ok());
@@ -1192,7 +1408,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
         let _ = agent_loop.run("Hi", &context_builder).await;
         let messages = agent_loop.history().messages();
@@ -1211,7 +1427,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
         let _ = agent_loop.run("Hi", &context_builder).await;
         // Budget guard should have been updated with usage from the stream
@@ -1228,7 +1444,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // Inject a user message before running
@@ -1251,7 +1467,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         inbound_tx.try_send(InboundMessage::SystemNotification {
@@ -1275,7 +1491,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         inbound_tx.try_send(InboundMessage::IntentMessage {
@@ -1300,7 +1516,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // Inject 10 messages concurrently
@@ -1324,7 +1540,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
 
         // Fill the channel (capacity 64)
         for i in 0..64 {
@@ -1344,7 +1560,7 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // Run without any inbound messages — drain should return immediately
@@ -1442,7 +1658,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -1555,7 +1771,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop.run("Test failure", &context_builder).await;
@@ -1616,7 +1832,7 @@ mod tests {
 
         let config = RuntimeConfig { iteration_timeout_ms: 100, ..Default::default() }; // 100ms timeout
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -1668,7 +1884,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         // The tool call will fail because shell is not in the tool registry
@@ -1773,7 +1989,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop.run("Run ordered", &context_builder).await;
@@ -1905,7 +2121,7 @@ mod tests {
             ..Default::default()
         };
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -1993,7 +2209,7 @@ mod tests {
             ..Default::default()
         };
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
@@ -2097,7 +2313,7 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
         let context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop.run("Test partial permission", &context_builder).await;

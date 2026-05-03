@@ -2,35 +2,41 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useSessionStore } from "../../stores/sessionStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
-import { toolbarButton, toolbarButtonActive, inputBase, inputMono, selectBase, dialogButtonPrimary, dialogButtonSecondary, testResultBase, testResultSuccess, testResultError } from "../../lib/ui-styles";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy, FileText, Terminal, Plus, RefreshCw, Layers, Cpu } from "lucide-react";
+import { toolbarButton, toolbarButtonActive } from "../../lib/ui-styles";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, X, Square, Copy, FileText, Terminal, Plus, RefreshCw, Layers, Cpu, MessageSquare, Loader } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContextUsageInfo, VaultKeyEntry, ModelInfo } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { MemoryPanel } from "../memory/MemoryPanel";
+import { SessionPanel } from "./SessionPanel";
 import { SkillBrowser } from "../skills/SkillBrowser";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory, iterationLimitPaused, continueExecution, contextUsage } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage } = useChatStore();
+  const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
-  const [activeDrawer, setActiveDrawer] = useState<"memory" | "skills" | null>(null);
+  const [activeDrawer, setActiveDrawer] = useState<"memory" | "skills" | "session" | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const prevScrollHeightRef = useRef<number>(0);
+  const isLoadingMoreRef = useRef<boolean>(false);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
 
   // Memoize sorted messages to avoid unnecessary re-renders
   const sortedMessages = useMemo(() => {
-    // Reorder messages: ensure assistant messages come after tool calls/results
+    // Reorder messages: ensure think → tool calls/results → assistant
     // in the same conversation turn
     const reordered = [...messages];
 
@@ -52,15 +58,17 @@ export function ChatPanel() {
       turns.push(currentTurn);
     }
 
-    // Within each turn, move assistant messages to the end
+    // Within each turn, order: think → tool → assistant → other
     const finalMessages: ChatMessage[] = [];
     for (const turn of turns) {
       const userMsg = turn.find(m => m.type === "user");
+      const thinkMsgs = turn.filter(m => m.type === "think");
       const assistantMsgs = turn.filter(m => m.type === "assistant");
       const toolMsgs = turn.filter(m => m.type === "tool_call" || m.type === "tool_result");
-      const otherMsgs = turn.filter(m => m.type !== "user" && m.type !== "assistant" && m.type !== "tool_call" && m.type !== "tool_result");
+      const otherMsgs = turn.filter(m => !["user", "think", "assistant", "tool_call", "tool_result"].includes(m.type));
 
       if (userMsg) finalMessages.push(userMsg);
+      finalMessages.push(...thinkMsgs);
       finalMessages.push(...toolMsgs);
       finalMessages.push(...assistantMsgs);
       finalMessages.push(...otherMsgs);
@@ -137,10 +145,21 @@ export function ChatPanel() {
     return () => window.removeEventListener('models-added', handler);
   }, [loadModels]);
 
-  // Connect WebSocket when agent changes + restore per-agent model
+  // Connect WebSocket when agent changes + restore per-agent model + init session
   useEffect(() => {
-    // Clear stale messages from previous agent
+    // 1. Clear current messages from previous agent
     useChatStore.getState().clearMessages();
+    // 2. Reset session state (sessions, currentSessionId, etc.)
+    useSessionStore.getState().reset();
+    // Clear additional chat state for a clean agent switch
+    useChatStore.setState({
+      currentSessionId: null,
+      hasMoreMessages: false,
+      messageCursor: null,
+      isLoadingMore: false,
+      iterationLimitPaused: null,
+      contextUsage: null,
+    });
 
     if (selectedAgentId && selectedAgent?.running) {
       connectStream(selectedAgentId, getGatewayUrl());
@@ -148,18 +167,79 @@ export function ChatPanel() {
       loadAgentModel(selectedAgentId);
       // Reload full model list from Vault to ensure all providers are visible
       loadModels();
-      // Load conversation history for the new agent
-      loadConversationHistory(selectedAgentId);
+
+      // 3. Fetch sessions and 4. auto-select the latest one
+      const initSession = async () => {
+        await useSessionStore.getState().fetchSessions(selectedAgentId);
+        const sessions = useSessionStore.getState().sessions;
+        const latestSession = sessions[0]; // sorted newest first
+        if (latestSession) {
+          useSessionStore.getState().switchSession(latestSession.session_id);
+          await useChatStore
+            .getState()
+            .loadSessionMessages(selectedAgentId, latestSession.session_id);
+        }
+        // 5. If no sessions, empty chat is already shown (messages cleared above)
+      };
+      void initSession();
     }
     return () => {
       useChatStore.getState().disconnectStream();
     };
-  }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadModels, loadConversationHistory]);
+  }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadModels]);
 
-  // Auto-scroll to bottom
+  // Load messages when active session changes (from SessionPanel)
   useEffect(() => {
+    if (!currentSessionId || !selectedAgentId) return;
+    const chatStoreSessionId = useChatStore.getState().currentSessionId;
+    if (currentSessionId === chatStoreSessionId) return;
+
+    const session = useSessionStore
+      .getState()
+      .sessions.find((s) => s.session_id === currentSessionId);
+    if (session && session.message_count === 0) {
+      useChatStore.getState().clearMessages();
+    }
+    void useChatStore
+      .getState()
+      .loadSessionMessages(selectedAgentId, currentSessionId);
+  }, [currentSessionId, selectedAgentId]);
+
+  // Auto-scroll to bottom on new messages, but not when loading more
+  useEffect(() => {
+    if (isLoadingMoreRef.current) {
+      // Loading more: restore scroll position to keep view stable
+      const container = messagesContainerRef.current;
+      if (container && prevScrollHeightRef.current > 0) {
+        const newScrollHeight = container.scrollHeight;
+        const heightDiff = newScrollHeight - prevScrollHeightRef.current;
+        container.scrollTop += heightDiff;
+        prevScrollHeightRef.current = 0;
+        isLoadingMoreRef.current = false;
+      }
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Scroll handler: load more messages when scrolled to top
+  const handleScroll = useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container || !selectedAgentId) return;
+
+    const { isLoadingMore, hasMoreMessages, currentSessionId } =
+      useChatStore.getState();
+    if (isLoadingMore || !hasMoreMessages || !currentSessionId) return;
+
+    // Trigger when within 50px of the top
+    if (container.scrollTop < 50) {
+      prevScrollHeightRef.current = container.scrollHeight;
+      isLoadingMoreRef.current = true;
+      void useChatStore
+        .getState()
+        .loadMoreMessages(selectedAgentId, currentSessionId);
+    }
+  }, [selectedAgentId]);
 
   const handleSend = () => {
     const content = inputValue.trim();
@@ -230,7 +310,20 @@ export function ChatPanel() {
       )}
       {/* Messages area with drawer overlay */}
       <div className="relative flex-1 overflow-hidden">
-        <div className="h-full overflow-y-auto px-4 py-3 select-text cursor-text" role="log" aria-label="Chat messages">
+        <div
+          ref={messagesContainerRef}
+          onScroll={handleScroll}
+          className="h-full overflow-y-auto px-4 py-3 select-text cursor-text"
+          role="log"
+          aria-label="Chat messages"
+        >
+          {/* Loading more indicator at top */}
+          {useChatStore.getState().isLoadingMore && (
+            <div className="flex items-center justify-center py-2">
+              <Loader className="h-4 w-4 animate-spin text-zinc-400 dark:text-zinc-500" />
+              <span className="ml-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">Loading more...</span>
+            </div>
+          )}
           {messages.length === 0 && (
             <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
               Start a conversation with {selectedAgent.name}
@@ -276,22 +369,34 @@ export function ChatPanel() {
             onClick={() => setActiveDrawer(null)}
           >
             <div
-              className="w-[480px] max-w-full h-full bg-white dark:bg-zinc-900 shadow-xl overflow-y-auto"
+              className={cn(
+                "max-w-full h-full bg-white dark:bg-zinc-900 shadow-xl overflow-y-auto",
+                activeDrawer === "session" ? "w-[280px]" : "w-[480px]",
+              )}
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="sticky top-0 flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 z-10">
-                <span className="font-medium text-sm text-zinc-900 dark:text-zinc-100">
-                  {activeDrawer === "memory" ? "Memory" : "Skills"}
-                </span>
-                <button
-                  className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                  onClick={() => setActiveDrawer(null)}
-                >
-                  <X size={16} />
-                </button>
-              </div>
+              {activeDrawer !== "session" && (
+                <div className="sticky top-0 flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 z-10">
+                  <span className="font-medium text-sm text-zinc-900 dark:text-zinc-100">
+                    {activeDrawer === "memory" ? "Memory" : "Skills"}
+                  </span>
+                  <button
+                    className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                    onClick={() => setActiveDrawer(null)}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              )}
               {activeDrawer === "memory" && <MemoryPanel />}
               {activeDrawer === "skills" && <SkillBrowser />}
+              {activeDrawer === "session" && selectedAgentId && (
+                <SessionPanel
+                  agentId={selectedAgentId}
+                  onClose={() => setActiveDrawer(null)}
+                  onOpenMemory={() => setActiveDrawer("memory")}
+                />
+              )}
             </div>
           </div>
         )}
@@ -336,16 +441,16 @@ export function ChatPanel() {
             )}
             {/* Workspace button */}
             <WorkspaceSelector />
-            {/* Memory button */}
+            {/* Session button */}
             <button
               className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors ${
-                activeDrawer === "memory"
+                activeDrawer === "session"
                   ? "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100"
                   : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
               }`}
-              onClick={() => setActiveDrawer(activeDrawer === "memory" ? null : "memory")}
+              onClick={() => setActiveDrawer(activeDrawer === "session" ? null : "session")}
             >
-              <Brain size={14} /> Memory
+              <MessageSquare size={14} /> Session
             </button>
             {/* Skills button */}
             <button
@@ -811,6 +916,22 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
               <span className="text-zinc-400">Thinking...</span>
             )}
             {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
+          </div>
+        </div>
+      </MessageContentWrapper>
+    );
+  }
+
+  if (message.type === "think") {
+    return (
+      <MessageContentWrapper>
+        <div className="flex justify-start">
+          <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200 select-text">
+            <ThinkBlock
+              content={message.content}
+              isStreaming={isStreaming}
+              hasReplyStarted={!isStreaming}
+            />
           </div>
         </div>
       </MessageContentWrapper>

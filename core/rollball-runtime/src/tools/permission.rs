@@ -54,7 +54,7 @@ pub fn tool_required_permission(tool_name: &str) -> Option<Permission> {
 /// For `rag_query`, this performs **dual permission validation** (S4.6):
 /// 1. Check `rag:query` (or `rag:query:<endpoint>`) is declared
 /// 2. Check `network:<endpoint>` is declared (network whitelist)
-/// The endpoint URL is extracted from `manifest.rag_config()`.
+///    The endpoint URL is extracted from `manifest.rag_config()`.
 pub fn validate_permission(manifest: &AgentManifest, tool_name: &str) -> Result<(), String> {
     let required = match tool_required_permission(tool_name) {
         Some(p) => p,
@@ -109,9 +109,7 @@ pub fn validate_permission(manifest: &AgentManifest, tool_name: &str) -> Result<
 
     // S4.6: RAG dual permission — also check network whitelist for the endpoint
     if tool_name == "rag_query" {
-        if let Err(e) = validate_rag_network_whitelist(manifest) {
-            return Err(e);
-        }
+        validate_rag_network_whitelist(manifest)?;
     }
 
     Ok(())

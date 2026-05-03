@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry } from "../lib/types";
 import { usePermissionStore } from "./permissionStore";
 import { getGatewayUrl } from "../lib/config";
 
@@ -23,6 +23,14 @@ interface ChatStore {
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
   /** Context usage info from Runtime (updated after each LLM call) */
   contextUsage: ContextUsageInfo | null;
+  /** Current active session ID */
+  currentSessionId: string | null;
+  /** Whether there are more older messages to load */
+  hasMoreMessages: boolean;
+  /** Cursor for pagination (message ID of the oldest loaded message) */
+  messageCursor: string | null;
+  /** Whether more messages are being loaded */
+  isLoadingMore: boolean;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => Promise<void>;
@@ -39,6 +47,16 @@ interface ChatStore {
   loadAgentModel: (agentId: string) => Promise<string | null>;
   /** Load conversation history for a specific agent from Gateway API */
   loadConversationHistory: (agentId: string) => Promise<void>;
+  /** Load paginated messages for a specific session */
+  loadSessionMessages: (
+    agentId: string,
+    sessionId: string,
+    cursor?: string,
+    limit?: number,
+    direction?: string,
+  ) => Promise<void>;
+  /** Load more older messages (triggered by scroll to top) */
+  loadMoreMessages: (agentId: string, sessionId: string) => Promise<void>;
 }
 
 /** Derive WebSocket URL from Gateway HTTP base URL */
@@ -93,6 +111,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   currentAgentId: null,
   iterationLimitPaused: null,
   contextUsage: null,
+  currentSessionId: null,
+  hasMoreMessages: false,
+  messageCursor: null,
+  isLoadingMore: false,
 
   connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
     // Update currentAgentId for stop functionality
@@ -396,11 +418,90 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       set({ messages: historyMessages });
     } catch (e) {
-      console.error("Failed to load conversation history:", e);
-      // Silently fail — empty chat is acceptable
+      console.error("[ChatStore] Failed to load conversation history:", e);
+      set({ messages: [] });
     }
   },
+
+  loadSessionMessages: async (
+    agentId: string,
+    sessionId: string,
+    cursor?: string,
+    limit: number = 50,
+    direction: string = "backward",
+  ) => {
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      params.set("direction", direction);
+      if (cursor) params.set("cursor", cursor);
+
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = (await resp.json()) as PaginatedMessages;
+
+      const converted = (data.messages ?? []).map(convertConversationEntry);
+
+      set((state) => {
+        if (cursor) {
+          // Loading more: prepend older messages
+          const existingIds = new Set(state.messages.map((m) => m.id));
+          const newMessages = converted.filter((m) => !existingIds.has(m.id));
+          return {
+            messages: [...newMessages, ...state.messages],
+            hasMoreMessages: data.has_more,
+            messageCursor: data.cursor,
+            isLoadingMore: false,
+            currentSessionId: sessionId,
+          };
+        }
+        // Initial load: replace messages
+        return {
+          messages: converted,
+          hasMoreMessages: data.has_more,
+          messageCursor: data.cursor,
+          isLoadingMore: false,
+          currentSessionId: sessionId,
+        };
+      });
+    } catch (e) {
+      console.error("[ChatStore] Failed to load session messages:", e);
+      set({ messages: [], currentSessionId: null, hasMoreMessages: false, messageCursor: null, isLoadingMore: false });
+    }
+  },
+
+  loadMoreMessages: async (agentId: string, sessionId: string) => {
+    const { isLoadingMore, hasMoreMessages, messageCursor } = get();
+    if (isLoadingMore || !hasMoreMessages || !messageCursor) return;
+    set({ isLoadingMore: true });
+    await get().loadSessionMessages(agentId, sessionId, messageCursor, 50, "backward");
+  },
 }));
+
+/** Convert a ConversationEntry from Gateway to UI ChatMessage */
+function convertConversationEntry(entry: ConversationEntry): ChatMessage {
+  const base: ChatMessage = {
+    id: entry.id,
+    type: entry.role as ChatMessage["type"],
+    content: entry.content,
+    timestamp: new Date(entry.ts).getTime(),
+  };
+
+  const meta = entry.metadata;
+  if (!meta) return base;
+
+  if (entry.role === "tool_call" || entry.role === "tool_result") {
+    base.toolName = meta.tool_name as string | undefined;
+    base.toolData = meta as Record<string, unknown>;
+    if (entry.role === "tool_result") {
+      base.toolStatus = meta.success === false ? "error" : "success";
+    }
+  }
+
+  return base;
+}
 
 /** Handle incoming WebSocket events */
 function handleMessageEvent(

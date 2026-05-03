@@ -38,7 +38,7 @@ fn perm_to_toml(p: &Permission) -> String {
 fn make_manifest(agent_id: &str, permissions: &[Permission]) -> rollball_core::AgentManifest {
     let perms_toml = permissions
         .iter()
-        .map(|p| perm_to_toml(p))
+        .map(perm_to_toml)
         .collect::<Vec<_>>()
         .join(", ");
     let toml_str = format!(

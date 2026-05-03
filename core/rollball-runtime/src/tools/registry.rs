@@ -94,6 +94,7 @@ impl Default for ToolRegistry {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +241,7 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
     use serde::Deserialize;
 
     #[derive(Deserialize)]
+    #[allow(dead_code)]
     struct WorkspaceConfig {
         version: String,
         #[serde(default)]
@@ -247,6 +249,7 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
     }
 
     #[derive(Deserialize)]
+    #[allow(dead_code)]
     struct WorkspaceDirEntry {
         id: String,
         path: String,

@@ -15,6 +15,28 @@ use rollball_core::error::RollballError;
 /// Maximum number of pending usage reports to buffer
 const MAX_PENDING_REPORTS: usize = 100;
 
+/// Check if a GatewayResponse is a server-push message (unsolicited).
+///
+/// Server-push messages are sent by Gateway outside the request-response
+/// cycle (e.g., IntentReceived, CapabilityUpdate). These can be interleaved
+/// with request responses on the IPC connection. `send_and_recv()` uses
+/// this to detect and buffer push messages that arrive while waiting
+/// for a specific response.
+///
+/// The push variants are those that Gateway sends proactively, never as
+/// a direct response to a Runtime request.
+fn is_push_message(response: &GatewayResponse) -> bool {
+    matches!(
+        response,
+        GatewayResponse::IntentReceived { .. }
+            | GatewayResponse::CapabilityUpdate { .. }
+            | GatewayResponse::LLMConfigDelivery { .. }
+            | GatewayResponse::IdentityDelivery { .. }
+            | GatewayResponse::WorkspaceContextUpdate { .. }
+            | GatewayResponse::IterationLimitPaused { .. }
+    )
+}
+
 /// LLM configuration received from Gateway via IPC
 ///
 /// Contains the user's configured provider, model, API key, and optional base URL.
@@ -46,6 +68,14 @@ pub struct GatewayClient {
     next_request_id: u64,
     /// S4.5.2: Pending usage reports buffered during disconnect
     pending_reports: VecDeque<rollball_core::budget::UsageReport>,
+    /// Buffered push messages received during send_and_recv() that were
+    /// not the expected response. These are consumed by recv_message()
+    /// before reading from the wire.
+    ///
+    /// This fixes the IPC frame interleaving bug: Gateway's tokio::select!
+    /// may send a push message before the response to a Runtime request,
+    /// causing send_and_recv() to receive the wrong frame type.
+    pending_push: VecDeque<GatewayResponse>,
 }
 
 impl GatewayClient {
@@ -60,6 +90,7 @@ impl GatewayClient {
             conn: None,
             next_request_id: 1,
             pending_reports: VecDeque::new(),
+            pending_push: VecDeque::new(),
         }
     }
 
@@ -148,7 +179,14 @@ impl GatewayClient {
     ///
     /// This is used in the Gateway message loop to receive messages
     /// from the Gateway (like IntentReceived, system notifications).
+    /// Consumes buffered push messages first (left over from send_and_recv)
+    /// before reading from the wire.
     pub async fn recv_message(&mut self) -> Result<Option<GatewayResponse>, RollballError> {
+        // Return buffered push messages first (from send_and_recv interleaving)
+        if let Some(msg) = self.pending_push.pop_front() {
+            return Ok(Some(msg));
+        }
+
         let conn = self.conn.as_mut().ok_or_else(|| {
             RollballError::Ipc("Not connected to Gateway".to_string())
         })?;
@@ -235,7 +273,14 @@ impl GatewayClient {
         }
     }
 
-    /// Send a request to Gateway and receive a response
+    /// Send a request to Gateway and receive a response.
+    ///
+    /// Handles the IPC frame interleaving issue: Gateway's `tokio::select!`
+    /// may dispatch a server-push message (IntentReceived, CapabilityUpdate,
+    /// etc.) before the response to our request, because all frames share
+    /// the same TYPE_RESPONSE wire type. When a push message arrives
+    /// instead of the expected response, we buffer it and keep receiving
+    /// until the actual response frame arrives.
     async fn send_and_recv(&mut self, request: GatewayRequest) -> Result<GatewayResponse, RollballError> {
         let _request_id = self.next_id();
 
@@ -250,16 +295,28 @@ impl GatewayClient {
         // Send frame
         conn.send_frame(&frame).await?;
 
-        // Receive response frame
-        let response_frame = conn.recv_frame().await?
-            .ok_or_else(|| RollballError::Ipc("Connection closed by Gateway".to_string()))?;
+        // Receive response frame, skipping any interleaved push messages.
+        // Push messages are server-initiated (not a response to our request)
+        // and must be buffered for recv_message() to consume later.
+        loop {
+            let response_frame = conn.recv_frame().await?
+                .ok_or_else(|| RollballError::Ipc("Connection closed by Gateway".to_string()))?;
 
-        // Decode response
-        let response: GatewayResponse = response_frame
-            .to_message()
-            .map_err(|e| RollballError::Ipc(format!("Failed to decode response: {e}")))?;
+            let response: GatewayResponse = response_frame
+                .to_message()
+                .map_err(|e| RollballError::Ipc(format!("Failed to decode response: {e}")))?;
 
-        Ok(response)
+            if is_push_message(&response) {
+                tracing::debug!(
+                    variant = std::format!("{:?}", std::mem::discriminant(&response)),
+                    "send_and_recv: buffered interleaved push message"
+                );
+                self.pending_push.push_back(response);
+                continue;
+            }
+
+            return Ok(response);
+        }
     }
 
     /// Request an API key for a specific provider (KeyRelease)
@@ -577,5 +634,61 @@ mod tests {
         let client = GatewayClient::new("unix:///tmp/test.sock");
         // Client is not connected, so report_usage should buffer
         assert_eq!(client.pending_report_count(), 0);
+    }
+
+    #[test]
+    fn test_is_push_message_identifies_push_variants() {
+        // Push variants — these are server-initiated, never a response to a Runtime request
+        assert!(is_push_message(&GatewayResponse::IntentReceived {
+            from: "test".to_string(),
+            action: "chat_message".to_string(),
+            params: serde_json::json!({}),
+        }));
+        assert!(is_push_message(&GatewayResponse::CapabilityUpdate {
+            agent_id: "test".to_string(),
+            actions: vec![],
+            removed: false,
+        }));
+        assert!(is_push_message(&GatewayResponse::LLMConfigDelivery {
+            provider: "test".to_string(),
+            model: None,
+            api_key: "key".to_string(),
+            base_url: None,
+            models: vec![],
+            model_capabilities: None,
+            max_output_tokens_limit: 32768,
+        }));
+        assert!(is_push_message(&GatewayResponse::WorkspaceContextUpdate {
+            context_text: "test".to_string(),
+            current_workspace_id: None,
+            current_workspace_path: None,
+        }));
+    }
+
+    #[test]
+    fn test_is_push_message_rejects_response_variants() {
+        // Response variants — these are always responses to Runtime requests
+        assert!(!is_push_message(&GatewayResponse::BudgetInfo {
+            remaining_tokens: 50000,
+            remaining_cost_usd: 1.5,
+        }));
+        assert!(!is_push_message(&GatewayResponse::IntentDelivered {
+            message_id: "msg-1".to_string(),
+        }));
+        assert!(!is_push_message(&GatewayResponse::KeyReleaseResult {
+            api_key: None,
+            error: None,
+        }));
+        assert!(!is_push_message(&GatewayResponse::UsageReportAck {}));
+        assert!(!is_push_message(&GatewayResponse::AgentHelloResult {
+            success: true,
+            error: None,
+        }));
+    }
+
+    #[test]
+    fn test_pending_push_buffer_is_empty_on_new_client() {
+        let client = GatewayClient::new("unix:///tmp/test.sock");
+        assert!(client.pending_push.is_empty());
     }
 }

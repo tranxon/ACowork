@@ -20,6 +20,7 @@ use rollball_grafeo::{
 use rollball_memory::{HintType, MemoryQuery, RetrievalMetrics};
 
 use crate::error::{Result, RuntimeError};
+use crate::episode_distill::DistilledEpisode;
 use crate::tools::rag::client::RagClient;
 
 // ---------------------------------------------------------------------------
@@ -425,6 +426,70 @@ impl MemoryManager {
         store
             .store_node(labels::EPISODIC, props)
             .map_err(|e| RuntimeError::Tool(format!("Failed to record episode: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Record a distilled episode into Grafeo.
+    ///
+    /// Converts a `DistilledEpisode` (produced by LLM-based semantic
+    /// extraction) into a Grafeo Episode node with structured metadata.
+    /// The `consolidated` flag is set to `false` — it will be marked
+    /// `true` by a later offline consolidation pass.
+    pub fn record_distilled(&self, store: &GrafeoStore, episode: &DistilledEpisode) -> Result<()> {
+        let mut props = vec![
+            ("session_id", Value::from(episode.session_id.as_str())),
+            ("role", Value::from("distilled")),
+            ("content", Value::from(episode.summary.as_str())),
+            ("content_type", Value::from("Informational")),
+            (
+                "timestamp",
+                Value::from(Timestamp::from_micros(
+                    chrono::Utc::now().timestamp_micros(),
+                )),
+            ),
+            ("consolidated", Value::from(false)),
+            (
+                "importance",
+                Value::from(f64::from(episode.importance)),
+            ),
+            (
+                "source_session_id",
+                Value::from(episode.source_session_id.as_str()),
+            ),
+            (
+                "distill_offset",
+                Value::from(i64::from(episode.distill_offset)),
+            ),
+        ];
+
+        // Add optional fields
+        if let Some(ref decision) = episode.decision {
+            props.push(("decision", Value::from(decision.as_str())));
+        }
+        if let Some(ref tool_summary) = episode.tool_summary {
+            props.push(("tool_summary", Value::from(tool_summary.as_str())));
+        }
+
+        // Store intent_type
+        props.push(("intent_type", Value::from(episode.intent_type.as_str())));
+
+        // Store keywords as JSON array
+        if !episode.keywords.is_empty() {
+            let keywords_json = serde_json::to_string(&episode.keywords)
+                .map_err(RuntimeError::Json)?;
+            props.push(("keywords", Value::from(keywords_json.as_str())));
+        }
+
+        store
+            .store_node(labels::EPISODIC, props)
+            .map_err(|e| RuntimeError::Tool(format!("Failed to record distilled episode: {e}")))?;
+
+        tracing::debug!(
+            session_id = %episode.session_id,
+            importance = episode.importance,
+            "Recorded distilled episode"
+        );
 
         Ok(())
     }
