@@ -1067,9 +1067,9 @@ function AddModelDialog({
         className="w-[440px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="mb-4 text-sm font-semibold">Add Model</h3>
+        <h3 className="mb-3 text-sm font-semibold">Add Model</h3>
 
-        <div className="space-y-3">
+        <div className="space-y-2">
           {/* Provider dropdown */}
           <div>
             <label className="mb-1 block text-xs text-zinc-500">Provider</label>
@@ -1082,7 +1082,7 @@ function AddModelDialog({
               <select
                 value={provider}
                 onChange={(e) => setProvider(e.target.value)}
-                className="w-full appearance-none rounded-md border border-zinc-200 bg-white px-3 py-2 pr-8 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                className="w-full appearance-none rounded-md border border-zinc-200 bg-white px-3 py-2 pr-8 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                 style={{
                   backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                   backgroundPosition: 'right 0.5rem center',
@@ -1108,7 +1108,7 @@ function AddModelDialog({
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
                 placeholder={providerDef?.keyPlaceholder ?? "API key..."}
-                className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
               />
             </div>
           )}
@@ -1185,7 +1185,7 @@ function AddModelDialog({
               value={modelSearchTerm}
               onChange={(e) => setModelSearchTerm(e.target.value)}
               placeholder="Search models..."
-              className="w-full rounded-md border border-zinc-200 px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+              className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
             />
             
             {/* Model list */}
@@ -1245,11 +1245,11 @@ function AddModelDialog({
             </div>
             
             {/* Manual model input */}
-            <div className="mt-1 flex gap-1">
+            <div className="mt-2 flex gap-1">
               <input
                 type="text"
                 placeholder="Or type a custom model name..."
-                className="flex-1 rounded-md border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     const val = (e.target as HTMLInputElement).value.trim();
@@ -1291,7 +1291,7 @@ function AddModelDialog({
                       readOnly={hasModelsDevData}
                       placeholder="e.g. 128000"
                       className={cn(
-                        "w-full rounded-md border border-zinc-200 px-3 py-1.5 text-xs",
+                        "w-full rounded-md border border-zinc-200 px-3 py-2 text-xs",
                         hasModelsDevData
                           ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
                           : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
@@ -1307,7 +1307,7 @@ function AddModelDialog({
                       readOnly={hasModelsDevData}
                       placeholder="e.g. 4096"
                       className={cn(
-                        "w-full rounded-md border border-zinc-200 px-3 py-1.5 text-xs",
+                        "w-full rounded-md border border-zinc-200 px-3 py-2 text-xs",
                         hasModelsDevData
                           ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
                           : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
