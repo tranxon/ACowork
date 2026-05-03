@@ -14,8 +14,8 @@ interface ChatStore {
   currentModel: string | null;
   /** Current active provider for the selected agent */
   currentProvider: string | null;
-  /** Per-agent model memory: agent_id → model name */
-  agentModels: Record<string, string>;
+  /** Per-agent model memory: agent_id → { model, provider } */
+  agentModels: Record<string, { model: string; provider: string }>;
   availableModels: { name: string; provider: string }[];
   /** Current agent ID for stop functionality */
   currentAgentId: string | null;
@@ -29,8 +29,10 @@ interface ChatStore {
   stopCurrentMessage: () => Promise<void>;
   disconnectStream: () => void;
   clearMessages: () => void;
-  setCurrentModel: (model: string, agentId: string) => void;
+  setCurrentModel: (model: string, provider: string, agentId: string) => void;
   setAvailableModels: (models: { name: string; provider: string }[]) => void;
+  /** Load provider for a specific agent from per-agent cache */
+  loadAgentProvider: (agentId: string) => string | null;
   /** Continue agent execution after iteration limit pause */
   continueExecution: (agentId: string) => Promise<void>;
   /** Load model for a specific agent from Gateway API, returns the model name */
@@ -306,21 +308,32 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   clearMessages: () => {
     set({ messages: [], tokenUsage: null });
   },
-  setCurrentModel: (model: string, agentId: string) => {
+  setCurrentModel: (model: string, provider: string, agentId: string) => {
     // Optimistically update UI only — don't cache until confirmed by backend
     const prevModel = get().currentModel;
-    set({ currentModel: model });
+    const prevProvider = get().currentProvider;
+    set({ currentModel: model, currentProvider: provider });
     // Send model_switch message to Agent via WebSocket when user changes model
     const ws = get().ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "model_switch", model, agentId, _prevModel: prevModel }));
+      ws.send(JSON.stringify({ type: "model_switch", model, provider, agentId, _prevModel: prevModel }));
     } else {
       // No WebSocket — revert immediately
-      set({ currentModel: prevModel });
+      set({ currentModel: prevModel, currentProvider: prevProvider });
     }
   },
   setAvailableModels: (models: { name: string; provider: string }[]) => {
-    set({ availableModels: models, currentModel: models[0]?.name ?? null });
+    set((state) => ({
+      availableModels: models,
+      // Only set defaults if nothing is currently selected — preserve
+      // per-agent selection when switching agents.
+      currentModel: state.currentModel ?? models[0]?.name ?? null,
+      currentProvider: state.currentProvider ?? models[0]?.provider ?? null,
+    }));
+  },
+  loadAgentProvider: (agentId: string) => {
+    const cached = get().agentModels[agentId];
+    return cached?.provider ?? null;
   },
   continueExecution: async (agentId: string) => {
     try {
@@ -341,17 +354,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!resp.ok) return null;
       const data = await resp.json() as { provider: string; model: string; available_models: string[] };
       if (data.model) {
-        // Build available models with provider info
-        const modelsWithProvider = (data.available_models || []).map(m => ({
-          name: m,
-          provider: data.provider
-        }));
-        set((state) => ({
-          currentModel: data.model,
-          currentProvider: data.provider,
-          agentModels: { ...state.agentModels, [agentId]: data.model },
-          availableModels: modelsWithProvider.length ? modelsWithProvider : state.availableModels,
-        }));
+        set((state) => {
+          // Prefer cached provider when the cached model matches — this
+          // fixes the bug where switching agents loses the manually-selected
+          // provider because the backend only returns the default_provider.
+          const cached = state.agentModels[agentId];
+          let provider = data.provider;
+          if (cached && cached.model === data.model && cached.provider) {
+            provider = cached.provider;
+          }
+          return {
+            currentModel: data.model,
+            currentProvider: provider,
+            agentModels: {
+              ...state.agentModels,
+              [agentId]: { model: data.model, provider },
+            },
+          };
+        });
       }
       return data.model ?? null;
     } catch {
@@ -474,10 +494,16 @@ function handleMessageEvent(
       const confirmedModel = data.model as string;
       const confirmedAgentId = data.agentId as string | undefined;
       console.log("[ChatStore] Model switch confirmed:", confirmedModel);
-      // Now persist to agentModels cache
+      // Now persist to agentModels cache (model + provider)
       if (confirmedAgentId && confirmedModel) {
         set((state) => ({
-          agentModels: { ...state.agentModels, [confirmedAgentId]: confirmedModel },
+          agentModels: {
+            ...state.agentModels,
+            [confirmedAgentId]: {
+              model: confirmedModel,
+              provider: state.currentProvider ?? "",
+            },
+          },
         }));
       }
       break;

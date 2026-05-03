@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { VaultKeyEntry, GatewayConfig, ModelInfo } from "../../lib/types";
-import { Key, Home, Plus, Trash2, Star, ChevronDown, Pencil, Loader2 } from "lucide-react";
-import { ALL_PROVIDERS, PROVIDER_CATEGORIES, getProviderDef } from "../../lib/providers";
-import { fetchProviderModels } from "../../lib/gateway-api";
+import { Key, Home, Plus, Trash2, Star, Pencil, Loader2 } from "lucide-react";
+import { needsApiKey, keyPlaceholder } from "../../lib/providers";
+import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 
 type ProviderWithStatus = {
   id: string;
@@ -11,8 +11,7 @@ type ProviderWithStatus = {
   models: string;
   local: boolean;
   baseUrl: string;
-  category: string;
-  description?: string;
+  modelCount: number;
 };
 
 export function ModelsPage() {
@@ -28,7 +27,8 @@ export function ModelsPage() {
   const [dynamicModels, setDynamicModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
 
-  const newProviderDef = getProviderDef(newProvider);
+  const [dynamicProviders, setDynamicProviders] = useState<Array<{ id: string; name: string; api?: string; model_count: number }>>([]);
+  const [dynamicProvidersLoading, setDynamicProvidersLoading] = useState(false);
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -50,7 +50,20 @@ export function ModelsPage() {
     }
   }, []);
 
-  useEffect(() => { fetchKeys(); fetchConfig(); }, [fetchKeys, fetchConfig]);
+  // Fetch dynamic providers from Gateway API
+  const fetchDynamicProviders = useCallback(async () => {
+    setDynamicProvidersLoading(true);
+    try {
+      const providers = await fetchProviders();
+      setDynamicProviders(providers);
+    } catch {
+      setDynamicProviders([]);
+    } finally {
+      setDynamicProvidersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchKeys(); fetchConfig(); fetchDynamicProviders(); }, [fetchKeys, fetchConfig, fetchDynamicProviders]);
 
   // Load dynamic models for the default provider on mount
   useEffect(() => {
@@ -69,9 +82,9 @@ export function ModelsPage() {
 
   const handleAddProviderChange = (id: string) => {
     setNewProvider(id);
-    const def = getProviderDef(id);
-    setNewBaseUrl(def?.baseUrl ?? "");
-    setNewDefaultModel(def?.exampleModels[0] ?? "");
+    const dynamicProvider = dynamicProviders.find((p) => p.id === id);
+    setNewBaseUrl(dynamicProvider?.api ?? "");
+    setNewDefaultModel("");
     setCustomModelInput(false);
     // Fetch dynamic model list from Gateway (models.dev)
     setDynamicModels([]);
@@ -83,9 +96,7 @@ export function ModelsPage() {
           setNewDefaultModel(resp.models[0].id);
         }
       })
-      .catch((e) => {
-        // Fallback: use hardcoded exampleModels from provider def
-        console.warn(`Failed to fetch models for ${id}:`, e);
+      .catch(() => {
         setDynamicModels([]);
       })
       .finally(() => setModelsLoading(false));
@@ -132,14 +143,13 @@ export function ModelsPage() {
     }
   };
 
-  const providers: ProviderWithStatus[] = ALL_PROVIDERS.map((p) => ({
+  const providers: ProviderWithStatus[] = dynamicProviders.map((p) => ({
     id: p.id,
     name: p.name,
-    models: p.exampleModels.join(", "),
-    local: !p.needsApiKey,
-    baseUrl: p.baseUrl,
-    category: p.category,
-    description: p.description,
+    models: `${p.model_count ?? 0} models`,
+    local: !needsApiKey(p.id),
+    baseUrl: p.api ?? "",
+    modelCount: p.model_count ?? 0,
   }));
 
   return (
@@ -159,7 +169,9 @@ export function ModelsPage() {
       <div className="flex-1 overflow-y-auto p-6">
         <div className="mx-auto max-w-2xl space-y-4">
           {loading ? (
-            <div className="py-8 text-center text-sm text-zinc-400">Loading providers...</div>
+            <div className="py-8 text-center text-sm text-zinc-400">
+              {dynamicProvidersLoading ? "Loading providers..." : "No providers found."}
+            </div>
           ) : (
             providers.map((provider) => {
               const keyEntry = keys.find((k) => k.provider === provider.id);
@@ -199,11 +211,8 @@ export function ModelsPage() {
                         {keyEntry?.default_model && (
                           <p className="mt-1 text-xs text-zinc-400">Model: {keyEntry.default_model}</p>
                         )}
-                        {!keyEntry?.base_url && provider.baseUrl && (
+                        {provider.baseUrl && (
                           <p className="mt-1 font-mono text-xs text-zinc-400">{provider.baseUrl}</p>
-                        )}
-                        {provider.description && (
-                          <p className="mt-0.5 text-xs text-zinc-400">{provider.description}</p>
                         )}
                       </div>
                     </div>
@@ -248,28 +257,24 @@ export function ModelsPage() {
                   onChange={(e) => handleAddProviderChange(e.target.value)}
                   className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                 >
-                  {PROVIDER_CATEGORIES.map((cat) => (
-                    <optgroup key={cat.id} label={cat.label}>
-                      {ALL_PROVIDERS.filter((p) => p.category === cat.id).map((p) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </optgroup>
+                  {dynamicProviders.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
                   ))}
                 </select>
               </div>
-              {(newProviderDef?.needsApiKey ?? true) && (
+              {needsApiKey(newProvider) && (
                 <div>
                   <label className="mb-1 block text-xs text-zinc-500">API Key</label>
                   <input
                     type="password"
                     value={newKey}
                     onChange={(e) => setNewKey(e.target.value)}
-                    placeholder={newProviderDef?.keyPlaceholder ?? "API key..."}
+                    placeholder={keyPlaceholder(newProvider)}
                     className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                   />
                 </div>
               )}
-              {newProviderDef?.editableBaseUrl && (
+              {(true) && (
                 <div>
                   <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
                   <input
@@ -309,51 +314,19 @@ export function ModelsPage() {
                       <Pencil className="h-3.5 w-3.5" />
                     </button>
                   </div>
-                ) : newProviderDef && newProviderDef.exampleModels.length > 0 && !customModelInput ? (
-                  <div className="flex items-center gap-1">
-                    <select
-                      value={newDefaultModel}
-                      onChange={(e) => setNewDefaultModel(e.target.value)}
-                      className="flex-1 rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-                    >
-                      {newProviderDef.exampleModels.map((m) => (
-                        <option key={m} value={m}>{m}</option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => setCustomModelInput(true)}
-                      className="rounded p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800"
-                      title="Enter custom model name"
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
                 ) : (
                   <div className="flex items-center gap-1">
                     <input
                       type="text"
                       value={newDefaultModel}
                       onChange={(e) => setNewDefaultModel(e.target.value)}
-                      placeholder={newProviderDef?.exampleModels[0] ?? "model name..."}
+                      placeholder="model name..."
                       className="flex-1 rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                     />
-                    {newProviderDef && newProviderDef.exampleModels.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => { setCustomModelInput(false); setNewDefaultModel(newProviderDef.exampleModels[0]); }}
-                        className="rounded p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800"
-                        title="Back to model selector"
-                      >
-                        <ChevronDown className="h-3.5 w-3.5" />
-                      </button>
-                    )}
                   </div>
                 )}
               </div>
-              {newProviderDef?.description && (
-                <p className="text-xs text-zinc-400">{newProviderDef.description}</p>
-              )}
+
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button
@@ -364,7 +337,7 @@ export function ModelsPage() {
               </button>
               <button
                 onClick={handleAdd}
-                disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false}
+                disabled={needsApiKey(newProvider) ? !newKey.trim() : false}
                 className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 Save

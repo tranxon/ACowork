@@ -2,12 +2,13 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import type { GatewayConfig, VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo } from "../../lib/types";
+import type { GatewayConfig, VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { ALL_PROVIDERS, getProviderDef } from "../../lib/providers";
+import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
 import { Star } from "lucide-react";
+import { inputReadonly, inputBase, inputMono, selectBase, dialogButtonPrimary, dialogButtonSecondary, testResultBase, testResultSuccess, testResultError } from "../../lib/ui-styles";
 
 type SettingsTab = "gateway" | "providers" | "appearance" | "general";
 
@@ -79,7 +80,7 @@ function GatewayTab() {
             type="text"
             value={DEFAULT_GATEWAY_URL}
             readOnly
-            className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            className={`w-full ${inputReadonly}`}
           />
         </div>
 
@@ -160,16 +161,9 @@ function ProvidersTab() {
   const [config, setConfig] = useState<GatewayConfig | null>(null);
 
   // Dynamic provider list from Gateway API
-  const [dynamicProviders, setDynamicProviders] = useState<{
-    id: string;
-    name: string;
-    models?: ModelInfo[];
-    modelCount?: number;
-    api?: string;
-  }[]>([]);
+  const [dynamicProviders, setDynamicProviders] = useState<ProviderListEntry[]>([]);
   const [dynamicProvidersLoading, setDynamicProvidersLoading] = useState(false);
 
-  const newProviderDef = getProviderDef(newProvider);
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -320,15 +314,14 @@ function ProvidersTab() {
       
       return models;
     } catch {
-      // Fallback to exampleModels from provider definition
-      const def = getProviderDef(providerId);
-      return (def?.exampleModels ?? []).map((id) => ({ id, name: id }));
+      // No fallback — Gateway always returns model list
+      return [];
     }
   }, []);
 
   const handleAdd = async () => {
     // First test the API key
-    if ((newProviderDef?.needsApiKey ?? true) && !newKey.trim()) {
+    if (needsApiKey(newProvider) && !newKey.trim()) {
       setTestResult({ success: false, message: "Please enter an API Key first" });
       return;
     }
@@ -412,36 +405,6 @@ function ProvidersTab() {
     }
   };
 
-  const handleTest = async () => {
-    if (!newKey.trim()) {
-      setTestResult({ success: false, message: "Please enter an API Key first" });
-      return;
-    }
-    setTesting(true);
-    setTestResult(null);
-    try {
-      // Temporarily add the key
-      await invoke("add_key", {
-        provider: newProvider,
-        key: newKey,
-        baseUrl: newBaseUrl || undefined,
-      });
-      
-      // Try to fetch models to verify the key works
-      await fetchProviderModels(newProvider);
-      
-      setTestResult({ success: true, message: "API Key is valid!" });
-      
-      // Remove the temporary key
-      await invoke("remove_key", { provider: newProvider });
-    } catch (e: any) {
-      const errorMsg = e?.message || e?.toString() || "Test failed";
-      setTestResult({ success: false, message: errorMsg });
-    } finally {
-      setTesting(false);
-    }
-  };
-
   const handleRemove = async (provider: string) => {
     if (!confirm(`Remove key for ${provider}?`)) return;
     try {
@@ -468,10 +431,9 @@ function ProvidersTab() {
 
   const handleEdit = async (provider: string) => {
     const keyEntry = keys.find((k) => k.provider === provider);
-    const def = getProviderDef(provider);
     const dynamicProvider = dynamicProviders.find((p) => p.id === provider);
     setEditKey(keyEntry?.key_preview ?? "");
-    setEditBaseUrl(keyEntry?.base_url ?? def?.baseUrl ?? dynamicProvider?.api ?? "");
+    setEditBaseUrl(keyEntry?.base_url ?? dynamicProvider?.api ?? "");
     setEditModels(keyEntry?.models?.length ? keyEntry.models : keyEntry?.default_model ? [keyEntry.default_model] : []);
     setEditModelSearchTerm("");
     // Load existing capabilities from VaultKeyEntry
@@ -556,8 +518,7 @@ function ProvidersTab() {
               <h3 className="mb-2 text-xs font-medium text-zinc-500">Configured Providers</h3>
               <div className="space-y-1">
                 {keys.map((keyEntry) => {
-                  const provider = ALL_PROVIDERS.find((p) => p.id === keyEntry.provider) || 
-                    dynamicProviders.find((p) => p.id === keyEntry.provider);
+                  const provider = dynamicProviders.find((p) => p.id === keyEntry.provider);
                   const providerName = provider?.name || keyEntry.provider;
                   
                   return (
@@ -650,18 +611,17 @@ function ProvidersTab() {
             </div>
             <div className="space-y-1">
               {/* Use dynamic providers if available, otherwise fallback to static */}
-              {(dynamicProviders.length > 0 ? dynamicProviders : ALL_PROVIDERS).map((item) => {
+              {dynamicProviders.map((item) => {
                 const providerId = item.id;
                 const providerName = item.name || providerId;
                 const keyEntry = keys.find((k) => k.provider === providerId);
-                const modelCount = 'modelCount' in item ? item.modelCount : ('models' in item ? item.models?.length : undefined);
+                const modelCount = item.model_count;
                 
                 // Skip if already configured (shown in top section)
                 if (keyEntry) return null;
                 
                 // Skip local providers that don't need API keys
-                const providerDef = getProviderDef(providerId);
-                if (providerDef && !providerDef.needsApiKey) return null;
+                if (!needsApiKey(providerId)) return null;
                 
                 return (
                   <div key={providerId} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
@@ -671,16 +631,13 @@ function ProvidersTab() {
                         {modelCount && (
                           <span className="ml-2 text-xs text-zinc-400">{modelCount} models available</span>
                         )}
-                        {!modelCount && providerDef?.description && (
-                          <span className="ml-2 text-xs text-zinc-400">— {providerDef.description}</span>
-                        )}
+
                       </div>
                       <button
                         onClick={() => {
                           setNewProvider(providerId);
-                          const def = getProviderDef(providerId);
                           const dynamicProvider = dynamicProviders.find((p) => p.id === providerId);
-                          setNewBaseUrl(def?.baseUrl ?? dynamicProvider?.api ?? "");
+                          setNewBaseUrl(dynamicProvider?.api ?? "");
                           fetchModels(providerId).then((models) => setAvailableModels(models));
                           // Reset capabilities state
                           setNewContextWindow("");
@@ -705,34 +662,32 @@ function ProvidersTab() {
       {showAddDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
-            <h3 className="mb-3 text-sm font-semibold">Add API Key: {newProviderDef?.name || newProvider}</h3>
+            <h3 className="mb-3 text-sm font-semibold">Add API Key: {dynamicProviders.find((p) => p.id === newProvider)?.name || newProvider}</h3>
 
             <div className="space-y-2">
               {/* Provider display (read-only) */}
               <div>
                 <label className="mb-1 block text-xs text-zinc-500">Provider</label>
                 <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
-                  {newProviderDef?.name || newProvider}
+                  {dynamicProviders.find((p) => p.id === newProvider)?.name || newProvider}
                 </div>
               </div>
 
-              {(newProviderDef?.needsApiKey ?? true) && (
+              {needsApiKey(newProvider) && (
                 <div>
                   <label className="mb-1 block text-xs text-zinc-500">API Key</label>
                   <input
                     type="password"
                     value={newKey}
                     onChange={(e) => setNewKey(e.target.value)}
-                    placeholder={newProviderDef?.keyPlaceholder ?? "API key..."}
+                    placeholder={keyPlaceholder(newProvider)}
                     className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                   />
                 </div>
               )}
 
               {(() => {
-                const dynamicProviderApi = dynamicProviders.find((p) => p.id === newProvider)?.api;
-                const showBaseUrl = newProviderDef?.editableBaseUrl ?? (!!dynamicProviderApi);
-                return showBaseUrl ? (
+                return (
                   <div>
                     <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
                     <input
@@ -743,7 +698,7 @@ function ProvidersTab() {
                       className="w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                     />
                   </div>
-                ) : null;
+                )
               })()}
 
               {/* Model selection (multi-select) */}
@@ -947,9 +902,7 @@ function ProvidersTab() {
                 );
               })()}
 
-              {newProviderDef?.description && (
-                <p className="text-xs text-zinc-400">{newProviderDef.description}</p>
-              )}
+
 
               {/* Test result */}
               {testResult && (
@@ -992,7 +945,7 @@ function ProvidersTab() {
                 </button>
                 <button
                   onClick={handleAdd}
-                  disabled={((newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false) || testing}
+                  disabled={(needsApiKey(newProvider) ? !newKey.trim() : false) || testing}
                   className="w-20 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
                 >
                   {testing ? "Saving..." : "Save"}
@@ -1021,7 +974,7 @@ function ProvidersTab() {
                 />
               </div>
 
-              {(getProviderDef(showEditDialog)?.editableBaseUrl ?? true) && (
+              {(
                 <div>
                   <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
                   <input
@@ -1285,7 +1238,7 @@ function GeneralTab() {
               await invoke("update_config", { logLevel: e.target.value });
             } catch { /* ignore */ }
           }}
-          className="rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+          className={selectBase}
         >
           <option value="trace">trace</option>
           <option value="debug">debug</option>
@@ -1301,7 +1254,7 @@ function GeneralTab() {
           type="text"
           value={config?.data_dir ?? "\u2014"}
           readOnly
-          className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+          className={`w-full ${inputReadonly}`}
         />
       </div>
       
@@ -1323,7 +1276,7 @@ function GeneralTab() {
                 setConfig(prev => prev ? { ...prev, max_output_tokens_limit: val } : prev);
               } catch { /* ignore */ }
             }}
-            className="w-32 rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className={`w-32 ${inputBase}`}
           />
           <span className="text-xs text-zinc-400">
             {config?.max_output_tokens_limit === 0 ? "No limit" : `${Math.round((config?.max_output_tokens_limit ?? 32768) / 1024)}K`}

@@ -2743,9 +2743,21 @@
           "output": 16384
         }
       },
-      "MiniMax-M2.5": {
-        "id": "MiniMax-M2.5",
+      "MiniMax/MiniMax-M2.5": {
+        "id": "MiniMax/MiniMax-M2.5",
         "name": "MiniMax-M2.5",
+        "family": "minimax",
+        "reasoning": true,
+        "tool_call": true,
+        "attachment": false,
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        }
+      },
+      "MiniMax/MiniMax-M2.7": {
+        "id": "MiniMax/MiniMax-M2.7",
+        "name": "MiniMax-M2.7",
         "family": "minimax",
         "reasoning": true,
         "tool_call": true,
@@ -3425,18 +3437,6 @@
         "limit": {
           "context": 262144,
           "output": 262144
-        }
-      },
-      "MiniMax/MiniMax-M2.7": {
-        "id": "MiniMax/MiniMax-M2.7",
-        "name": "MiniMax-M2.7",
-        "family": "minimax",
-        "reasoning": true,
-        "tool_call": true,
-        "attachment": false,
-        "limit": {
-          "context": 204800,
-          "output": 131072
         }
       },
       "siliconflow/deepseek-v3-0324": {

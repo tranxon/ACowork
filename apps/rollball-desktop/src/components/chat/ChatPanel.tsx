@@ -5,8 +5,9 @@ import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
-import { ALL_PROVIDERS, getProviderDef, PROVIDER_CATEGORIES } from "../../lib/providers";
+import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
+import { toolbarButton, toolbarButtonActive, inputBase, inputMono, selectBase, dialogButtonPrimary, dialogButtonSecondary, testResultBase, testResultSuccess, testResultError } from "../../lib/ui-styles";
 import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy, FileText, Terminal, Plus, RefreshCw, Layers } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -18,7 +19,7 @@ import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory, iterationLimitPaused, continueExecution, contextUsage } = useChatStore();
+  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, loadConversationHistory, iterationLimitPaused, continueExecution, contextUsage } = useChatStore();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
@@ -145,13 +146,15 @@ export function ChatPanel() {
       connectStream(selectedAgentId, getGatewayUrl());
       // Always load model from Gateway API (reads per-agent .agent_model.json)
       loadAgentModel(selectedAgentId);
+      // Reload full model list from Vault to ensure all providers are visible
+      loadModels();
       // Load conversation history for the new agent
       loadConversationHistory(selectedAgentId);
     }
     return () => {
       useChatStore.getState().disconnectStream();
     };
-  }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadConversationHistory]);
+  }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadModels, loadConversationHistory]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -327,7 +330,8 @@ export function ChatPanel() {
               <ModelMenu
                 models={availableModels}
                 currentModel={currentModel}
-                onSelect={(m) => selectedAgentId && setCurrentModel(m, selectedAgentId)}
+                currentProvider={currentProvider}
+                onSelect={(m, p) => selectedAgentId && setCurrentModel(m, p, selectedAgentId)}
               />
             )}
             {/* Workspace button */}
@@ -896,7 +900,6 @@ function AddModelDialog({
   const [providersLoading, setProvidersLoading] = useState(false);
   const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
 
-  const providerDef = getProviderDef(provider);
 
   // Fetch existing keys to check which models are already added
   useEffect(() => {
@@ -925,6 +928,7 @@ function AddModelDialog({
           const providers = (parsed.providers || []).map((p: any) => ({
             id: p.id,
             name: p.name || p.id,
+            api: p.api,
           }));
           if (providers.length > 0) {
             setDynamicProviders(providers);
@@ -935,7 +939,7 @@ function AddModelDialog({
         const providers = await fetchProviders();
         setDynamicProviders(providers);
       } catch {
-        setDynamicProviders(ALL_PROVIDERS.filter(p => p.needsApiKey).map(p => ({ id: p.id, name: p.name })));
+        setDynamicProviders([]);
       }
       setProvidersLoading(false);
     };
@@ -951,8 +955,7 @@ function AddModelDialog({
         const data = await fetchProviderModels(provider);
         setAvailableModels(data.models ?? []);
       } catch {
-        const def = getProviderDef(provider);
-        setAvailableModels((def?.exampleModels ?? []).map((id) => ({ id, name: id })));
+        setAvailableModels([]);
       }
       setModelsLoading(false);
     };
@@ -962,8 +965,8 @@ function AddModelDialog({
   // Reset state when provider changes
   useEffect(() => {
     if (!provider) return;
-    const def = getProviderDef(provider);
-    setBaseUrl(def?.baseUrl ?? "");
+    const dynamicProvider = dynamicProviders.find((p) => p.id === provider);
+    setBaseUrl(dynamicProvider?.api ?? "");
     setModels([]);
     setModelSearchTerm("");
     setModelCapabilityFilter([]);
@@ -983,7 +986,7 @@ function AddModelDialog({
   };
 
   const handleSave = async () => {
-    if ((providerDef?.needsApiKey ?? true) && !key.trim()) {
+    if (needsApiKey(provider) && !key.trim()) {
       setTestResult({ success: false, message: "Please enter an API Key first" });
       return;
     }
@@ -994,7 +997,7 @@ function AddModelDialog({
     
     try {
       // First test the API key
-      if (providerDef?.needsApiKey ?? true) {
+      if (needsApiKey(provider)) {
         // Temporarily add the key
         await invoke("add_key", {
           provider,
@@ -1063,49 +1066,18 @@ function AddModelDialog({
     }
   };
 
-  const handleTest = async () => {
-    if (!key.trim()) {
-      setTestResult({ success: false, message: "Please enter an API Key first" });
-      return;
-    }
-    setTesting(true);
-    setTestResult(null);
-    try {
-      // Try to fetch models with the provided key
-      // First, temporarily add the key
-      await invoke("add_key", {
-        provider,
-        key,
-        baseUrl: baseUrl || undefined,
-      });
-      
-      // Then try to fetch models to verify the key works
-      await fetchProviderModels(provider);
-      
-      setTestResult({ success: true, message: "API Key is valid!" });
-      
-      // Remove the temporary key (user will save if they want)
-      await invoke("remove_key", { provider });
-    } catch (e: any) {
-      const errorMsg = e?.message || e?.toString() || "Test failed";
-      setTestResult({ success: false, message: errorMsg });
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  const dynamicProviderApi = dynamicProviders.find((p) => p.id === provider)?.api;
-  const showBaseUrl = providerDef?.editableBaseUrl ?? (!!dynamicProviderApi);
+  const showBaseUrl = true;
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="w-[440px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800"
+        className="w-[440px] max-h-[85vh] overflow-hidden rounded-lg bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="mb-3 text-sm font-semibold">Add Model</h3>
+        <h3 className="shrink-0 px-6 pt-6 pb-3 text-sm font-semibold">Add Model</h3>
 
-        <div className="space-y-2">
+        <div className="flex-1 overflow-y-auto px-6">
+          <div className="space-y-2">
           {/* Provider dropdown */}
           <div>
             <label className="mb-1 block text-xs text-zinc-500">Provider</label>
@@ -1136,20 +1108,19 @@ function AddModelDialog({
           </div>
 
           {/* API Key */}
-          {(providerDef?.needsApiKey ?? true) && (
+          {needsApiKey(provider) && (
             <div>
               <label className="mb-1 block text-xs text-zinc-500">API Key</label>
               <input
                 type="password"
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
-                placeholder={providerDef?.keyPlaceholder ?? "API key..."}
+                placeholder={keyPlaceholder(provider)}
                 className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
               />
             </div>
           )}
 
-          {/* Base URL */}
           {showBaseUrl && (
             <div>
               <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
@@ -1367,9 +1338,7 @@ function AddModelDialog({
             );
           })()}
 
-          {providerDef?.description && (
-            <p className="text-xs text-zinc-400">{providerDef.description}</p>
-          )}
+
 
           {/* Test result */}
           {testResult && (
@@ -1383,8 +1352,9 @@ function AddModelDialog({
             </div>
           )}
         </div>
+        </div>
 
-        <div className="mt-4 flex items-center justify-between gap-2">
+        <div className="shrink-0 flex items-center justify-between gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
           {/* Test result on the left */}
           <div className="flex-1 min-w-0">
             {testResult && (
@@ -1412,7 +1382,7 @@ function AddModelDialog({
             </button>
             <button
               onClick={handleSave}
-              disabled={((providerDef?.needsApiKey ?? true) ? !key.trim() : false) || saving}
+              disabled={(needsApiKey(provider) ? !key.trim() : false) || saving}
               className="w-20 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
             >
               {saving ? "Saving..." : "Save"}
@@ -1428,11 +1398,13 @@ function AddModelDialog({
 function ModelMenu({
   models,
   currentModel,
+  currentProvider,
   onSelect,
 }: {
   models: { name: string; provider: string }[];
   currentModel: string | null;
-  onSelect: (model: string) => void;
+  currentProvider: string | null;
+  onSelect: (model: string, provider: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -1475,10 +1447,8 @@ function ModelMenu({
         type="button"
         onClick={() => setOpen(!open)}
         className={cn(
-          "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
-          "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
-          "dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700",
-          open && "ring-1 ring-zinc-300 dark:ring-zinc-600",
+          toolbarButton,
+          open && toolbarButtonActive,
         )}
       >
         <span className="font-medium">
@@ -1506,13 +1476,13 @@ function ModelMenu({
           {/* Model list */}
           <div className="max-h-[240px] overflow-y-auto">
             {models.map((m) => {
-            const isActive = m.name === currentModel;
+            const isActive = m.name === currentModel && m.provider === currentProvider;
             return (
               <button
-                key={m.name}
+                key={`${m.name}::${m.provider}`}
                 type="button"
                 onClick={() => {
-                  onSelect(m.name);
+                  onSelect(m.name, m.provider);
                   setOpen(false);
                 }}
                 className={cn(

@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
-import { ALL_PROVIDERS, PROVIDER_CATEGORIES, LOCAL_PROVIDERS, getProviderDef } from "../../lib/providers";
-import { fetchProviderModels } from "../../lib/gateway-api";
+import { needsApiKey, keyPlaceholder } from "../../lib/providers";
+import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 import type { ModelInfo } from "../../lib/types";
 
@@ -197,6 +197,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 /** Step 3: API Key */
 function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void }) {
   const [provider, setProvider] = useState("openai");
+  const [dynamicProviders, setDynamicProviders] = useState<Array<{ id: string; name: string; api?: string }>>([]);
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
@@ -206,17 +207,26 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const providerDef = getProviderDef(provider);
+  // Fetch dynamic providers from Gateway API
+  useEffect(() => {
+    const loadProviders = async () => {
+      try {
+        const providers = await fetchProviders();
+        setDynamicProviders(providers);
+      } catch {
+        setDynamicProviders([]);
+      }
+    };
+    loadProviders();
+  }, []);
 
-  // Fetch models from Gateway API with fallback to exampleModels
   const loadModels = useCallback(async (providerId: string) => {
     setModelsLoading(true);
     try {
       const data = await fetchProviderModels(providerId);
       setAvailableModels(data.models ?? []);
     } catch {
-      const def = getProviderDef(providerId);
-      setAvailableModels((def?.exampleModels ?? []).map((id) => ({ id, name: id })));
+      setAvailableModels([]);
     }
     setModelsLoading(false);
   }, []);
@@ -227,8 +237,8 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
     setSaved(false);
     setSelectedModels([]);
     setModelSearchTerm("");
-    const def = getProviderDef(id);
-    setBaseUrl(def?.baseUrl ?? "");
+    const dynamicProvider = dynamicProviders.find((p) => p.id === id);
+    setBaseUrl(dynamicProvider?.api ?? "");
     loadModels(id);
   };
 
@@ -262,7 +272,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
     }
   };
 
-  const needsKey = providerDef?.needsApiKey ?? true;
+  const needsKey = needsApiKey(provider);
   const canSave = needsKey ? apiKey.trim().length > 0 : true;
 
   return (
@@ -280,12 +290,8 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               onChange={(e) => handleProviderChange(e.target.value)}
               className="w-full rounded-md border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
             >
-              {PROVIDER_CATEGORIES.map((cat) => (
-                <optgroup key={cat.id} label={cat.label}>
-                  {ALL_PROVIDERS.filter((p) => p.category === cat.id).map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </optgroup>
+              {dynamicProviders.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
           </div>
@@ -296,13 +302,13 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               type="password"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setSaved(false); }}
-              placeholder={providerDef?.keyPlaceholder ?? "API key..."}
+              placeholder={keyPlaceholder(provider)}
               className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
             />
           )}
 
           {/* Base URL input (if editable) */}
-          {providerDef?.editableBaseUrl && (
+          {true && (
             <input
               type="text"
               value={baseUrl}
@@ -379,10 +385,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
             />
           </div>
 
-          {/* Provider description */}
-          {providerDef?.description && (
-            <p className="mt-1 text-xs text-zinc-400">{providerDef.description}</p>
-          )}
+
 
           <button
             onClick={handleSave}
@@ -400,7 +403,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
             <span className="text-sm font-medium">Local Providers (no key needed)</span>
           </div>
           <p className="mt-1 text-xs text-zinc-400">
-            {LOCAL_PROVIDERS.map((p) => p.name).join(", ")}
+            {dynamicProviders.filter(p => !needsApiKey(p.id)).map((p) => p.name).join(", ") || "Ollama, LM Studio"}
           </p>
         </div>
       </div>
