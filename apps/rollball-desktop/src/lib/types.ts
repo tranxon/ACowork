@@ -152,6 +152,24 @@ export interface TokenUsage {
   total_tokens: number;
 }
 
+/** Context usage info reported by Runtime, forwarded via Gateway WebSocket */
+export interface ContextUsageInfo {
+  /** Context window limit (from model capabilities) */
+  context_window: number;
+  /** Current input tokens used (prompt_tokens from API response) */
+  input_tokens: number;
+  /** Current output tokens generated (completion_tokens) */
+  output_tokens: number;
+  /** Total tokens (input + output) */
+  total_tokens: number;
+  /** Max input tokens (from models.dev limit.input, if available) */
+  max_input_tokens?: number;
+  /** Usable context space */
+  usable_context: number;
+  /** Usage percentage (0-100) */
+  usage_percent: number;
+}
+
 /** Navigation view type */
 export type NavView = "chat" | "settings";
 

@@ -48,6 +48,8 @@ pub enum BridgeEventType {
     SkillExecuted,
     /// Iteration limit reached — agent paused, awaiting user decision
     IterationLimitPaused,
+    /// Context usage report (from Runtime, forwarded to Desktop App)
+    ContextUsage,
 }
 
 impl BridgeEventType {
@@ -64,6 +66,7 @@ impl BridgeEventType {
             "memory_updated" => Some(Self::MemoryUpdated),
             "skill_executed" => Some(Self::SkillExecuted),
             "iteration_limit_paused" => Some(Self::IterationLimitPaused),
+            "context_usage" => Some(Self::ContextUsage),
             _ => None,
         }
     }
@@ -85,6 +88,7 @@ impl BridgeEventType {
             Self::MemoryUpdated => "memory_updated",
             Self::SkillExecuted => "skill_executed",
             Self::IterationLimitPaused => "iteration_limit_paused",
+            Self::ContextUsage => "context_usage",
         }
     }
 }

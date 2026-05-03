@@ -71,9 +71,18 @@ struct NativeChatRequest {
     tools: Option<Vec<NativeToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// Request usage stats in the final streaming chunk (OpenAI stream_options)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
 }
 
+/// OpenAI stream_options to request usage in the final chunk
 #[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct NativeMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,21 +93,21 @@ struct NativeMessage {
     tool_calls: Option<Vec<NativeToolCall>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NativeToolSpec {
     #[serde(rename = "type")]
     kind: String,
     function: NativeToolFunctionSpec,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NativeToolFunctionSpec {
     name: String,
     description: String,
     parameters: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NativeToolCall {
     id: Option<String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -106,7 +115,7 @@ struct NativeToolCall {
     function: NativeFunctionCall,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NativeFunctionCall {
     name: String,
     arguments: String,
@@ -146,7 +155,11 @@ struct NativeUsage {
 // Streaming SSE types
 #[derive(Debug, Deserialize)]
 struct StreamChunk {
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    /// Usage info included in the final chunk when stream_options.include_usage = true
+    #[serde(default)]
+    usage: Option<NativeUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +356,7 @@ impl Provider for OpenAIProvider {
             max_tokens: request.max_tokens,
             tools: convert_tools(request.tools.as_deref()),
             stream: None,
+            stream_options: None,
         };
 
         // Log request payload for debugging tool definitions
@@ -421,6 +435,7 @@ impl Provider for OpenAIProvider {
             max_tokens: request.max_tokens,
             tools: convert_tools(request.tools.as_deref()),
             stream: Some(true),
+            stream_options: Some(StreamOptions { include_usage: true }),
         };
 
         // Log request payload for debugging tool definitions
@@ -446,21 +461,40 @@ impl Provider for OpenAIProvider {
 
         let url = format!("{}/chat/completions", self.base_url);
 
-        let mut req_builder = self.http_client.post(&url);
-
-        if let Some(ref api_key) = self.api_key {
-            req_builder = req_builder.bearer_auth(api_key);
-        }
-
-        let response = req_builder
-            .json(&native_request)
-            .send()
-            .await
-            .map_err(|e| rollball_core::RollballError::Provider(rollball_core::ProviderError::network(format!("OpenAI streaming request failed: {e}"))))?;
+        let response = self.send_streaming_request(&url, &native_request).await?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+
+            // Fallback: if the error is caused by stream_options (some OpenAI-compatible
+            // APIs don't support this field), retry without it.
+            if (status.as_u16() == 422 || status.as_u16() == 400)
+                && body.contains("stream_options")
+            {
+                tracing::warn!(
+                    status = %status,
+                    "stream_options not supported, retrying without it"
+                );
+                let fallback_request = NativeChatRequest {
+                    model: native_request.model.clone(),
+                    messages: native_request.messages.clone(),
+                    temperature: native_request.temperature,
+                    max_tokens: native_request.max_tokens,
+                    tools: native_request.tools.clone(),
+                    stream: Some(true),
+                    stream_options: None,
+                };
+                let retry_response = self.send_streaming_request(&url, &fallback_request).await?;
+                if !retry_response.status().is_success() {
+                    let s = retry_response.status();
+                    let b = retry_response.text().await.unwrap_or_default();
+                    return Err(rollball_core::RollballError::Provider(
+                        rollball_core::ProviderError::from_status_code(s.as_u16(), format!("OpenAI API error: {s} - {b}"))
+                    ));
+                }
+                return Ok(Self::sse_to_stream(retry_response));
+            }
 
             // Detailed diagnostics for 400 Bad Request errors
             if status.as_u16() == 400 {
@@ -472,7 +506,6 @@ impl Provider for OpenAIProvider {
                     "LLM returned 400 Bad Request - detailed diagnostics"
                 );
                 if body.contains("invalid function arguments") {
-                    // Log the last assistant message's tool_calls for diagnosis
                     if let Some(last_assistant) = native_request.messages.iter().rev()
                         .find(|m| m.role == "assistant")
                     {
@@ -484,10 +517,46 @@ impl Provider for OpenAIProvider {
                 }
             }
 
-            return Err(rollball_core::RollballError::Provider(rollball_core::ProviderError::from_status_code(status.as_u16(), format!("OpenAI API error: {status} — {body}"))));
+            return Err(rollball_core::RollballError::Provider(
+                rollball_core::ProviderError::from_status_code(status.as_u16(), format!("OpenAI API error: {status} - {body}"))
+            ));
         }
 
-        // Spawn a task to read SSE lines and send events via channel
+        Ok(Self::sse_to_stream(response))
+    }
+
+    async fn chat_token_count(&self, messages: &[ChatMessage]) -> rollball_core::error::Result<u64> {
+        // Approximate token count: ~4 chars per token for English text
+        // This is a rough estimate; precise counting requires tiktoken
+        let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+        Ok((total_chars as f64 / 4.0).ceil() as u64)
+    }
+}
+
+// ── OpenAIProvider inherent helpers (not part of Provider trait) ─────────
+
+impl OpenAIProvider {
+    /// Send a streaming HTTP request and return the raw response.
+    async fn send_streaming_request(
+        &self,
+        url: &str,
+        native_request: &NativeChatRequest,
+    ) -> rollball_core::error::Result<reqwest::Response> {
+        let mut req_builder = self.http_client.post(url);
+        if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.bearer_auth(api_key);
+        }
+        req_builder
+            .json(native_request)
+            .send()
+            .await
+            .map_err(|e| rollball_core::RollballError::Provider(
+                rollball_core::ProviderError::network(format!("OpenAI streaming request failed: {e}"))
+            ))
+    }
+
+    /// Convert an HTTP SSE response into a Stream of StreamEvent.
+    fn sse_to_stream(response: reqwest::Response) -> Box<dyn Stream<Item = StreamEvent> + Send> {
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
@@ -508,8 +577,9 @@ impl Provider for OpenAIProvider {
                             }
 
                             if let Some(event) = parse_sse_line(&line)
-                                && tx.send(Some(event)).await.is_err() {
-                                    return; // receiver dropped
+                                && tx.send(Some(event)).await.is_err()
+                            {
+                                return; // receiver dropped
                             }
                         }
                     }
@@ -522,14 +592,7 @@ impl Provider for OpenAIProvider {
             let _ = tx.send(None).await;
         });
 
-        Ok(Box::new(ChannelStream { rx }))
-    }
-
-    async fn chat_token_count(&self, messages: &[ChatMessage]) -> rollball_core::error::Result<u64> {
-        // Approximate token count: ~4 chars per token for English text
-        // This is a rough estimate; precise counting requires tiktoken
-        let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-        Ok((total_chars as f64 / 4.0).ceil() as u64)
+        Box::new(ChannelStream { rx })
     }
 }
 
@@ -567,6 +630,24 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
     }
 
     let chunk: StreamChunk = serde_json::from_str(data).ok()?;
+
+    // If the final streaming chunk includes usage info (requested via
+    // stream_options.include_usage), emit a Finished event so the
+    // agent loop can compute context usage. This is the standard
+    // OpenAI behavior: the last chunk before [DONE] contains usage.
+    if let Some(usage) = chunk.usage {
+        let prompt = usage.prompt_tokens.unwrap_or(0);
+        let completion = usage.completion_tokens.unwrap_or(0);
+        return Some(StreamEvent::Finished(ChatResponse {
+            content: String::new(),
+            tool_calls: None,
+            usage: Some(rollball_core::providers::traits::UsageInfo {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: prompt + completion,
+            }),
+        }));
+    }
 
     for choice in chunk.choices {
         if let Some(content) = &choice.delta.content

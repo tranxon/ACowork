@@ -487,6 +487,27 @@ impl GatewayClient {
         }
     }
 
+    /// Report context usage to Gateway after each LLM call.
+    ///
+    /// Sends a ContextUsageReport containing token counts and usage percentage.
+    /// Gateway forwards this to the Desktop App via WebSocket for UI display.
+    pub async fn report_context_usage(
+        &mut self,
+        agent_id: &str,
+        context: rollball_core::protocol::ContextUsageInfo,
+    ) -> Result<(), RollballError> {
+        let request = GatewayRequest::ContextUsageReport {
+            agent_id: agent_id.to_string(),
+            context,
+        };
+
+        match self.send_and_recv(request).await {
+            Ok(GatewayResponse::ContextUsageAck {}) => Ok(()),
+            Ok(other) => Err(RollballError::Ipc(format!("Unexpected response type: {:?}", other))),
+            Err(e) => Err(e),
+        }
+    }
+
     /// S4.2.4: Query capabilities from the Gateway
     pub async fn query_capabilities(
         &mut self,

@@ -157,6 +157,9 @@ struct StreamEventRaw {
     content_block: Option<ContentBlockStart>,
     #[serde(default)]
     message: Option<AnthropicResponse>,
+    /// Usage info included in message_delta event
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -512,6 +515,7 @@ impl Provider for AnthropicProvider {
             let mut buffer = String::new();
             let mut pending_tool_id: Option<String> = None;
             let mut pending_tool_name: Option<String> = None;
+            let mut accumulated_input_tokens: u64 = 0;
 
             use futures_util::StreamExt;
             while let Some(chunk_result) = stream.next().await {
@@ -527,6 +531,7 @@ impl Provider for AnthropicProvider {
                                 &line,
                                 &mut pending_tool_id,
                                 &mut pending_tool_name,
+                                &mut accumulated_input_tokens,
                             )
                                 && tx.send(Some(event)).await.is_err()
                             {
@@ -603,6 +608,7 @@ fn parse_anthropic_sse_line(
     line: &str,
     pending_tool_id: &mut Option<String>,
     pending_tool_name: &mut Option<String>,
+    accumulated_input_tokens: &mut u64,
 ) -> Option<StreamEvent> {
     let line = line.trim();
     if line.is_empty() || line == ":" {
@@ -659,10 +665,35 @@ fn parse_anthropic_sse_line(
             None
         }
         "message_delta" => {
-            // Contains stop_reason, but we don't emit an event for this
+            // Contains stop_reason and output usage info.
+            // Combine accumulated input_tokens from message_start with output_tokens
+            // from message_delta to produce a complete usage report.
+            if let Some(usage) = event.usage {
+                let input = *accumulated_input_tokens;
+                let output = usage.output_tokens.unwrap_or(0);
+                return Some(StreamEvent::Finished(ChatResponse {
+                    content: String::new(),
+                    tool_calls: None,
+                    usage: Some(rollball_core::providers::traits::UsageInfo {
+                        prompt_tokens: input,
+                        completion_tokens: output,
+                        total_tokens: input + output,
+                    }),
+                }));
+            }
             None
         }
-        "message_start" | "content_block_stop" | "ping" => {
+        "message_start" => {
+            // Extract input_tokens from message_start's usage for later combination
+            // with output_tokens from message_delta.
+            if let Some(ref msg) = event.message {
+                if let Some(ref usage) = msg.usage {
+                    *accumulated_input_tokens = usage.input_tokens.unwrap_or(0);
+                }
+            }
+            None
+        }
+        "content_block_stop" | "ping" => {
             // No action needed for these event types
             None
         }
@@ -881,10 +912,12 @@ mod tests {
     fn test_parse_sse_content_delta() {
         let mut tool_id = None;
         let mut tool_name = None;
+        let mut input_tokens = 0u64;
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
             &mut tool_id,
             &mut tool_name,
+            &mut input_tokens,
         );
         assert!(event.is_some());
         if let Some(StreamEvent::Content(text)) = event {
@@ -898,10 +931,12 @@ mod tests {
     fn test_parse_sse_tool_use_start() {
         let mut tool_id = None;
         let mut tool_name = None;
+        let mut input_tokens = 0u64;
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_xyz","name":"calculator","input":{}}}"#,
             &mut tool_id,
             &mut tool_name,
+            &mut input_tokens,
         );
         assert!(event.is_some());
         if let Some(StreamEvent::ToolCallStart(tc)) = event {
@@ -916,10 +951,12 @@ mod tests {
     fn test_parse_sse_tool_input_delta() {
         let mut tool_id = None;
         let mut tool_name = None;
+        let mut input_tokens = 0u64;
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"expr\":"}}"#,
             &mut tool_id,
             &mut tool_name,
+            &mut input_tokens,
         );
         assert!(event.is_some());
         if let Some(StreamEvent::ToolCallChunk { arguments: chunk, .. }) = event {

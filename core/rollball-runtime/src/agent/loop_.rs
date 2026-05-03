@@ -36,6 +36,8 @@ use crate::error::{Result, RuntimeError};
 pub enum ChunkEvent {
     /// Content delta to append to the streaming message
     Delta(String),
+    /// Context usage report (after each LLM call)
+    ContextUsage(rollball_core::protocol::ContextUsageInfo),
 }
 
 /// Tool execution event emitted during the agent loop's tool dispatch phase.
@@ -370,6 +372,15 @@ impl AgentLoop {
             // Update budget
             if let Some(usage) = &response.usage {
                 self.budget_guard.update_usage(usage.total_tokens, 0.0);
+
+                // Compute and emit context usage report
+                let model_caps = self.gateway_model_capabilities.values().next();
+                if let (Some(chunk_tx), Some(caps)) = (&self.on_chunk, model_caps) {
+                    let ctx_usage = crate::agent::context::compute_context_usage(caps, usage);
+                    let _ = chunk_tx.send(
+                        crate::agent::loop_::ChunkEvent::ContextUsage(ctx_usage)
+                    ).await;
+                }
             }
 
             if !has_tool_calls {

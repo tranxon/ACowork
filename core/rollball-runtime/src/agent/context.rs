@@ -160,7 +160,40 @@ impl ContextBuilder {
             );
             Some(explicit)
         } else if let Some(caps) = gateway_capabilities {
-            let recommended = caps.max_output_tokens.min(u32::MAX as u64) as u32;
+            // Cap max_output_tokens: it should never exceed context_window.
+            // models.dev data or user input may provide inflated values that
+            // the actual API rejects (e.g. alibaba-cn proxy limits kimi-k2.6
+            // max_tokens to 98304, but models.dev reports 384000).
+            let raw = caps.max_output_tokens;
+            let context_window = caps.context_window;
+            let recommended = if raw > context_window {
+                tracing::warn!(
+                    model = %model,
+                    raw_max_output_tokens = raw,
+                    context_window = context_window,
+                    "max_output_tokens exceeds context_window, capping"
+                );
+                context_window
+            } else {
+                raw
+            };
+            // Hard cap: many provider APIs reject max_tokens > 32K.
+            // This follows opencode's approach: Math.min(limit.output, 32000).
+            // models.dev's limit.output can be inflated (e.g. 384000) but
+            // actual API max_tokens parameter is usually capped much lower.
+            const MAX_TOKENS_HARD_CAP: u64 = 32_768;
+            let recommended = if recommended > MAX_TOKENS_HARD_CAP {
+                tracing::warn!(
+                    model = %model,
+                    requested = recommended,
+                    cap = MAX_TOKENS_HARD_CAP,
+                    "max_output_tokens exceeds 128K hard cap, capping"
+                );
+                MAX_TOKENS_HARD_CAP
+            } else {
+                recommended
+            };
+            let recommended = recommended.min(u32::MAX as u64) as u32;
             tracing::info!(
                 model = %model,
                 recommended_max_tokens = recommended,
@@ -297,5 +330,35 @@ mod tests {
 
         let request = builder.build(&manifest, &history, None);
         assert!(request.messages[0].content.contains("Alice"));
+    }
+}
+
+/// Compute context usage info from model capabilities and API usage response.
+/// Follows opencode's approach: usable context = context_window - maxOutputTokens,
+/// or max_input_tokens - reserved if available.
+pub fn compute_context_usage(
+    caps: &ModelCapabilitiesInfo,
+    usage: &rollball_core::providers::traits::UsageInfo,
+) -> rollball_core::protocol::ContextUsageInfo {
+    // Cap max_output_tokens at 32K (same as max_tokens hard cap)
+    let max_output = caps.max_output_tokens.min(32_768);
+    let usable = caps
+        .max_input_tokens
+        .map(|input| input.saturating_sub(max_output))
+        .unwrap_or_else(|| caps.context_window.saturating_sub(max_output));
+    let total = usage.prompt_tokens + usage.completion_tokens;
+    let percent = if usable > 0 {
+        ((total as f64 / usable as f64) * 100.0).min(100.0) as u8
+    } else {
+        0
+    };
+    rollball_core::protocol::ContextUsageInfo {
+        context_window: caps.context_window,
+        input_tokens: usage.prompt_tokens,
+        output_tokens: usage.completion_tokens,
+        total_tokens: total,
+        max_input_tokens: caps.max_input_tokens,
+        usable_context: usable,
+        usage_percent: percent,
     }
 }

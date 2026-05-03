@@ -322,6 +322,9 @@ async fn dispatch_request(
         GatewayRequest::CronList {} => {
             handle_cron_list(conn_id, session_mgr, state).await
         }
+        GatewayRequest::ContextUsageReport { agent_id, context } => {
+            handle_context_usage_report(&agent_id, &context, conn_id, session_mgr, bridge_tx).await
+        }
         GatewayRequest::AgentHello { agent_id, version, connection_role } => {
             handle_agent_hello(&agent_id, &version, &connection_role, conn_id, state, session_mgr).await
         }
@@ -1219,6 +1222,29 @@ async fn handle_cron_list(
         .collect();
 
     GatewayResponse::CronListResult { entries }
+}
+
+/// Handle ContextUsageReport — forward context usage to Desktop App via WebSocket bridge
+async fn handle_context_usage_report(
+    agent_id: &str,
+    context: &rollball_core::protocol::ContextUsageInfo,
+    _conn_id: &str,
+    _session_mgr: &SharedSessionMgr,
+    bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
+) -> GatewayResponse {
+    // Broadcast context_usage event to all WebSocket bridge subscribers
+    if let Some(tx) = bridge_tx {
+        let event = crate::http::routes::BridgeEvent {
+            agent_id: agent_id.to_string(),
+            message_id: String::new(),
+            event_type: crate::http::routes::BridgeEventType::ContextUsage,
+            payload: serde_json::to_value(context).unwrap_or_default(),
+        };
+        if let Err(e) = tx.send(event) {
+            tracing::debug!("Failed to forward context_usage to bridge: {}", e);
+        }
+    }
+    GatewayResponse::ContextUsageAck {}
 }
 
 /// Handle AgentHello — register the session with the agent's identity

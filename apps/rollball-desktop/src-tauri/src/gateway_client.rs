@@ -421,6 +421,9 @@ pub struct ModelCapabilities {
     pub context_window: u64,
     /// Maximum output tokens the model can generate
     pub max_output_tokens: u64,
+    /// Maximum input tokens (from models.dev limit.input)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
     /// Whether the model supports tool/function calling
     #[serde(default = "default_true")]
     pub supports_tool_calling: bool,

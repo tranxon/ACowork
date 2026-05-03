@@ -71,6 +71,11 @@ pub struct ModelCapabilitiesInfo {
     pub context_window: u64,
     /// Maximum output tokens the model can generate
     pub max_output_tokens: u64,
+    /// Maximum input tokens (optional, from models.dev limit.input).
+    /// When available, usable context = max_input_tokens - reserved.
+    /// When absent, usable context = context_window - max_output_tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
 
     // ── Capability flags ──
     /// Whether the model supports tool/function calling
@@ -106,6 +111,27 @@ pub struct ModelCapabilitiesInfo {
     /// Knowledge cutoff date (e.g. "2025-04", "2024-10")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_cutoff: Option<String>,
+}
+
+/// Context usage info reported by Runtime to Gateway after each LLM call.
+/// Forwarded to Desktop App via WebSocket for UI display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextUsageInfo {
+    /// Context window limit (from model capabilities)
+    pub context_window: u64,
+    /// Current input tokens used (prompt_tokens from API response)
+    pub input_tokens: u64,
+    /// Current output tokens generated (completion_tokens)
+    pub output_tokens: u64,
+    /// Total tokens (input + output)
+    pub total_tokens: u64,
+    /// Max input tokens (from models.dev limit.input, if available)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    /// Usable context space (context_window - max_output_tokens, or max_input_tokens - reserved)
+    pub usable_context: u64,
+    /// Usage percentage (0-100)
+    pub usage_percent: u8,
 }
 
 /// Gateway Service API request
@@ -170,6 +196,11 @@ pub enum GatewayRequest {
     },
     /// List cron entries for the calling agent (S3.4)
     CronList {},
+    /// Runtime reports context usage to Gateway (after each LLM call)
+    ContextUsageReport {
+        agent_id: String,
+        context: ContextUsageInfo,
+    },
     /// Agent registration — first message sent after IPC connection
     /// Runtime sends this to identify itself to the Gateway
     AgentHello {
@@ -219,6 +250,8 @@ pub enum GatewayResponse {
     },
     /// Usage report acknowledgment
     UsageReportAck {},
+    /// Context usage report acknowledgment
+    ContextUsageAck {},
     /// Rate limit token
     RateToken {
         granted: bool,

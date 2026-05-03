@@ -110,7 +110,8 @@ impl Cli {
         let stderr_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_thread_ids(false)
-            .with_file(false);
+            .with_file(false)
+            .with_ansi(cfg!(not(windows))); // Enable ANSI on non-Windows, disable on Windows
 
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(file_appender)
@@ -210,19 +211,19 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                     llm_config.api_key.as_deref(),
                     llm_config.base_url.as_deref(),
                 );
-                // Model is required — if Gateway didn't specify one, use the first
-                // example model from the provider definition as a sensible default.
-                let resolved = llm_config.model.unwrap_or_else(|| {
-                    let fallback = crate::providers::router::default_model_for_provider(
-                        &llm_config.provider,
-                    );
-                    tracing::warn!(
-                        provider = %llm_config.provider,
-                        fallback_model = %fallback,
-                        "No model specified by Gateway, using provider default"
-                    );
-                    fallback
-                });
+                // Model resolution: prefer explicit model > first from user-selected models list
+                // If neither is available, refuse service — Runtime cannot guess.
+                let resolved = llm_config.model
+                    .or_else(|| llm_config.models.first().cloned())
+                    .unwrap_or_else(|| {
+                        let provider = &llm_config.provider;
+                        tracing::error!(
+                            provider = %provider,
+                            "No model available from Gateway. \
+                             Please configure a provider and select a model in Settings."
+                        );
+                        format!("NO_MODEL_FOR_{}", provider.to_uppercase())
+                    });
                 let models = llm_config.models.clone();
                 (p, resolved, models)
             }
@@ -434,6 +435,15 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                                         // Keep consuming chunks but they will be dropped until reconnect succeeds
                                     }
                                 }
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::ContextUsage(ctx_info) => {
+                            // Send context usage report to Gateway via IPC
+                            if let Err(e) = chunk_client
+                                .report_context_usage(&agent_id, ctx_info)
+                                .await
+                            {
+                                tracing::debug!("Context usage report send failed: {}", e);
                             }
                         }
                     }
@@ -885,7 +895,7 @@ async fn run_gateway_loop(
                         }
                     }
                     // Ignore other push messages (CapabilityUpdate, etc.)
-                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: _, model_capabilities } => {
+                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: available_models, model_capabilities } => {
                         tracing::info!(
                             provider = %provider,
                             model = ?model,
@@ -896,15 +906,18 @@ async fn run_gateway_loop(
                             Some(&api_key),
                             base_url.as_deref(),
                         );
-                        let resolved = model.unwrap_or_else(|| {
-                            let fallback = crate::providers::router::default_model_for_provider(&provider);
-                            tracing::warn!(
-                                provider = %provider,
-                                fallback_model = %fallback,
-                                "No model in runtime LLMConfigDelivery, using provider default"
-                            );
-                            fallback
-                        });
+                        // Model resolution: prefer explicit model > first from user-selected models
+                        // If neither is available, refuse service — Runtime cannot guess.
+                        let resolved = model
+                            .or_else(|| available_models.first().cloned())
+                            .unwrap_or_else(|| {
+                                tracing::error!(
+                                    provider = %provider,
+                                    "No model available from Gateway hot-push. \
+                                     Please configure a provider and select a model in Settings."
+                                );
+                                format!("NO_MODEL_FOR_{}", provider.to_uppercase())
+                            });
                         agent_loop.update_provider(new_provider, resolved);
 
                         // Sync updated model capabilities if provided by Gateway

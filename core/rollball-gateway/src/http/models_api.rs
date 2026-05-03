@@ -61,6 +61,9 @@ pub struct ModelInfo {
     /// Maximum output tokens
     #[serde(default)]
     pub max_tokens: Option<u64>,
+    /// Maximum input tokens (from models.dev limit.input)
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
     /// Knowledge cutoff date (e.g. "2025-04")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge: Option<String>,
@@ -196,6 +199,11 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
             .and_then(|v| v.get("output"))
             .and_then(|v| v.as_u64());
 
+        let max_input_tokens = model_data
+            .get("limit")
+            .and_then(|v| v.get("input"))
+            .and_then(|v| v.as_u64());
+
         let model = ModelInfo {
             id: id.clone(),
             name: model_data
@@ -217,6 +225,7 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
                 .map(|s| s.to_string()),
             context_window,
             max_tokens,
+            max_input_tokens,
             knowledge: model_data
                 .get("knowledge")
                 .and_then(|v| v.as_str())
@@ -427,11 +436,49 @@ fn lookup_model_capabilities_from_data(
     provider: &str,
     model_id: &str,
 ) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
-    let (_, models) = resolve_provider(data, provider)?;
-    let model = models.iter().find(|m| m.id == model_id)?;
+    // 1. Try exact provider match first
+    if let Some((_, models)) = resolve_provider(data, provider) {
+        if let Some(model) = models.iter().find(|m| m.id == model_id) {
+            return model_to_capabilities(model);
+        }
+    }
+    // 2. Fallback: cross-provider search by model ID
+    //    This handles cases like alibaba-cn proxying moonshotai/kimi-k2.6
+    cross_provider_lookup(data, model_id)
+}
+
+/// Search all providers for a model matching the given model_id.
+/// Strips provider prefix if present (e.g. "moonshotai/kimi-k2.6" -> "kimi-k2.6").
+fn cross_provider_lookup(
+    data: &serde_json::Value,
+    model_id: &str,
+) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
+    let bare_id = if model_id.contains('/') {
+        model_id.split('/').last().unwrap_or(model_id)
+    } else {
+        model_id
+    };
+
+    let providers = data.as_object()?;
+    for (pid, provider_data) in providers {
+        if let Some(models) = extract_models(provider_data).into_iter().find(|m| m.id == bare_id || m.id == model_id) {
+            tracing::debug!(
+                model_id = model_id,
+                found_in_provider = %pid,
+                "Cross-provider model capabilities lookup succeeded"
+            );
+            return model_to_capabilities(&models);
+        }
+    }
+    None
+}
+
+/// Convert a ModelInfo to ModelCapabilitiesInfo
+fn model_to_capabilities(model: &ModelInfo) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
     Some(rollball_core::protocol::ModelCapabilitiesInfo {
         context_window: model.context_window.unwrap_or(0),
         max_output_tokens: model.max_tokens.unwrap_or(0),
+        max_input_tokens: model.max_input_tokens,
         supports_tool_calling: model.tool_call.unwrap_or(true),
         supports_reasoning: model.reasoning,
         supports_attachment: model.attachment,

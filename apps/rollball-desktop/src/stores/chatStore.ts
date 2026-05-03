@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage, TokenUsage, ToolApprovalNeededEvent } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent } from "../lib/types";
 import { usePermissionStore } from "./permissionStore";
 import { getGatewayUrl } from "../lib/config";
 
@@ -21,6 +21,8 @@ interface ChatStore {
   currentAgentId: string | null;
   /** Whether the agent loop is paused at iteration limit, awaiting user continue */
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
+  /** Context usage info from Runtime (updated after each LLM call) */
+  contextUsage: ContextUsageInfo | null;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => Promise<void>;
@@ -88,6 +90,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   availableModels: [],
   currentAgentId: null,
   iterationLimitPaused: null,
+  contextUsage: null,
 
   connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
     // Update currentAgentId for stop functionality
@@ -154,7 +157,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Don't set ws: null here — onclose will fire after onerror
     };
 
-    set({ ws, streamingMessageId: null, tokenUsage: null, currentAgentId: agentId });
+    set({ ws, streamingMessageId: null, tokenUsage: null, contextUsage: null, currentAgentId: agentId });
   },
 
   sendMessage: async (content: string, agentId: string) => {
@@ -518,6 +521,12 @@ function handleMessageEvent(
     case "skill_executed":
       console.log("[WS] Skill executed event:", data);
       break;
+
+    case "context_usage": {
+      const usage = data as unknown as ContextUsageInfo;
+      set({ contextUsage: usage });
+      break;
+    }
 
     case "iteration_limit_paused": {
       const { iteration, max_iterations, message } = data as {

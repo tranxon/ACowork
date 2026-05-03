@@ -140,6 +140,8 @@ function ProvidersTab() {
   const [newContextWindow, setNewContextWindow] = useState("");
   const [newMaxOutputTokens, setNewMaxOutputTokens] = useState("");
   const [newSupportsToolCalling, setNewSupportsToolCalling] = useState(true);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Edit dialog state
   const [editKey, setEditKey] = useState("");
@@ -325,20 +327,32 @@ function ProvidersTab() {
   }, []);
 
   const handleAdd = async () => {
-    // Build model_capabilities if user provided values
+    // Get effective values (prefer models.dev data if available)
+    const primaryModel = newModels.length > 0 ? newModels[0] : "";
+    const modelInfo = availableModels.find(m => m.id === primaryModel);
+    const hasModelsDevData = !!(modelInfo && (modelInfo.context_window || modelInfo.max_tokens));
+    const effectiveContextWindow = hasModelsDevData 
+      ? (modelInfo?.context_window?.toString() ?? newContextWindow)
+      : newContextWindow;
+    const effectiveMaxOutputTokens = hasModelsDevData 
+      ? (modelInfo?.max_tokens?.toString() ?? newMaxOutputTokens)
+      : newMaxOutputTokens;
+    const effectiveSupportsToolCalling = hasModelsDevData 
+      ? (modelInfo?.tool_call ?? newSupportsToolCalling)
+      : newSupportsToolCalling;
+    
+    // Rust requires context_window to be present (u64, not Option)
+    // Default to 128000 if not specified (safe default for most models)
+    const ctxWindow = effectiveContextWindow ? parseInt(effectiveContextWindow) : 128000;
+    
+    // Build model_capabilities if user selected models
     let modelCapabilities: ModelCapabilitiesInfo | undefined;
-    if (newContextWindow || newMaxOutputTokens) {
-      const cw = Number(newContextWindow);
-      const mot = Number(newMaxOutputTokens);
-      if ((newContextWindow && (!Number.isFinite(cw) || cw <= 0)) ||
-          (newMaxOutputTokens && (!Number.isFinite(mot) || mot <= 0))) {
-        alert('Context Window and Max Output Tokens must be positive numbers');
-        return;
-      }
+    if (newModels.length > 0) {
+      const maxOutTokens = effectiveMaxOutputTokens ? parseInt(effectiveMaxOutputTokens) : 0;
       modelCapabilities = {
-        context_window: cw || 0,
-        max_output_tokens: mot || 0,
-        supports_tool_calling: newSupportsToolCalling,
+        context_window: ctxWindow,
+        max_output_tokens: maxOutTokens,
+        supports_tool_calling: effectiveSupportsToolCalling,
       };
     }
     try {
@@ -356,10 +370,41 @@ function ProvidersTab() {
       setNewContextWindow("");
       setNewMaxOutputTokens("");
       setNewSupportsToolCalling(true);
+      setTestResult(null);
       await fetchKeys();
       await fetchConfig();
     } catch (e) {
       alert(`Failed to add key: ${e}`);
+    }
+  };
+
+  const handleTest = async () => {
+    if (!newKey.trim()) {
+      setTestResult({ success: false, message: "Please enter an API Key first" });
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      // Temporarily add the key
+      await invoke("add_key", {
+        provider: newProvider,
+        key: newKey,
+        baseUrl: newBaseUrl || undefined,
+      });
+      
+      // Try to fetch models to verify the key works
+      await fetchProviderModels(newProvider);
+      
+      setTestResult({ success: true, message: "API Key is valid!" });
+      
+      // Remove the temporary key
+      await invoke("remove_key", { provider: newProvider });
+    } catch (e: any) {
+      const errorMsg = e?.message || e?.toString() || "Test failed";
+      setTestResult({ success: false, message: errorMsg });
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -871,22 +916,43 @@ function ProvidersTab() {
               {newProviderDef?.description && (
                 <p className="text-xs text-zinc-400">{newProviderDef.description}</p>
               )}
+
+              {/* Test result */}
+              {testResult && (
+                <div className={cn(
+                  "rounded-md px-3 py-2 text-xs",
+                  testResult.success
+                    ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
+                    : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
+                )}>
+                  {testResult.message}
+                </div>
+              )}
             </div>
 
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 flex justify-between gap-2">
               <button
-                onClick={() => { setShowAddDialog(false); setNewModels([]); }}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                onClick={handleTest}
+                disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false || testing}
+                className="rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700"
               >
-                Cancel
+                {testing ? "Testing..." : "Test"}
               </button>
-              <button
-                onClick={handleAdd}
-                disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false}
-                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
-              >
-                Save
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { setShowAddDialog(false); setNewModels([]); setTestResult(null); }}
+                  className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAdd}
+                  disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false}
+                  className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                >
+                  Save
+                </button>
+              </div>
             </div>
           </div>
         </div>
