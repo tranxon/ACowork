@@ -520,14 +520,14 @@ function ProvidersTab() {
           {keys.length > 0 && (
             <div>
               <h3 className="mb-2 text-xs font-medium text-zinc-500">Configured Providers</h3>
-              <div className="space-y-2">
+              <div className="space-y-1">
                 {keys.map((keyEntry) => {
                   const provider = ALL_PROVIDERS.find((p) => p.id === keyEntry.provider) || 
                     dynamicProviders.find((p) => p.id === keyEntry.provider);
                   const providerName = provider?.name || keyEntry.provider;
                   
                   return (
-                    <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
+                    <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
                       <div className="flex items-center justify-between">
                         <div className="min-w-0 flex-1">
                           <span className="text-sm font-medium">{providerName}</span>
@@ -614,7 +614,7 @@ function ProvidersTab() {
                 </button>
               </div>
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1">
               {/* Use dynamic providers if available, otherwise fallback to static */}
               {(dynamicProviders.length > 0 ? dynamicProviders : ALL_PROVIDERS).map((item) => {
                 const providerId = item.id;
@@ -630,7 +630,7 @@ function ProvidersTab() {
                 if (providerDef && !providerDef.needsApiKey) return null;
                 
                 return (
-                  <div key={providerId} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
+                  <div key={providerId} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
                     <div className="flex items-center justify-between">
                       <div className="min-w-0 flex-1">
                         <span className="text-sm font-medium">{providerName}</span>
