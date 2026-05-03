@@ -94,6 +94,7 @@ fn test_gateway_config(temp_dir: &Path) -> GatewayConfig {
         http: rollball_gateway::config::HttpConfig { enabled: false, ..Default::default() },
         default_provider: None,
         default_model: None,
+        max_output_tokens_limit: 32_768,
     }
 }
 

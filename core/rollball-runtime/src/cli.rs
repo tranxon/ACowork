@@ -194,6 +194,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     //
     // In Standalone mode: use manifest suggested_provider + env vars (development only).
     let mut gateway_model_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo> = None;
+    let mut gateway_max_output_tokens_limit: u64 = 32_768;
     let (provider, resolved_model, available_models) = if let Some(ref mut client) = ipc_client {
         // Gateway mode: LLMConfigDelivery is required
         match client.recv_llm_config().await {
@@ -206,6 +207,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                 );
                 // Save model capabilities for later use in context and loop
                 gateway_model_capabilities = llm_config.model_capabilities;
+                gateway_max_output_tokens_limit = llm_config.max_output_tokens_limit;
                 let p = crate::providers::router::create_provider(
                     &llm_config.provider,
                     llm_config.api_key.as_deref(),
@@ -372,6 +374,9 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     if let Some(caps) = gateway_model_capabilities {
         agent_loop.update_gateway_model_capabilities(caps);
     }
+
+    // Inject max_output_tokens_limit from Gateway config
+    agent_loop.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
 
     // Step 9: Run the appropriate loop based on connection mode
     if let Some(mut client) = ipc_client {
@@ -895,10 +900,11 @@ async fn run_gateway_loop(
                         }
                     }
                     // Ignore other push messages (CapabilityUpdate, etc.)
-                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: available_models, model_capabilities } => {
+                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: available_models, model_capabilities, max_output_tokens_limit } => {
                         tracing::info!(
                             provider = %provider,
                             model = ?model,
+                            max_output_tokens_limit = max_output_tokens_limit,
                             "Received LLMConfigDelivery at runtime — updating provider"
                         );
                         let new_provider = crate::providers::router::create_provider(
@@ -925,6 +931,7 @@ async fn run_gateway_loop(
                         if let Some(caps) = model_capabilities {
                             agent_loop.update_gateway_model_capabilities(caps);
                         }
+                        agent_loop.update_max_output_tokens_limit(max_output_tokens_limit);
                     }
                     GatewayResponse::WorkspaceContextUpdate {
                         context_text,

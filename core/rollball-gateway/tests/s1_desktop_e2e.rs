@@ -77,6 +77,7 @@ fn gateway_config(temp_dir: &Path) -> GatewayConfig {
         },
         default_provider: None,
         default_model: None,
+        max_output_tokens_limit: 32_768,
     }
 }
 

@@ -27,6 +27,11 @@ fn default_true() -> bool {
     true
 }
 
+/// Default max output tokens limit (32K) — matches opencode's Math.min(limit.output, 32000)
+fn default_max_output_tokens_limit() -> u64 {
+    32_768
+}
+
 /// Cost information for a model (per million tokens)
 ///
 /// Used by BudgetGuard for cost-aware token budgeting.
@@ -302,6 +307,12 @@ pub enum GatewayResponse {
         /// None when model capabilities are not available (e.g. unknown model).
         #[serde(default)]
         model_capabilities: Option<ModelCapabilitiesInfo>,
+        /// Global max output tokens limit (from Gateway config).
+        /// When set, this value caps the max_output_tokens used in API requests
+        /// and context usage calculations, overriding model capabilities if they exceed it.
+        /// Default: 32768 (32K). Set to 0 to disable the limit.
+        #[serde(default = "default_max_output_tokens_limit")]
+        max_output_tokens_limit: u64,
     },
     /// Identity query result from System Agent
     IdentityQueryResult {

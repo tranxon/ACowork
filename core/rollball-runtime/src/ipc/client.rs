@@ -32,6 +32,8 @@ pub struct LlmConfigReceived {
     pub models: Vec<String>,
     /// Model capabilities from models.dev / offline data
     pub model_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo>,
+    /// Global max output tokens limit from Gateway config
+    pub max_output_tokens_limit: u64,
 }
 
 /// IPC client for Gateway communication
@@ -191,12 +193,14 @@ impl GatewayClient {
                     base_url,
                     models,
                     model_capabilities,
+                    max_output_tokens_limit,
                 }))) => {
                     tracing::info!(
                         provider = %provider,
                         model = ?model,
                         models = ?models,
                         model_capabilities = ?model_capabilities,
+                        max_output_tokens_limit = max_output_tokens_limit,
                         "Received LLMConfigDelivery from Gateway"
                     );
                     return Ok(LlmConfigReceived {
@@ -206,6 +210,7 @@ impl GatewayClient {
                         base_url,
                         models,
                         model_capabilities,
+                        max_output_tokens_limit,
                     });
                 }
                 Ok(Ok(Some(_other))) => {

@@ -341,6 +341,9 @@ async fn hot_push_llm_config(state: &AppState) {
             };
             let mgr = session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+                // Read max_output_tokens_limit from Gateway config
+                let max_output_tokens_limit = state.gateway_state.read().await.config
+                    .as_ref().map(|c| c.max_output_tokens_limit).unwrap_or(32_768);
                 let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
                     provider: cfg.provider.clone(),
                     model: cfg.model.clone(),
@@ -348,6 +351,7 @@ async fn hot_push_llm_config(state: &AppState) {
                     base_url: cfg.base_url.clone(),
                     models: cfg.models.clone(),
                     model_capabilities,
+                    max_output_tokens_limit,
                 }).await;
                 if push_result {
                     tracing::info!(

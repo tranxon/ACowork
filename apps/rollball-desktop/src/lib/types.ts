@@ -108,6 +108,8 @@ export interface GatewayConfig {
   default_provider?: string;
   /** Default LLM model (if configured) */
   default_model?: string;
+  /** Global max output tokens limit (default 32768) */
+  max_output_tokens_limit: number;
 }
 
 /** Generic message response */

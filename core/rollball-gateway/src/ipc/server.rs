@@ -1302,6 +1302,11 @@ async fn handle_agent_hello(
                 None
             };
             // Use push_message (async) to deliver LLM config via the session's push channel
+            // Read max_output_tokens_limit from Gateway config
+            let max_output_tokens_limit = {
+                let gw = state.read().await;
+                gw.config.as_ref().map(|c| c.max_output_tokens_limit).unwrap_or(32_768)
+            };
             let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
                 provider: cfg.provider,
                 model: cfg.model,
@@ -1309,6 +1314,7 @@ async fn handle_agent_hello(
                 base_url: cfg.base_url,
                 models: cfg.models,
                 model_capabilities,
+                max_output_tokens_limit,
             }).await;
             if !push_result {
                 tracing::warn!("Failed to push LLMConfigDelivery to {} (channel closed)", conn_id);

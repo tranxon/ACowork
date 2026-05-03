@@ -40,6 +40,8 @@ pub struct ConfigResponse {
     /// Default LLM model (if configured)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Global max output tokens limit (default 32768)
+    pub max_output_tokens_limit: u64,
 }
 
 /// HTTP config subset
@@ -66,6 +68,9 @@ pub struct UpdateConfigRequest {
     /// Default LLM model for all agents
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Global max output tokens limit (caps max_output_tokens in API requests)
+    #[serde(default)]
+    pub max_output_tokens_limit: Option<u64>,
 }
 
 /// Generic message response
@@ -102,6 +107,7 @@ pub async fn get_config(
         },
         default_provider: config.default_provider.clone(),
         default_model: config.default_model.clone(),
+        max_output_tokens_limit: config.max_output_tokens_limit,
     }))
 }
 
@@ -133,6 +139,9 @@ pub async fn update_config(
     if let Some(ref model) = body.default_model {
         updates.push(format!("default_model={}", model));
     }
+    if let Some(limit) = body.max_output_tokens_limit {
+        updates.push(format!("max_output_tokens_limit={}", limit));
+    }
 
     if updates.is_empty() {
         return Err(ApiError::bad_request("No configuration fields to update"));
@@ -162,6 +171,9 @@ pub async fn update_config(
             } else {
                 config.default_model = Some(model.clone());
             }
+        }
+        if let Some(limit) = body.max_output_tokens_limit {
+            config.max_output_tokens_limit = limit;
         }
     }
     drop(gw);
@@ -228,6 +240,7 @@ mod tests {
             },
             default_provider: Some("deepseek".to_string()),
             default_model: Some("deepseek-chat".to_string()),
+            max_output_tokens_limit: 32768,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("19876"));

@@ -105,6 +105,10 @@ pub struct AgentLoop {
     /// When Gateway delivers capabilities for a model, they are stored here
     /// so that ContextBuilder can look them up at build() time.
     gateway_model_capabilities: HashMap<String, ModelCapabilitiesInfo>,
+    /// Global max output tokens limit from Gateway config.
+    /// When a model's max_output_tokens exceeds this value, the value is capped.
+    /// Default: 32768 (32K). Set to 0 to disable the limit.
+    max_output_tokens_limit: u64,
 }
 
 impl AgentLoop {
@@ -143,6 +147,7 @@ impl AgentLoop {
             on_chunk,
             on_tool_event,
             gateway_model_capabilities: HashMap::new(),
+            max_output_tokens_limit: 32_768,
         };
         (loop_, inbound_tx)
     }
@@ -176,6 +181,16 @@ impl AgentLoop {
             "AgentLoop received model capabilities from Gateway"
         );
         self.gateway_model_capabilities.insert(model_name, caps);
+    }
+
+    /// Update the max output tokens limit from Gateway config.
+    pub fn update_max_output_tokens_limit(&mut self, limit: u64) {
+        tracing::info!(
+            old_limit = self.max_output_tokens_limit,
+            new_limit = limit,
+            "AgentLoop max_output_tokens_limit updated from Gateway"
+        );
+        self.max_output_tokens_limit = limit;
     }
 
     /// Look up model capabilities by model name.
@@ -352,7 +367,7 @@ impl AgentLoop {
             self.trim_history_to_budget();
 
             // ②.5 Build context (now with trimmed history)
-            let chat_request = context_builder.build(&self.manifest, &self.history, self.get_model_capabilities(None));
+            let chat_request = context_builder.build(&self.manifest, &self.history, self.get_model_capabilities(None), self.max_output_tokens_limit);
 
             tracing::info!(
                 request_messages_count = chat_request.messages.len(),
@@ -376,7 +391,7 @@ impl AgentLoop {
                 // Compute and emit context usage report
                 let model_caps = self.gateway_model_capabilities.values().next();
                 if let (Some(chunk_tx), Some(caps)) = (&self.on_chunk, model_caps) {
-                    let ctx_usage = crate::agent::context::compute_context_usage(caps, usage);
+                    let ctx_usage = crate::agent::context::compute_context_usage(caps, usage, self.max_output_tokens_limit);
                     let _ = chunk_tx.send(
                         crate::agent::loop_::ChunkEvent::ContextUsage(ctx_usage)
                     ).await;
@@ -716,7 +731,7 @@ impl AgentLoop {
                             tracing::info!("Emergency trim removed {} messages, retrying", removed);
                             let chat_request = context_builder
                                 .unwrap()
-                                .build(&self.manifest, &self.history, self.get_model_capabilities(None));
+                                .build(&self.manifest, &self.history, self.get_model_capabilities(None), self.max_output_tokens_limit);
                             return self.call_llm_streaming_no_retry(&chat_request).await;
                         } else {
                             return Err(RuntimeError::Provider(e));

@@ -220,7 +220,7 @@ fn test_s5_identity_injection_in_context() {
     let builder = ContextBuilder::new("You are a helpful assistant.".to_string())
         .with_identity(Some("Name: Alice, City: Shanghai".to_string()));
 
-    let request = builder.build(&manifest, &history, None);
+    let request = builder.build(&manifest, &history, None, 32_768);
 
     // Verify identity is injected into system prompt
     assert!(request.messages[0].content.contains("Alice"), "System prompt should contain identity name");

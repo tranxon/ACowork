@@ -1299,10 +1299,36 @@ function GeneralTab() {
         <h2 className="mb-3 text-sm font-medium">Data Directory</h2>
         <input
           type="text"
-          value={config?.data_dir ?? "—"}
+          value={config?.data_dir ?? "\u2014"}
           readOnly
           className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
         />
+      </div>
+      
+      <div>
+        <h2 className="mb-1 text-sm font-medium">Max Output Tokens Limit</h2>
+        <p className="mb-2 text-xs text-zinc-500 dark:text-zinc-400">
+          API requests will cap max_tokens at this value. Set to 0 to disable.
+        </p>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={0}
+            step={1024}
+            value={config?.max_output_tokens_limit ?? 32768}
+            onChange={async (e) => {
+              const val = parseInt(e.target.value) || 0;
+              try {
+                await invoke("update_config", { maxOutputTokensLimit: val });
+                setConfig(prev => prev ? { ...prev, max_output_tokens_limit: val } : prev);
+              } catch { /* ignore */ }
+            }}
+            className="w-32 rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+          />
+          <span className="text-xs text-zinc-400">
+            {config?.max_output_tokens_limit === 0 ? "No limit" : `${Math.round((config?.max_output_tokens_limit ?? 32768) / 1024)}K`}
+          </span>
+        </div>
       </div>
 
       <div>

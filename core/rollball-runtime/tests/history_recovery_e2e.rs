@@ -211,7 +211,7 @@ async fn test_sanitize_invalid_tool_call_arguments() {
 
     let manifest = full_manifest();
     let builder = ContextBuilder::new("You are a test assistant.".to_string());
-    let request = builder.build(&manifest, &history, None);
+    let request = builder.build(&manifest, &history, None, 32_768);
 
     // Find the assistant message with tool_calls in the built request
     let assistant_msg = request
@@ -248,7 +248,7 @@ async fn test_sanitize_orphaned_tool_result() {
 
     let manifest = full_manifest();
     let builder = ContextBuilder::new("You are a test assistant.".to_string());
-    let request = builder.build(&manifest, &history, None);
+    let request = builder.build(&manifest, &history, None, 32_768);
 
     // Only tc_1's result should remain; tc_orphan should be removed
     let tool_results: Vec<_> = request
@@ -286,7 +286,7 @@ async fn test_sanitize_orphaned_tool_call() {
 
     let manifest = full_manifest();
     let builder = ContextBuilder::new("You are a test assistant.".to_string());
-    let request = builder.build(&manifest, &history, None);
+    let request = builder.build(&manifest, &history, None, 32_768);
 
     // Find the assistant message and verify only tc_1 remains
     let assistant_msg = request

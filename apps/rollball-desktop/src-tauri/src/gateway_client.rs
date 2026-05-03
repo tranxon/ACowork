@@ -303,6 +303,7 @@ impl GatewayClient {
         idle_timeout_secs: Option<u64>,
         default_provider: Option<&str>,
         default_model: Option<&str>,
+        max_output_tokens_limit: Option<u64>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::Map::new();
         if let Some(level) = log_level {
@@ -319,6 +320,12 @@ impl GatewayClient {
         }
         if let Some(model) = default_model {
             body.insert("default_model".to_string(), serde_json::Value::String(model.to_string()));
+        }
+        if let Some(limit) = max_output_tokens_limit {
+            body.insert(
+                "max_output_tokens_limit".to_string(),
+                serde_json::Value::Number(limit.into()),
+            );
         }
         let resp = self
             .client

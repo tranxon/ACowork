@@ -20,6 +20,7 @@ pub async fn update_config(
     idle_timeout_secs: Option<u64>,
     default_provider: Option<String>,
     default_model: Option<String>,
+    max_output_tokens_limit: Option<u64>,
 ) -> Result<GenericMessageResponse, String> {
     let client = state.gateway.read().await;
     client
@@ -28,6 +29,7 @@ pub async fn update_config(
             idle_timeout_secs,
             default_provider.as_deref(),
             default_model.as_deref(),
+            max_output_tokens_limit,
         )
         .await
         .map_err(|e| e.to_string())

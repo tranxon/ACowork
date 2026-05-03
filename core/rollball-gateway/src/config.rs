@@ -53,6 +53,11 @@ pub struct GatewayConfig {
     /// then the manifest's suggested_model.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Global max output tokens limit for all agents.
+    /// When a model's max_output_tokens exceeds this value, the value is capped.
+    /// Default: 32768 (32K). Set to 0 to disable the limit.
+    #[serde(default = "default_max_output_tokens_limit")]
+    pub max_output_tokens_limit: u64,
 }
 
 /// HTTP API configuration
@@ -100,6 +105,7 @@ fn default_log_level() -> String { "info".to_string() }
 fn default_idle_timeout() -> u64 { 300 } // 5 minutes
 fn default_max_iterations() -> u32 { 20 }
 fn default_iteration_timeout_ms() -> u64 { 30_000 }
+fn default_max_output_tokens_limit() -> u64 { 32_768 }
 
 impl GatewayConfig {
     /// Get the project config directory
@@ -177,6 +183,8 @@ impl GatewayConfig {
                 .unwrap_or_default(),
             default_provider: file_config.as_ref().and_then(|c| c.default_provider.clone()),
             default_model: file_config.as_ref().and_then(|c| c.default_model.clone()),
+            max_output_tokens_limit: file_config.as_ref().map(|c| c.max_output_tokens_limit)
+                .unwrap_or_else(default_max_output_tokens_limit),
         })
     }
 
@@ -229,6 +237,7 @@ impl Default for GatewayConfig {
             http: HttpConfig::default(),
             default_provider: None,
             default_model: None,
+            max_output_tokens_limit: default_max_output_tokens_limit(),
         }
     }
 }

@@ -101,6 +101,7 @@ impl ContextBuilder {
         manifest: &AgentManifest,
         history: &HistoryManager,
         gateway_capabilities: Option<&ModelCapabilitiesInfo>,
+        max_output_tokens_limit: u64,
     ) -> ChatRequest {
         let mut messages = Vec::new();
 
@@ -177,19 +178,25 @@ impl ContextBuilder {
             } else {
                 raw
             };
-            // Hard cap: many provider APIs reject max_tokens > 32K.
+            // Hard cap: many provider APIs reject max_tokens above a certain limit.
             // This follows opencode's approach: Math.min(limit.output, 32000).
             // models.dev's limit.output can be inflated (e.g. 384000) but
             // actual API max_tokens parameter is usually capped much lower.
-            const MAX_TOKENS_HARD_CAP: u64 = 32_768;
-            let recommended = if recommended > MAX_TOKENS_HARD_CAP {
+            // The limit is now configurable via Gateway config (max_output_tokens_limit).
+            // Set to 0 to disable the limit.
+            let hard_cap = if max_output_tokens_limit == 0 {
+                u64::MAX // No limit
+            } else {
+                max_output_tokens_limit
+            };
+            let recommended = if recommended > hard_cap {
                 tracing::warn!(
                     model = %model,
                     requested = recommended,
-                    cap = MAX_TOKENS_HARD_CAP,
-                    "max_output_tokens exceeds 128K hard cap, capping"
+                    cap = hard_cap,
+                    "max_output_tokens exceeds hard cap, capping"
                 );
-                MAX_TOKENS_HARD_CAP
+                hard_cap
             } else {
                 recommended
             };
@@ -312,7 +319,7 @@ mod tests {
         });
 
         let builder = ContextBuilder::new("You are a helpful assistant.".to_string());
-        let request = builder.build(&manifest, &history, None);
+        let request = builder.build(&manifest, &history, None, 32_768);
 
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 2); // system + user
@@ -328,7 +335,7 @@ mod tests {
         let builder = ContextBuilder::new("You are a helper.".to_string())
             .with_identity(Some("Name: Alice, City: Shanghai".to_string()));
 
-        let request = builder.build(&manifest, &history, None);
+        let request = builder.build(&manifest, &history, None, 32_768);
         assert!(request.messages[0].content.contains("Alice"));
     }
 }
@@ -339,9 +346,12 @@ mod tests {
 pub fn compute_context_usage(
     caps: &ModelCapabilitiesInfo,
     usage: &rollball_core::providers::traits::UsageInfo,
+    max_output_tokens_limit: u64,
 ) -> rollball_core::protocol::ContextUsageInfo {
-    // Cap max_output_tokens at 32K (same as max_tokens hard cap)
-    let max_output = caps.max_output_tokens.min(32_768);
+    // Cap max_output_tokens at the configured limit (same cap used in build())
+    // Set max_output_tokens_limit to 0 to disable the limit.
+    let effective_limit = if max_output_tokens_limit == 0 { u64::MAX } else { max_output_tokens_limit };
+    let max_output = caps.max_output_tokens.min(effective_limit);
     let usable = caps
         .max_input_tokens
         .map(|input| input.saturating_sub(max_output))
