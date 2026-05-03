@@ -1451,7 +1451,7 @@ function ModelMenu({
           open && toolbarButtonActive,
         )}
       >
-        <Brain className="h-3.5 w-3.5" />
+        <Brain size={14} />
         <span className="font-medium">
           {(() => {
             if (!currentModel || !currentModel.includes('/')) return currentModel ?? "Model";
