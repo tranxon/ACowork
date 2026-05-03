@@ -16,7 +16,7 @@ interface ChatStore {
   currentProvider: string | null;
   /** Per-agent model memory: agent_id → model name */
   agentModels: Record<string, string>;
-  availableModels: string[];
+  availableModels: { name: string; provider: string }[];
   /** Current agent ID for stop functionality */
   currentAgentId: string | null;
   /** Whether the agent loop is paused at iteration limit, awaiting user continue */
@@ -28,7 +28,7 @@ interface ChatStore {
   disconnectStream: () => void;
   clearMessages: () => void;
   setCurrentModel: (model: string, agentId: string) => void;
-  setAvailableModels: (models: string[]) => void;
+  setAvailableModels: (models: { name: string; provider: string }[]) => void;
   /** Continue agent execution after iteration limit pause */
   continueExecution: (agentId: string) => Promise<void>;
   /** Load model for a specific agent from Gateway API, returns the model name */
@@ -316,8 +316,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set({ currentModel: prevModel });
     }
   },
-  setAvailableModels: (models: string[]) => {
-    set({ availableModels: models, currentModel: models[0] ?? null });
+  setAvailableModels: (models: { name: string; provider: string }[]) => {
+    set({ availableModels: models, currentModel: models[0]?.name ?? null });
   },
   continueExecution: async (agentId: string) => {
     try {
@@ -338,11 +338,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!resp.ok) return null;
       const data = await resp.json() as { provider: string; model: string; available_models: string[] };
       if (data.model) {
+        // Build available models with provider info
+        const modelsWithProvider = (data.available_models || []).map(m => ({
+          name: m,
+          provider: data.provider
+        }));
         set((state) => ({
           currentModel: data.model,
           currentProvider: data.provider,
           agentModels: { ...state.agentModels, [agentId]: data.model },
-          availableModels: data.available_models?.length ? data.available_models : state.availableModels,
+          availableModels: modelsWithProvider.length ? modelsWithProvider : state.availableModels,
         }));
       }
       return data.model ?? null;

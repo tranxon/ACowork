@@ -102,15 +102,22 @@ export function ChatPanel() {
     const loadModels = async () => {
       try {
         const keys = await invoke<VaultKeyEntry[]>("list_keys");
-        const allModels: string[] = [];
+        const allModels: { name: string; provider: string }[] = [];
         for (const key of keys) {
+          const provider = key.provider;
           if (key.models?.length) {
-            allModels.push(...key.models);
+            for (const model of key.models) {
+              allModels.push({ name: model, provider });
+            }
           } else if (key.default_model) {
-            allModels.push(key.default_model);
+            allModels.push({ name: key.default_model, provider });
           }
         }
-        setAvailableModels([...new Set(allModels)]);
+        // Deduplicate by model name + provider
+        const uniqueModels = allModels.filter(
+          (m, i, arr) => arr.findIndex(x => x.name === m.name && x.provider === m.provider) === i
+        );
+        setAvailableModels(uniqueModels);
         setHasLlmConfig(keys.length > 0);
       } catch {
         // Gateway may not be running
@@ -669,7 +676,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <MessageContentWrapper>
         <div className="flex justify-end">
-          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-[#D8D9DC] px-3 py-2 text-sm text-zinc-900 dark:bg-[#3D3D3F] dark:text-zinc-100 select-text">
+          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-[#9DF29F] px-3 py-2 text-sm text-zinc-900 select-text">
             {message.content}
           </div>
         </div>
@@ -769,7 +776,7 @@ function ModelMenu({
   currentModel,
   onSelect,
 }: {
-  models: string[];
+  models: { name: string; provider: string }[];
   currentModel: string | null;
   onSelect: (model: string) => void;
 }) {
@@ -816,14 +823,14 @@ function ModelMenu({
           <div className="px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
             Switch Model
           </div>
-          {models.map((m) => {
-            const isActive = m === currentModel;
+            {models.map((m) => {
+            const isActive = m.name === currentModel;
             return (
               <button
-                key={m}
+                key={m.name}
                 type="button"
                 onClick={() => {
-                  onSelect(m);
+                  onSelect(m.name);
                   setOpen(false);
                 }}
                 className={cn(
@@ -836,10 +843,14 @@ function ModelMenu({
                 <span className="w-3.5 shrink-0">
                   {isActive && <Check className="h-3 w-3 text-blue-500" />}
                 </span>
-                <span className={cn("font-medium", isActive && "text-blue-600 dark:text-blue-400")}>
-                  {m}
-                </span>
-
+                <div className="flex items-center gap-1.5">
+                  <span className={cn("font-medium", isActive && "text-blue-600 dark:text-blue-400")}>
+                    {m.name}
+                  </span>
+                  <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+                    {m.provider}
+                  </span>
+                </div>
               </button>
             );
           })}
