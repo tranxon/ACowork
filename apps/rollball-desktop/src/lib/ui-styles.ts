@@ -25,7 +25,7 @@ export const inputMono =
 
 /** Toolbar button (borderless, compact) — used for Model/Workspace selectors */
 export const toolbarButton =
-  "inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs transition-colors text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200";
+  "inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200";
 
 /** Toolbar button active state */
 export const toolbarButtonActive =

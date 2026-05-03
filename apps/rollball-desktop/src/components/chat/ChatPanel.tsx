@@ -8,7 +8,7 @@ import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 import { toolbarButton, toolbarButtonActive, inputBase, inputMono, selectBase, dialogButtonPrimary, dialogButtonSecondary, testResultBase, testResultSuccess, testResultError } from "../../lib/ui-styles";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy, FileText, Terminal, Plus, RefreshCw, Layers } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, Brain, X, Square, Copy, FileText, Terminal, Plus, RefreshCw, Layers, Cpu } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContextUsageInfo, VaultKeyEntry, ModelInfo } from "../../lib/types";
@@ -1451,7 +1451,7 @@ function ModelMenu({
           open && toolbarButtonActive,
         )}
       >
-        <Brain size={14} />
+        <Cpu size={14} />
         <span className="font-medium">
           {(() => {
             if (!currentModel || !currentModel.includes('/')) return currentModel ?? "Model";

@@ -127,7 +127,7 @@ export function WorkspaceSelector() {
             setOpen(!open);
           }}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs transition-colors",
+            "inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors",
             "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200",
             open && "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100",
           )}
