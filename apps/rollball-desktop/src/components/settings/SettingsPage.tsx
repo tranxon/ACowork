@@ -327,6 +327,40 @@ function ProvidersTab() {
   }, []);
 
   const handleAdd = async () => {
+    // First test the API key
+    if ((newProviderDef?.needsApiKey ?? true) && !newKey.trim()) {
+      setTestResult({ success: false, message: "Please enter an API Key first" });
+      return;
+    }
+    
+    setTesting(true);
+    setTestResult(null);
+    
+    try {
+      // Temporarily add the key
+      await invoke("add_key", {
+        provider: newProvider,
+        key: newKey,
+        baseUrl: newBaseUrl || undefined,
+      });
+      
+      // Try to fetch models to verify the key works
+      await fetchProviderModels(newProvider);
+      
+      setTestResult({ success: true, message: "API Key is valid!" });
+      
+      // Remove the temporary key
+      await invoke("remove_key", { provider: newProvider });
+    } catch (e: any) {
+      const errorMsg = e?.message || e?.toString() || "Test failed";
+      setTestResult({ success: false, message: errorMsg });
+      setTesting(false);
+      return;
+    }
+    
+    setTesting(false);
+    
+    // Test passed, proceed with saving
     // Get effective values (prefer models.dev data if available)
     const primaryModel = newModels.length > 0 ? newModels[0] : "";
     const modelInfo = availableModels.find(m => m.id === primaryModel);
@@ -930,27 +964,38 @@ function ProvidersTab() {
               )}
             </div>
 
-            <div className="mt-4 flex justify-between gap-2">
-              <button
-                onClick={handleTest}
-                disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false || testing}
-                className="rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700"
-              >
-                {testing ? "Testing..." : "Test"}
-              </button>
-              <div className="flex gap-2">
+            <div className="mt-4 flex items-center justify-between gap-2">
+              {/* Test result on the left */}
+              <div className="flex-1 min-w-0">
+                {testResult && (
+                  <div className={cn(
+                    "rounded-md px-3 py-1.5 text-xs truncate",
+                    testResult.success
+                      ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
+                      : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
+                  )}>
+                    {testResult.message}
+                  </div>
+                )}
+                {testing && (
+                  <div className="text-xs text-zinc-400">Testing...</div>
+                )}
+              </div>
+              
+              {/* Buttons on the right with equal width */}
+              <div className="flex gap-2 shrink-0">
                 <button
                   onClick={() => { setShowAddDialog(false); setNewModels([]); setTestResult(null); }}
-                  className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                  className="w-20 rounded-md px-3 py-1.5 text-xs font-medium text-center text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleAdd}
-                  disabled={(newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false}
-                  className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                  disabled={((newProviderDef?.needsApiKey ?? true) ? !newKey.trim() : false) || testing}
+                  className="w-20 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
                 >
-                  Save
+                  {testing ? "Saving..." : "Save"}
                 </button>
               </div>
             </div>
@@ -1136,16 +1181,17 @@ function ProvidersTab() {
               })()}
             </div>
 
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 flex items-center justify-end gap-2">
+              {/* Buttons with equal width */}
               <button
                 onClick={() => setShowEditDialog(null)}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                className="w-20 rounded-md px-3 py-1.5 text-xs font-medium text-center text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
               >
                 Cancel
               </button>
               <button
                 onClick={handleEditSave}
-                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="w-20 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 Save
               </button>
