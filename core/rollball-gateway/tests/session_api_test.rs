@@ -34,6 +34,7 @@ fn create_test_app() -> axum::Router {
         std::sync::Arc::new(HttpAuth::new(false)),
         Some(session_mgr),
         Some(bridge_tx),
+        None,
     );
     build_router(state)
 }
@@ -100,6 +101,7 @@ model = "gpt-4"
     let state = AppState::new(
         std::sync::Arc::new(tokio::sync::RwLock::new(gw_state)),
         std::sync::Arc::new(HttpAuth::new(false)),
+        None,
         None,
         None,
     );
@@ -276,6 +278,7 @@ model = "gpt-4"
         std::sync::Arc::new(HttpAuth::new(false)),
         Some(session_mgr),
         Some(bridge_tx),
+        None,
     );
     let app = build_router(state);
 

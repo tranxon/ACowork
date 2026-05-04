@@ -9,6 +9,7 @@ pub mod tools;
 pub mod memory;
 pub mod skills;
 pub mod ipc;
+pub mod grpc;
 pub mod config;
 pub mod cli;
 pub mod error;

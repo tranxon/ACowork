@@ -44,11 +44,14 @@ rusqlite.workspace = true
 futures = "0.3"
 futures-core.workspace = true
 futures-util = "0.3"
+tokio-stream.workspace = true
 rand.workspace = true
 sha2.workspace = true
 zip.workspace = true
 toml.workspace = true
 serde_yaml.workspace = true
+tonic.workspace = true
+prost.workspace = true
 
 # File system watching
 notify.workspace = true

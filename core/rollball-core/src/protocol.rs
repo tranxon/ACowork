@@ -1,7 +1,7 @@
 //! Gateway Service API message definitions (contract layer, transport-agnostic)
 //!
-//! Defines the IPC protocol between Agent Runtime and Gateway.
-//! All messages are JSON-serializable and transported via Frame format.
+//! Defines the protocol between Agent Runtime and Gateway.
+//! All messages are JSON-serializable.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -499,97 +499,7 @@ pub struct CronEntryInfo {
     pub params: Value,
 }
 
-/// Transport layer frame format
-///
-/// Wire format: `[body_len: u32 BE][msg_type: u8][body: JSON bytes]`
-#[derive(Debug, Clone)]
-pub struct Frame {
-    /// Length of body in bytes (4 bytes big-endian on wire)
-    pub body_len: u32,
-    /// Message type discriminator
-    pub msg_type: u8,
-    /// JSON payload
-    pub body: Vec<u8>,
-}
 
-impl Frame {
-    /// Message type: request
-    pub const TYPE_REQUEST: u8 = 0;
-    /// Message type: response
-    pub const TYPE_RESPONSE: u8 = 1;
-    /// Message type: stream chunk
-    pub const TYPE_STREAM_CHUNK: u8 = 2;
-    /// Message type: error
-    pub const TYPE_ERROR: u8 = 3;
-
-    /// Wire header size: 4 bytes (body_len) + 1 byte (msg_type) = 5 bytes
-    pub const HEADER_SIZE: usize = 5;
-
-    /// Create a new Frame from JSON-serializable data
-    pub fn from_message<T: Serialize>(msg_type: u8, msg: &T) -> Result<Self, serde_json::Error> {
-        let body = serde_json::to_vec(msg)?;
-        let body_len = body.len() as u32;
-        Ok(Self {
-            body_len,
-            msg_type,
-            body,
-        })
-    }
-
-    /// Decode Frame body into typed message
-    pub fn to_message<T: for<'de> Deserialize<'de>>(&self) -> Result<T, serde_json::Error> {
-        serde_json::from_slice(&self.body)
-    }
-
-    /// Encode frame to wire format bytes
-    ///
-    /// Wire format: `[body_len: u32 BE][msg_type: u8][body: JSON bytes]`
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(Self::HEADER_SIZE + self.body.len());
-        buf.extend_from_slice(&self.body_len.to_be_bytes());
-        buf.push(self.msg_type);
-        buf.extend_from_slice(&self.body);
-        buf
-    }
-
-    /// Decode frame from wire format bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self, FrameError> {
-        if data.len() < Self::HEADER_SIZE {
-            return Err(FrameError::TooShort {
-                expected: Self::HEADER_SIZE,
-                actual: data.len(),
-            });
-        }
-
-        let body_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        let msg_type = data[4];
-        let body = data[Self::HEADER_SIZE..].to_vec();
-
-        if body.len() != body_len as usize {
-            return Err(FrameError::LengthMismatch {
-                expected: body_len as usize,
-                actual: body.len(),
-            });
-        }
-
-        Ok(Self {
-            body_len,
-            msg_type,
-            body,
-        })
-    }
-}
-
-/// Frame encoding/decoding errors
-#[derive(Debug, thiserror::Error)]
-pub enum FrameError {
-    #[error("Frame too short: expected at least {expected} bytes, got {actual}")]
-    TooShort { expected: usize, actual: usize },
-    #[error("Body length mismatch: expected {expected} bytes, got {actual}")]
-    LengthMismatch { expected: usize, actual: usize },
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-}
 
 #[cfg(test)]
 mod tests {
@@ -644,71 +554,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_frame_from_message() {
-        let req = GatewayRequest::KeyRelease {
-            provider: "openai".into(),
-        };
-        let frame = Frame::from_message(Frame::TYPE_REQUEST, &req).unwrap();
-        assert_eq!(frame.msg_type, Frame::TYPE_REQUEST);
-        assert!(frame.body_len > 0);
-        assert!(!frame.body.is_empty());
-    }
 
-    #[test]
-    fn test_frame_to_message() {
-        let req = GatewayRequest::KeyRelease {
-            provider: "openai".into(),
-        };
-        let frame = Frame::from_message(Frame::TYPE_REQUEST, &req).unwrap();
-        let parsed: GatewayRequest = frame.to_message().unwrap();
-        if let GatewayRequest::KeyRelease { provider } = parsed {
-            assert_eq!(provider, "openai");
-        } else {
-            panic!("Expected KeyRelease variant");
-        }
-    }
-
-    #[test]
-    fn test_frame_wire_format_roundtrip() {
-        let req = GatewayRequest::RateAcquire {
-            provider: "anthropic".into(),
-        };
-        let frame = Frame::from_message(Frame::TYPE_REQUEST, &req).unwrap();
-        let wire_bytes = frame.to_bytes();
-
-        // Verify header
-        assert!(wire_bytes.len() >= Frame::HEADER_SIZE);
-        assert_eq!(wire_bytes[4], Frame::TYPE_REQUEST);
-
-        // Decode back
-        let decoded = Frame::from_bytes(&wire_bytes).unwrap();
-        assert_eq!(decoded.msg_type, Frame::TYPE_REQUEST);
-        assert_eq!(decoded.body_len, frame.body_len);
-
-        let parsed: GatewayRequest = decoded.to_message().unwrap();
-        if let GatewayRequest::RateAcquire { provider } = parsed {
-            assert_eq!(provider, "anthropic");
-        } else {
-            panic!("Expected RateAcquire variant");
-        }
-    }
-
-    #[test]
-    fn test_frame_from_bytes_too_short() {
-        let result = Frame::from_bytes(&[0u8; 3]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_frame_from_bytes_length_mismatch() {
-        // body_len says 100 but only 0 body bytes
-        let mut data = vec![0u8; 5];
-        data[0..4].copy_from_slice(&100u32.to_be_bytes());
-        data[4] = Frame::TYPE_REQUEST;
-        let result = Frame::from_bytes(&data);
-        assert!(result.is_err());
-    }
 
     // ── S2.1: PermissionRequest/PermissionResult protocol tests ──────
 

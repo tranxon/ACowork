@@ -7,10 +7,15 @@
 //! - Permission, Identity, Budget types
 //! - Unified error types
 
+pub mod proto_bridge;
+pub mod proto {
+    #![allow(clippy::large_enum_variant)]
+    tonic::include_proto!("rollball.ipc.v1");
+}
+
 pub mod defaults;
 pub mod manifest;
 pub mod protocol;
-pub mod transport;
 pub mod intent;
 pub mod permission;
 pub mod identity;
@@ -23,8 +28,8 @@ pub mod error;
 
 // Re-exports for convenience
 pub use manifest::{AgentManifest, CapabilityDef, LlmConfig, ProviderConfig, RoutingConfig, LlmBudget, RagToolConfig, ToolDeclaration};
-pub use protocol::{GatewayRequest, GatewayResponse, Frame, ModelCapabilitiesInfo, ModelCostInfo, ModelModalities, SessionInfoDto, ConversationEntryDto};
-pub use transport::{AsyncTransportConnection, AsyncTransportServer, TransportKind, classify_endpoint, default_endpoint};
+pub use protocol::{GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo, ModelModalities, SessionInfoDto, ConversationEntryDto};
+
 pub use intent::Intent;
 pub use permission::Permission;
 pub use identity::{Identity, IdentityCategory, IdentityEntry, IdentityQueryResult, IdentityStore, IdentitySubscription, PrivacyLevel};

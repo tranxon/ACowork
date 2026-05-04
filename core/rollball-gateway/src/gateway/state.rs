@@ -26,6 +26,8 @@ pub struct RunningAgentInfo {
     pub pid: u32,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub workspace: String,
+    /// Whether the Agent has completed the gRPC AgentHello handshake
+    pub connected: bool,
 }
 
 /// Shared permission store type (same as IPC server)
@@ -97,6 +99,21 @@ impl GatewayState {
     /// Check if an agent is running
     pub fn is_running(&self, agent_id: &str) -> bool {
         self.running_agents.contains_key(agent_id)
+    }
+
+    /// Check if an agent is connected (gRPC AgentHello completed)
+    pub fn is_connected(&self, agent_id: &str) -> bool {
+        self.running_agents
+            .get(agent_id)
+            .map(|r| r.connected)
+            .unwrap_or(false)
+    }
+
+    /// Set the connected state of a running agent
+    pub fn set_agent_connected(&mut self, agent_id: &str, connected: bool) {
+        if let Some(info) = self.running_agents.get_mut(agent_id) {
+            info.connected = connected;
+        }
     }
 
     /// Add an installed agent
@@ -223,6 +240,7 @@ mod tests {
             pid: 1234,
             started_at: chrono::Utc::now(),
             workspace: "/tmp/weather-workspace".to_string(),
+            connected: false,
         });
         assert!(state.is_running("com.example.weather"));
         

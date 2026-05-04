@@ -11,7 +11,7 @@ use serde_json::Value;
 
 /// Intent send tool — send an Intent to another Agent through the Gateway
 pub struct IntentSendTool {
-    // Phase 2+: will hold GatewayClient reference
+    // Phase 2+: will hold GatewayGrpcClient reference
 }
 
 impl IntentSendTool {
@@ -104,7 +104,7 @@ impl Tool for IntentSendTool {
         }
 
         // Phase 1: Return placeholder confirmation
-        // Phase 2+: Send via GatewayClient IPC
+        // Phase 2+: Send via GatewayGrpcClient gRPC
         let mode = if async_ { "async" } else { "sync" };
         Ok(ToolResult {
             ok: true,

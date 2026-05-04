@@ -114,6 +114,7 @@ fn is_pid_alive(pid: u32) -> bool {
 ///
 /// Binds to the configured host:port. If port is occupied,
 /// auto-increments up to port_max.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_http_server(
     http_config: &HttpConfig,
     gateway_state: Arc<RwLock<GatewayState>>,
@@ -122,6 +123,7 @@ pub(crate) async fn start_http_server(
     session_mgr: Option<SharedSessionMgr>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     models_cache: crate::http::models_api::ModelsCache,
+    session_pending: Option<crate::http::routes::SessionPendingRequests>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -139,6 +141,7 @@ pub(crate) async fn start_http_server(
         session_mgr,
         bridge_tx,
         models_cache,
+        session_pending,
     );
 
     // S5.9: Clean up stale pidfile from a previous Gateway run before writing a new one.

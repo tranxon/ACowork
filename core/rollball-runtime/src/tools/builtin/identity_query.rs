@@ -100,7 +100,7 @@ impl Tool for IdentityQueryTool {
         //
         // When IPC is connected, this will:
         // 1. Build an IntentSend { target: "com.rollball.system", action: "identity:query", params: { fields } }
-        // 2. Send via GatewayClient
+        // 2. Send via GatewayGrpcClient
         // 3. Wait for response with IdentityQueryResult
         // 4. Apply PrivacyLevel filtering based on requester agent_id
 

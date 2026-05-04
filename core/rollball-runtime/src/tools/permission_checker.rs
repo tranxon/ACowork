@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use parking_lot::RwLock;
 use rollball_core::permission::{Permission, PermissionGrant, PermissionPolicy};
-use crate::ipc::client::GatewayClient;
+use crate::grpc::client::GatewayGrpcClient;
 
 /// Result of a permission check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,7 +200,7 @@ impl PermissionChecker {
     pub async fn check_and_request(
         &self,
         requested: &Permission,
-        ipc_client: Option<&mut GatewayClient>,
+        ipc_client: Option<&GatewayGrpcClient>,
     ) -> (bool, Option<String>) {
         // 1. Check local cache first
         if self.check_cache(requested) {

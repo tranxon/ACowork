@@ -149,6 +149,7 @@ impl AppState {
         auth: Arc<HttpAuth>,
         session_mgr: Option<SharedSessionMgr>,
         bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
+        session_pending: Option<SessionPendingRequests>,
     ) -> Self {
         Self {
             gateway_state,
@@ -156,7 +157,9 @@ impl AppState {
             session_mgr,
             bridge_tx,
             models_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            session_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            session_pending: session_pending.unwrap_or_else(|| {
+                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
+            }),
         }
     }
 
@@ -167,6 +170,7 @@ impl AppState {
         session_mgr: Option<SharedSessionMgr>,
         bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
         models_cache: crate::http::models_api::ModelsCache,
+        session_pending: Option<SessionPendingRequests>,
     ) -> Self {
         Self {
             gateway_state,
@@ -174,7 +178,9 @@ impl AppState {
             session_mgr,
             bridge_tx,
             models_cache,
-            session_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            session_pending: session_pending.unwrap_or_else(|| {
+                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
+            }),
         }
     }
 }
@@ -479,6 +485,7 @@ mod tests {
         AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
+            None,
             None,
             None,
         )

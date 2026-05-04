@@ -27,6 +27,7 @@ fn create_test_app() -> axum::Router {
         std::sync::Arc::new(HttpAuth::new(false)),
         None,
         None,
+        None,
     );
     build_router(state)
 }
@@ -49,6 +50,7 @@ fn create_test_app_with_session() -> (axum::Router, SharedSessionMgr, tokio::syn
         std::sync::Arc::new(HttpAuth::new(false)),
         Some(session_mgr.clone()),
         Some(bridge_tx.clone()),
+        None,
     );
     (build_router(state), session_mgr, bridge_tx)
 }

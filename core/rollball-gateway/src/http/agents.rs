@@ -39,6 +39,7 @@ pub struct AgentListResponse {
     pub name: String,
     pub version: String,
     pub running: bool,
+    pub connected: bool,
 }
 
 /// Agent detail response
@@ -51,6 +52,7 @@ pub struct AgentDetailResponse {
     pub author: String,
     pub install_path: String,
     pub running: bool,
+    pub connected: bool,
     pub pid: Option<u32>,
     pub started_at: Option<String>,
 }
@@ -115,14 +117,17 @@ pub async fn list_agents(
         .values()
         .map(|info| {
             // Verify the process is actually alive (not just in running_agents)
-            let actually_running = gw.running_agents.get(&info.agent_id)
+            let running_info = gw.running_agents.get(&info.agent_id);
+            let actually_running = running_info
                 .map(|r| is_process_alive(r.pid))
                 .unwrap_or(false);
+            let connected = running_info.map(|r| r.connected).unwrap_or(false);
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
                 version: info.version.clone(),
                 running: actually_running,
+                connected,
             }
         })
         .collect();
@@ -143,6 +148,7 @@ pub async fn get_agent_detail(
     let actually_running = running_info.as_ref()
         .map(|r| is_process_alive(r.pid))
         .unwrap_or(false);
+    let connected = running_info.map(|r| r.connected).unwrap_or(false);
     let resp = AgentDetailResponse {
         agent_id: info.agent_id.clone(),
         name: info.name.clone(),
@@ -151,6 +157,7 @@ pub async fn get_agent_detail(
         author: info.manifest.author.clone(),
         install_path: info.install_path.clone(),
         running: actually_running,
+        connected,
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
     };
@@ -268,8 +275,9 @@ pub async fn start_agent(
 
     // Use the lifecycle manager to start the agent
     let idle_timeout = 300; // Default idle timeout
-    let socket_path = gw.config.as_ref().map(|c| c.socket_path.clone()).unwrap_or_default();
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, socket_path);
+    let grpc_addr = crate::grpc::server::default_grpc_addr();
+    let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, gateway_grpc_endpoint);
     lifecycle.start_agent(&agent_id, &mut gw).await
         .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
 
@@ -290,8 +298,9 @@ pub async fn stop_agent(
     }
 
     let idle_timeout = 300;
-    let socket_path = gw.config.as_ref().map(|c| c.socket_path.clone()).unwrap_or_default();
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, socket_path);
+    let grpc_addr = crate::grpc::server::default_grpc_addr();
+    let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, gateway_grpc_endpoint);
     lifecycle.stop_agent(&agent_id, &mut gw).await
         .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
 
@@ -341,34 +350,58 @@ pub async fn get_agent_model(
     // Try reading per-agent model preference from workspace
     let workspace = std::path::Path::new(&info.install_path).join("workspace");
     let model_path = workspace.join(".agent_model.json");
-    let active_model = if model_path.exists() {
+    let (active_model, active_provider) = if model_path.exists() {
         match std::fs::read_to_string(&model_path) {
             Ok(content) => {
-                // Parse only the "model" field
+                // Parse both "model" and "provider" fields
                 if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&content) {
-                    obj.get("model")
+                    let model = obj.get("model")
                         .and_then(|v| v.as_str())
-                        .map(|m| m.to_string())
+                        .map(|m| m.to_string());
+                    let provider = obj.get("provider")
+                        .and_then(|v| v.as_str())
+                        .map(|p| p.to_string());
+                    (model, provider)
                 } else {
-                    None
+                    (None, None)
                 }
             }
-            Err(_) => None,
+            Err(_) => (None, None),
         }
     } else {
-        None
+        (None, None)
     };
 
-    // Use per-agent preference if available and valid, otherwise gateway default
+    // Resolve vault entry: prefer per-agent provider, fallback to default
+    let (resolved_vault_entry, resolved_provider_name) = if let Some(ref ap) = active_provider {
+        if ap != &provider_name {
+            // Per-agent model is from a different provider; look up that provider's vault entry
+            match gw.vault.get_provider(ap) {
+                Ok(entry) => (entry, ap.clone()),
+                Err(_) => {
+                    // Per-agent provider no longer exists in vault, fall back to default
+                    (vault_entry, provider_name.clone())
+                }
+            }
+        } else {
+            (vault_entry, provider_name.clone())
+        }
+    } else {
+        (vault_entry, provider_name.clone())
+    };
+
+    // Use per-agent preference if available and valid in the CORRECT provider's models
     let resolved_model = match active_model {
-        Some(ref m) if vault_entry.models.contains(m) => m.clone(),
+        Some(ref m) if resolved_vault_entry.models.contains(m) => m.clone(),
         _ => gateway_model,
     };
 
+    let resolved_provider = active_provider.unwrap_or(resolved_provider_name);
+
     Ok(Json(AgentModelResponse {
-        provider: provider_name,
+        provider: resolved_provider,
         model: resolved_model,
-        available_models: vault_entry.models,
+        available_models: resolved_vault_entry.models,
     }))
 }
 
@@ -383,6 +416,7 @@ mod tests {
             name: "Weather Agent".to_string(),
             version: "1.0.0".to_string(),
             running: false,
+            connected: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));

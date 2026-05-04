@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package rollball.ipc.v1;
+
+service GatewayService {
+  rpc Connect(stream ClientMessage) returns (stream ServerMessage);
+}
+
+message ClientMessage {
+  // Unique request ID. Always present. 0 = stream chunk (no correlation needed).
+  uint64 request_id = 1;
+  oneof payload {
+    KeyReleaseRequest       key_release           = 2;
+    IntentSendRequest       intent_send           = 3;
+    BudgetQueryRequest      budget_query          = 4;
+    UsageReportRequest      usage_report          = 5;
+    RateAcquireRequest      rate_acquire          = 6;
+    PermissionRequest       permission_request    = 7;
+    IdentityQueryRequest    identity_query        = 8;
+    CapabilityQueryRequest  capability_query      = 9;
+    CronRegisterRequest     cron_register         = 10;
+    CronUnregisterRequest   cron_unregister       = 11;
+    CronListRequest         cron_list             = 12;
+    ContextUsageReportRequest context_usage_report = 13;
+    AgentHelloRequest       agent_hello           = 14;
+    ListSessionsRequest     list_sessions         = 15;
+    GetSessionMessagesRequest get_session_messages = 16;
+    CreateSessionRequest    create_session        = 17;
+    GetCurrentSessionIdRequest get_current_session_id = 18;
+    StreamChunk             stream_chunk          = 19;
+  }
+}
+
+message ServerMessage {
+  // Echo of ClientMessage.request_id for req-resp. 0 = unsolicited push.
+  uint64 request_id = 1;
+  oneof payload {
+    AgentHelloResult        agent_hello_result    = 2;
+    KeyReleaseResult        key_release_result    = 3;
+    IntentDelivered         intent_delivered      = 4;
+    BudgetInfo              budget_info           = 5;
+    UsageReportAck          usage_report_ack      = 6;
+    ContextUsageAck         context_usage_ack     = 7;
+    RateToken               rate_token            = 8;
+    PermissionResult        permission_result     = 9;
+    IdentityQueryResult     identity_query_result = 10;
+    CapabilityOverview      capability_overview   = 11;
+    CronRegisterResult      cron_register_result  = 12;
+    CronUnregisterResult    cron_unregister_result = 13;
+    CronListResult          cron_list_result      = 14;
+    SessionList             session_list          = 15;
+    SessionMessages         session_messages      = 16;
+    SessionCreated          session_created       = 17;
+    CurrentSessionId        current_session_id    = 18;
+    IntentReceived          intent_received       = 19;
+    CapabilityUpdate        capability_update     = 20;
+    LLMConfigDelivery       llm_config_delivery   = 21;
+    IdentityDelivery        identity_delivery     = 22;
+    WorkspaceContextUpdate  workspace_context_update = 23;
+    IterationLimitPaused    iteration_limit_paused = 24;
+  }
+}
+
+message KeyReleaseRequest       { string provider = 1; }
+message IntentSendRequest       { string target = 1; string action = 2; string params_json = 3; bool async_ = 4; }
+message BudgetQueryRequest      { string provider = 1; }
+message UsageReportRequest      { string agent_id = 1; string provider = 2; uint64 tokens_used = 3; double cost_usd = 4; string timestamp = 5; string error = 6; }
+message RateAcquireRequest      { string provider = 1; }
+message PermissionRequest       { string request_id = 1; string permission = 2; string reason = 3; uint64 timeout_ms = 4; }
+message IdentityQueryRequest    { repeated string fields = 1; }
+message CapabilityQueryRequest  { string agent_id = 1; }
+message CronRegisterRequest     { string agent_id = 1; string schedule = 2; string action = 3; string params_json = 4; }
+message CronUnregisterRequest   { string cron_id = 1; }
+message CronListRequest         {}
+message ContextUsageReportRequest { string agent_id = 1; ContextUsageInfo context = 2; }
+message AgentHelloRequest       { string agent_id = 1; string version = 2; string connection_role = 3; }
+message ListSessionsRequest     {}
+message GetSessionMessagesRequest { string session_id = 1; string cursor = 2; uint32 limit = 3; string direction = 4; }
+message CreateSessionRequest    {}
+message GetCurrentSessionIdRequest {}
+
+message AgentHelloResult        { bool success = 1; string error = 2; }
+message KeyReleaseResult        { string api_key = 1; string error = 2; }
+message IntentDelivered         { string message_id = 1; }
+message BudgetInfo              { uint64 remaining_tokens = 1; double remaining_cost_usd = 2; }
+message UsageReportAck          {}
+message ContextUsageAck         {}
+message RateToken               { bool granted = 1; uint64 retry_after_ms = 2; }
+message PermissionResult        { string request_id = 1; bool granted = 2; string reason = 3; }
+message IdentityQueryResult     { map<string, string> values = 1; map<string, float> confidence = 2; }
+message CapabilityOverview      { map<string, StringList> capabilities = 1; }
+message StringList              { repeated string items = 1; }
+message CronRegisterResult      { string cron_id = 1; string error = 2; }
+message CronUnregisterResult    { bool removed = 1; }
+message CronListResult          { repeated CronEntryInfo entries = 1; }
+message SessionList             { repeated SessionInfoDto sessions = 1; }
+message SessionMessages         { repeated ConversationEntryDto messages = 1; string cursor = 2; bool has_more = 3; }
+message SessionCreated          { string session_id = 1; }
+message CurrentSessionId        { string session_id = 1; }
+
+message IntentReceived          { string from = 1; string action = 2; string params_json = 3; }
+message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }
+message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; }
+message IdentityDelivery        { repeated IdentityEntry entries = 1; }
+message WorkspaceContextUpdate  { string context_text = 1; string current_workspace_id = 2; string current_workspace_path = 3; }
+message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
+
+message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }
+
+message ModelCostInfo           { double input_per_million = 1; double output_per_million = 2; }
+message ModelModalities         { repeated string input = 1; repeated string output = 2; }
+message ModelCapabilitiesInfo   { uint64 context_window = 1; uint64 max_output_tokens = 2; uint64 max_input_tokens = 3; bool supports_tool_calling = 4; bool supports_reasoning = 5; bool supports_attachment = 6; bool supports_temperature = 7; ModelCostInfo cost = 8; ModelModalities modalities = 9; string name = 10; string family = 11; string knowledge_cutoff = 12; }
+message ContextUsageInfo        { uint64 context_window = 1; uint64 input_tokens = 2; uint64 output_tokens = 3; uint64 total_tokens = 4; uint64 max_input_tokens = 5; uint64 usable_context = 6; uint32 usage_percent = 7; }
+message IdentityEntry           { string field = 1; string value = 2; float confidence = 3; string category = 4; string privacy = 5; string source = 6; string updated_at = 7; }
+message CronEntryInfo           { string id = 1; string agent_id = 2; string schedule = 3; string action = 4; string params_json = 5; }
+message SessionInfoDto          { string session_id = 1; string created_at = 2; uint32 message_count = 3; string title = 4; }
+message ConversationEntryDto    { string id = 1; string ts = 2; string role = 3; string content = 4; string metadata_json = 5; }

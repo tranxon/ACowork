@@ -17,7 +17,7 @@ use rollball_gateway::gateway::state::{
     AgentInfo, GatewayState, RunningAgentInfo,
 };
 use rollball_gateway::intent::router::IntentRouter;
-use rollball_gateway::ipc::server::{IpcServer, SharedState};
+use rollball_gateway::ipc::server::SharedState;
 use rollball_gateway::ipc::session::SessionManager;
 use rollball_gateway::rate::bucket::RateLimiter;
 
@@ -98,6 +98,7 @@ async fn test_e2e_intent_routing_with_capabilities() {
             pid: 12345,
             started_at: chrono::Utc::now(),
             workspace: "/tmp/weather-workspace".to_string(),
+            connected: false,
         });
     }
 
@@ -262,6 +263,7 @@ async fn test_e2e_intent_budget_rate_combined() {
             pid: 54321,
             started_at: chrono::Utc::now(),
             workspace: "/tmp/weather-ws".to_string(),
+            connected: false,
         });
 
         // Set budget and rate limits
@@ -351,17 +353,15 @@ async fn test_e2e_intent_budget_rate_combined() {
 
 /// E2E Test 5: Capability broadcast on install/uninstall
 ///
-/// Verifies that the IpcServer's broadcast channel correctly
+/// Verifies that the capability broadcast channel correctly
 /// distributes CapabilityUpdate messages to subscribers.
 #[tokio::test]
 async fn test_e2e_capability_broadcast_flow() {
     let dir = temp_dir("cap_broadcast");
     let _state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
 
-    // Create IpcServer and get the broadcast sender
-    let ipc_server = IpcServer::new("tcp://127.0.0.1:0");
-    let cap_tx = ipc_server.capability_sender();
-    let mut cap_rx = cap_tx.subscribe();
+    // Create broadcast channel directly
+    let (cap_tx, mut cap_rx) = tokio::sync::broadcast::channel::<rollball_core::protocol::GatewayResponse>(64);
 
     // Simulate install event — broadcast CapabilityUpdate
     let install_update = rollball_core::protocol::GatewayResponse::CapabilityUpdate {
@@ -417,7 +417,7 @@ async fn test_e2e_capability_broadcast_flow() {
         } => {
             assert_eq!(agent_id, "com.example.weather");
             assert!(actions.is_empty());
-            assert!(*removed);
+            assert!(removed);
         }
         _ => panic!("Expected CapabilityUpdate (removed), got {:?}", msg2),
     }

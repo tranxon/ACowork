@@ -24,9 +24,14 @@ use std::fs;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rollball_gateway::config::GatewayConfig;
+
+/// Global lock to serialize E2E tests that spawn Gateway processes.
+/// Prevents port conflicts when running under `cargo test --workspace`.
+static E2E_LOCK: Mutex<()> = Mutex::new(());
 
 // ── 常量 ──────────────────────────────────────────────────────────────
 
@@ -263,15 +268,16 @@ fn install_and_start_system_agent(temp: &Path) -> anyhow::Result<()> {
         println!("System Agent already running");
     }
 
-    // Wait for agent ready
+    // Wait for agent ready (running + connected via gRPC AgentHello)
     let deadline = std::time::Instant::now() + AGENT_STARTUP_TIMEOUT;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1000));
         if let Ok(resp) = http_get(&format!("{}/api/agents/com.rollball.system", GATEWAY_URL))
             && let Ok(agent) = serde_json::from_str::<serde_json::Value>(&resp)
             && agent.get("running").and_then(|v| v.as_bool()).unwrap_or(false)
+            && agent.get("connected").and_then(|v| v.as_bool()).unwrap_or(false)
         {
-            println!("System Agent is running");
+            println!("System Agent is running and connected");
             return Ok(());
         }
     }
@@ -286,6 +292,7 @@ fn has_api_key() -> bool {
 
 #[test]
 fn test_s1_gateway_health_check() {
+    let _guard = E2E_LOCK.lock().unwrap();
     let temp = temp_dir("health");
     let _gw = GatewayProcess::start(&temp).expect("Failed to start Gateway");
     wait_for_gateway().expect("Gateway not responding");
@@ -315,6 +322,7 @@ fn test_s1_package_system_agent() {
 
 #[test]
 fn test_s1_install_system_agent() {
+    let _guard = E2E_LOCK.lock().unwrap();
     let temp = temp_dir("install");
     let _gw = GatewayProcess::start(&temp).expect("Failed to start Gateway");
     wait_for_gateway().expect("Gateway not responding");
@@ -347,6 +355,7 @@ fn test_s1_install_system_agent() {
 
 #[test]
 fn test_s1_start_system_agent() {
+    let _guard = E2E_LOCK.lock().unwrap();
     let temp = temp_dir("start");
     let _gw = GatewayProcess::start(&temp).expect("Failed to start Gateway");
     wait_for_gateway().expect("Gateway not responding");
@@ -355,6 +364,7 @@ fn test_s1_start_system_agent() {
 
 #[test]
 fn test_s1_chat_with_system_agent() {
+    let _guard = E2E_LOCK.lock().unwrap();
     if !has_api_key() { eprintln!("SKIPPING: No API key set"); return; }
 
     let temp = temp_dir("chat");
@@ -370,6 +380,7 @@ fn test_s1_chat_with_system_agent() {
 
 #[test]
 fn test_s1_full_conversation_flow() {
+    let _guard = E2E_LOCK.lock().unwrap();
     if !has_api_key() { eprintln!("SKIPPING: No API key set"); return; }
 
     let temp = temp_dir("full_flow");
@@ -407,6 +418,7 @@ fn test_s1_full_conversation_flow() {
 
 #[test]
 fn test_s1_websocket_streaming() {
+    let _guard = E2E_LOCK.lock().unwrap();
     if !has_api_key() { eprintln!("SKIPPING: No API key set"); return; }
 
     let temp = temp_dir("ws_stream");

@@ -163,10 +163,14 @@ export function ChatPanel() {
 
     if (selectedAgentId && selectedAgent?.running) {
       connectStream(selectedAgentId, getGatewayUrl());
-      // Always load model from Gateway API (reads per-agent .agent_model.json)
-      loadAgentModel(selectedAgentId);
-      // Reload full model list from Vault to ensure all providers are visible
-      loadModels();
+      // Load model from Gateway API FIRST (reads per-agent .agent_model.json),
+      // THEN reload the model list. This ensures currentModel is set before
+      // setAvailableModels runs, preventing the fallback-to-first-model bug.
+      const initModel = async () => {
+        await loadAgentModel(selectedAgentId);
+        loadModels();
+      };
+      void initModel();
 
       // 3. Fetch sessions and 4. auto-select the latest one
       const initSession = async () => {
@@ -696,7 +700,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
       {/* Collapsed/Summary card */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        className="flex w-fit max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
       >
         <Icon className="h-4 w-4 shrink-0 text-zinc-400" />
         <span className="font-medium">
@@ -954,7 +958,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <div className="flex justify-start">
         <button
-          className="flex w-full max-w-[85%] items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="flex w-fit max-w-[85%] items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
           onClick={() => setExpanded(!expanded)}
         >
           <Wrench className="mt-0.5 h-3 w-3 shrink-0" />

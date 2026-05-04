@@ -41,6 +41,7 @@ fn create_test_app() -> axum::Router {
         std::sync::Arc::new(HttpAuth::new(false)),
         Some(session_mgr),
         Some(bridge_tx),
+        None,
     );
     build_router(state)
 }

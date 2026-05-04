@@ -12,7 +12,7 @@ use crate::config::GatewayConfig;
 use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
-use crate::ipc::server::{IpcServer, SharedState};
+use crate::ipc::server::SharedState;
 use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
 use crate::package_manager::uninstall;
@@ -37,7 +37,6 @@ impl Gateway {
         let idle_timeout = config.idle_timeout_secs;
         let vault_dir = config.vault_dir.clone();
         let data_dir = config.data_dir.clone();
-        let socket_path = config.socket_path.clone();
 
         // Ensure data directory exists before opening the database
         std::fs::create_dir_all(&data_dir)
@@ -52,10 +51,15 @@ impl Gateway {
                 perm_db_path.display(), e
             )))?;
 
+        // Build the gRPC endpoint URL that Runtime processes will use to connect.
+        // Runtime expects an HTTP URL like "http://127.0.0.1:19877".
+        let grpc_addr = crate::grpc::server::default_grpc_addr();
+        let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+
         Ok(Self {
             config,
             state: GatewayState::new(&vault_dir),
-            lifecycle: LifecycleManager::new(idle_timeout, socket_path),
+            lifecycle: LifecycleManager::new(idle_timeout, gateway_grpc_endpoint),
             perm_store,
         })
     }
@@ -500,6 +504,14 @@ impl Gateway {
         let (bridge_tx, _) = tokio::sync::broadcast::channel::<crate::http::routes::BridgeEvent>(256);
         let http_bridge_tx = Some(bridge_tx.clone());
 
+        // S1.14 / Task #12: Create shared session_pending for HTTP ↔ gRPC bridge.
+        // HTTP handlers store oneshot senders here; gRPC dispatch resolves them
+        // when Runtime replies with IntentSend(action=session_response).
+        let session_pending: crate::http::routes::SessionPendingRequests =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let http_session_pending = Some(session_pending.clone());
+        let grpc_session_pending = Some(session_pending);
+
         // Start HTTP server in a separate tokio task (parallel with IPC)
         let http_state = shared_state.clone();
         let http_socket_path = socket_path.clone();
@@ -513,29 +525,42 @@ impl Gateway {
                 http_session_mgr,
                 http_bridge_tx,
                 http_models_cache,
+                http_session_pending,
             ).await {
                 tracing::error!("HTTP server failed: {}", e);
             }
         });
 
-        // Run the IPC server in a spawned task so we can select on signals
-        let ipc_server = IpcServer::with_permission_store(&socket_path, shared_perm_store)
-            .with_session_mgr(session_mgr)
-            .with_bridge_tx(bridge_tx);
-        let ipc_state = shared_state.clone();
-        let ipc_handle = tokio::spawn(async move {
-            if let Err(e) = ipc_server.listen(ipc_state).await {
-                tracing::error!("IPC server error: {}", e);
+        // Task #12: Start gRPC server so HTTP API can reach Runtime via gRPC.
+        // The gRPC server registers each connection in ipc_session_mgr,
+        // so HTTP handlers find gRPC-connected agents via the same path.
+        let grpc_state = shared_state.clone();
+        let grpc_session_mgr = session_mgr.clone();
+        let grpc_perm_store = shared_perm_store.clone();
+        let grpc_bridge_tx = Some(bridge_tx.clone());
+        let (capability_tx, _) = tokio::sync::broadcast::channel::<rollball_core::protocol::GatewayResponse>(64);
+        let grpc_handle = tokio::spawn(async move {
+            let grpc_addr = crate::grpc::server::default_grpc_addr();
+            if let Err(e) = crate::grpc::server::start_grpc_server(
+                grpc_addr,
+                grpc_state,
+                grpc_session_mgr,
+                grpc_perm_store,
+                capability_tx,
+                grpc_bridge_tx,
+                grpc_session_pending,
+            ).await {
+                tracing::error!("gRPC server failed: {}", e);
             }
         });
 
-        // S5.9: Wait for either SIGTERM/SIGINT or IPC server exit.
-        // On signal, both IPC and HTTP tasks are aborted, triggering
+        // S5.9: Wait for either SIGTERM/SIGINT or server exit.
+        // On signal, all server tasks are aborted, triggering
         // PidFileGuard::Drop which cleans up the pidfile.
         let shutdown_result = tokio::select! {
-            ipc_result = ipc_handle => {
-                tracing::info!("IPC server exited");
-                ipc_result.map_err(|e| GatewayError::Config(format!("IPC server task error: {}", e)))
+            grpc_result = grpc_handle => {
+                tracing::info!("gRPC server exited");
+                grpc_result.map_err(|e| GatewayError::Config(format!("gRPC server task error: {}", e)))
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Received shutdown signal, cleaning up...");
@@ -545,9 +570,6 @@ impl Gateway {
 
         // Clean up HTTP server on any exit path (triggers PidFileGuard::Drop for pidfile cleanup)
         http_handle.abort();
-        // Note: ipc_handle is consumed by tokio::select! and cannot be aborted here.
-        // When signal is received, the IPC task continues but will be cleaned up
-        // when the tokio runtime shuts down after run() returns.
 
         shutdown_result?;
 

@@ -122,10 +122,16 @@ function GatewayTab() {
   );
 }
 
+/** Compare two provider arrays by id for equality check (avoid unnecessary re-renders) */
+function providersEqual(a: ProviderListEntry[], b: ProviderListEntry[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((item, i) => item.id === b[i].id && item.name === b[i].name && item.model_count === b[i].model_count);
+}
+
 /** Provider configuration */
 function ProvidersTab() {
   const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [keysLoading, setKeysLoading] = useState(true);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState<string | null>(null);
   const [newProvider, setNewProvider] = useState("openai");
@@ -172,7 +178,7 @@ function ProvidersTab() {
     } catch {
       // Gateway may not be running
     } finally {
-      setLoading(false);
+      setKeysLoading(false);
     }
   }, []);
 
@@ -185,57 +191,59 @@ function ProvidersTab() {
     }
   }, []);
 
-  // Fetch dynamic provider list from Gateway API
+  // Fetch dynamic provider list from Gateway API with stale-while-revalidate pattern
   const fetchDynamicProviders = useCallback(async (useCache = true) => {
-    // Check localStorage cache first
     const CACHE_KEY = "rollball_models_cache";
     const CACHE_TIMESTAMP_KEY = "rollball_models_cache_timestamp";
     const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
-    
+
     let hasValidCache = false;
-    
+    let hasCachedData = false;
+
     if (useCache) {
       try {
         const cachedData = localStorage.getItem(CACHE_KEY);
         const cachedTimestamp = localStorage.getItem(CACHE_TIMESTAMP_KEY);
-        
+
         if (cachedData && cachedTimestamp) {
           const timestamp = parseInt(cachedTimestamp, 10);
           const now = Date.now();
-          
-          // Use cache if it's still fresh
+
+          // Use cache immediately regardless of freshness (stale-while-revalidate)
+          const parsed = JSON.parse(cachedData);
+          const cachedProviders = parsed.providers ?? [];
+          setDynamicProviders(cachedProviders);
+          hasCachedData = cachedProviders.length > 0;
+
           if (now - timestamp < CACHE_TTL) {
-            const parsed = JSON.parse(cachedData);
-            setDynamicProviders(parsed.providers ?? []);
+            // Cache is fresh — background refresh without loading indicator
             hasValidCache = true;
-            // Still refresh in background
-          } else {
-            // Cache expired, clear it
-            localStorage.removeItem(CACHE_KEY);
-            localStorage.removeItem(CACHE_TIMESTAMP_KEY);
           }
+          // Stale cache: show loading indicator while revalidating
         }
       } catch {
         // Ignore cache errors
       }
     }
-    
-    // If no valid cache, show loading
-    if (!hasValidCache) {
+
+    // Show loading indicator only when no cached data is displayed yet
+    if (!hasValidCache && !hasCachedData) {
       setDynamicProvidersLoading(true);
     }
-    
-    // Track start time for minimum loading duration
-    const startTime = Date.now();
-    const MIN_LOADING_DURATION = 300; // 300ms minimum loading time
-    
-    // Fetch from Gateway API (background refresh)
+
+    // Fetch from Gateway API
     try {
       const response = await fetch(`${getGatewayUrl()}/api/models`);
       if (response.ok) {
         const data = await response.json();
-        setDynamicProviders(data.providers ?? []);
-        
+        const newProviders = data.providers ?? [];
+
+        // Only update state if data actually changed (avoid unnecessary re-renders)
+        setDynamicProviders(prev => {
+          if (providersEqual(prev, newProviders)) return prev;
+          return newProviders;
+        });
+
         // Update cache
         try {
           localStorage.setItem(CACHE_KEY, JSON.stringify(data));
@@ -245,20 +253,12 @@ function ProvidersTab() {
         }
       }
     } catch {
-      // Gateway API failed, keep using cache if available
-      if (!hasValidCache) {
+      // Gateway API failed, keep using cached data if available
+      if (!hasValidCache && !hasCachedData) {
         // No cache and API failed, show empty state
         setDynamicProviders([]);
       }
     } finally {
-      // Ensure minimum loading duration for better UX
-      const elapsed = Date.now() - startTime;
-      const remaining = Math.max(0, MIN_LOADING_DURATION - elapsed);
-      
-      if (remaining > 0) {
-        await new Promise(resolve => setTimeout(resolve, remaining));
-      }
-      
       setDynamicProvidersLoading(false);
     }
   }, []);
@@ -503,35 +503,34 @@ function ProvidersTab() {
   };
 
   return (
-    <div className="max-w-lg space-y-4">
+    <div className="max-w-2xl space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium">Provider Management</h2>
       </div>
 
-      {loading ? (
-        <div className="py-8 text-center text-xs text-zinc-400">Loading...</div>
-      ) : (
         <div className="space-y-3">
-          {/* Configured Providers (top section) */}
-          {keys.length > 0 && (
+          {/* Configured Providers (top section) — depends on fetchKeys */}
+          {keysLoading ? (
+            <div className="py-3 text-center text-xs text-zinc-400">Loading keys...</div>
+          ) : keys.length > 0 && (
             <div>
               <h3 className="mb-2 text-xs font-medium text-zinc-500">Configured Providers</h3>
               <div className="space-y-1">
                 {keys.map((keyEntry) => {
                   const provider = dynamicProviders.find((p) => p.id === keyEntry.provider);
                   const providerName = provider?.name || keyEntry.provider;
-                  
+
                   return (
                     <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
-                      <div className="flex items-center justify-between">
-                        <div className="min-w-0 flex-1">
-                          <span className="text-sm font-medium">{providerName}</span>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center flex-nowrap gap-2">
+                          <span className="shrink-0 text-sm font-medium">{providerName}</span>
                           {keyEntry.models?.length ? (
-                            <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.models.join(", ")}</span>
+                            <span className="shrink-0 text-xs text-blue-500 dark:text-blue-400">{keyEntry.models.join(", ")}</span>
                           ) : keyEntry.default_model ? (
-                            <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">{keyEntry.default_model}</span>
+                            <span className="shrink-0 text-xs text-blue-500 dark:text-blue-400">{keyEntry.default_model}</span>
                           ) : (
-                            <span className="ml-2 text-xs text-zinc-400">—</span>
+                            <span className="shrink-0 text-xs text-zinc-400">—</span>
                           )}
                         </div>
                         <div className="flex items-center gap-2">
@@ -575,7 +574,7 @@ function ProvidersTab() {
             <div className="border-t border-zinc-200 dark:border-zinc-700" />
           )}
 
-          {/* Available Providers (bottom section) */}
+          {/* Available Providers (bottom section) — renders independently */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <h3 className="text-xs font-medium text-zinc-500">
@@ -584,12 +583,11 @@ function ProvidersTab() {
               <div className="flex gap-1">
                 <button
                   onClick={() => {
-                    // Clear all models cache
+                    // Clear localStorage cache only — keep current UI data
                     Object.keys(localStorage)
                       .filter(k => k.startsWith('rollball_models_'))
                       .forEach(k => localStorage.removeItem(k));
-                    // Clear current display and show loading
-                    setDynamicProviders([]);
+                    // Mark refreshing, do NOT clear dynamicProviders
                     setDynamicProvidersLoading(true);
                     // Re-fetch from API
                     fetchDynamicProviders(false);
@@ -610,53 +608,58 @@ function ProvidersTab() {
               </div>
             </div>
             <div className="space-y-1">
-              {/* Use dynamic providers if available, otherwise fallback to static */}
-              {dynamicProviders.map((item) => {
-                const providerId = item.id;
-                const providerName = item.name || providerId;
-                const keyEntry = keys.find((k) => k.provider === providerId);
-                const modelCount = item.model_count;
-                
-                // Skip if already configured (shown in top section)
-                if (keyEntry) return null;
-                
-                // Skip local providers that don't need API keys
-                if (!needsApiKey(providerId)) return null;
-                
-                return (
-                  <div key={providerId} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
-                    <div className="flex items-center justify-between">
-                      <div className="min-w-0 flex-1">
-                        <span className="text-sm font-medium">{providerName}</span>
-                        {modelCount && (
-                          <span className="ml-2 text-xs text-zinc-400">{modelCount} models available</span>
-                        )}
+              {/* Show loading indicator when no data and still loading */}
+              {dynamicProvidersLoading && dynamicProviders.length === 0 ? (
+                <div className="py-3 text-center text-xs text-zinc-400">Loading providers...</div>
+              ) : dynamicProviders.length === 0 && !dynamicProvidersLoading ? (
+                <div className="py-3 text-center text-xs text-zinc-400">No providers available</div>
+              ) : (
+                dynamicProviders.map((item) => {
+                  const providerId = item.id;
+                  const providerName = item.name || providerId;
+                  const keyEntry = keys.find((k) => k.provider === providerId);
+                  const modelCount = item.model_count;
 
+                  // Skip if already configured (shown in top section)
+                  if (keyEntry) return null;
+
+                  // Skip local providers that don't need API keys
+                  if (!needsApiKey(providerId)) return null;
+
+                  return (
+                    <div key={providerId} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 flex-1">
+                          <span className="text-sm font-medium">{providerName}</span>
+                          {modelCount && (
+                            <span className="ml-2 text-xs text-zinc-400">{modelCount} models available</span>
+                          )}
+
+                        </div>
+                        <button
+                          onClick={() => {
+                            setNewProvider(providerId);
+                            const dynamicProvider = dynamicProviders.find((p) => p.id === providerId);
+                            setNewBaseUrl(dynamicProvider?.api ?? "");
+                            fetchModels(providerId).then((models) => setAvailableModels(models));
+                            // Reset capabilities state
+                            setNewContextWindow("");
+                            setNewMaxOutputTokens("");
+                            setNewSupportsToolCalling(true);
+                            setShowAddDialog(true);
+                          }}
+                          className="rounded-md bg-zinc-100 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                        >
+                          Add Key
+                        </button>
                       </div>
-                      <button
-                        onClick={() => {
-                          setNewProvider(providerId);
-                          const dynamicProvider = dynamicProviders.find((p) => p.id === providerId);
-                          setNewBaseUrl(dynamicProvider?.api ?? "");
-                          fetchModels(providerId).then((models) => setAvailableModels(models));
-                          // Reset capabilities state
-                          setNewContextWindow("");
-                          setNewMaxOutputTokens("");
-                          setNewSupportsToolCalling(true);
-                          setShowAddDialog(true);
-                        }}
-                        className="rounded-md bg-zinc-100 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
-                      >
-                        Add Key
-                      </button>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
           </div>
         </div>
-      )}
 
       {/* Add key dialog */}
       {showAddDialog && (

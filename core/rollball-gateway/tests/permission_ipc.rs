@@ -11,9 +11,9 @@ use rollball_core::permission::{Permission, PermissionGrant};
 
 #[test]
 fn test_permission_request_response_roundtrip() {
-    use rollball_core::protocol::{GatewayRequest, GatewayResponse, Frame};
+    use rollball_core::protocol::{GatewayRequest, GatewayResponse};
 
-    // Test request roundtrip
+    // Test request roundtrip via JSON serialization
     let request = GatewayRequest::PermissionRequest {
         request_id: "perm-rt-001".to_string(),
         permission: "shell".to_string(),
@@ -21,8 +21,8 @@ fn test_permission_request_response_roundtrip() {
         timeout_ms: rollball_core::protocol::PERMISSION_REQUEST_TIMEOUT_MS,
     };
 
-    let frame = Frame::from_message(Frame::TYPE_REQUEST, &request).unwrap();
-    let parsed: GatewayRequest = frame.to_message().unwrap();
+    let json = serde_json::to_string(&request).unwrap();
+    let parsed: GatewayRequest = serde_json::from_str(&json).unwrap();
 
     if let GatewayRequest::PermissionRequest {
         request_id,
@@ -46,8 +46,8 @@ fn test_permission_request_response_roundtrip() {
         reason: None,
     };
 
-    let frame = Frame::from_message(Frame::TYPE_RESPONSE, &response).unwrap();
-    let parsed: GatewayResponse = frame.to_message().unwrap();
+    let json = serde_json::to_string(&response).unwrap();
+    let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
 
     if let GatewayResponse::PermissionResult {
         request_id,

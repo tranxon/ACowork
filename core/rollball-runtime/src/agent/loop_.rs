@@ -31,7 +31,7 @@ use crate::error::{Result, RuntimeError};
 /// Streaming chunk event emitted during LLM response generation.
 ///
 /// Adapted from ZeroClaw's DraftEvent, simplified for RollBall's IPC architecture.
-/// Each delta is forwarded to the Gateway via `TYPE_STREAM_CHUNK` frame,
+/// Each delta is forwarded to the Gateway via `StreamChunk` gRPC message,
 /// which maps to a BridgeEventType::Chunk for the Desktop App WebSocket.
 #[derive(Debug, Clone)]
 pub enum ChunkEvent {
@@ -96,7 +96,7 @@ pub struct AgentLoop {
     inbound_rx: tokio::sync::mpsc::Receiver<InboundMessage>,
     /// Optional streaming chunk sender (like ZeroClaw's on_delta).
     /// When set, each StreamEvent::Content delta is forwarded here
-    /// so the caller can relay chunks to Gateway via TYPE_STREAM_CHUNK.
+    /// so the caller can relay chunks to Gateway via StreamChunk.
     on_chunk: Option<mpsc::Sender<ChunkEvent>>,
     /// Optional tool event sender for forwarding tool_call/tool_result events
     /// to the Gateway via IPC. When set, ToolCall events are emitted before
@@ -121,7 +121,7 @@ impl AgentLoop {
     /// external sources (Gateway, cross-agent intents, system notifications).
     ///
     /// If `on_chunk` is provided, streaming LLM deltas are forwarded to it
-    /// so the caller can relay chunks to the Gateway via TYPE_STREAM_CHUNK frames
+    /// so the caller can relay chunks to the Gateway via StreamChunk messages
     /// (like ZeroClaw's on_delta / DraftEvent pattern).
     ///
     /// If `on_tool_event` is provided, tool execution events (ToolCall/ToolResult)
@@ -1254,10 +1254,10 @@ mod tests {
 
     #[test]
     fn test_agent_loop_with_gateway_client() {
-        // NOTE: We use ipc_client: None because GatewayClient::connect is
+        // NOTE: We use ipc_client: None because GatewayGrpcClient::connect is
         // lazy (does not immediately connect), and connecting to a non-existent
-        // socket would fail at connect_transport() time. This test verifies
-        // that AgentLoop construction works correctly, not the IPC connection.
+        // server would fail. This test verifies that AgentLoop construction works
+        // correctly, not the gRPC connection.
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("ok"));

@@ -110,6 +110,8 @@ struct WsClientMessage {
     content: Option<String>,
     /// Model name for model_switch messages
     model: Option<String>,
+    /// Provider name for model_switch messages
+    provider: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -514,20 +516,25 @@ async fn handle_ws_text(
             }
         };
 
-        tracing::info!(agent = %agent_id, model = %model, "Forwarding model_switch to agent");
+        let provider = client_msg.provider.filter(|p| !p.is_empty());
+        tracing::info!(agent = %agent_id, model = %model, provider = ?provider, "Forwarding model_switch to agent");
 
         let message_id = format!("msg-{}", uuid::Uuid::new_v4());
         let mut pushed_ok = false;
         if let Some(session_mgr) = &state.session_mgr {
             let mgr = session_mgr.lock().await;
             if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
+                let mut params = serde_json::json!({
+                    "model": model,
+                    "message_id": message_id,
+                });
+                if let Some(ref p) = provider {
+                    params["provider"] = serde_json::json!(p);
+                }
                 let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
                     from: "http-ws".to_string(),
                     action: "model_switch".to_string(),
-                    params: serde_json::json!({
-                        "model": model,
-                        "message_id": message_id,
-                    }),
+                    params,
                 };
                 pushed_ok = session.push_message(intent).await;
             }
@@ -539,11 +546,14 @@ async fn handle_ws_text(
                 "message_id": message_id,
             });
             let _ = socket.send(Message::Text(ack.to_string().into())).await;
-            let confirmed = serde_json::json!({
+            let mut confirmed = serde_json::json!({
                 "type": "model_confirmed",
                 "model": model,
                 "agentId": agent_id,
             });
+            if let Some(ref p) = provider {
+                confirmed["provider"] = serde_json::json!(p);
+            }
             let _ = socket.send(Message::Text(confirmed.to_string().into())).await;
         } else {
             let err = serde_json::json!({

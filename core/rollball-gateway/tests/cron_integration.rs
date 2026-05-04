@@ -8,7 +8,7 @@
 //! 5. Cron IPC protocol round-trip
 //! 6. Cron HTTP API integration
 
-use rollball_core::protocol::{Frame, GatewayRequest, GatewayResponse};
+use rollball_core::protocol::{GatewayRequest, GatewayResponse};
 use rollball_gateway::cron::{CronScheduler, CronStore, StoredCronEntry};
 use rollball_gateway::gateway::state::{AgentInfo, GatewayState};
 
@@ -235,8 +235,8 @@ fn test_cron_register_ipc_roundtrip() {
         params: serde_json::json!({}),
     };
 
-    let frame = Frame::from_message(Frame::TYPE_REQUEST, &request).unwrap();
-    let parsed: GatewayRequest = frame.to_message().unwrap();
+    let json = serde_json::to_string(&request).unwrap();
+    let parsed: GatewayRequest = serde_json::from_str(&json).unwrap();
 
     if let GatewayRequest::CronRegister {
         agent_id,
@@ -260,8 +260,8 @@ fn test_cron_unregister_ipc_roundtrip() {
         cron_id: "cron-1".to_string(),
     };
 
-    let frame = Frame::from_message(Frame::TYPE_REQUEST, &request).unwrap();
-    let parsed: GatewayRequest = frame.to_message().unwrap();
+    let json = serde_json::to_string(&request).unwrap();
+    let parsed: GatewayRequest = serde_json::from_str(&json).unwrap();
 
     if let GatewayRequest::CronUnregister { cron_id } = parsed {
         assert_eq!(cron_id, "cron-1");
@@ -274,8 +274,8 @@ fn test_cron_unregister_ipc_roundtrip() {
 fn test_cron_list_ipc_roundtrip() {
     let request = GatewayRequest::CronList {};
 
-    let frame = Frame::from_message(Frame::TYPE_REQUEST, &request).unwrap();
-    let parsed: GatewayRequest = frame.to_message().unwrap();
+    let json = serde_json::to_string(&request).unwrap();
+    let parsed: GatewayRequest = serde_json::from_str(&json).unwrap();
 
     assert!(matches!(parsed, GatewayRequest::CronList {}));
 }
@@ -287,8 +287,8 @@ fn test_cron_register_result_roundtrip() {
         error: None,
     };
 
-    let frame = Frame::from_message(Frame::TYPE_RESPONSE, &response).unwrap();
-    let parsed: GatewayResponse = frame.to_message().unwrap();
+    let json = serde_json::to_string(&response).unwrap();
+    let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
 
     if let GatewayResponse::CronRegisterResult { cron_id, error } = parsed {
         assert_eq!(cron_id, Some("cron-42".to_string()));
@@ -302,8 +302,8 @@ fn test_cron_register_result_roundtrip() {
 fn test_cron_unregister_result_roundtrip() {
     let response = GatewayResponse::CronUnregisterResult { removed: true };
 
-    let frame = Frame::from_message(Frame::TYPE_RESPONSE, &response).unwrap();
-    let parsed: GatewayResponse = frame.to_message().unwrap();
+    let json = serde_json::to_string(&response).unwrap();
+    let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
 
     if let GatewayResponse::CronUnregisterResult { removed } = parsed {
         assert!(removed);
@@ -326,8 +326,8 @@ fn test_cron_list_result_roundtrip() {
         ],
     };
 
-    let frame = Frame::from_message(Frame::TYPE_RESPONSE, &response).unwrap();
-    let parsed: GatewayResponse = frame.to_message().unwrap();
+    let json = serde_json::to_string(&response).unwrap();
+    let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
 
     if let GatewayResponse::CronListResult { entries } = parsed {
         assert_eq!(entries.len(), 1);

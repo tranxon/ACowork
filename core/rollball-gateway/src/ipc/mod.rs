@@ -1,14 +1,10 @@
-//! IPC server module
+//! Gateway handler module
+//!
+//! Contains handler functions for Gateway Service API requests
+//! and session management for connected Agent Runtimes.
 
 pub mod server;
-pub mod transport;
 pub mod session;
 
 // Re-export SharedState for convenience
 pub use server::SharedState;
-
-// Re-export transport submodules for test access
-#[cfg(unix)]
-pub use transport::unix_transport;
-#[cfg(windows)]
-pub use transport::windows_transport;

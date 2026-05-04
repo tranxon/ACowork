@@ -1,27 +1,16 @@
-//! Gateway Service API server (async, multi-connection, platform-agnostic)
+//! Gateway Service API handler implementations
 //!
-//! Accepts multiple concurrent IPC connections from Agent Runtime processes,
-//! decodes requests, routes to handlers, and sends responses.
-//!
-//! Each connection is handled in its own tokio task, allowing
-//! multiple Agent Runtimes to communicate with the Gateway simultaneously.
-//!
-//! Platform-specific transport (Unix Socket / Named Pipe) is injected via
-//! `AsyncTransportServer` / `AsyncTransportConnection` traits.
-//! This file contains ZERO `#[cfg(unix)]` / `#[cfg(windows)]` annotations.
+//! Contains handler functions for processing Gateway Service API requests.
+//! These handlers are shared between the gRPC server (grpc/dispatch.rs)
+//! and can be used by any transport layer.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, Mutex};
 
-use rollball_core::protocol::{Frame, GatewayRequest, GatewayResponse};
-use rollball_core::transport::AsyncTransportConnection;
-use rollball_core::error::RollballError;
+use rollball_core::protocol::GatewayResponse;
 use rollball_core::permission::{Permission, PermissionGrant, PermissionPolicy};
-use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::ipc::session::SessionManager;
-use crate::ipc::transport;
 
 /// Shared state type: Arc<RwLock<GatewayState>> for concurrent read/write access.
 /// RwLock chosen because handlers are predominantly read-heavy (key lookup,
@@ -33,490 +22,11 @@ pub type SharedState = Arc<RwLock<GatewayState>>;
 pub type SharedPermissionStore = Arc<crate::permission_store::PermissionStore>;
 
 /// Shared session manager type
-type SharedSessionMgr = Arc<Mutex<SessionManager>>;
-
-/// IPC server (async, multi-connection, platform-agnostic)
-pub struct IpcServer {
-    endpoint: String,
-    perm_store: SharedPermissionStore,
-    /// Broadcast channel for CapabilityUpdate push notifications.
-    /// When an agent is installed/uninstalled, a CapabilityUpdate message
-    /// is broadcast to all connected Agent sessions.
-    capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
-    /// Optional external session manager (shared with HTTP API)
-    external_session_mgr: Option<crate::http::routes::SharedSessionMgr>,
-    /// Bridge channel for forwarding Agent responses to HTTP/WebSocket clients.
-    /// When an Agent sends an IntentSend targeting "http-api" or "http-ws",
-    /// the response is broadcast via this channel so the HTTP WebSocket handler
-    /// can stream it back to the Desktop App.
-    bridge_tx: Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
-    /// Pending session requests for IPC response correlation (S1.14)
-    session_pending: Option<crate::http::routes::SessionPendingRequests>,
-}
-
-/// Default broadcast channel capacity for capability updates
-const CAPABILITY_BROADCAST_CAPACITY: usize = 64;
-
-impl IpcServer {
-    /// Create new IPC server
-    pub fn new(endpoint: &str) -> Self {
-        let perm_store = crate::permission_store::PermissionStore::open_in_memory()
-            .expect("Failed to create in-memory permission store");
-        let (capability_tx, _) = tokio::sync::broadcast::channel(CAPABILITY_BROADCAST_CAPACITY);
-        Self {
-            endpoint: endpoint.to_string(),
-            perm_store: Arc::new(perm_store),
-            capability_tx,
-            external_session_mgr: None,
-            bridge_tx: None,
-            session_pending: None,
-        }
-    }
-
-    /// Create IPC server with an existing permission store
-    pub fn with_permission_store(endpoint: &str, perm_store: SharedPermissionStore) -> Self {
-        let (capability_tx, _) = tokio::sync::broadcast::channel(CAPABILITY_BROADCAST_CAPACITY);
-        Self {
-            endpoint: endpoint.to_string(),
-            perm_store,
-            capability_tx,
-            external_session_mgr: None,
-            bridge_tx: None,
-            session_pending: None,
-        }
-    }
-
-    /// Set external session manager (shared with HTTP API for message bridging)
-    pub fn with_session_mgr(mut self, session_mgr: crate::http::routes::SharedSessionMgr) -> Self {
-        self.external_session_mgr = Some(session_mgr);
-        self
-    }
-
-    /// Set bridge channel for forwarding Agent responses to HTTP/WebSocket clients
-    pub fn with_bridge_tx(mut self, bridge_tx: tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>) -> Self {
-        self.bridge_tx = Some(bridge_tx);
-        self
-    }
-
-    /// Set pending session requests map for IPC response correlation (S1.14)
-    pub fn with_session_pending(mut self, pending: crate::http::routes::SessionPendingRequests) -> Self {
-        self.session_pending = Some(pending);
-        self
-    }
-
-    /// Get a sender for broadcasting capability updates.
-    /// Use this from HTTP API handlers to push CapabilityUpdate
-    /// to all connected Agent sessions when install/uninstall occurs.
-    pub fn capability_sender(&self) -> tokio::sync::broadcast::Sender<GatewayResponse> {
-        self.capability_tx.clone()
-    }
-
-    /// Start the server (async, multi-connection)
-    ///
-    /// Each incoming connection is handled in its own tokio task,
-    /// allowing multiple Agent Runtimes to connect concurrently.
-    /// The GatewayState is protected by an async RwLock so that
-    /// concurrent readers do not block each other.
-    pub async fn listen(&self, state: SharedState) -> Result<(), GatewayError> {
-        let mut server = transport::create_server(&self.endpoint)?;
-
-        server.listen().await?;
-
-        tracing::info!("IPC server listening on: {}", server.endpoint_desc());
-
-        // Use external session manager if provided (shared with HTTP API),
-        // otherwise create a new one (standalone mode)
-        let session_mgr: SharedSessionMgr =
-            self.external_session_mgr.clone()
-                .unwrap_or_else(|| Arc::new(Mutex::new(SessionManager::new())));
-        let conn_counter = AtomicU64::new(0);
-        let perm_store = Arc::clone(&self.perm_store);
-        let capability_tx = self.capability_tx.clone();
-        let bridge_tx = self.bridge_tx.clone();
-        let session_pending = self.session_pending.clone();
-
-        loop {
-            let conn = server.accept().await?;
-
-            let conn_id =
-                format!("conn-{}", conn_counter.fetch_add(1, Ordering::Relaxed) + 1);
-            tracing::info!("Accepted connection: {} ({})", conn_id, conn.peer_desc());
-
-            let state = Arc::clone(&state);
-            let session_mgr = Arc::clone(&session_mgr);
-            let perm_store = Arc::clone(&perm_store);
-            let cap_rx = capability_tx.subscribe();
-            let bridge_tx = bridge_tx.clone();
-            let session_pending = session_pending.clone();
-
-            tokio::spawn(async move {
-                // Session is created inside handle_connection with push channel
-
-                if let Err(e) =
-                    handle_connection(conn, &conn_id, state, &session_mgr, &perm_store, cap_rx, bridge_tx, session_pending).await
-                {
-                    tracing::warn!("Connection {} error: {}", conn_id, e);
-                }
-
-                // Cleanup session on disconnect
-                {
-                    let mut mgr = session_mgr.lock().await;
-                    mgr.remove_session(&conn_id);
-                }
-                tracing::info!("Connection {} closed", conn_id);
-            });
-        }
-    }
-}
-
-// ── Connection handler (platform-agnostic) ─────────────────────────────────
-
-/// Handle a single connection's request/response loop.
-///
-/// Uses a `tokio::select!` to multiplex:
-/// 1. Incoming requests from the Agent (recv_frame)
-/// 2. Server-push messages (IntentReceived)
-/// 3. CapabilityUpdate broadcast messages
-#[allow(clippy::too_many_arguments)]
-async fn handle_connection(
-    mut conn: Box<dyn AsyncTransportConnection>,
-    conn_id: &str,
-    state: SharedState,
-    session_mgr: &SharedSessionMgr,
-    perm_store: &SharedPermissionStore,
-    mut cap_rx: tokio::sync::broadcast::Receiver<GatewayResponse>,
-    bridge_tx: Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
-    session_pending: Option<crate::http::routes::SessionPendingRequests>,
-) -> Result<(), RollballError> {
-    // Create server-push channel for this connection
-    let (push_tx, mut push_rx) = tokio::sync::mpsc::channel::<GatewayResponse>(32);
-
-    // Register session with push channel
-    {
-        let mut mgr = session_mgr.lock().await;
-        mgr.create_session_with_push(conn_id, push_tx);
-    }
-
-    loop {
-        tokio::select! {
-            // Branch 1: Incoming request from Agent
-            frame_result = conn.recv_frame() => {
-                let frame = match frame_result? {
-                    Some(f) => f,
-                    None => return Ok(()), // Connection closed
-                };
-
-                if frame.msg_type == Frame::TYPE_REQUEST {
-                    let request: GatewayRequest = frame.to_message().map_err(|e| {
-                        RollballError::Ipc(format!("Failed to decode request: {}", e))
-                    })?;
-
-                    tracing::debug!("Received request from {}: {:?}", conn_id, request);
-
-                    let response =
-                        dispatch_request(request, conn_id, &state, session_mgr, perm_store, &bridge_tx, &session_pending).await;
-
-                    let resp_frame =
-                        Frame::from_message(Frame::TYPE_RESPONSE, &response)
-                            .map_err(|e| RollballError::Ipc(format!("Failed to encode response: {}", e)))?;
-
-                    conn.send_frame(&resp_frame).await?;
-                } else if frame.msg_type == Frame::TYPE_STREAM_CHUNK {
-                    // IPC streaming protocol upgrade (Option B):
-                    // Runtime sends TYPE_STREAM_CHUNK frames for high-frequency
-                    // streaming deltas. Gateway processes them (broadcast to bridge
-                    // channel) but does NOT send a response frame back, eliminating
-                    // per-chunk request-response overhead.
-                    let request: GatewayRequest = frame.to_message().map_err(|e| {
-                        RollballError::Ipc(format!("Failed to decode stream chunk: {}", e))
-                    })?;
-
-                    tracing::trace!("Received stream chunk from {}", conn_id);
-
-                    // Dispatch without awaiting a response — just broadcast and continue
-                    let _ = dispatch_stream_chunk(request, conn_id, &state, session_mgr, &bridge_tx).await;
-                    // No conn.send_frame() — no response for stream chunks
-                }
-            }
-            // Branch 2: Server-push message (IntentReceived)
-            push_msg = push_rx.recv() => {
-                match push_msg {
-                    Some(msg) => {
-                        tracing::debug!("Server-push to {}: {:?}", conn_id, msg);
-                        let push_frame =
-                            Frame::from_message(Frame::TYPE_RESPONSE, &msg)
-                                .map_err(|e| RollballError::Ipc(format!("Failed to encode push: {}", e)))?;
-                        conn.send_frame(&push_frame).await?;
-                    }
-                    None => {
-                        // Push channel closed — should not happen normally
-                        tracing::warn!("Push channel closed for {}", conn_id);
-                        return Ok(());
-                    }
-                }
-            }
-            // Branch 3: CapabilityUpdate broadcast (install/uninstall)
-            cap_msg = cap_rx.recv() => {
-                match cap_msg {
-                    Ok(msg) => {
-                        tracing::debug!("CapabilityUpdate broadcast to {}: {:?}", conn_id, msg);
-                        let cap_frame =
-                            Frame::from_message(Frame::TYPE_RESPONSE, &msg)
-                                .map_err(|e| RollballError::Ipc(format!("Failed to encode capability update: {}", e)))?;
-                        conn.send_frame(&cap_frame).await?;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("CapabilityUpdate channel lagged for {}: skipped {} messages", conn_id, n);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        // All senders dropped — no more capability updates
-                        tracing::info!("CapabilityUpdate channel closed for {}", conn_id);
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── Request dispatch ────────────────────────────────────────────────────────
-
-/// Dispatch request to the appropriate handler
-#[allow(dead_code)]
-async fn dispatch_request(
-    request: GatewayRequest,
-    conn_id: &str,
-    state: &SharedState,
-    session_mgr: &SharedSessionMgr,
-    perm_store: &SharedPermissionStore,
-    bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
-    session_pending: &Option<crate::http::routes::SessionPendingRequests>,
-) -> GatewayResponse {
-    match request {
-        GatewayRequest::KeyRelease { provider } => {
-            handle_key_release(&provider, conn_id, state, session_mgr).await
-        }
-        GatewayRequest::IntentSend {
-            target,
-            action,
-            params,
-            async_,
-        } => {
-            // S1.14: Check if this is a session response from Runtime
-            if action == "session_response" {
-                if let Some(pending) = session_pending {
-                    handle_session_response(&params, pending).await;
-                }
-                return GatewayResponse::IntentDelivered {
-                    message_id: format!("msg-session-resp-{}", chrono::Utc::now().timestamp_millis()),
-                };
-            }
-            handle_intent_send(&target, &action, &params, async_, conn_id, state, session_mgr, perm_store, bridge_tx)
-                .await
-        }
-        GatewayRequest::BudgetQuery { provider } => {
-            handle_budget_query(&provider, state).await
-        }
-        GatewayRequest::UsageReport(report) => {
-            handle_usage_report(report, state).await
-        }
-        GatewayRequest::RateAcquire { provider } => {
-            handle_rate_acquire(&provider, state).await
-        }
-        GatewayRequest::PermissionRequest {
-            request_id,
-            permission,
-            reason,
-            timeout_ms,
-        } => handle_permission_request(&request_id, &permission, &reason, timeout_ms, conn_id, state, session_mgr, perm_store).await,
-        GatewayRequest::IdentityQuery { fields } => {
-            handle_identity_query(&fields, conn_id, session_mgr).await
-        }
-        GatewayRequest::CapabilityQuery { agent_id } => {
-            handle_capability_query(agent_id.as_deref(), state).await
-        }
-        GatewayRequest::CronRegister {
-            agent_id,
-            schedule,
-            action,
-            params,
-        } => handle_cron_register(&agent_id, &schedule, &action, &params, state).await,
-        GatewayRequest::CronUnregister { cron_id } => {
-            handle_cron_unregister(&cron_id, state).await
-        }
-        GatewayRequest::CronList {} => {
-            handle_cron_list(conn_id, session_mgr, state).await
-        }
-        GatewayRequest::ContextUsageReport { agent_id, context } => {
-            handle_context_usage_report(&agent_id, &context, conn_id, session_mgr, bridge_tx).await
-        }
-        GatewayRequest::AgentHello { agent_id, version, connection_role } => {
-            handle_agent_hello(&agent_id, &version, &connection_role, conn_id, state, session_mgr).await
-        }
-        // S1.14: Session query requests from Runtime
-        // These are currently placeholder handlers. The actual session data
-        // flows through IntentReceived/IntentSend with "session_response" action.
-        // These variants exist for protocol completeness and future use
-        // when Gateway maintains a session cache.
-        GatewayRequest::ListSessions => {
-            GatewayResponse::SessionList { sessions: vec![] }
-        }
-        GatewayRequest::GetSessionMessages { session_id, .. } => {
-            tracing::warn!(
-                session_id = %session_id,
-                "GetSessionMessages via GatewayRequest — session data is on the Runtime side, returning empty"
-            );
-            GatewayResponse::SessionMessages {
-                messages: vec![],
-                cursor: None,
-                has_more: false,
-            }
-        }
-        GatewayRequest::CreateSession => {
-            GatewayResponse::SessionCreated {
-                session_id: String::new(),
-            }
-        }
-        GatewayRequest::GetCurrentSessionId => {
-            GatewayResponse::CurrentSessionId { session_id: None }
-        }
-    }
-}
-
-/// Handle session response from Runtime (S1.14)
-///
-/// When the Runtime processes a session query (triggered by Gateway's IntentReceived
-/// push), it sends the result back via IntentSend with action "session_response".
-/// This function extracts the request_id from the params, finds the pending
-/// oneshot sender, and fulfills it — which unblocks the HTTP handler awaiting
-/// the result.
-async fn handle_session_response(
-    params: &serde_json::Value,
-    pending: &crate::http::routes::SessionPendingRequests,
-) {
-    let request_id = params.get("request_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if request_id.is_empty() {
-        tracing::warn!("Session response missing request_id, ignoring");
-        return;
-    }
-
-    tracing::debug!(request_id = %request_id, "Received session response from Runtime");
-
-    let mut map = pending.lock().await;
-    if let Some(sender) = map.remove(request_id) {
-        // Forward the entire params as the response value
-        // The HTTP handler will extract the specific fields it needs
-        let response_value = params.get("data").cloned().unwrap_or(serde_json::Value::Null);
-        if sender.send(response_value).is_err() {
-            tracing::warn!(
-                request_id = %request_id,
-                "Session response oneshot already closed — HTTP handler may have timed out"
-            );
-        }
-    } else {
-        tracing::warn!(
-            request_id = %request_id,
-            "Session response has no pending request — may have timed out"
-        );
-    }
-}
-
-/// Dispatch a TYPE_STREAM_CHUNK request.
-///
-/// Lightweight handler for streaming chunk frames — extracts the IntentSend body,
-/// resolves the sender's agent_id, and broadcasts to the bridge channel.
-/// No response is sent back to the Runtime (that's the whole point of TYPE_STREAM_CHUNK).
-/// No permission or capability checks — those were already validated by the
-/// initial IntentSend that started the conversation.
-async fn dispatch_stream_chunk(
-    request: GatewayRequest,
-    conn_id: &str,
-    _state: &SharedState,
-    session_mgr: &SharedSessionMgr,
-    bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
-) {
-    // Only IntentSend makes sense as a stream chunk
-    let (target, action, params) = match request {
-        GatewayRequest::IntentSend {
-            target,
-            action,
-            params,
-            async_,
-        } => {
-            let _ = async_; // streaming chunks are always async
-            (target, action, params)
-        }
-        _ => {
-            tracing::warn!("Ignoring non-IntentSend stream chunk from {}", conn_id);
-            return;
-        }
-    };
-
-    // Resolve agent_id from session
-    let from = {
-        let mgr = session_mgr.lock().await;
-        mgr.get_session(conn_id)
-            .and_then(|s| s.agent_id.clone())
-            .unwrap_or_else(|| "unknown".to_string())
-    };
-
-    // Only handle HTTP bridge targets (http-api / http-ws) for streaming chunks
-    if target != "http-api" && target != "http-ws" {
-        tracing::debug!(
-            "Ignoring stream chunk with non-HTTP target: from={} to={}",
-            from, target
-        );
-        return;
-    }
-
-    let message_id = format!("msg-{}", chrono::Utc::now().timestamp_millis());
-
-    // Broadcast to bridge channel — same logic as handle_intent_send's HTTP path
-    if let Some(tx) = bridge_tx {
-        let event_type = crate::http::routes::BridgeEventType::from_action(&action)
-            .unwrap_or_else(crate::http::routes::BridgeEventType::default_for_unknown);
-
-        let payload = match event_type {
-            crate::http::routes::BridgeEventType::Chunk => {
-                let delta = params.get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                serde_json::json!({ "delta": delta })
-            }
-            crate::http::routes::BridgeEventType::Done => {
-                let content = params.get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                serde_json::json!({ "content": content })
-            }
-            crate::http::routes::BridgeEventType::Error => {
-                let msg = params.get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error");
-                serde_json::json!({ "message": msg })
-            }
-            _ => params.clone(),
-        };
-
-        let event = crate::http::routes::BridgeEvent {
-            agent_id: from.clone(),
-            message_id: message_id.clone(),
-            event_type,
-            payload,
-        };
-
-        if let Err(e) = tx.send(event) {
-            tracing::debug!("Failed to broadcast stream chunk: {}", e);
-        }
-    }
-}
+pub type SharedSessionMgr = Arc<Mutex<SessionManager>>;
 
 // ── Handler implementations ─────────────────────────────────────────────────
 
-#[allow(dead_code)]
-async fn handle_key_release(
+pub async fn handle_key_release(
     provider: &str,
     conn_id: &str,
     state: &SharedState,
@@ -575,9 +85,8 @@ async fn handle_key_release(
 /// Maximum params size for Intent messages (64KB)
 const INTENT_PARAMS_MAX_SIZE_BYTES: usize = 64 * 1024;
 
-#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-async fn handle_intent_send(
+pub async fn handle_intent_send(
     target: &str,
     action: &str,
     params: &serde_json::Value,
@@ -807,8 +316,7 @@ async fn handle_intent_send(
 }
 
 /// S4.3.3: Budget query handler — returns real remaining budget
-#[allow(dead_code)]
-async fn handle_budget_query(provider: &str, state: &SharedState) -> GatewayResponse {
+pub async fn handle_budget_query(provider: &str, state: &SharedState) -> GatewayResponse {
     let guard = state.read().await;
     if let Some(tracker) = guard.budget_tracker() {
         let remaining = tracker.remaining_tokens(provider);
@@ -831,8 +339,7 @@ async fn handle_budget_query(provider: &str, state: &SharedState) -> GatewayResp
 }
 
 /// S4.3.2: Usage report handler — updates cumulative usage
-#[allow(dead_code)]
-async fn handle_usage_report(
+pub async fn handle_usage_report(
     report: rollball_core::budget::UsageReport,
     state: &SharedState,
 ) -> GatewayResponse {
@@ -855,8 +362,7 @@ async fn handle_usage_report(
 }
 
 /// S4.4.2: Rate acquire handler — token bucket allocation
-#[allow(dead_code)]
-async fn handle_rate_acquire(provider: &str, state: &SharedState) -> GatewayResponse {
+pub async fn handle_rate_acquire(provider: &str, state: &SharedState) -> GatewayResponse {
     let mut guard = state.write().await;
     if let Some(limiter) = guard.rate_limiter_mut() {
         let result = limiter.try_acquire_for(provider, "default");
@@ -1003,9 +509,8 @@ impl AsyncPermissionApprovalCallback for AsyncCliApprovalCallback {
 /// Note: The Gateway processes this in the IPC handler task. For S2.2,
 /// when we implement interactive CLI approval, the approval step will
 /// be spawned as a separate tokio task to avoid blocking the IPC loop.
-#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-async fn handle_permission_request(
+pub async fn handle_permission_request(
     request_id: &str,
     permission: &str,
     reason: &str,
@@ -1140,8 +645,7 @@ async fn handle_permission_request(
 /// S3.3/S3.4: Queries the System Agent for identity fields.
 /// In Phase 2, this returns an empty result — actual query requires
 /// the System Agent to be running and accessible via IPC.
-#[allow(dead_code)]
-async fn handle_identity_query(
+pub async fn handle_identity_query(
     fields: &[String],
     conn_id: &str,
     session_mgr: &SharedSessionMgr,
@@ -1173,8 +677,7 @@ async fn handle_identity_query(
 ///
 /// S4.2.4: Returns the capability registry for the requested agent
 /// or all agents if no filter is specified.
-#[allow(dead_code)]
-async fn handle_capability_query(
+pub async fn handle_capability_query(
     agent_id: Option<&str>,
     state: &SharedState,
 ) -> GatewayResponse {
@@ -1204,7 +707,7 @@ async fn handle_capability_query(
 
 // ── Cron handlers (S3.4) ──────────────────────────────────────────────────
 
-async fn handle_cron_register(
+pub async fn handle_cron_register(
     agent_id: &str,
     schedule: &str,
     action: &str,
@@ -1255,7 +758,7 @@ async fn handle_cron_register(
     }
 }
 
-async fn handle_cron_unregister(
+pub async fn handle_cron_unregister(
     cron_id: &str,
     state: &SharedState,
 ) -> GatewayResponse {
@@ -1282,7 +785,7 @@ async fn handle_cron_unregister(
     GatewayResponse::CronUnregisterResult { removed }
 }
 
-async fn handle_cron_list(
+pub async fn handle_cron_list(
     conn_id: &str,
     session_mgr: &SharedSessionMgr,
     state: &SharedState,
@@ -1317,7 +820,7 @@ async fn handle_cron_list(
 }
 
 /// Handle ContextUsageReport — forward context usage to Desktop App via WebSocket bridge
-async fn handle_context_usage_report(
+pub async fn handle_context_usage_report(
     agent_id: &str,
     context: &rollball_core::protocol::ContextUsageInfo,
     _conn_id: &str,
@@ -1344,7 +847,7 @@ async fn handle_context_usage_report(
 /// On successful authentication, also pushes LLMConfigDelivery to the Agent
 /// via the session's push channel. This satisfies PRD GTW-05 and SEC-07:
 /// API keys are distributed via IPC, not environment variables.
-async fn handle_agent_hello(
+pub async fn handle_agent_hello(
     agent_id: &str,
     version: &str,
     connection_role: &str,
@@ -1363,8 +866,14 @@ async fn handle_agent_hello(
         session.connection_role = connection_role.to_string();
         tracing::info!("Session {} authenticated as agent {} (role={})", conn_id, agent_id, connection_role);
 
+        // Mark the agent as connected in GatewayState
+        {
+            let mut gw = state.write().await;
+            gw.set_agent_connected(agent_id, true);
+        }
+
         // Only push LLM config to main connections.
-        // chunk-relay connections don't need LLM config — they only send TYPE_STREAM_CHUNK.
+        // chunk-relay connections don't need LLM config — they only send StreamChunk.
         if connection_role == "main" {
             let llm_config = resolve_llm_config_for_agent(agent_id, state).await;
         if let Some(cfg) = llm_config {
@@ -1818,308 +1327,7 @@ mod tests {
         assert!(matches!(response, GatewayResponse::UsageReportAck {}));
     }
 
-    // ── Integration tests (platform-specific transport) ──────────────────
-
-    /// Helper: send a request frame and receive a response frame
-    async fn send_request_recv_response(
-        conn: &mut dyn AsyncTransportConnection,
-        request: &GatewayRequest,
-    ) -> GatewayResponse {
-        let frame =
-            Frame::from_message(Frame::TYPE_REQUEST, request).unwrap();
-        conn.send_frame(&frame).await.unwrap();
-
-        let resp_frame = conn.recv_frame().await.unwrap().unwrap();
-        resp_frame.to_message().unwrap()
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_ipc_server_single_connection() {
-        let socket_path = format!(
-            "/tmp/rollball-test-ipc-single-{}.sock",
-            std::process::id()
-        );
-        let _ = std::fs::remove_file(&socket_path);
-        let state = test_shared_state("single");
-
-        let server = IpcServer::new(&socket_path);
-        let server_handle = tokio::spawn(async move { server.listen(state).await });
-
-        // Give server time to bind and listen
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let stream = tokio::net::UnixStream::connect(&socket_path)
-            .await
-            .unwrap();
-        let mut conn = Box::new(
-            crate::ipc::transport::unix_transport::UnixTransportConnection::new(stream)
-        );
-
-        // Send BudgetQuery request
-        let request =
-            GatewayRequest::BudgetQuery { provider: "openai".to_string() };
-        let response = send_request_recv_response(&mut *conn, &request).await;
-
-        if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
-            assert_eq!(remaining_tokens, u64::MAX);
-        } else {
-            panic!("Expected BudgetInfo, got {:?}", response);
-        }
-
-        drop(conn);
-        server_handle.abort();
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_ipc_server_multiple_sequential() {
-        let socket_path = format!(
-            "/tmp/rollball-test-ipc-seq-{}.sock",
-            std::process::id()
-        );
-        let _ = std::fs::remove_file(&socket_path);
-        let state = test_shared_state("sequential");
-
-        let server = IpcServer::new(&socket_path);
-        let server_handle = tokio::spawn(async move { server.listen(state).await });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // First connection
-        {
-            let stream = tokio::net::UnixStream::connect(&socket_path)
-                .await
-                .unwrap();
-            let mut conn = Box::new(
-                crate::ipc::transport::unix_transport::UnixTransportConnection::new(stream)
-            );
-            let request =
-                GatewayRequest::RateAcquire { provider: "openai".to_string() };
-            let response =
-                send_request_recv_response(&mut *conn, &request).await;
-            if let GatewayResponse::RateToken { granted, .. } = response {
-                assert!(granted);
-            } else {
-                panic!("Expected RateToken");
-            }
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-        // Second connection
-        {
-            let stream = tokio::net::UnixStream::connect(&socket_path)
-                .await
-                .unwrap();
-            let mut conn = Box::new(
-                crate::ipc::transport::unix_transport::UnixTransportConnection::new(stream)
-            );
-            let request =
-                GatewayRequest::BudgetQuery { provider: "anthropic".to_string() };
-            let response =
-                send_request_recv_response(&mut *conn, &request).await;
-            if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
-                assert_eq!(remaining_tokens, u64::MAX);
-            } else {
-                panic!("Expected BudgetInfo");
-            }
-        }
-
-        server_handle.abort();
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_ipc_server_concurrent_connections() {
-        let socket_path = format!(
-            "/tmp/rollball-test-ipc-conc-{}.sock",
-            std::process::id()
-        );
-        let _ = std::fs::remove_file(&socket_path);
-        let state = test_shared_state("concurrent");
-
-        let server = IpcServer::new(&socket_path);
-        let server_handle = tokio::spawn(async move { server.listen(state).await });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Spawn 10 concurrent connections, each sending a request
-        let mut handles = Vec::new();
-        for i in 0..10 {
-            let socket_path = socket_path.clone();
-            let handle = tokio::spawn(async move {
-                let stream =
-                    tokio::net::UnixStream::connect(&socket_path).await.unwrap();
-                let mut conn: Box<dyn AsyncTransportConnection> = Box::new(
-                    crate::ipc::transport::unix_transport::UnixTransportConnection::new(stream)
-                );
-
-                let request = GatewayRequest::RateAcquire {
-                    provider: format!("provider-{}", i),
-                };
-                let frame =
-                    Frame::from_message(Frame::TYPE_REQUEST, &request).unwrap();
-                conn.send_frame(&frame).await.unwrap();
-
-                let resp_frame = conn.recv_frame().await.unwrap().unwrap();
-                let response: GatewayResponse =
-                    resp_frame.to_message().unwrap();
-                response
-            });
-            handles.push(handle);
-        }
-
-        // All 10 should succeed
-        for handle in handles {
-            let response = handle.await.unwrap();
-            if let GatewayResponse::RateToken { granted, .. } = response {
-                assert!(granted);
-            } else {
-                panic!("Expected RateToken, got {:?}", response);
-            }
-        }
-
-        server_handle.abort();
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn test_ipc_server_named_pipe_single() {
-        let pipe_name = format!(
-            r"\\.\pipe\rollball-test-ipc-{}",
-            std::process::id()
-        );
-        let state = test_shared_state("np-single");
-
-        let server = IpcServer::new(&pipe_name);
-        let server_handle = tokio::spawn(async move { server.listen(state).await });
-
-        // Give server time to reach first accept() and create pipe instance
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let mut conn = crate::ipc::transport::windows_transport::connect_client_async(&pipe_name)
-            .await
-            .expect("Failed to connect to Named Pipe");
-
-        let request = GatewayRequest::BudgetQuery { provider: "openai".to_string() };
-        let response = send_request_recv_response(&mut *conn, &request).await;
-
-        if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
-            assert_eq!(remaining_tokens, u64::MAX);
-        } else {
-            panic!("Expected BudgetInfo, got {:?}", response);
-        }
-
-        drop(conn);
-        server_handle.abort();
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn test_ipc_server_named_pipe_multiple_sequential() {
-        let pipe_name = format!(
-            r"\\.\pipe\rollball-test-ipc-seq-{}",
-            std::process::id()
-        );
-        let state = test_shared_state("np-seq");
-
-        let server = IpcServer::new(&pipe_name);
-        let server_handle = tokio::spawn(async move { server.listen(state).await });
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // First connection
-        {
-            let mut conn = crate::ipc::transport::windows_transport::connect_client_async(&pipe_name)
-                .await
-                .expect("Failed to connect to Named Pipe (1st)");
-            let request = GatewayRequest::RateAcquire { provider: "openai".to_string() };
-            let response = send_request_recv_response(&mut *conn, &request).await;
-            if let GatewayResponse::RateToken { granted, .. } = response {
-                assert!(granted);
-            } else {
-                panic!("Expected RateToken, got {:?}", response);
-            }
-            drop(conn);
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Second connection
-        {
-            let mut conn = crate::ipc::transport::windows_transport::connect_client_async(&pipe_name)
-                .await
-                .expect("Failed to connect to Named Pipe (2nd)");
-            let request = GatewayRequest::BudgetQuery { provider: "anthropic".to_string() };
-            let response = send_request_recv_response(&mut *conn, &request).await;
-            if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
-                assert_eq!(remaining_tokens, u64::MAX);
-            } else {
-                panic!("Expected BudgetInfo, got {:?}", response);
-            }
-            drop(conn);
-        }
-
-        server_handle.abort();
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn test_ipc_server_named_pipe_concurrent() {
-        let pipe_name = format!(
-            r"\\.\pipe\rollball-test-ipc-conc-{}",
-            std::process::id()
-        );
-        let state = test_shared_state("np-conc");
-
-        let server = IpcServer::new(&pipe_name);
-        let server_handle = tokio::spawn(async move { server.listen(state).await });
-
-        // Give the server time to start and create the first pipe instance
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Spawn 10 concurrent connections, each sending a request.
-        // Uses connect_client_async which retries on NotFound/Busy.
-        let mut handles = Vec::new();
-        for i in 0..10 {
-            let pipe_name = pipe_name.clone();
-            let handle = tokio::spawn(async move {
-                let mut conn: Box<dyn AsyncTransportConnection> =
-                    crate::ipc::transport::windows_transport::connect_client_async(&pipe_name)
-                        .await
-                        .expect("Failed to connect to Named Pipe");
-
-                let request = GatewayRequest::RateAcquire {
-                    provider: format!("provider-{}", i),
-                };
-                let frame =
-                    Frame::from_message(Frame::TYPE_REQUEST, &request).unwrap();
-                conn.send_frame(&frame).await.unwrap();
-
-                let resp_frame = conn.recv_frame().await.unwrap().unwrap();
-                let response: GatewayResponse =
-                    resp_frame.to_message().unwrap();
-                response
-            });
-            handles.push(handle);
-        }
-
-        // All 10 should succeed
-        for handle in handles {
-            let response = handle.await.unwrap();
-            if let GatewayResponse::RateToken { granted, .. } = response {
-                assert!(granted);
-            } else {
-                panic!("Expected RateToken, got {:?}", response);
-            }
-        }
-
-        server_handle.abort();
-    }
+    // ── Integration tests (no longer using legacy IPC transport) ─────
 
     #[tokio::test]
     async fn test_gateway_state_concurrent_access() {
@@ -2251,6 +1459,7 @@ mod tests {
                 pid: 1234,
                 started_at: chrono::Utc::now(),
                 workspace: "/tmp/test".to_string(),
+                connected: false,
             });
         }
 
@@ -2557,7 +1766,7 @@ mod tests {
     #[tokio::test]
     async fn test_capability_broadcast_to_sessions() {
         let (capability_tx, mut cap_rx1) =
-            tokio::sync::broadcast::channel::<GatewayResponse>(CAPABILITY_BROADCAST_CAPACITY);
+            tokio::sync::broadcast::channel::<GatewayResponse>(64);
         let mut cap_rx2 = capability_tx.subscribe();
 
         // Simulate an install event — broadcast CapabilityUpdate

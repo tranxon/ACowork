@@ -130,19 +130,16 @@ impl Cli {
 
 /// Attempt to connect to Gateway via the given socket path.
 /// Returns Some(client) on success, None on failure (graceful fallback to standalone mode).
-async fn connect_gateway_client(socket_path: &str, agent_id: &str, version: &str) -> Option<crate::ipc::client::GatewayClient> {
-    let mut client = crate::ipc::client::GatewayClient::new(socket_path);
-    match client.connect_and_register(agent_id, version).await {
-        Ok(()) => {
-            tracing::info!("Connected and registered with Gateway at {}", socket_path);
+async fn connect_gateway_client(endpoint: &str, agent_id: &str, version: &str) -> Option<crate::grpc::client::GatewayGrpcClient> {
+    match crate::grpc::client::GatewayGrpcClient::connect_and_register(
+        endpoint, agent_id, version,
+    ).await {
+        Ok(client) => {
+            tracing::info!(endpoint = %endpoint, "Connected and registered with Gateway gRPC");
             Some(client)
         }
         Err(e) => {
-            tracing::warn!(
-                "Failed to connect to Gateway at {}: {}",
-                socket_path,
-                e
-            );
+            tracing::warn!(endpoint = %endpoint, error = %e, "Failed to connect to Gateway gRPC");
             None
         }
     }
@@ -166,14 +163,14 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         "Package loaded successfully"
     );
 
-    // Step 2: Connect to Gateway if socket path is provided
-    let mut ipc_client = if let Some(socket_path) = config.get_gateway_address() {
-        connect_gateway_client(socket_path, &loaded.manifest.agent_id, &loaded.manifest.version).await
+    // Step 2: Connect to Gateway gRPC if socket path is provided
+    let mut grpc_client = if let Some(endpoint) = config.get_gateway_address() {
+        connect_gateway_client(endpoint, &loaded.manifest.agent_id, &loaded.manifest.version).await
     } else {
         None
     };
-    if ipc_client.is_some() {
-        tracing::info!("Gateway IPC client initialized");
+    if grpc_client.is_some() {
+        tracing::info!("Gateway gRPC client initialized");
     } else {
         tracing::info!("Running in standalone mode (no Gateway)");
     }
@@ -195,7 +192,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     // In Standalone mode: use manifest suggested_provider + env vars (development only).
     let mut gateway_model_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo> = None;
     let mut gateway_max_output_tokens_limit: u64 = 32_768;
-    let (provider, resolved_model, available_models) = if let Some(ref mut client) = ipc_client {
+    let (provider, resolved_model, available_models) = if let Some(ref mut client) = grpc_client {
         // Gateway mode: LLMConfigDelivery is required
         match client.recv_llm_config().await {
             Ok(llm_config) => {
@@ -310,7 +307,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     // If the agent previously selected a different model (via model_switch),
     // it was persisted to .agent_model.json in the workspace.
     // On cold start, restore that preference if the model is still available.
-    if let Some(saved_model) = load_agent_model(&config.work_dir) {
+    if let Some((saved_model, _saved_provider)) = load_agent_model(&config.work_dir) {
         if available_models.contains(&saved_model) {
             if saved_model != resolved_model {
                 tracing::info!(
@@ -341,17 +338,17 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
 
     // Step 8: Create AgentLoop with optional streaming chunk channel and tool event channel
     // In Gateway mode, each StreamEvent::Content delta is forwarded through
-    // the on_chunk mpsc channel, then relayed to Gateway via TYPE_STREAM_CHUNK.
+    // the on_chunk mpsc channel, then relayed to Gateway via StreamChunk.
     // Tool events (ToolCall/ToolResult) are forwarded through on_tool_event
     // and relayed to Gateway via agent_tool_call/agent_tool_result intents.
-    let (chunk_tx, chunk_rx) = if ipc_client.is_some() {
+    let (chunk_tx, chunk_rx) = if grpc_client.is_some() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::ChunkEvent>(256);
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
 
-    let (tool_event_tx, tool_event_rx) = if ipc_client.is_some() {
+    let (tool_event_tx, tool_event_rx) = if grpc_client.is_some() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::ToolEvent>(64);
         (Some(tx), Some(rx))
     } else {
@@ -404,7 +401,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
     agent_loop.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
 
     // Step 9: Run the appropriate loop based on connection mode
-    if let Some(mut client) = ipc_client {
+    if let Some(mut client) = grpc_client {
         // Gateway mode: run message loop to receive messages from Gateway
         tracing::info!("Running in Gateway mode");
 
@@ -416,23 +413,23 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
             .to_string();
 
         // Spawn chunk relay task: consumes ChunkEvent from mpsc channel and
-        // forwards each delta to Gateway via TYPE_STREAM_CHUNK (no response wait).
-        // This uses a second IPC connection dedicated to outbound streaming chunks,
-        // so it doesn't interfere with the main connection's recv/send cycle.
+        // forwards each delta to Gateway via gRPC stream (fire-and-forget).
+        // Uses a separate gRPC connection dedicated to outbound streaming chunks.
         let chunk_relay = if let Some(mut chunk_rx) = chunk_rx {
             let agent_id = agent_id.clone();
             let version = version.clone();
-            let socket_path = socket_path.clone();
             Some(tokio::spawn(async move {
-                // Connect a second IPC client for chunk relay.
-                // On send failure, reconnect with exponential backoff so that
-                // streaming resumes after Gateway restart / IPC reconnect.
-                let mut chunk_client = crate::ipc::client::GatewayClient::new(&socket_path);
-                if let Err(e) = chunk_client.connect_and_register_with_role(&agent_id, &version, "chunk-relay").await {
-                    tracing::error!("Chunk relay IPC connection failed: {}", e);
-                    return;
-                }
-                tracing::info!("Chunk relay connected to Gateway");
+                // Connect a second gRPC client for chunk relay.
+                let mut chunk_client = match crate::grpc::client::GatewayGrpcClient::connect_and_register_with_role(
+                    "http://127.0.0.1:19877", &agent_id, &version, "chunk-relay",
+                ).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        tracing::error!("Chunk relay gRPC connection failed: {}", e);
+                        return;
+                    }
+                };
+                tracing::info!("Chunk relay connected to Gateway via gRPC");
 
                 while let Some(event) = chunk_rx.recv().await {
                     match event {
@@ -441,20 +438,18 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                                 "content": delta,
                             });
                             if let Err(e) = chunk_client
-                                .send_stream_chunk("http-ws", "agent_chunk", params, true)
+                                .send_stream_chunk("http-ws", "agent_chunk", params)
                                 .await
                             {
                                 tracing::warn!("Chunk relay send failed: {}, reconnecting...", e);
-                                // Reconnect chunk relay IPC with exponential backoff
-                                match try_reconnect_chunk_relay(
-                                    &socket_path, &agent_id, &version, &mut chunk_client,
-                                ).await {
+                                // Reconnect chunk relay gRPC
+                                match chunk_client.reconnect_and_reregister(&agent_id, &version).await {
                                     Ok(()) => {
                                         tracing::info!("Chunk relay reconnected, resending last chunk");
                                         // Retry the failed chunk once after reconnect
                                         let retry_params = serde_json::json!({ "content": delta });
                                         if let Err(e2) = chunk_client
-                                            .send_stream_chunk("http-ws", "agent_chunk", retry_params, true)
+                                            .send_stream_chunk("http-ws", "agent_chunk", retry_params)
                                             .await
                                         {
                                             tracing::warn!("Chunk relay retry failed after reconnect: {}", e2);
@@ -468,7 +463,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                             }
                         }
                         crate::agent::loop_::ChunkEvent::ContextUsage(ctx_info) => {
-                            // Send context usage report to Gateway via IPC
+                            // Send context usage report to Gateway via gRPC
                             if let Err(e) = chunk_client
                                 .report_context_usage(&agent_id, ctx_info)
                                 .await
@@ -486,18 +481,21 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
 
         // Spawn tool event relay task: consumes ToolEvent from mpsc channel and
         // forwards each event to Gateway via IntentSend (agent_tool_call / agent_tool_result).
-        // Uses a dedicated IPC connection, following the same pattern as chunk_relay.
+        // Uses a dedicated gRPC connection, following the same pattern as chunk_relay.
         let tool_event_relay = if let Some(mut tool_event_rx) = tool_event_rx {
             let agent_id = agent_id.clone();
             let version = version.clone();
-            let socket_path = socket_path.clone();
             Some(tokio::spawn(async move {
-                let mut te_client = crate::ipc::client::GatewayClient::new(&socket_path);
-                if let Err(e) = te_client.connect_and_register_with_role(&agent_id, &version, "tool-event-relay").await {
-                    tracing::error!("Tool event relay IPC connection failed: {}", e);
-                    return;
-                }
-                tracing::info!("Tool event relay connected to Gateway");
+                let mut te_client = match crate::grpc::client::GatewayGrpcClient::connect_and_register_with_role(
+                    "http://127.0.0.1:19877", &agent_id, &version, "tool-event-relay",
+                ).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        tracing::error!("Tool event relay gRPC connection failed: {}", e);
+                        return;
+                    }
+                };
+                tracing::info!("Tool event relay connected to Gateway via gRPC");
 
                 while let Some(event) = tool_event_rx.recv().await {
                     let (action, params) = match event {
@@ -535,9 +533,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                         .await
                     {
                         tracing::warn!("Tool event relay send failed: {}, reconnecting...", e);
-                        match try_reconnect_chunk_relay(
-                            &socket_path, &agent_id, &version, &mut te_client,
-                        ).await {
+                        match te_client.reconnect_and_reregister(&agent_id, &version).await {
                             Ok(()) => {
                                 tracing::info!("Tool event relay reconnected");
                             }
@@ -785,10 +781,10 @@ async fn run_chat_loop(
 async fn run_gateway_loop(
     mut agent_loop: crate::agent::loop_::AgentLoop,
     inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
-    ipc_client: &mut crate::ipc::client::GatewayClient,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     mut context_builder: crate::agent::context::ContextBuilder,
     work_dir: String,
-    socket_path: String,
+    _socket_path: String,
     agent_id_for_reconnect: String,
     version_for_reconnect: String,
 ) -> Result<()> {
@@ -808,7 +804,7 @@ async fn run_gateway_loop(
 
     // Main message loop — receive messages from Gateway and process them
     loop {
-        match ipc_client.recv_message().await {
+        match grpc_client.recv_message().await {
             Ok(Some(response)) => {
                 tracing::debug!("Received Gateway message: {:?}", response);
 
@@ -817,7 +813,7 @@ async fn run_gateway_loop(
                         tracing::info!("Received intent from {}: {}", from, action);
 
                         // Budget pre-check: skip processing if budget is exhausted
-                        if let Ok((remaining_tokens, _)) = ipc_client.query_budget(&budget_provider).await
+                        if let Ok((remaining_tokens, _)) = grpc_client.query_budget(&budget_provider).await
                             && remaining_tokens == 0
                         {
                             tracing::warn!(
@@ -830,7 +826,7 @@ async fn run_gateway_loop(
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown"),
                             });
-                            let _ = ipc_client.send_intent(&from, "agent_error", error_params, false).await;
+                            let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
                             continue;
                         }
                         // If budget query fails (e.g. provider not tracked), proceed anyway
@@ -839,10 +835,12 @@ async fn run_gateway_loop(
                         // and persist to workspace so the preference survives restarts
                         if action == "model_switch" {
                             if let Some(model) = params.get("model").and_then(|v| v.as_str()) {
+                                let provider = params.get("provider").and_then(|v| v.as_str());
                                 context_builder.set_override_model(model.to_string());
-                                save_agent_model(&work_dir, model);
+                                save_agent_model(&work_dir, model, provider);
                                 tracing::info!(
                                     model = %model,
+                                    provider = ?provider,
                                     "Model switched via model_switch message (persisted to workspace)"
                                 );
                             } else {
@@ -886,19 +884,19 @@ async fn run_gateway_loop(
                         // requests session/conversation data. Runtime processes them using
                         // conversation.rs functions and sends results back via IntentSend.
                         if action == "list_sessions" {
-                            handle_list_sessions(&work_dir, ipc_client, &params).await;
+                            handle_list_sessions(&work_dir, grpc_client, &params).await;
                             continue;
                         }
                         if action == "get_session_messages" {
-                            handle_get_session_messages(&work_dir, ipc_client, &params).await;
+                            handle_get_session_messages(&work_dir, grpc_client, &params).await;
                             continue;
                         }
                         if action == "create_session" {
-                            handle_create_session(&work_dir, &agent_id_for_reconnect, &mut current_session_id, ipc_client, &params).await;
+                            handle_create_session(&work_dir, &agent_id_for_reconnect, &mut current_session_id, grpc_client, &params).await;
                             continue;
                         }
                         if action == "get_current_session_id" {
-                            handle_get_current_session_id(ipc_client, &params, &current_session_id).await;
+                            handle_get_current_session_id(grpc_client, &params, &current_session_id).await;
                             continue;
                         }
 
@@ -935,7 +933,7 @@ async fn run_gateway_loop(
                                     "message_id": message_id,
                                 });
 
-                                match ipc_client.send_intent(reply_target, "agent_response", intent_params, false).await {
+                                match grpc_client.send_intent(reply_target, "agent_response", intent_params, false).await {
                                     Ok(_) => tracing::debug!("Response sent to {}", reply_target),
                                     Err(e) => tracing::error!("Failed to send response: {}", e),
                                 }
@@ -948,7 +946,7 @@ async fn run_gateway_loop(
                                     "content": format!("Error: {}", e),
                                     "message_id": message_id,
                                 });
-                                let _ = ipc_client.send_intent(&from, "agent_error", error_params, false).await;
+                                let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
                             }
                         }
                     }
@@ -1007,10 +1005,9 @@ async fn run_gateway_loop(
                 tracing::info!("Gateway connection closed, attempting reconnect...");
                 // Try to reconnect with exponential backoff
                 match try_reconnect_gateway(
-                    &socket_path,
                     &agent_id_for_reconnect,
                     &version_for_reconnect,
-                    ipc_client,
+                    grpc_client,
                 ).await {
                     Ok(()) => {
                         tracing::info!("Reconnected to Gateway successfully");
@@ -1043,7 +1040,7 @@ async fn run_gateway_loop(
 /// to Gateway via IntentSend with action "session_response".
 async fn handle_list_sessions(
     work_dir: &str,
-    ipc_client: &mut crate::ipc::client::GatewayClient,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     params: &serde_json::Value,
 ) {
     let request_id = params.get("request_id")
@@ -1075,7 +1072,7 @@ async fn handle_list_sessions(
         "sessions": session_dtos,
     });
 
-    send_session_response(ipc_client, &request_id, data).await;
+    send_session_response(grpc_client, &request_id, data).await;
 }
 
 /// Handle "get_session_messages" action from Gateway (S1.14)
@@ -1084,7 +1081,7 @@ async fn handle_list_sessions(
 /// and sends them back to Gateway via IntentSend.
 async fn handle_get_session_messages(
     work_dir: &str,
-    ipc_client: &mut crate::ipc::client::GatewayClient,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     params: &serde_json::Value,
 ) {
     let request_id = params.get("request_id")
@@ -1114,7 +1111,7 @@ async fn handle_get_session_messages(
         let data = serde_json::json!({
             "error": "session_id is required",
         });
-        send_session_response(ipc_client, &request_id, data).await;
+        send_session_response(grpc_client, &request_id, data).await;
         return;
     }
 
@@ -1126,7 +1123,7 @@ async fn handle_get_session_messages(
         let data = serde_json::json!({
             "error": format!("Session {} not found", session_id),
         });
-        send_session_response(ipc_client, &request_id, data).await;
+        send_session_response(grpc_client, &request_id, data).await;
         return;
     }
 
@@ -1154,14 +1151,14 @@ async fn handle_get_session_messages(
                 "cursor": paginated.cursor,
                 "has_more": paginated.has_more,
             });
-            send_session_response(ipc_client, &request_id, data).await;
+            send_session_response(grpc_client, &request_id, data).await;
         }
         Err(e) => {
             tracing::error!("Failed to read session messages: {}", e);
             let data = serde_json::json!({
                 "error": format!("Failed to read messages: {}", e),
             });
-            send_session_response(ipc_client, &request_id, data).await;
+            send_session_response(grpc_client, &request_id, data).await;
         }
     }
 }
@@ -1173,7 +1170,7 @@ async fn handle_create_session(
     work_dir: &str,
     agent_id: &str,
     current_session_id: &mut String,
-    ipc_client: &mut crate::ipc::client::GatewayClient,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     params: &serde_json::Value,
 ) {
     let request_id = params.get("request_id")
@@ -1199,14 +1196,14 @@ async fn handle_create_session(
             let data = serde_json::json!({
                 "session_id": new_session_id,
             });
-            send_session_response(ipc_client, &request_id, data).await;
+            send_session_response(grpc_client, &request_id, data).await;
         }
         Err(e) => {
             tracing::error!("Failed to create new session: {}", e);
             let data = serde_json::json!({
                 "error": format!("Failed to create session: {}", e),
             });
-            send_session_response(ipc_client, &request_id, data).await;
+            send_session_response(grpc_client, &request_id, data).await;
         }
     }
 }
@@ -1215,7 +1212,7 @@ async fn handle_create_session(
 ///
 /// Returns the currently active session ID.
 async fn handle_get_current_session_id(
-    ipc_client: &mut crate::ipc::client::GatewayClient,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     params: &serde_json::Value,
     current_session_id: &str,
 ) {
@@ -1233,7 +1230,7 @@ async fn handle_get_current_session_id(
     let data = serde_json::json!({
         "session_id": session_id,
     });
-    send_session_response(ipc_client, &request_id, data).await;
+    send_session_response(grpc_client, &request_id, data).await;
 }
 
 /// Send a session response back to Gateway via IntentSend (S1.14)
@@ -1241,7 +1238,7 @@ async fn handle_get_current_session_id(
 /// Wraps the response data with the request_id and sends it
 /// as an IntentSend with action "session_response" targeting "http-api".
 async fn send_session_response(
-    ipc_client: &mut crate::ipc::client::GatewayClient,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     request_id: &str,
     data: serde_json::Value,
 ) {
@@ -1250,7 +1247,7 @@ async fn send_session_response(
         "data": data,
     });
 
-    if let Err(e) = ipc_client
+    if let Err(e) = grpc_client
         .send_intent("http-api", "session_response", params, true)
         .await
     {
@@ -1310,14 +1307,18 @@ const AGENT_MODEL_FILE: &str = ".agent_model.json";
 struct AgentModelEntry {
     /// The model identifier selected by the user
     model: String,
+    /// The provider identifier selected by the user (e.g., "deepseek", "openai")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     /// ISO 8601 timestamp of when the model was last changed
     updated_at: String,
 }
 
 /// Load the per-agent model preference from the workspace.
 ///
-/// Returns `Some(model)` if the file exists and parses correctly, otherwise `None`.
-fn load_agent_model(work_dir: &str) -> Option<String> {
+/// Returns `Some((model, provider))` if the file exists and parses correctly, otherwise `None`.
+/// The provider field may be `None` for legacy files that only stored the model.
+fn load_agent_model(work_dir: &str) -> Option<(String, Option<String>)> {
     let path = std::path::Path::new(work_dir).join(AGENT_MODEL_FILE);
     if !path.exists() {
         return None;
@@ -1328,10 +1329,11 @@ fn load_agent_model(work_dir: &str) -> Option<String> {
                 Ok(entry) => {
                     tracing::info!(
                         model = %entry.model,
+                        provider = ?entry.provider,
                         updated_at = %entry.updated_at,
                         "Loaded per-agent model preference from workspace"
                     );
-                    Some(entry.model)
+                    Some((entry.model, entry.provider))
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse {}: {}", AGENT_MODEL_FILE, e);
@@ -1349,9 +1351,12 @@ fn load_agent_model(work_dir: &str) -> Option<String> {
 /// Save the per-agent model preference to the workspace.
 ///
 /// Called when a model_switch message is received. Overwrites any existing entry.
-fn save_agent_model(work_dir: &str, model: &str) {
+/// The provider is saved alongside the model so that the correct provider can be
+/// restored when the agent restarts or when the frontend queries the model info.
+fn save_agent_model(work_dir: &str, model: &str, provider: Option<&str>) {
     let entry = AgentModelEntry {
         model: model.to_string(),
+        provider: provider.map(|s| s.to_string()),
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
     let path = std::path::Path::new(work_dir).join(AGENT_MODEL_FILE);
@@ -1380,88 +1385,46 @@ fn remove_agent_model(work_dir: &str) {
     }
 }
 
-/// Attempt to reconnect to the Gateway with exponential backoff.
+/// Attempt to reconnect to the Gateway via gRPC with exponential backoff.
 ///
-/// Called when the IPC connection drops (Gateway restart, network issue, etc.).
+/// Called when the gRPC connection drops (Gateway restart, network issue, etc.).
 /// Returns Ok(()) if reconnection succeeds, Err if all attempts fail.
 async fn try_reconnect_gateway(
-    socket_path: &str,
     agent_id: &str,
     version: &str,
-    ipc_client: &mut crate::ipc::client::GatewayClient,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
 ) -> Result<()> {
-    const MAX_RECONNECT_ATTEMPTS: u32 = 5;
-    const BASE_DELAY_MS: u64 = 1000;
-    const MAX_DELAY_MS: u64 = 30000;
-
-    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-        let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt - 1), MAX_DELAY_MS);
-        tracing::info!(
-            attempt, max = MAX_RECONNECT_ATTEMPTS,
-            delay_ms = delay,
-            "Reconnect attempt {}/{} in {}ms",
-            attempt, MAX_RECONNECT_ATTEMPTS, delay
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-
-        // Create a fresh client and try to connect
-        let mut new_client = crate::ipc::client::GatewayClient::new(socket_path);
-        match new_client.connect_and_register(agent_id, version).await {
-            Ok(()) => {
-                tracing::info!("Reconnected to Gateway on attempt {}", attempt);
-                // Swap the old client with the new one
-                *ipc_client = new_client;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::warn!("Reconnect attempt {} failed: {}", attempt, e);
-            }
+    match grpc_client.reconnect_and_reregister(agent_id, version).await {
+        Ok(()) => {
+            tracing::info!("Reconnected to Gateway gRPC successfully");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to reconnect to Gateway gRPC: {}", e);
+            Err(crate::error::RuntimeError::Ipc(format!(
+                "gRPC reconnect failed: {}", e
+            )))
         }
     }
-
-    Err(crate::error::RuntimeError::Ipc(
-        format!("Failed to reconnect to Gateway after {} attempts", MAX_RECONNECT_ATTEMPTS)
-    ))
 }
 
-/// Attempt to reconnect the chunk relay IPC connection with exponential backoff.
-///
-/// Similar to `try_reconnect_gateway` but registers with the "chunk-relay" role
-/// so the Gateway associates this connection with the streaming chunk channel.
+/// Attempt to reconnect the chunk relay gRPC connection with exponential backoff.
+#[allow(dead_code)]
 async fn try_reconnect_chunk_relay(
-    socket_path: &str,
     agent_id: &str,
     version: &str,
-    chunk_client: &mut crate::ipc::client::GatewayClient,
+    chunk_client: &mut crate::grpc::client::GatewayGrpcClient,
 ) -> Result<()> {
-    const MAX_RECONNECT_ATTEMPTS: u32 = 3;
-    const BASE_DELAY_MS: u64 = 500;
-    const MAX_DELAY_MS: u64 = 10000;
-
-    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-        let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt - 1), MAX_DELAY_MS);
-        tracing::info!(
-            attempt, max = MAX_RECONNECT_ATTEMPTS,
-            delay_ms = delay,
-            "Chunk relay reconnect attempt {}/{} in {}ms",
-            attempt, MAX_RECONNECT_ATTEMPTS, delay
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-
-        let mut new_client = crate::ipc::client::GatewayClient::new(socket_path);
-        match new_client.connect_and_register_with_role(agent_id, version, "chunk-relay").await {
-            Ok(()) => {
-                tracing::info!("Chunk relay reconnected on attempt {}", attempt);
-                *chunk_client = new_client;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::warn!("Chunk relay reconnect attempt {} failed: {}", attempt, e);
-            }
+    match chunk_client.reconnect_and_reregister(agent_id, version).await {
+        Ok(()) => {
+            tracing::info!("Chunk relay reconnected to Gateway gRPC successfully");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to reconnect chunk relay gRPC: {}", e);
+            Err(crate::error::RuntimeError::Ipc(format!(
+                "Chunk relay gRPC reconnect failed: {}", e
+            )))
         }
     }
-
-    Err(crate::error::RuntimeError::Ipc(
-        format!("Failed to reconnect chunk relay after {} attempts", MAX_RECONNECT_ATTEMPTS)
-    ))
 }

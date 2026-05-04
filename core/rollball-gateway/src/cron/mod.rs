@@ -345,8 +345,9 @@ pub async fn run_cron_scheduler(
                 let mut gw = gateway_state.write().await;
                 if gw.is_installed(&agent_id) {
                     // Start the agent process
-                    let socket_path = gw.config.as_ref().map(|c| c.socket_path.clone()).unwrap_or_default();
-                    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(0, socket_path);
+                    let grpc_addr = crate::grpc::server::default_grpc_addr();
+                    let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+                    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(0, gateway_grpc_endpoint);
                     match lifecycle.start_agent(&agent_id, &mut gw).await {
                         Ok(()) => {
                             tracing::info!("Cron: started agent {} for scheduled trigger", agent_id);

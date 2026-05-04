@@ -345,13 +345,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
   setAvailableModels: (models: { name: string; provider: string }[]) => {
-    set((state) => ({
-      availableModels: models,
-      // Only set defaults if nothing is currently selected — preserve
-      // per-agent selection when switching agents.
-      currentModel: state.currentModel ?? models[0]?.name ?? null,
-      currentProvider: state.currentProvider ?? models[0]?.provider ?? null,
-    }));
+    set((state) => {
+      // Check if current model+provider combo exists in new list
+      const currentModelExists = state.currentModel && state.currentProvider
+        ? models.some(m => m.name === state.currentModel && m.provider === state.currentProvider)
+        : false;
+
+      return {
+        availableModels: models,
+        // Only fallback to first model if current selection doesn't exist in new list
+        currentModel: currentModelExists ? state.currentModel : (models[0]?.name ?? null),
+        currentProvider: currentModelExists ? state.currentProvider : (models[0]?.provider ?? null),
+      };
+    });
   },
   loadAgentProvider: (agentId: string) => {
     const cached = get().agentModels[agentId];
@@ -377,12 +383,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const data = await resp.json() as { provider: string; model: string; available_models: string[] };
       if (data.model) {
         set((state) => {
-          // Prefer cached provider when the cached model matches — this
-          // fixes the bug where switching agents loses the manually-selected
-          // provider because the backend only returns the default_provider.
+          // The backend now returns the saved provider from .agent_model.json,
+          // so data.provider is the correct per-agent provider.
+          // Only fall back to the cached provider if the backend didn't return one
+          // (shouldn't happen with the fix, but kept for robustness).
           const cached = state.agentModels[agentId];
           let provider = data.provider;
-          if (cached && cached.model === data.model && cached.provider) {
+          if (!provider && cached && cached.model === data.model && cached.provider) {
             provider = cached.provider;
           }
           return {
@@ -593,8 +600,9 @@ function handleMessageEvent(
     case "model_confirmed": {
       // Gateway confirms the model switch was forwarded to the Agent Runtime
       const confirmedModel = data.model as string;
+      const confirmedProvider = data.provider as string | undefined;
       const confirmedAgentId = data.agentId as string | undefined;
-      console.log("[ChatStore] Model switch confirmed:", confirmedModel);
+      console.log("[ChatStore] Model switch confirmed:", confirmedModel, confirmedProvider);
       // Now persist to agentModels cache (model + provider)
       if (confirmedAgentId && confirmedModel) {
         set((state) => ({
@@ -602,7 +610,7 @@ function handleMessageEvent(
             ...state.agentModels,
             [confirmedAgentId]: {
               model: confirmedModel,
-              provider: state.currentProvider ?? "",
+              provider: confirmedProvider ?? state.currentProvider ?? "",
             },
           },
         }));

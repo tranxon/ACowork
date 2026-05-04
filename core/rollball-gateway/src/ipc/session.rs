@@ -147,7 +147,7 @@ impl SessionManager {
     ///
     /// When an agent has multiple connections (main + chunk-relay),
     /// only the main connection should receive IntentReceived messages.
-    /// chunk-relay connections only send TYPE_STREAM_CHUNK frames.
+    /// chunk-relay connections only send StreamChunk messages.
     pub fn find_by_agent_id(&self, agent_id: &str) -> Option<(&String, &Session)> {
         self.sessions.iter().find(|(_, s)| {
             s.agent_id.as_deref() == Some(agent_id) && s.connection_role == "main"

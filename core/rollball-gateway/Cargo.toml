@@ -47,6 +47,9 @@ rand.workspace = true
 fs2 = "0.4"
 libc.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
+tonic.workspace = true
+prost.workspace = true
+tokio-stream.workspace = true
 
 # Interactive CLI (feature-gated)
 dialoguer = { workspace = true, optional = true }

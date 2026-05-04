@@ -28,7 +28,7 @@ pub async fn spawn_agent_process(
     agent_id: &str,
     install_path: &str,
     workspace: &Path,
-    gateway_socket: &str,
+    gateway_grpc_endpoint: &str,
 ) -> Result<AgentChild, GatewayError> {
     // Locate the rollball-runtime binary (sibling of current executable)
     let runtime_bin = std::env::current_exe()
@@ -63,7 +63,7 @@ pub async fn spawn_agent_process(
         .arg("--work-dir")
         .arg(workspace)
         .arg("--gateway-socket")
-        .arg(gateway_socket)
+        .arg(gateway_grpc_endpoint)
         .arg("--log-level")
         .arg("info")
         .stdout(Stdio::null())
@@ -204,7 +204,7 @@ mod tests {
             "com.test.nonexistent",
             "/nonexistent/path",
             Path::new("/tmp/nonexistent-workspace"),
-            "/tmp/test-socket",
+            "http://127.0.0.1:19877",
         )
         .await;
         assert!(result.is_err());
