@@ -38,7 +38,7 @@ impl OpenAIProvider {
     /// Create a provider with a custom base URL
     pub fn with_base_url(base_url: Option<&str>, api_key: Option<&str>) -> Self {
         let http_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(600)) // 10 min: LLM streaming can be long (thinking + generation)
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");

@@ -523,7 +523,13 @@ impl AgentLoop {
 
                 // Persist think block (if present) and assistant response to JSONL
                 if let Some(ref conversation) = self.conversation {
-                    if let Some(think_content) = extract_think_block(&content) {
+                    // DeepSeek reasoning_content (separate field) takes priority
+                    if let Some(ref reasoning) = response.reasoning_content {
+                        if !reasoning.is_empty() {
+                            conversation.append_message("think", reasoning, None);
+                        }
+                    } else if let Some(think_content) = extract_think_block(&content) {
+                        // Fallback: extract from <think> tags in content
                         conversation.append_message("think", &think_content, None);
                     }
                     let assistant_text = strip_think_block(&content);
@@ -553,10 +559,15 @@ impl AgentLoop {
                 .collect();
 
             // Persist think block (if present) to JSONL
-            if let Some(ref conversation) = self.conversation
-                && let Some(think_content) = extract_think_block(&response.content)
-            {
-                conversation.append_message("think", &think_content, None);
+            if let Some(ref conversation) = self.conversation {
+                // DeepSeek reasoning_content (separate field) takes priority
+                if let Some(ref reasoning) = response.reasoning_content {
+                    if !reasoning.is_empty() {
+                        conversation.append_message("think", reasoning, None);
+                    }
+                } else if let Some(think_content) = extract_think_block(&response.content) {
+                    conversation.append_message("think", &think_content, None);
+                }
             }
 
             // Add assistant message with tool_calls to history

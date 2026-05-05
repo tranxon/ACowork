@@ -31,6 +31,9 @@ export function ChatPanel() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef<number>(0);
   const isLoadingMoreRef = useRef<boolean>(false);
+  const lastInitAgentRef = useRef<string | null>(null);
+  const agentSessionMapRef = useRef<Record<string, string>>({});
+  const isInitialLoadRef = useRef<boolean>(false);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
 
@@ -135,6 +138,20 @@ export function ChatPanel() {
 
   // Connect WebSocket when agent changes + restore per-agent model + init session
   useEffect(() => {
+    // Skip re-init if this agent was already initialized and is still running.
+    // This prevents redundant clearMessages + reload when selectedAgent.running
+    // is re-evaluated without actually changing (e.g. agent list refresh).
+    if (selectedAgentId && selectedAgentId === lastInitAgentRef.current && selectedAgent?.running) {
+      return;
+    }
+
+    // Remember the current session for the agent we're leaving
+    const leavingAgentId = lastInitAgentRef.current;
+    const leavingSessionId = useSessionStore.getState().currentSessionId;
+    if (leavingAgentId && leavingSessionId) {
+      agentSessionMapRef.current[leavingAgentId] = leavingSessionId;
+    }
+
     // 1. Clear current messages from previous agent
     useChatStore.getState().clearMessages();
     // 2. Reset session state (sessions, currentSessionId, etc.)
@@ -150,6 +167,7 @@ export function ChatPanel() {
     });
 
     if (selectedAgentId && selectedAgent?.running) {
+      lastInitAgentRef.current = selectedAgentId;
       connectStream(selectedAgentId, getGatewayUrl());
       // Load model from Gateway API FIRST (reads per-agent .agent_model.json),
       // THEN reload the model list. This ensures currentModel is set before
@@ -160,20 +178,28 @@ export function ChatPanel() {
       };
       void initModel();
 
-      // 3. Fetch sessions and 4. auto-select the latest one
+      // 3. Fetch sessions and 4. restore previously selected session (or latest)
       const initSession = async () => {
+        isInitialLoadRef.current = true;
         await useSessionStore.getState().fetchSessions(selectedAgentId);
         const sessions = useSessionStore.getState().sessions;
-        const latestSession = sessions[0]; // sorted newest first
-        if (latestSession) {
-          useSessionStore.getState().switchSession(latestSession.session_id);
+        // Restore previously selected session for this agent, fallback to latest
+        const rememberedSessionId = agentSessionMapRef.current[selectedAgentId];
+        const targetSession = rememberedSessionId
+          ? sessions.find((s) => s.session_id === rememberedSessionId) ?? sessions[0]
+          : sessions[0];
+        if (targetSession) {
+          useSessionStore.getState().switchSession(targetSession.session_id);
           await useChatStore
             .getState()
-            .loadSessionMessages(selectedAgentId, latestSession.session_id);
+            .loadSessionMessages(selectedAgentId, targetSession.session_id);
         }
         // 5. If no sessions, empty chat is already shown (messages cleared above)
+        isInitialLoadRef.current = false;
       };
       void initSession();
+    } else {
+      lastInitAgentRef.current = null;
     }
     return () => {
       // Do NOT disconnect the old agent's ws — keep it alive for reuse.
@@ -188,15 +214,27 @@ export function ChatPanel() {
     const chatStoreSessionId = useChatStore.getState().currentSessionId;
     if (currentSessionId === chatStoreSessionId) return;
 
+    // Guard: only proceed if this session belongs to the current agent's session list.
+    // During agent switches, currentSessionId may briefly hold the previous agent's
+    // session ID (stale value from the previous render), which would cause a 400 error
+    // and wipe messages loaded by the correct concurrent request.
     const session = useSessionStore
       .getState()
       .sessions.find((s) => s.session_id === currentSessionId);
-    if (session && session.message_count === 0) {
+    if (!session) return;
+
+    if (session.message_count === 0) {
       useChatStore.getState().clearMessages();
     }
+    
+    // Mark as initial load to trigger scroll-to-bottom after messages are loaded
+    isInitialLoadRef.current = true;
     void useChatStore
       .getState()
-      .loadSessionMessages(selectedAgentId, currentSessionId);
+      .loadSessionMessages(selectedAgentId, currentSessionId)
+      .finally(() => {
+        isInitialLoadRef.current = false;
+      });
   }, [currentSessionId, selectedAgentId]);
 
   // Auto-scroll to bottom on new messages, but not when loading more
@@ -213,7 +251,13 @@ export function ChatPanel() {
       }
       return;
     }
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    // Initial load: scroll to bottom immediately without animation
+    if (isInitialLoadRef.current && messages.length > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    } else {
+      // Normal new message: smooth scroll
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   // Scroll handler: load more messages when scrolled to top
@@ -700,7 +744,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
       {/* Collapsed/Summary card */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-fit max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        className="flex w-fit max-w-[85%] items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
       >
         <Icon className="h-4 w-4 shrink-0 text-zinc-400" />
         <span className="font-medium">
@@ -718,7 +762,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
 
       {/* Expanded details - paired call + result */}
       {expanded && (
-        <div className="ml-4 max-w-full overflow-hidden space-y-1 border-l-2 border-zinc-200 pl-4 dark:border-zinc-700">
+        <div className="ml-4 space-y-1 border-l-2 border-zinc-200 pl-4 dark:border-zinc-700">
           {pairedItems.map((pair, idx) => {
             const isExpanded = expandedItem === idx;
             const { call, result } = pair;
@@ -728,11 +772,11 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
                 {/* Tool call row */}
                 <button
                   onClick={() => setExpandedItem(isExpanded ? null : idx)}
-                  className="flex w-full items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                  className="flex w-fit max-w-[85%] items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800"
                 >
                   <Wrench className="h-3 w-3 shrink-0" />
                   <span className="font-medium">{call.toolName}</span>
-                  <span className="min-w-0 flex-1 text-left truncate text-zinc-500 dark:text-zinc-500">
+                  <span className="text-zinc-500 dark:text-zinc-500">
                     {(() => {
                       try {
                         const params = JSON.parse(call.content || "{}");
@@ -757,23 +801,23 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
 
                 {/* Expanded details */}
                 {isExpanded && (
-                  <div className="ml-5 min-w-0 max-w-full space-y-2 overflow-hidden">
+                  <div className="ml-5 space-y-2">
                     {/* Call details */}
-                    <div className="min-w-0">
+                    <div>
                       <div className="mb-1 text-[10px] font-medium text-zinc-500">Arguments:</div>
-                      <pre className="w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-zinc-50 p-2 text-[10px] text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
+                      <pre className="w-fit max-w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-zinc-50 p-2 text-[10px] text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
                         {call.content}
                       </pre>
                     </div>
                     
                     {/* Result if exists */}
                     {result && (
-                      <div className="min-w-0">
+                      <div>
                         <div className="mb-1 flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
                           <Check className="h-3 w-3" />
                           Result ({result.content.length} chars)
                         </div>
-                        <pre className="w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-emerald-50/30 p-2 text-[10px] text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400">
+                        <pre className="w-fit max-w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-emerald-50/30 p-2 text-[10px] text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400">
                           {result.content.length > 500 
                             ? result.content.substring(0, 500) + "\n\n... (truncated)"
                             : result.content

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { ChevronRight, ChevronDown, Clock } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -14,14 +14,26 @@ export interface ThinkBlockProps {
   defaultExpanded?: boolean;
 }
 
+/** Max visible lines in the think content area (overflow scrolls to bottom) */
+const MAX_VISIBLE_LINES = 5;
+const LINE_HEIGHT_REM = 1.5; // text-sm line-height
+
 /**
  * Simple collapsible think block with timer.
  * Shows "Thinking (Xs)" header, click to expand/collapse content.
- * When endTime is provided (from done event), duration is frozen;
- * otherwise it keeps counting during streaming.
+ * Content is capped at 5 visible lines with auto-scroll to bottom,
+ * so only the latest output is visible during long thinking phases.
  */
 export function ThinkBlock({ content, isStreaming: _isStreaming, startTime, endTime, defaultExpanded }: ThinkBlockProps) {
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when content updates
+  useEffect(() => {
+    if (expanded && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [content, expanded]);
 
   // Calculate duration: use fixed endTime if available, otherwise live timer
   const duration = startTime
@@ -41,7 +53,11 @@ export function ThinkBlock({ content, isStreaming: _isStreaming, startTime, endT
       </button>
 
       {expanded && (
-        <div className="ml-5 mt-1 rounded bg-zinc-50 dark:bg-zinc-800/50 p-3 text-sm text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+        <div
+          ref={contentRef}
+          className="ml-5 mt-1 rounded bg-zinc-50 dark:bg-zinc-800/50 p-3 text-sm text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 overflow-y-auto"
+          style={{ maxHeight: `${MAX_VISIBLE_LINES * LINE_HEIGHT_REM}rem` }}
+        >
           <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{content.trim() || "..."}</ReactMarkdown>
           </div>

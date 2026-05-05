@@ -662,6 +662,18 @@ function handleMessageEvent(
           }
         }
 
+        // If we had an active reasoning_content think message and now receive a regular delta,
+        // finalize the think message by setting endTime to stop the timer.
+        let messages = state.messages;
+        if (state.thinkingMessageId && delta) {
+          const now = Date.now();
+          messages = messages.map((msg) =>
+            msg.id === state.thinkingMessageId
+              ? { ...msg, endTime: now }
+              : msg,
+          );
+        }
+
         const newBuffer = state.streamBuffer + delta;
 
         // Already in think phase — check for </think> close
@@ -745,12 +757,13 @@ function handleMessageEvent(
           if (definitelyNotThink) {
             if (state.streamingMessageId && !state.isInThinkPhase) {
               return {
-                messages: state.messages.map((msg) =>
+                messages: messages.map((msg) =>
                   msg.id === state.streamingMessageId
                     ? { ...msg, content: msg.content + delta }
                     : msg,
                 ),
                 streamBuffer: newBuffer,
+                thinkingMessageId: null,
               };
             } else {
               const assistantMsgId = `msg-assistant-${Date.now()}`;
@@ -761,9 +774,10 @@ function handleMessageEvent(
                 timestamp: Date.now(),
               };
               return {
-                messages: [...state.messages, assistantMsg],
+                messages: [...messages, assistantMsg],
                 streamBuffer: newBuffer,
                 streamingMessageId: assistantMsgId,
+                thinkingMessageId: null,
               };
             }
           }
@@ -799,15 +813,27 @@ function handleMessageEvent(
         turnId,
         startTime: Date.now(),
       };
-      set((state) => ({
-        messages: [...state.messages, toolMsg],
-        // End current streaming phase: thinking/reply ends when tools start executing.
-        // This ensures the next iteration's content creates new messages.
-        streamingMessageId: null,
-        thinkingMessageId: null,
-        isInThinkPhase: false,
-        streamBuffer: "",
-      }));
+      set((state) => {
+        // Finalize any active think message (set endTime to stop the timer)
+        let messages = state.messages;
+        if (state.thinkingMessageId) {
+          const now = Date.now();
+          messages = messages.map((msg) =>
+            msg.id === state.thinkingMessageId
+              ? { ...msg, endTime: now }
+              : msg,
+          );
+        }
+        return {
+          messages: [...messages, toolMsg],
+          // End current streaming phase: thinking/reply ends when tools start executing.
+          // This ensures the next iteration's content creates new messages.
+          streamingMessageId: null,
+          thinkingMessageId: null,
+          isInThinkPhase: false,
+          streamBuffer: "",
+        };
+      });
       break;
     }
 
