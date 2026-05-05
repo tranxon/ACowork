@@ -258,13 +258,7 @@ async fn distill_with_llm(
 ) -> Result<DistilledEpisode> {
     let request = ChatRequest {
         model: model_name.to_string(),
-        messages: vec![ChatMessage {
-            role: MessageRole::User,
-            content: prompt.to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        }],
+        messages: vec![ChatMessage::user(prompt)],
         temperature: Some(0.3),
         max_tokens: Some(1024),
         tools: None,
@@ -456,20 +450,8 @@ mod tests {
     #[test]
     fn test_format_messages() {
         let messages = vec![
-            ChatMessage {
-                role: MessageRole::User,
-                content: "Hello".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "Hi there!".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant("Hi there!"),
         ];
         let text = format_messages(&messages);
         assert!(text.contains("[User]: Hello"));

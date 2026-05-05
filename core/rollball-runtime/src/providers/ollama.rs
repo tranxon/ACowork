@@ -172,6 +172,7 @@ fn parse_response(msg: OllamaResponseMessage, resp: &OllamaChatResponse) -> Chat
         content,
         tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
         usage: Some(usage),
+        ..Default::default()
     }
 }
 
@@ -287,6 +288,7 @@ mod tests {
             ChatMessage {
                 role: MessageRole::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,

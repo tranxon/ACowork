@@ -88,6 +88,8 @@ struct NativeMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<NativeToolCall>>,
@@ -172,6 +174,8 @@ struct StreamDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<StreamToolCallDelta>>,
 }
 
@@ -224,6 +228,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                 return NativeMessage {
                     role: role.to_string(),
                     content,
+                    reasoning_content: None,
                     tool_call_id,
                     tool_calls: None,
                 };
@@ -250,6 +255,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                     } else {
                         Some(m.content.clone())
                     },
+                    reasoning_content: m.reasoning_content.clone(),
                     tool_call_id: None,
                     tool_calls: Some(native_calls),
                 };
@@ -258,6 +264,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
             NativeMessage {
                 role: role.to_string(),
                 content: Some(m.content.clone()),
+                reasoning_content: m.reasoning_content.clone(),
                 tool_call_id: None,
                 tool_calls: None,
             }
@@ -335,8 +342,10 @@ fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> Cha
 
     ChatResponse {
         content,
+        reasoning_content: msg.reasoning_content,
         tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
         usage: usage_info,
+        ..Default::default()
     }
 }
 
@@ -575,10 +584,10 @@ impl OpenAIProvider {
                                 return;
                             }
 
-                            if let Some(event) = parse_sse_line(&line)
-                                && tx.send(Some(event)).await.is_err()
-                            {
-                                return; // receiver dropped
+                            for event in parse_sse_line(&line) {
+                                if tx.send(Some(event)).await.is_err() {
+                                    return; // receiver dropped
+                                }
                             }
                         }
                     }
@@ -616,23 +625,27 @@ impl Stream for ChannelStream {
     }
 }
 
-/// Parse a single SSE line into a StreamEvent
-fn parse_sse_line(line: &str) -> Option<StreamEvent> {
+/// Parse a single SSE line into one or more StreamEvents.
+fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
     let line = line.trim();
     tracing::debug!(
         line = %line.chars().take(500).collect::<String>(),
         "SSE raw line received"
     );
     if line.is_empty() || line == ":" {
-        return None;
+        return Vec::new();
     }
 
-    let data = line.strip_prefix("data: ")?;
+    let Some(data) = line.strip_prefix("data: ") else {
+        return Vec::new();
+    };
     if data == "[DONE]" {
-        return None;
+        return Vec::new();
     }
 
-    let chunk: StreamChunk = serde_json::from_str(data).ok()?;
+    let Some(chunk) = serde_json::from_str::<StreamChunk>(data).ok() else {
+        return Vec::new();
+    };
 
     // If the final streaming chunk includes usage info (requested via
     // stream_options.include_usage), emit a Finished event so the
@@ -641,7 +654,7 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
     if let Some(usage) = chunk.usage {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let completion = usage.completion_tokens.unwrap_or(0);
-        return Some(StreamEvent::Finished(ChatResponse {
+        return vec![StreamEvent::Finished(ChatResponse {
             content: String::new(),
             tool_calls: None,
             usage: Some(rollball_core::providers::traits::UsageInfo {
@@ -649,13 +662,23 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
                 completion_tokens: completion,
                 total_tokens: prompt + completion,
             }),
-        }));
+            ..Default::default()
+        })];
     }
 
+    let mut events = Vec::new();
+
     for choice in chunk.choices {
-        if let Some(content) = &choice.delta.content
-            && !content.is_empty() {
-            return Some(StreamEvent::Content(content.clone()));
+        if let Some(ref content) = choice.delta.content
+            && !content.is_empty()
+        {
+            events.push(StreamEvent::Content(content.clone()));
+        }
+
+        if let Some(ref rc) = choice.delta.reasoning_content
+            && !rc.is_empty()
+        {
+            events.push(StreamEvent::ReasoningContent(rc.clone()));
         }
 
         if let Some(tool_calls) = choice.delta.tool_calls {
@@ -678,7 +701,7 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
                             index = ?tc_delta.index,
                             "SSE tool_call delta details"
                         );
-                        return Some(StreamEvent::ToolCallStart(ToolCall {
+                        events.push(StreamEvent::ToolCallStart(ToolCall {
                             id: tc_delta
                                 .id
                                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
@@ -688,27 +711,28 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
                                 arguments: initial_arguments,
                             },
                         }));
-                    }
-                    // DeepSeek sends empty name string in subsequent tool_call
-                    // chunks; fall through to process arguments instead of
-                    // skipping the entire delta.
-                    tracing::debug!(
-                        has_name = false,
-                        has_arguments = func.arguments.is_some(),
-                        args_preview = ?func.arguments.as_ref().map(|a| a.chars().take(200).collect::<String>()),
-                        index = ?tc_delta.index,
-                        "SSE tool_call delta details"
-                    );
-                    if let Some(args) = func.arguments {
-                        let idx = tc_delta.index.unwrap_or(0);
-                        return Some(StreamEvent::ToolCallChunk { index: idx, arguments: args });
+                    } else {
+                        // DeepSeek sends empty name string in subsequent tool_call
+                        // chunks; fall through to process arguments instead of
+                        // skipping the entire delta.
+                        tracing::debug!(
+                            has_name = false,
+                            has_arguments = func.arguments.is_some(),
+                            args_preview = ?func.arguments.as_ref().map(|a| a.chars().take(200).collect::<String>()),
+                            index = ?tc_delta.index,
+                            "SSE tool_call delta details"
+                        );
+                        if let Some(args) = func.arguments {
+                            let idx = tc_delta.index.unwrap_or(0);
+                            events.push(StreamEvent::ToolCallChunk { index: idx, arguments: args });
+                        }
                     }
                 }
             }
         }
     }
 
-    None
+    events
 }
 
 #[cfg(test)]
@@ -721,6 +745,7 @@ mod tests {
             ChatMessage {
                 role: MessageRole::System,
                 content: "You are helpful.".to_string(),
+                reasoning_content: None,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -728,6 +753,7 @@ mod tests {
             ChatMessage {
                 role: MessageRole::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -745,6 +771,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::Assistant,
             content: "".to_string(),
+            reasoning_content: None,
             name: None,
             tool_call_id: None,
             tool_calls: Some(vec![ToolCall {

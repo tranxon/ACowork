@@ -122,13 +122,7 @@ impl ContextBuilder {
 
         // 3. Tool definitions are passed separately in ChatRequest
 
-        messages.push(ChatMessage {
-            role: MessageRole::System,
-            content: system_content,
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        messages.push(ChatMessage::system(system_content));
 
         // 7. Conversation history
         // Filter out System messages from history — only the first system message
@@ -311,13 +305,7 @@ mod tests {
     fn test_context_builder_basic() {
         let manifest = test_manifest();
         let mut history = HistoryManager::new(10000, 4);
-        history.append(ChatMessage {
-            role: MessageRole::User,
-            content: "Hello".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        history.append(ChatMessage::user("Hello"));
 
         let builder = ContextBuilder::new("You are a helpful assistant.".to_string());
         let request = builder.build(&manifest, &history, None, 32_768);
