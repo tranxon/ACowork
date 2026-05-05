@@ -2,6 +2,7 @@
 //!
 //! Unified execution engine for .agent packages.
 
+pub mod platform;
 pub mod agent;
 pub mod package;
 pub mod providers;

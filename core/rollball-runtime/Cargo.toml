@@ -56,6 +56,9 @@ prost.workspace = true
 # File system watching
 notify.workspace = true
 
+# ripgrep-based file traversal (gitignore-aware)
+ignore.workspace = true
+
 # Interactive CLI (feature-gated)
 dialoguer = { workspace = true, optional = true }
 

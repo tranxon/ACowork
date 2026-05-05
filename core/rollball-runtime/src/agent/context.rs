@@ -121,10 +121,12 @@ impl ContextBuilder {
         // 2.5 Autobiographical context (Phase 1: skip, Phase 2: from Grafeo)
 
         // 3. Environment platform info (runtime detection)
+        let shell_info = crate::platform::detected_shell();
         system_content.push_str(&format!(
-            "\n\n## Environment\n- Operating System: {}\n- Architecture: {}",
+            "\n\n## Environment\n- Operating System: {}\n- Architecture: {}\n- Shell: {}",
             std::env::consts::OS,
-            std::env::consts::ARCH
+            std::env::consts::ARCH,
+            shell_info.display_name
         ));
 
         // 3.5 Tool definitions are passed separately in ChatRequest

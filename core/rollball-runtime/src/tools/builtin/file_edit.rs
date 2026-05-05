@@ -49,7 +49,7 @@ impl Tool for FileEditTool {
             "file_edit: resolving path"
         );
 
-        let content = match tokio::fs::read_to_string(&full_path).await {
+        let raw_content = match tokio::fs::read_to_string(&full_path).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -63,7 +63,14 @@ impl Tool for FileEditTool {
             }
         };
 
-        let count = content.matches(old_text).count();
+        // Detect original line ending style and normalize to LF for matching.
+        // LLM-generated old_text always uses LF, but Windows files may use CRLF.
+        let line_ending = if raw_content.contains("\r\n") { "\r\n" } else { "\n" };
+        let content = raw_content.replace("\r\n", "\n");
+        let old_text_normalized = old_text.replace("\r\n", "\n");
+        let new_text_normalized = new_text.replace("\r\n", "\n");
+
+        let count = content.matches(&old_text_normalized).count();
         if count == 0 {
             return Ok(ToolResult { ok: false, content: String::new(), error: Some("old_text not found in file".to_string()), token_usage: None });
         }
@@ -71,8 +78,15 @@ impl Tool for FileEditTool {
             return Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("old_text found {count} times — must be unique")), token_usage: None });
         }
 
-        let new_content = content.replacen(old_text, new_text, 1);
-        match tokio::fs::write(&full_path, &new_content).await {
+        let new_content = content.replacen(&old_text_normalized, &new_text_normalized, 1);
+
+        // Restore original line ending style before writing back.
+        let output = if line_ending == "\r\n" {
+            new_content.replace('\n', "\r\n")
+        } else {
+            new_content
+        };
+        match tokio::fs::write(&full_path, output).await {
             Ok(()) => Ok(ToolResult { ok: true, content: format!("Replaced in {path}"), error: None, token_usage: None }),
             Err(e) => {
                 tracing::warn!(
