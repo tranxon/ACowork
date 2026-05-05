@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
@@ -517,6 +518,7 @@ impl Provider for AnthropicProvider {
             let mut pending_tool_id: Option<String> = None;
             let mut pending_tool_name: Option<String> = None;
             let mut accumulated_input_tokens: u64 = 0;
+            let mut block_index_map: HashMap<u64, u64> = HashMap::new();
 
             use futures_util::StreamExt;
             while let Some(chunk_result) = stream.next().await {
@@ -533,6 +535,7 @@ impl Provider for AnthropicProvider {
                                 &mut pending_tool_id,
                                 &mut pending_tool_name,
                                 &mut accumulated_input_tokens,
+                                &mut block_index_map,
                             )
                                 && tx.send(Some(event)).await.is_err()
                             {
@@ -604,12 +607,21 @@ impl Stream for ChannelStream {
     }
 }
 
-/// Parse a single Anthropic SSE line into a StreamEvent
+/// Parse a single Anthropic SSE line into a StreamEvent.
+///
+/// `block_index_map` maps Anthropic's global content_block index to a
+/// tool-call-only sequential index (0, 1, 2…). This is needed because
+/// Anthropic assigns index to *all* content blocks (text + tool_use),
+/// while the downstream loop expects indices that align with the tool_calls
+/// array (i.e. only tool_use blocks counted). Without this mapping, if a
+/// text block appears before tool_use blocks, the indices would be off-by-one
+/// or more, causing argument chunks to be routed to wrong buffers.
 fn parse_anthropic_sse_line(
     line: &str,
     pending_tool_id: &mut Option<String>,
     pending_tool_name: &mut Option<String>,
     accumulated_input_tokens: &mut u64,
+    block_index_map: &mut HashMap<u64, u64>,
 ) -> Option<StreamEvent> {
     let line = line.trim();
     if line.is_empty() || line == ":" {
@@ -635,6 +647,11 @@ fn parse_anthropic_sse_line(
                 let name = block.name.unwrap_or_default();
                 *pending_tool_id = Some(id.clone());
                 *pending_tool_name = Some(name.clone());
+                // Map Anthropic's global content_block index to sequential tool-call index
+                let tool_index = block_index_map.len() as u64;
+                if let Some(content_block_index) = event.index {
+                    block_index_map.insert(content_block_index, tool_index);
+                }
                 return Some(StreamEvent::ToolCallStart(ToolCall {
                     id,
                     call_type: "function".to_string(),
@@ -656,7 +673,13 @@ fn parse_anthropic_sse_line(
                 if let Some(partial_json) = delta.partial_json
                     && !partial_json.is_empty()
                 {
-                    return Some(StreamEvent::ToolCallChunk { index: 0, arguments: partial_json });
+                    // Route argument chunks to the correct tool_call buffer by content block index.
+                    // Anthropic assigns each content block a unique global index (text blocks
+                    // also occupy indices), but loop_.rs expects sequential tool-call indices
+                    // (0, 1, 2…). We translate via block_index_map so downstream stays aligned.
+                    let content_block_index = event.index.unwrap_or(0);
+                    let tool_index = block_index_map.get(&content_block_index).copied().unwrap_or(0);
+                    return Some(StreamEvent::ToolCallChunk { index: tool_index, arguments: partial_json });
                 }
             }
             None
@@ -892,11 +915,13 @@ mod tests {
         let mut tool_id = None;
         let mut tool_name = None;
         let mut input_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut block_index_map,
         );
         assert!(event.is_some());
         if let Some(StreamEvent::Content(text)) = event {
@@ -911,11 +936,13 @@ mod tests {
         let mut tool_id = None;
         let mut tool_name = None;
         let mut input_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_xyz","name":"calculator","input":{}}}"#,
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut block_index_map,
         );
         assert!(event.is_some());
         if let Some(StreamEvent::ToolCallStart(tc)) = event {
@@ -924,6 +951,8 @@ mod tests {
         } else {
             panic!("Expected ToolCallStart event");
         }
+        // content_block index 1 should map to tool-call index 0
+        assert_eq!(block_index_map.get(&1), Some(&0u64));
     }
 
     #[test]
@@ -931,17 +960,91 @@ mod tests {
         let mut tool_id = None;
         let mut tool_name = None;
         let mut input_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
+        // First register the tool_use at content_block index 1 -> tool-call index 0
+        let _ = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_xyz","name":"calculator","input":{}}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut block_index_map,
+        );
+        // Now send a delta for content_block index 1 — should be mapped to tool-call index 0
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"expr\":"}}"#,
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut block_index_map,
         );
         assert!(event.is_some());
-        if let Some(StreamEvent::ToolCallChunk { arguments: chunk, .. }) = event {
+        if let Some(StreamEvent::ToolCallChunk { index, arguments: chunk }) = event {
+            assert_eq!(index, 0, "index should be mapped to tool-call sequential index 0, not content_block index 1");
             assert!(chunk.contains("expr"));
         } else {
             panic!("Expected ToolCallChunk event");
+        }
+    }
+
+    #[test]
+    fn test_parse_sse_multi_tool_call_index_routing() {
+        // Simulate Anthropic streaming where a text block precedes tool_use blocks.
+        // content_block index 0 = text (skipped), index 1 = first tool, index 2 = second tool.
+        // The block_index_map should translate: 1->0, 2->1 so downstream gets
+        // sequential tool-call indices (0, 1) matching the tool_calls array.
+        let mut tool_id = None;
+        let mut tool_name = None;
+        let mut input_tokens = 0u64;
+        let mut block_index_map: HashMap<u64, u64> = HashMap::new();
+
+        // content_block_start for first tool (content_block index 1, e.g. after text block at index 0)
+        let e1 = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_001","name":"shell","input":{}}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut block_index_map,
+        );
+        assert!(matches!(e1, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_001" && tc.function.name == "shell"));
+
+        // content_block_start for second tool (content_block index 2)
+        let e2 = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_002","name":"read_file","input":{}}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut block_index_map,
+        );
+        assert!(matches!(e2, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_002" && tc.function.name == "read_file"));
+
+        // Delta for first tool (content_block index 1) — should map to tool-call index 0
+        let e3 = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut block_index_map,
+        );
+        if let Some(StreamEvent::ToolCallChunk { index, arguments }) = e3 {
+            assert_eq!(index, 0, "first tool delta must have sequential tool-call index 0 (content_block 1 -> tool 0)");
+            assert!(arguments.contains("command"));
+        } else {
+            panic!("Expected ToolCallChunk for index 0");
+        }
+
+        // Delta for second tool (content_block index 2) — should map to tool-call index 1
+        let e4 = parse_anthropic_sse_line(
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+            &mut tool_id,
+            &mut tool_name,
+            &mut input_tokens,
+            &mut block_index_map,
+        );
+        if let Some(StreamEvent::ToolCallChunk { index, arguments }) = e4 {
+            assert_eq!(index, 1, "second tool delta must have sequential tool-call index 1 (content_block 2 -> tool 1)");
+            assert!(arguments.contains("path"));
+        } else {
+            panic!("Expected ToolCallChunk for index 1");
         }
     }
 

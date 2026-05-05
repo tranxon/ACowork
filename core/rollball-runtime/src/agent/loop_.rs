@@ -847,8 +847,13 @@ impl AgentLoop {
         let mut tool_calls: Option<Vec<ToolCall>> = None;
         let mut usage = None;
 
-        // ToolCallChunk accumulation buffer: indexed by tool_call index (from SSE stream)
+        // ToolCallChunk accumulation buffer: indexed by tool_call sequential index
         let mut tool_call_args_buffer: HashMap<u64, String> = HashMap::new();
+        // Track which tool_call indices have accumulated valid JSON so far.
+        // Once complete JSON is formed, any further delta chunks for that index
+        // are stale duplicates (observed with some OpenAI-compatible APIs) and
+        // must be discarded to avoid corrupting the arguments.
+        let mut finished_tool_indices: HashSet<u64> = HashSet::new();
 
         while let Some(event) = stream.next().await {
             match event {
@@ -873,8 +878,15 @@ impl AgentLoop {
                 }
                 StreamEvent::ToolCallChunk { index, arguments } => {
                     tracing::debug!(index, chunk_len = arguments.len(), "ToolCallChunk received");
-                    // Accumulate argument chunks by index
-                    tool_call_args_buffer.entry(index).or_default().push_str(&arguments);
+                    // Discard stale delta chunks for tool calls that already have complete JSON
+                    if !finished_tool_indices.contains(&index) {
+                        let buffer = tool_call_args_buffer.entry(index).or_default();
+                        buffer.push_str(&arguments);
+                        // Check if accumulated arguments now form valid JSON
+                        if serde_json::from_str::<serde_json::Value>(buffer).is_ok() {
+                            finished_tool_indices.insert(index);
+                        }
+                    }
                 }
                 StreamEvent::Finished(resp) => {
                     // Use final response data; prefer stream-accumulated content
@@ -898,8 +910,14 @@ impl AgentLoop {
                                 if let Some(args) = tool_call_args_buffer.get(&(i as u64))
                                     && (tc.function.arguments.is_empty() || tc.function.arguments == "{}")
                                 {
-                                    // Arguments empty — apply buffer (MiniMax incremental pattern)
-                                    tc.function.arguments = args.clone();
+                                    // Validate JSON before applying — stream interruption can
+                                    // leave incomplete arguments that would fail at tool execution.
+                                    if serde_json::from_str::<serde_json::Value>(args).is_ok() {
+                                        tc.function.arguments = args.clone();
+                                    } else {
+                                        tracing::error!(tool_name = %tc.function.name, index = i, raw_args = %args, "Accumulated tool call arguments are not valid JSON, discarding");
+                                        tc.function.arguments = "{}".to_string();
+                                    }
                                 }
                                 // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
                                 // they are already complete — do not append buffer content.
@@ -951,9 +969,15 @@ impl AgentLoop {
                 if let Some(args) = tool_call_args_buffer.get(&(i as u64))
                     && (tc.function.arguments.is_empty() || tc.function.arguments == "{}")
                 {
-                    // Arguments empty — apply buffer (MiniMax incremental pattern)
-                    tracing::info!(tool_name = %tc.function.name, index = i, accumulated_len = args.len(), "Applying accumulated arguments to tool call");
-                    tc.function.arguments = args.clone();
+                    // Validate JSON before applying — stream interruption can
+                    // leave incomplete arguments that would fail at tool execution.
+                    if serde_json::from_str::<serde_json::Value>(args).is_ok() {
+                        tracing::info!(tool_name = %tc.function.name, index = i, accumulated_len = args.len(), "Applying accumulated arguments to tool call");
+                        tc.function.arguments = args.clone();
+                    } else {
+                        tracing::error!(tool_name = %tc.function.name, index = i, raw_args = %args, "Accumulated tool call arguments are not valid JSON, discarding");
+                        tc.function.arguments = "{}".to_string();
+                    }
                 }
                 // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
                 // they are already complete — do not append buffer content.
@@ -971,7 +995,6 @@ impl AgentLoop {
             },
             tool_calls,
             usage,
-            ..Default::default()
         })
     }
 

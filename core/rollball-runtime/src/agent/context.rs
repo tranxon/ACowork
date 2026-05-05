@@ -120,7 +120,14 @@ impl ContextBuilder {
 
         // 2.5 Autobiographical context (Phase 1: skip, Phase 2: from Grafeo)
 
-        // 3. Tool definitions are passed separately in ChatRequest
+        // 3. Environment platform info (runtime detection)
+        system_content.push_str(&format!(
+            "\n\n## Environment\n- Operating System: {}\n- Architecture: {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+
+        // 3.5 Tool definitions are passed separately in ChatRequest
 
         messages.push(ChatMessage::system(system_content));
 
