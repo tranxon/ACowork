@@ -16,7 +16,7 @@ use std::env;
 
 
 use rollball_core::providers::traits::{
-    ChatMessage, ChatRequest, MessageRole, Provider, StreamEvent, ToolCall,
+    ChatMessage, ChatRequest, Provider, StreamEvent, ToolCall,
 };
 use rollball_core::tools::traits::Tool;
 use rollball_runtime::providers::openai::OpenAIProvider;
@@ -45,24 +45,12 @@ fn get_minimax_provider() -> Option<OpenAIProvider> {
 
 /// Build a simple user message
 fn user_message(content: &str) -> ChatMessage {
-    ChatMessage {
-        role: MessageRole::User,
-        content: content.to_string(),
-        name: None,
-        tool_call_id: None,
-        tool_calls: None,
-    }
+    ChatMessage::user(content)
 }
 
 /// Build a system message
 fn system_message(content: &str) -> ChatMessage {
-    ChatMessage {
-        role: MessageRole::System,
-        content: content.to_string(),
-        name: None,
-        tool_call_id: None,
-        tool_calls: None,
-    }
+    ChatMessage::system(content)
 }
 
 /// Serialize all builtin tool specs into the JSON format accepted by ChatRequest.tools.
@@ -465,21 +453,12 @@ async fn test_llm_tool_result_roundtrip() {
 
     // Step 3: Send tool result back to LLM as a tool message
     let tool_call_id = tool_calls[0].id.clone();
-    let tool_message = ChatMessage {
-        role: MessageRole::Tool,
-        content: tool_result.content.clone(),
-        name: None,
-        tool_call_id: Some(tool_call_id),
-        tool_calls: None,
-    };
+    let tool_message = ChatMessage::tool(tool_call_id, tool_result.content.clone());
 
     // Build the assistant message with tool_calls
     let assistant_message = ChatMessage {
-        role: MessageRole::Assistant,
-        content: String::new(),
-        name: None,
-        tool_call_id: None,
         tool_calls: Some(tool_calls.clone()),
+        ..ChatMessage::assistant(String::new())
     };
 
     let request2 = ChatRequest {
@@ -598,6 +577,7 @@ async fn test_llm_streaming_tool_call() {
                 panic!("Stream error: {}", msg);
             }
             StreamEvent::Finished(_) => {}
+            StreamEvent::ReasoningContent(_) => {}
         }
     }
 
@@ -814,6 +794,10 @@ async fn test_llm_streaming_text_content() {
                 // Tool call events are also valid stream output
                 has_content = true;
             }
+            StreamEvent::ReasoningContent(_) => {
+                // Reasoning content is also valid stream output
+                has_content = true;
+            }
             StreamEvent::Error(msg) => {
                 panic!("Stream error: {}", msg);
             }
@@ -834,6 +818,7 @@ async fn test_llm_streaming_text_content() {
         events.len(),
         events.iter().map(|e| match e {
             StreamEvent::Content(_) => "Content",
+            StreamEvent::ReasoningContent(_) => "ReasoningContent",
             StreamEvent::Finished(_) => "Finished",
             StreamEvent::ToolCallStart(_) => "ToolCallStart",
             StreamEvent::ToolCallChunk { .. } => "ToolCallChunk",

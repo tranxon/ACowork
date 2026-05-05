@@ -379,13 +379,7 @@ impl AgentLoop {
     /// Run the agent loop for a single user message
     pub async fn run(&mut self, user_message: &str, context_builder: &ContextBuilder) -> Result<String> {
         // Add user message to history
-        self.history.append(ChatMessage {
-            role: MessageRole::User,
-            content: user_message.to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        self.history.append(ChatMessage::user(user_message));
 
         // Persist user message to JSONL
         if let Some(ref conversation) = self.conversation {
@@ -444,31 +438,20 @@ impl AgentLoop {
                             let (msg, _) = other.enforce_size_limit();
                             match msg {
                                 InboundMessage::UserMessage(text) => {
-                                    self.history.append(ChatMessage {
-                                        role: MessageRole::User,
-                                        content: text,
-                                        name: None,
-                                        tool_call_id: None,
-                                        tool_calls: None,
-                                    });
+                                    self.history.append(ChatMessage::user(text));
                                 }
                                 InboundMessage::SystemNotification { notification_type, data } => {
                                     self.history.append(ChatMessage {
                                         role: MessageRole::User,
                                         content: format!("[system:{}] {}", notification_type, data),
                                         name: Some("system".to_string()),
-                                        tool_call_id: None,
-                                        tool_calls: None,
+                                        ..Default::default()
                                     });
                                 }
                                 InboundMessage::IntentMessage { from, action, params } => {
-                                    self.history.append(ChatMessage {
-                                        role: MessageRole::User,
-                                        content: format!("[intent:{}:{}] {}", from, action, params),
-                                        name: None,
-                                        tool_call_id: None,
-                                        tool_calls: None,
-                                    });
+                                    self.history.append(ChatMessage::user(
+                                        format!("[intent:{}:{}] {}", from, action, params),
+                                    ));
                                 }
                                 _ => {} // ContinueExecution and Interrupt handled above
                             }
@@ -504,8 +487,7 @@ impl AgentLoop {
                                 role: MessageRole::User,
                                 content: format!("[System Warning] {reason}"),
                                 name: Some("system".to_string()),
-                                tool_call_id: None,
-                                tool_calls: None,
+                                ..Default::default()
                             });
                         }
                         _ => {}
@@ -563,11 +545,8 @@ impl AgentLoop {
                 }
 
                 self.history.append(ChatMessage {
-                    role: MessageRole::Assistant,
-                    content: response.content,
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: None,
+                    reasoning_content: response.reasoning_content,
+                    ..ChatMessage::assistant(response.content)
                 });
 
                 tracing::info!(iteration, "Agent returned text response");
@@ -596,11 +575,9 @@ impl AgentLoop {
 
             // Add assistant message with tool_calls to history
             self.history.append(ChatMessage {
-                role: MessageRole::Assistant,
-                content: response.content.clone(),
-                name: None,
-                tool_call_id: None,
+                reasoning_content: response.reasoning_content.clone(),
                 tool_calls: Some(deduped_calls.clone()),
+                ..ChatMessage::assistant(response.content.clone())
             });
 
             // Persist tool calls to JSONL
@@ -705,11 +682,8 @@ impl AgentLoop {
             // ⑥ Append tool results to history + ⑧ Loop detection
             for (idx, (tc, result_content)) in deduped_calls.iter().zip(tool_results.iter()).enumerate() {
                 let tool_result_message = ChatMessage {
-                    role: MessageRole::Tool,
-                    content: result_content.clone(),
                     name: Some(tc.function.name.clone()),
-                    tool_call_id: Some(tc.id.clone()),
-                    tool_calls: None,
+                    ..ChatMessage::tool(tc.id.clone(), result_content.clone())
                 };
 
                 self.history.append(tool_result_message);
@@ -755,8 +729,7 @@ impl AgentLoop {
                                     role: MessageRole::User,
                                     content: warning_content,
                                     name: Some("system".to_string()),
-                                    tool_call_id: None,
-                                    tool_calls: None,
+                                    ..Default::default()
                                 });
                             }
                             ResponseLevel::Block => {
@@ -794,13 +767,7 @@ impl AgentLoop {
             let (msg, _truncated) = msg.enforce_size_limit();
             match msg {
                 InboundMessage::UserMessage(text) => {
-                    self.history.append(ChatMessage {
-                        role: MessageRole::User,
-                        content: text,
-                        name: None,
-                        tool_call_id: None,
-                        tool_calls: None,
-                    });
+                    self.history.append(ChatMessage::user(text));
                 }
                 InboundMessage::SystemNotification { notification_type, data } => {
                     tracing::info!("System notification: {} = {:?}", notification_type, data);
@@ -809,19 +776,14 @@ impl AgentLoop {
                         role: MessageRole::User,
                         content: format!("[system:{}] {}", notification_type, data),
                         name: Some("system".to_string()),
-                        tool_call_id: None,
-                        tool_calls: None,
+                        ..Default::default()
                     });
                 }
                 InboundMessage::IntentMessage { from, action, params } => {
                     tracing::info!("Intent from {}: {} params={:?}", from, action, params);
-                    self.history.append(ChatMessage {
-                        role: MessageRole::User,
-                        content: format!("[intent:{}:{}] {}", from, action, params),
-                        name: None,
-                        tool_call_id: None,
-                        tool_calls: None,
-                    });
+                    self.history.append(ChatMessage::user(
+                        format!("[intent:{}:{}] {}", from, action, params),
+                    ));
                 }
                 InboundMessage::Interrupt { reason } => {
                     tracing::info!(reason = %reason, "Received interrupt signal");
@@ -881,6 +843,7 @@ impl AgentLoop {
         let stream = self.provider.chat_stream(chat_request.clone()).await?;
         let mut stream = Box::into_pin(stream);
         let mut accumulated_content = String::new();
+        let mut accumulated_reasoning_content = String::new();
         let mut tool_calls: Option<Vec<ToolCall>> = None;
         let mut usage = None;
 
@@ -901,6 +864,9 @@ impl AgentLoop {
                         }
                     }
                 }
+                StreamEvent::ReasoningContent(chunk) => {
+                    accumulated_reasoning_content.push_str(&chunk);
+                }
                 StreamEvent::ToolCallStart(tc) => {
                     tracing::info!(tool_name = %tc.function.name, tool_id = %tc.id, initial_args = %tc.function.arguments, "ToolCallStart received");
                     tool_calls.get_or_insert_with(Vec::new).push(tc);
@@ -914,6 +880,9 @@ impl AgentLoop {
                     // Use final response data; prefer stream-accumulated content
                     if accumulated_content.is_empty() {
                         accumulated_content = resp.content;
+                    }
+                    if accumulated_reasoning_content.is_empty() {
+                        accumulated_reasoning_content = resp.reasoning_content.unwrap_or_default();
                     }
                     if resp.tool_calls.is_some() {
                         // Prefer Finished event's tool_calls as they are complete
@@ -995,8 +964,14 @@ impl AgentLoop {
 
         Ok(ChatResponse {
             content: accumulated_content,
+            reasoning_content: if accumulated_reasoning_content.is_empty() {
+                None
+            } else {
+                Some(accumulated_reasoning_content)
+            },
             tool_calls,
             usage,
+            ..Default::default()
         })
     }
 

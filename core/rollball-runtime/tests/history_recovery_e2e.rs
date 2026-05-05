@@ -31,13 +31,7 @@ use rollball_runtime::tools::builtin;
 
 /// Create a basic user message
 fn make_user_message(content: &str) -> ChatMessage {
-    ChatMessage {
-        role: MessageRole::User,
-        content: content.to_string(),
-        name: None,
-        tool_call_id: None,
-        tool_calls: None,
-    }
+    ChatMessage::user(content)
 }
 
 /// Create a tool call with given id, name, and arguments
@@ -54,39 +48,17 @@ fn make_tool_call(id: &str, name: &str, arguments: &str) -> ToolCall {
 
 /// Create a tool result message referencing a tool_call_id
 fn make_tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
-    ChatMessage {
-        role: MessageRole::Tool,
-        content: content.to_string(),
-        name: None,
-        tool_call_id: Some(tool_call_id.to_string()),
-        tool_calls: None,
-    }
+    ChatMessage::tool(tool_call_id, content)
 }
 
 /// Create an assistant message with tool_calls
 fn make_assistant_with_tool_calls(content: &str, tool_calls: Vec<ToolCall>) -> ChatMessage {
-    ChatMessage {
-        role: MessageRole::Assistant,
-        content: content.to_string(),
-        name: None,
-        tool_call_id: None,
-        tool_calls: if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        },
-    }
+    ChatMessage::assistant_with_tools(content, tool_calls)
 }
 
 /// Create an assistant message with text only
 fn make_assistant_text(content: &str) -> ChatMessage {
-    ChatMessage {
-        role: MessageRole::Assistant,
-        content: content.to_string(),
-        name: None,
-        tool_call_id: None,
-        tool_calls: None,
-    }
+    ChatMessage::assistant(content)
 }
 
 /// Create a manifest with all permissions and declared tools
@@ -407,13 +379,7 @@ async fn test_sanitize_mixed_corruption() {
     let mut messages = vec![
         make_user_message("Do multiple things"),
         // Empty assistant message (should be removed)
-        ChatMessage {
-            role: MessageRole::Assistant,
-            content: "".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        },
+        ChatMessage::assistant(""),
         // Assistant with invalid arguments + valid tool_call
         make_assistant_with_tool_calls(
             "",
@@ -526,13 +492,7 @@ async fn test_sanitize_preserves_valid_history() {
     // Build a perfectly valid conversation with complete tool_call + tool result pairs.
     // Verify that sanitize does not alter message count or content.
     let mut messages = vec![
-        ChatMessage {
-            role: MessageRole::System,
-            content: "You are a helpful assistant.".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        },
+        ChatMessage::system("You are a helpful assistant."),
         make_user_message("Read the file"),
         make_assistant_with_tool_calls(
             "Let me check that for you.",
@@ -643,20 +603,8 @@ async fn test_llm_tool_call_with_proper_tool_call_id() {
     let request1 = ChatRequest {
         model: "MiniMax-M2.5".to_string(),
         messages: vec![
-            ChatMessage {
-                role: MessageRole::System,
-                content: "You are a helpful assistant. Use the file_read tool when asked to read files.".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: MessageRole::User,
-                content: "Please read the file hello.txt".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
+            ChatMessage::system("You are a helpful assistant. Use the file_read tool when asked to read files."),
+            ChatMessage::user("Please read the file hello.txt"),
         ],
         temperature: Some(0.1),
         max_tokens: None,
@@ -674,38 +622,17 @@ async fn test_llm_tool_call_with_proper_tool_call_id() {
 
     // Step 2: Build tool result message using tool_call_id from the LLM response
     let tc = &tool_calls[0];
-    let tool_result_msg = ChatMessage {
-        role: MessageRole::Tool,
-        content: "File contents: Hello from RollBall!".to_string(),
-        name: None,
-        tool_call_id: Some(tc.id.clone()), // Use the actual tool_call_id from LLM
-        tool_calls: None,
-    };
+    let tool_result_msg = ChatMessage::tool(tc.id.clone(), "File contents: Hello from RollBall!");
 
     // Step 3: Send back the tool result — this should NOT produce a 400 error
     let request2 = ChatRequest {
         model: "MiniMax-M2.5".to_string(),
         messages: vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Please read the file hello.txt"),
             ChatMessage {
-                role: MessageRole::System,
-                content: "You are a helpful assistant.".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: MessageRole::User,
-                content: "Please read the file hello.txt".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: response1.content.clone(),
-                name: None,
-                tool_call_id: None,
                 tool_calls: Some(tool_calls.clone()),
+                ..ChatMessage::assistant(response1.content.clone())
             },
             tool_result_msg,
         ],

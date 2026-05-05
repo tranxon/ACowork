@@ -366,6 +366,7 @@ fn parse_response(resp: AnthropicResponse) -> ChatResponse {
             Some(tool_calls)
         },
         usage: usage_info,
+        ..Default::default()
     }
 }
 
@@ -679,6 +680,7 @@ fn parse_anthropic_sse_line(
                         completion_tokens: output,
                         total_tokens: input + output,
                     }),
+                    ..Default::default()
                 }));
             }
             None
@@ -736,27 +738,9 @@ mod tests {
     #[test]
     fn test_convert_messages_basic() {
         let messages = vec![
-            ChatMessage {
-                role: MessageRole::System,
-                content: "You are helpful.".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: MessageRole::User,
-                content: "Hello".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "Hi there!".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
+            ChatMessage::system("You are helpful."),
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant("Hi there!"),
         ];
 
         let (converted, system) = convert_messages(&messages);
@@ -768,20 +752,14 @@ mod tests {
 
     #[test]
     fn test_convert_messages_with_tool_calls() {
-        let messages = vec![ChatMessage {
-            role: MessageRole::Assistant,
-            content: "".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "toolu_123".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "get_weather".to_string(),
-                    arguments: r#"{"city":"Shanghai"}"#.to_string(),
-                },
-            }]),
-        }];
+        let messages = vec![ChatMessage::assistant_with_tools("", vec![ToolCall {
+            id: "toolu_123".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Shanghai"}"#.to_string(),
+            },
+        }])];
 
         let (converted, _system) = convert_messages(&messages);
         assert_eq!(converted.len(), 1);
@@ -797,6 +775,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::Tool,
             content: r#"{"tool_call_id":"toolu_123","content":"Sunny, 25°C"}"#.to_string(),
+            reasoning_content: None,
             name: None,
             tool_call_id: None,
             tool_calls: None,
@@ -974,6 +953,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::User,
             content: "Hello world".to_string(),
+            reasoning_content: None,
             name: None,
             tool_call_id: None,
             tool_calls: None,
@@ -993,6 +973,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::User,
             content: "你好世界".to_string(),
+            reasoning_content: None,
             name: None,
             tool_call_id: None,
             tool_calls: None,

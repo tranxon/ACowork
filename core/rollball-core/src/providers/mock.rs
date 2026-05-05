@@ -15,8 +15,6 @@ use crate::providers::traits::{
     ChatMessage, ChatRequest, ChatResponse, FunctionCall, Provider, StreamEvent,
     ToolCall, UsageInfo,
 };
-#[cfg(test)]
-use crate::providers::traits::MessageRole;
 
 /// A single canned response step for the mock provider
 #[derive(Debug, Clone)]
@@ -133,12 +131,12 @@ impl Provider for MockProvider {
         match response {
             MockResponse::Text { content } => Ok(ChatResponse {
                 content,
-                tool_calls: None,
                 usage: Some(UsageInfo {
                     prompt_tokens: 100,
                     completion_tokens: 50,
                     total_tokens: 150,
                 }),
+                ..Default::default()
             }),
             MockResponse::ToolCalls { tool_calls, content } => Ok(ChatResponse {
                 content,
@@ -148,6 +146,7 @@ impl Provider for MockProvider {
                     completion_tokens: 100,
                     total_tokens: 300,
                 }),
+                ..Default::default()
             }),
             MockResponse::Error { message } => {
                 Err(crate::error::RollballError::Provider(crate::providers::ProviderError::unknown(message)))
@@ -197,13 +196,7 @@ mod tests {
         let provider = MockProvider::single_text("Hello, world!");
         let request = ChatRequest {
             model: "mock".to_string(),
-            messages: vec![ChatMessage {
-                role: MessageRole::User,
-                content: "Hi".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
+            messages: vec![ChatMessage::user("Hi")],
             temperature: None,
             max_tokens: None,
             tools: None,
@@ -225,13 +218,7 @@ mod tests {
 
         let request = ChatRequest {
             model: "mock".to_string(),
-            messages: vec![ChatMessage {
-                role: MessageRole::User,
-                content: "What is 2+2?".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
+            messages: vec![ChatMessage::user("What is 2+2?")],
             temperature: None,
             max_tokens: None,
             tools: None,
@@ -258,13 +245,7 @@ mod tests {
 
         let request = ChatRequest {
             model: "mock".to_string(),
-            messages: vec![ChatMessage {
-                role: MessageRole::User,
-                content: "Hi".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
+            messages: vec![ChatMessage::user("Hi")],
             temperature: None,
             max_tokens: None,
             tools: None,
@@ -279,13 +260,7 @@ mod tests {
         let provider = MockProvider::new(vec![]);
         let request = ChatRequest {
             model: "mock".to_string(),
-            messages: vec![ChatMessage {
-                role: MessageRole::User,
-                content: "Hi".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
+            messages: vec![ChatMessage::user("Hi")],
             temperature: None,
             max_tokens: None,
             tools: None,
@@ -300,13 +275,7 @@ mod tests {
         let provider = MockProvider::single_text("ok");
         let request = ChatRequest {
             model: "mock".to_string(),
-            messages: vec![ChatMessage {
-                role: MessageRole::User,
-                content: "test message".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
+            messages: vec![ChatMessage::user("test message")],
             temperature: Some(0.5),
             max_tokens: None,
             tools: None,

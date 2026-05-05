@@ -133,20 +133,25 @@ impl std::error::Error for ProviderError {}
 
 
 /// Chat message role
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     System,
+    #[default]
     User,
     Assistant,
     Tool,
 }
 
 /// Chat message in conversation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
+    #[serde(default)]
     pub role: MessageRole,
+    #[serde(default)]
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Tool call ID — required for role=Tool messages to match the corresponding
@@ -155,6 +160,53 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+impl ChatMessage {
+    /// Create a user message
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: MessageRole::User, content: content.into(), ..Default::default() }
+    }
+
+    /// Create an assistant message
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self { role: MessageRole::Assistant, content: content.into(), ..Default::default() }
+    }
+
+    /// Create an assistant message with reasoning content (DeepSeek thinking mode)
+    pub fn assistant_with_reasoning(content: impl Into<String>, reasoning: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content: content.into(),
+            reasoning_content: Some(reasoning.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create an assistant message with tool calls
+    pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content: content.into(),
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            ..Default::default()
+        }
+    }
+
+    /// Create a tool result message
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            tool_call_id: Some(tool_call_id.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create a system message
+    pub fn system(content: impl Into<String>) -> Self {
+        Self { role: MessageRole::System, content: content.into(), ..Default::default() }
+    }
 }
 
 /// Tool call from LLM
@@ -187,9 +239,12 @@ pub struct ChatRequest {
 }
 
 /// Chat response from LLM provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatResponse {
+    #[serde(default)]
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default)]
@@ -209,6 +264,8 @@ pub struct UsageInfo {
 pub enum StreamEvent {
     /// Text chunk
     Content(String),
+    /// Reasoning content chunk (e.g. DeepSeek thinking mode)
+    ReasoningContent(String),
     /// Tool call start
     ToolCallStart(ToolCall),
     /// Tool call argument chunk (index identifies which tool call, arguments is incremental JSON fragment)

@@ -491,9 +491,7 @@ mod tests {
         ChatMessage {
             role,
             content: content.to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
+            ..Default::default()
         }
     }
 
@@ -598,28 +596,16 @@ mod tests {
     }
 
     fn make_tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
-        ChatMessage {
-            role: MessageRole::Tool,
-            content: content.to_string(),
-            name: None,
-            tool_call_id: Some(tool_call_id.to_string()),
-            tool_calls: None,
-        }
+        ChatMessage::tool(tool_call_id, content)
     }
 
     #[test]
     fn test_sanitize_fixes_invalid_arguments() {
         let mut messages = vec![
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![
+            ChatMessage::assistant_with_tools("", vec![
                     make_tool_call("tc_1", "read_file", "not valid json{{"),
                     make_tool_call("tc_2", "write_file", r#"{"path":"/tmp"}"#),
                 ]),
-            },
             make_tool_result("tc_1", "result 1"),
             make_tool_result("tc_2", "result 2"),
         ];
@@ -637,15 +623,9 @@ mod tests {
     #[test]
     fn test_sanitize_removes_orphaned_tool_result() {
         let mut messages = vec![
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "I'll help you".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![
+            ChatMessage::assistant_with_tools("I'll help you", vec![
                     make_tool_call("tc_1", "read_file", "{}"),
                 ]),
-            },
             make_tool_result("tc_1", "result 1"),
             make_tool_result("tc_orphan", "orphaned result"),
         ];
@@ -660,16 +640,10 @@ mod tests {
     #[test]
     fn test_sanitize_removes_orphaned_tool_call() {
         let mut messages = vec![
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![
+            ChatMessage::assistant_with_tools("", vec![
                     make_tool_call("tc_1", "read_file", "{}"),
                     make_tool_call("tc_2", "write_file", "{}"),
                 ]),
-            },
             make_tool_result("tc_1", "result 1"),
             // tc_2 has no result
         ];
@@ -687,13 +661,7 @@ mod tests {
     fn test_sanitize_removes_empty_assistant_message() {
         let mut messages = vec![
             make_message(MessageRole::User, "Hello"),
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
+            ChatMessage::assistant(""),
             make_message(MessageRole::User, "World"),
         ];
 
@@ -710,15 +678,9 @@ mod tests {
         let mut messages = vec![
             make_message(MessageRole::System, "System"),
             make_message(MessageRole::User, "Hello"),
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "Let me check".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![
+            ChatMessage::assistant_with_tools("Let me check", vec![
                     make_tool_call("tc_1", "search", "{}"),
                 ]),
-            },
             make_tool_result("tc_1", "Found it"),
             make_message(MessageRole::Assistant, "Here's the answer"),
         ];
@@ -737,15 +699,9 @@ mod tests {
     #[test]
     fn test_sanitize_is_idempotent() {
         let mut messages = vec![
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![
+            ChatMessage::assistant_with_tools("", vec![
                     make_tool_call("tc_1", "read_file", "not json"),
                 ]),
-            },
             make_tool_result("tc_1", "result 1"),
         ];
 
@@ -765,16 +721,10 @@ mod tests {
     #[test]
     fn test_sanitize_clears_tool_calls_when_all_orphaned() {
         let mut messages = vec![
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: "Let me check".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: Some(vec![
+            ChatMessage::assistant_with_tools("Let me check", vec![
                     make_tool_call("tc_1", "search", "{}"),
                     make_tool_call("tc_2", "read", "{}"),
                 ]),
-            },
         ];
         // No tool results at all — both tool_calls should be removed
 

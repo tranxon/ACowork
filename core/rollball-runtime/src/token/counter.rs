@@ -393,13 +393,7 @@ mod tests {
     #[test]
     fn test_count_message_basic() {
         let counter = TokenCounter::new();
-        let msg = ChatMessage {
-            role: MessageRole::User,
-            content: "Hello world".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        };
+        let msg = ChatMessage::user("Hello world");
         let count = counter.count_message(&msg, "gpt-4");
         // content tokens + role overhead + boundary
         assert!(count >= 3, "Expected at least 3 tokens, got {count}");
@@ -412,8 +406,7 @@ mod tests {
             role: MessageRole::User,
             content: "Hello".to_string(),
             name: Some("Alice".to_string()),
-            tool_call_id: None,
-            tool_calls: None,
+            ..Default::default()
         };
         let count_without_name = counter.count_text("Hello", "gpt-4") + 2; // role + boundary
         let count_with_name = counter.count_message(&msg, "gpt-4");
@@ -423,20 +416,14 @@ mod tests {
     #[test]
     fn test_count_message_with_tool_calls() {
         let counter = TokenCounter::new();
-        let msg = ChatMessage {
-            role: MessageRole::Assistant,
-            content: "".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "call_123".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "weather".to_string(),
-                    arguments: r#"{"city":"Shanghai"}"#.to_string(),
-                },
-            }]),
-        };
+        let msg = ChatMessage::assistant_with_tools("", vec![ToolCall {
+            id: "call_123".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "weather".to_string(),
+                arguments: r#"{"city":"Shanghai"}"#.to_string(),
+            },
+        }]);
         let count = counter.count_message(&msg, "gpt-4");
         // Tool call overhead (4) + name + arguments + role + boundary
         assert!(count >= 6, "Expected at least 6 tokens for tool call message, got {count}");
@@ -445,20 +432,8 @@ mod tests {
     #[test]
     fn test_count_messages_with_cache() {
         let mut counter = TokenCounter::new();
-        let system = ChatMessage {
-            role: MessageRole::System,
-            content: "You are a helpful assistant. Be concise and accurate.".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        };
-        let user = ChatMessage {
-            role: MessageRole::User,
-            content: "Hello".to_string(),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        };
+        let system = ChatMessage::system("You are a helpful assistant. Be concise and accurate.");
+        let user = ChatMessage::user("Hello");
 
         let count1 = counter.count_messages(&[system.clone(), user.clone()], "gpt-4");
         // Second call should use cache for system prompt
@@ -471,13 +446,7 @@ mod tests {
     fn test_count_incremental() {
         let counter = TokenCounter::new();
         let new_messages = vec![
-            ChatMessage {
-                role: MessageRole::User,
-                content: "What is the weather?".to_string(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
+            ChatMessage::user("What is the weather?"),
         ];
         let count = counter.count_incremental(&new_messages, "gpt-4");
         assert!(count > 0);
