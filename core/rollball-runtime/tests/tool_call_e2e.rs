@@ -570,6 +570,52 @@ async fn test_file_edit_missing_required_params() {
 }
 
 #[tokio::test]
+async fn test_file_edit_crlf_compatible() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work_dir = tmp.path().to_string_lossy().to_string();
+
+    // Create a file with CRLF line endings
+    let test_file = tmp.path().join("crlf_file.txt");
+    std::fs::write(&test_file, "line1\r\nHello, world!\r\nline3").unwrap();
+
+    let tool = builtin::file_edit::FileEditTool::new(&work_dir);
+    // old_text uses LF (as LLM would generate), file has CRLF
+    let result = tool
+        .execute(serde_json::json!({
+            "path": "crlf_file.txt",
+            "old_text": "Hello, world!",
+            "new_text": "Hello, RollBall!"
+        }))
+        .await
+        .unwrap();
+
+    assert!(result.ok, "file_edit should succeed on CRLF file: {:?}", result.error);
+
+    // Verify the replacement was successful
+    let content = std::fs::read_to_string(&test_file).unwrap();
+    assert!(content.contains("Hello, RollBall!"), "Content should be replaced");
+
+    // Verify line endings are preserved as CRLF
+    assert!(
+        content.contains("\r\n"),
+        "CRLF line endings should be preserved, got: {:?}",
+        content
+    );
+    assert!(
+        !content.contains("\r\n\r\n"),
+        "Should not have double CRLF, got: {:?}",
+        content
+    );
+    // Ensure no bare LF without CR
+    let normalized = content.replace("\r\n", "\n");
+    assert!(
+        !normalized.contains("\r"),
+        "Should not have stray CR characters, got: {:?}",
+        content
+    );
+}
+
+#[tokio::test]
 async fn test_glob_search_valid() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
@@ -644,6 +690,31 @@ async fn test_glob_search_empty_pattern() {
 }
 
 #[tokio::test]
+async fn test_glob_search_windows_backslash_pattern() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work_dir = tmp.path().to_string_lossy().to_string();
+
+    // Create nested structure
+    let sub = tmp.path().join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("main.rs"), "fn main() {}").unwrap();
+    std::fs::write(sub.join("lib.rs"), "pub fn lib() {}").unwrap();
+    std::fs::write(tmp.path().join("readme.md"), "# Hello").unwrap();
+
+    let tool = builtin::glob_search::GlobSearchTool::new(&work_dir);
+    // Use Windows-style backslash separator in the pattern
+    let result = tool
+        .execute(serde_json::json!({ "pattern": "src\\*.rs" }))
+        .await
+        .unwrap();
+
+    assert!(result.ok, "glob_search with backslash pattern should succeed: {:?}", result.error);
+    assert!(result.content.contains("src/main.rs"), "Output should use forward slashes: {}", result.content);
+    assert!(result.content.contains("src/lib.rs"), "Output should use forward slashes: {}", result.content);
+    assert!(!result.content.contains("readme.md"));
+}
+
+#[tokio::test]
 async fn test_content_search_valid() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
@@ -710,11 +781,37 @@ async fn test_content_search_empty_pattern() {
     assert!(result.error.unwrap().contains("Missing 'pattern'"));
 }
 
-// Shell tool uses `sh -c` which is Unix-only
-#[cfg(unix)]
+#[tokio::test]
+async fn test_content_search_path_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work_dir = tmp.path().to_string_lossy().to_string();
+
+    // Create nested structure to test path formatting
+    let sub = tmp.path().join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("main.rs"), "fn main() { RollBall; }").unwrap();
+
+    let tool = builtin::content_search::ContentSearchTool::new(&work_dir);
+    let result = tool
+        .execute(serde_json::json!({ "pattern": "RollBall" }))
+        .await
+        .unwrap();
+
+    assert!(result.ok, "content_search should succeed: {:?}", result.error);
+    assert!(
+        result.content.contains("src/main.rs"),
+        "Output path should use forward slashes, got: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("\\"),
+        "Output should not contain backslashes, got: {}",
+        result.content
+    );
+}
+
 #[tokio::test]
 async fn test_shell_command_valid() {
-
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 

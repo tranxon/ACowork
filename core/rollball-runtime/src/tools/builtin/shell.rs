@@ -53,12 +53,9 @@ impl Tool for ShellTool {
             });
         }
 
-        // Detect platform at runtime and choose shell accordingly
-        let (shell, shell_arg) = if std::env::consts::OS == "windows" {
-            ("cmd", "/C")
-        } else {
-            ("sh", "-c")
-        };
+        // Use runtime-detected shell (pwsh > powershell > cmd on Windows, $SHELL on Unix)
+        let shell_info = crate::platform::detected_shell();
+        let (shell, shell_arg) = (shell_info.binary, shell_info.arg);
 
         tracing::debug!(
             command = %command,
