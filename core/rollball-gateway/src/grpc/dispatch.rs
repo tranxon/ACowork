@@ -185,8 +185,51 @@ pub async fn dispatch_grpc_request(
             GatewayResponse::CurrentSessionId { session_id: None }
         }
 
-        Some(proto::client_message::Payload::StreamChunk(_req)) => {
-            // Stream chunks produce no response — return early with empty ServerMessage
+        Some(proto::client_message::Payload::StreamChunk(req)) => {
+            // Stream chunks target the HTTP/WebSocket client — forward via bridge
+            if req.target == "http-ws" || req.target == "http-api" {
+                let agent_id = {
+                    let mgr = session_mgr.lock().await;
+                    mgr.get_session(conn_id)
+                        .and_then(|s| s.agent_id.clone())
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+
+                let params: serde_json::Value = serde_json::from_str(&req.params_json)
+                    .unwrap_or(serde_json::Value::Null);
+
+                let event_type = crate::http::routes::BridgeEventType::from_action(&req.action)
+                    .unwrap_or_else(crate::http::routes::BridgeEventType::default_for_unknown);
+
+                // Transform payload to match frontend WebSocket protocol
+                let payload = match event_type {
+                    crate::http::routes::BridgeEventType::Chunk => {
+                        let delta = params.get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let mut p = serde_json::json!({ "delta": delta });
+                        if let Some(reasoning) = params.get("reasoning_content").and_then(|v| v.as_str()) {
+                            p["reasoning_content"] = serde_json::Value::String(reasoning.to_string());
+                        }
+                        p
+                    }
+                    _ => params,
+                };
+
+                if let Some(tx) = bridge_tx {
+                    let event = BridgeEvent {
+                        agent_id,
+                        message_id: format!("chunk-{}", chrono::Utc::now().timestamp_millis()),
+                        event_type,
+                        payload,
+                    };
+                    if let Err(e) = tx.send(event) {
+                        tracing::debug!("Failed to broadcast stream chunk: {}", e);
+                    }
+                }
+            }
+
+            // Stream chunks produce no gRPC response
             return proto::ServerMessage {
                 request_id,
                 payload: None,

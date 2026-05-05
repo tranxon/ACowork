@@ -1,52 +1,49 @@
-import { useState, useEffect } from "react";
-import { ChevronRight } from "lucide-react";
+import { useState } from "react";
+import { ChevronRight, ChevronDown, Clock } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 export interface ThinkBlockProps {
-  /** Raw text content inside the <think> tags */
   content: string;
-  /** Whether the parent message is currently being streamed */
-  isStreaming: boolean;
-  /** Whether the reply after </think> has already started */
-  hasReplyStarted: boolean;
+  isStreaming?: boolean;
+  hasReplyStarted?: boolean;
+  startTime?: number;
+  /** Fixed end time (set by done event); if absent, duration keeps ticking in streaming mode */
+  endTime?: number;
+  /** Whether to default to expanded state (e.g. when this is the last message) */
+  defaultExpanded?: boolean;
 }
 
 /**
- * Collapsible think-block UI for assistant reasoning output.
- *
- * - During streaming and before the actual reply starts: auto-expanded
- * - After reply starts or streaming ends: auto-collapsed
- * - User can click the header to toggle expansion at any time
+ * Simple collapsible think block with timer.
+ * Shows "Thinking (Xs)" header, click to expand/collapse content.
+ * When endTime is provided (from done event), duration is frozen;
+ * otherwise it keeps counting during streaming.
  */
-export function ThinkBlock({ content, isStreaming, hasReplyStarted }: ThinkBlockProps) {
-  const [expanded, setExpanded] = useState(true);
+export function ThinkBlock({ content, isStreaming: _isStreaming, startTime, endTime, defaultExpanded }: ThinkBlockProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded ?? false);
 
-  // Auto-collapse when the reply starts or streaming finishes
-  useEffect(() => {
-    if (hasReplyStarted || !isStreaming) {
-      setExpanded(false);
-    }
-  }, [hasReplyStarted, isStreaming]);
-
-  // While streaming and before reply starts, force expanded
-  const showExpanded = isStreaming && !hasReplyStarted ? true : expanded;
+  // Calculate duration: use fixed endTime if available, otherwise live timer
+  const duration = startTime
+    ? Math.round(((endTime ?? Date.now()) - startTime) / 1000)
+    : null;
 
   return (
-    <div className="mb-2">
+    <div className="my-1">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+        className="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300 transition-colors"
       >
-        <ChevronRight
-          className={`h-3 w-3 transition-transform duration-200 ${showExpanded ? "rotate-90" : ""}`}
-        />
-        <span>Thinking{isStreaming && !hasReplyStarted ? "..." : ""}</span>
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <Clock className="h-3 w-3" />
+        <span>Thinking</span>
+        {duration !== null && <span className="text-[10px]">({duration}s)</span>}
       </button>
-      {showExpanded && (
-        <div className="mt-1 rounded bg-zinc-50 dark:bg-zinc-800/50 p-3 text-sm text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+
+      {expanded && (
+        <div className="ml-5 mt-1 rounded bg-zinc-50 dark:bg-zinc-800/50 p-3 text-sm text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
           <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content.trim() || "…"}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content.trim() || "..."}</ReactMarkdown>
           </div>
         </div>
       )}

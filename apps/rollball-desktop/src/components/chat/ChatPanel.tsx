@@ -21,7 +21,7 @@ import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, ws, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage } = useChatStore();
+  const { messages, sending, wsMap, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage } = useChatStore();
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
@@ -34,79 +34,67 @@ export function ChatPanel() {
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
 
-  // Memoize sorted messages to avoid unnecessary re-renders
-  const sortedMessages = useMemo(() => {
-    // Reorder messages: ensure think → tool calls/results → assistant
-    // in the same conversation turn
-    const reordered = [...messages];
-
-    // Group messages by conversation turn (between user messages)
-    const turns: ChatMessage[][] = [];
-    let currentTurn: ChatMessage[] = [];
-
-    for (const msg of reordered) {
-      if (msg.type === "user") {
-        if (currentTurn.length > 0) {
-          turns.push(currentTurn);
-        }
-        currentTurn = [msg];
-      } else {
-        currentTurn.push(msg);
-      }
-    }
-    if (currentTurn.length > 0) {
-      turns.push(currentTurn);
-    }
-
-    // Within each turn, order: think → tool → assistant → other
-    const finalMessages: ChatMessage[] = [];
-    for (const turn of turns) {
-      const userMsg = turn.find(m => m.type === "user");
-      const thinkMsgs = turn.filter(m => m.type === "think");
-      const assistantMsgs = turn.filter(m => m.type === "assistant");
-      const toolMsgs = turn.filter(m => m.type === "tool_call" || m.type === "tool_result");
-      const otherMsgs = turn.filter(m => !["user", "think", "assistant", "tool_call", "tool_result"].includes(m.type));
-
-      if (userMsg) finalMessages.push(userMsg);
-      finalMessages.push(...thinkMsgs);
-      finalMessages.push(...toolMsgs);
-      finalMessages.push(...assistantMsgs);
-      finalMessages.push(...otherMsgs);
-    }
-
-    return finalMessages;
-  }, [messages]);
-
-  // Group consecutive tool calls for compact display
+  // Group consecutive messages for display
+  // - Consecutive tool_call/tool_result → folded together (always aggregated)
+  // - think messages / assistant <think> → folded with timer
+  // - Everything else → display as-is
   const displayMessages = useMemo(() => {
-    const grouped: Array<ChatMessage | { type: 'tool_group'; id: string; items: ChatMessage[] }> = [];
-    let currentGroup: ChatMessage[] = [];
+    const grouped: Array<
+      | ChatMessage
+      | { type: 'tool_group'; items: ChatMessage[] }
+      | { type: 'think_group'; item: ChatMessage }
+    > = [];
+    
+    let toolGroup: ChatMessage[] = [];
 
-    for (const msg of sortedMessages) {
-      if (msg.type === "tool_call" || msg.type === "tool_result") {
-        currentGroup.push(msg);
+    const flushToolGroup = () => {
+      if (toolGroup.length > 0) {
+        grouped.push({ type: 'tool_group', items: [...toolGroup] });
+        toolGroup = [];
+      }
+    };
+
+    for (const msg of messages) {
+      if (msg.type === 'tool_call' || msg.type === 'tool_result') {
+        toolGroup.push(msg);
       } else {
-        if (currentGroup.length > 0) {
-          grouped.push({
-            type: 'tool_group',
-            id: `group-${currentGroup[0].id}`,
-            items: currentGroup,
-          });
-          currentGroup = [];
+        flushToolGroup();
+        
+        if (msg.type === 'assistant') {
+          // Streaming: if content starts with <think> but no </think> yet,
+          // treat entire content as thinking
+          if (msg.id === streamingMessageId) {
+            const trimmed = msg.content.trimStart();
+            if (trimmed.startsWith('<think>') && !trimmed.includes('</think>')) {
+              const thinkContent = trimmed.slice(7);
+              if (thinkContent) {
+                grouped.push({ type: 'think_group', item: { ...msg, content: thinkContent } });
+              }
+              continue;
+            }
+          }
+
+          const { thinkContent, replyContent } = parseThinkContent(msg.content);
+          if (thinkContent) {
+            grouped.push({ type: 'think_group', item: { ...msg, content: thinkContent } });
+          }
+          if (replyContent.trim()) {
+            grouped.push({ ...msg, content: replyContent });
+          } else if (!thinkContent) {
+            // Empty message (streaming)
+            grouped.push(msg);
+          }
+        } else if (msg.type === 'think') {
+          grouped.push({ type: 'think_group', item: msg });
+        } else {
+          grouped.push(msg);
         }
-        grouped.push(msg);
       }
     }
-    if (currentGroup.length > 0) {
-      grouped.push({
-        type: 'tool_group',
-        id: `group-${currentGroup[0].id}`,
-        items: currentGroup,
-      });
-    }
 
+    flushToolGroup();
     return grouped;
-  }, [sortedMessages]);
+  }, [messages, streamingMessageId]);
 
   // Load available models from Vault keys
   const loadModels = useCallback(async () => {
@@ -188,7 +176,9 @@ export function ChatPanel() {
       void initSession();
     }
     return () => {
-      useChatStore.getState().disconnectStream();
+      // Do NOT disconnect the old agent's ws — keep it alive for reuse.
+      // Only clear reconnect timers for the old agent to avoid stale reconnects.
+      // The ws connections are per-agent and managed in wsMap.
     };
   }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadModels]);
 
@@ -334,10 +324,31 @@ export function ChatPanel() {
             </div>
           )}
           <div className="space-y-2">
-            {displayMessages.map((item) => {
-              if ('type' in item && item.type === 'tool_group') {
-                return <ToolCallGroup key={item.id} items={item.items} />;
+            {displayMessages.map((item, idx) => {
+              const displayItem = item as any;
+              
+              // Tool group - multiple consecutive tool calls/results
+              if (displayItem.type === 'tool_group') {
+                return <ToolCallGroup key={idx} items={displayItem.items} />;
               }
+              
+              // Think message with folding
+              if (displayItem.type === 'think_group') {
+                const isThinkStreaming = displayItem.item.id === streamingMessageId;
+                return (
+                  <ThinkBlock
+                    key={idx}
+                    content={displayItem.item.content}
+                    isStreaming={isThinkStreaming}
+                    hasReplyStarted={!isThinkStreaming}
+                    startTime={displayItem.item.startTime}
+                    endTime={displayItem.item.endTime}
+                    defaultExpanded={false}
+                  />
+                );
+              }
+              
+              // Regular message
               const msg = item as ChatMessage;
               return (
                 <MessageBubble key={msg.id} message={msg} isStreaming={msg.id === streamingMessageId} />
@@ -415,7 +426,7 @@ export function ChatPanel() {
           placeholder={
             gatewayStatus !== "connected"
               ? "Gateway not connected"
-              : !ws || ws.readyState !== WebSocket.OPEN
+              : !wsMap[selectedAgentId!] || wsMap[selectedAgentId!].readyState !== WebSocket.OPEN
                 ? "Type a message... (HTTP mode — streaming unavailable)"
                 : "Type a message... (Enter to send, Shift+Enter for new line)"
           }
@@ -646,17 +657,6 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
   if (!primaryTool) return null;
   const [toolName, count] = primaryTool;
 
-  // Generate human-readable action name
-  const actionMap: Record<string, string> = {
-    "file_read": "Read",
-    "file_write": "Write",
-    "file_edit": "Edit",
-    "shell": "Run",
-    "web_search": "Search",
-    "web_fetch": "Fetch",
-  };
-  const actionName = actionMap[toolName] || toolName;
-
   // Generate summary
   const callItems = items.filter(m => m.type === "tool_call");
   const summaryItems = callItems.slice(0, 3).map(item => {
@@ -696,7 +696,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
   }
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-1 min-w-0 max-w-full overflow-hidden">
       {/* Collapsed/Summary card */}
       <button
         onClick={() => setExpanded(!expanded)}
@@ -704,7 +704,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
       >
         <Icon className="h-4 w-4 shrink-0 text-zinc-400" />
         <span className="font-medium">
-          {actionName} {count} {count === 1 ? "call" : "calls"}
+          工具调用 ({count} {count === 1 ? "call" : "calls"})
         </span>
         <span className="truncate text-zinc-500 dark:text-zinc-500">
           {summary}
@@ -718,7 +718,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
 
       {/* Expanded details - paired call + result */}
       {expanded && (
-        <div className="ml-4 space-y-1 border-l-2 border-zinc-200 pl-4 dark:border-zinc-700">
+        <div className="ml-4 max-w-full overflow-hidden space-y-1 border-l-2 border-zinc-200 pl-4 dark:border-zinc-700">
           {pairedItems.map((pair, idx) => {
             const isExpanded = expandedItem === idx;
             const { call, result } = pair;
@@ -732,7 +732,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
                 >
                   <Wrench className="h-3 w-3 shrink-0" />
                   <span className="font-medium">{call.toolName}</span>
-                  <span className="min-w-0 flex-1 break-all text-zinc-500 dark:text-zinc-500">
+                  <span className="min-w-0 flex-1 text-left truncate text-zinc-500 dark:text-zinc-500">
                     {(() => {
                       try {
                         const params = JSON.parse(call.content || "{}");
@@ -757,23 +757,23 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
 
                 {/* Expanded details */}
                 {isExpanded && (
-                  <div className="ml-5 space-y-2">
+                  <div className="ml-5 min-w-0 max-w-full space-y-2 overflow-hidden">
                     {/* Call details */}
-                    <div>
+                    <div className="min-w-0">
                       <div className="mb-1 text-[10px] font-medium text-zinc-500">Arguments:</div>
-                      <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[10px] text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
+                      <pre className="w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-zinc-50 p-2 text-[10px] text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
                         {call.content}
                       </pre>
                     </div>
                     
                     {/* Result if exists */}
                     {result && (
-                      <div>
+                      <div className="min-w-0">
                         <div className="mb-1 flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
                           <Check className="h-3 w-3" />
                           Result ({result.content.length} chars)
                         </div>
-                        <pre className="overflow-x-auto rounded bg-emerald-50/30 p-2 text-[10px] text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400">
+                        <pre className="w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-emerald-50/30 p-2 text-[10px] text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400">
                           {result.content.length > 500 
                             ? result.content.substring(0, 500) + "\n\n... (truncated)"
                             : result.content
@@ -896,24 +896,15 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
   }
 
   if (message.type === "assistant") {
-    const { thinkContent, replyContent, thinkClosed } = parseThinkContent(message.content);
-    const hasReplyStarted = thinkClosed && replyContent.length > 0;
     const showPlaceholder = !message.content;
 
     return (
       <MessageContentWrapper>
         <div className="flex justify-start">
           <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200 select-text">
-            {thinkContent !== null && (
-              <ThinkBlock
-                content={thinkContent}
-                isStreaming={isStreaming}
-                hasReplyStarted={hasReplyStarted}
-              />
-            )}
-            {replyContent && (
-              <div className={`prose prose-sm prose-zinc max-w-none dark:prose-invert ${thinkContent !== null ? "mt-2" : ""} select-text`}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{replyContent}</ReactMarkdown>
+            {message.content && (
+              <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert select-text">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
               </div>
             )}
             {showPlaceholder && (
@@ -935,6 +926,8 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
               content={message.content}
               isStreaming={isStreaming}
               hasReplyStarted={!isStreaming}
+              startTime={message.startTime}
+              endTime={message.endTime}
             />
           </div>
         </div>
@@ -1667,3 +1660,4 @@ function ModelMenu({
     </div>
   );
 }
+

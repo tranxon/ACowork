@@ -8,7 +8,8 @@ interface ChatStore {
   messages: ChatMessage[];
   streamingMessageId: string | null;
   sending: boolean;
-  ws: WebSocket | null;
+  /** Per-agent WebSocket connections: agentId → WebSocket */
+  wsMap: Record<string, WebSocket>;
   tokenUsage: TokenUsage | null;
   /** Current active model for the selected agent */
   currentModel: string | null;
@@ -31,14 +32,25 @@ interface ChatStore {
   messageCursor: string | null;
   /** Whether more messages are being loaded */
   isLoadingMore: boolean;
+  /** Current turn/iteration ID — tracks LLM call cycles for grouping thinking + tools */
+  currentTurnId: string | null;
+  /** Accumulated raw stream buffer for cross-chunk tag detection */
+  streamBuffer: string;
+  /** Current thinking message ID (type: "think") during streaming */
+  thinkingMessageId: string | null;
+  /** Whether the current stream is inside a <think> block */
+  isInThinkPhase: boolean;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => Promise<void>;
   stopCurrentMessage: () => Promise<void>;
-  disconnectStream: () => void;
+  /** Disconnect a specific agent's WebSocket, or all if no agentId provided */
+  disconnectStream: (agentId?: string) => void;
   clearMessages: () => void;
   setCurrentModel: (model: string, provider: string, agentId: string) => void;
   setAvailableModels: (models: { name: string; provider: string }[]) => void;
+  /** Get the WebSocket for a specific agent */
+  getWs: (agentId: string) => WebSocket | undefined;
   /** Load provider for a specific agent from per-agent cache */
   loadAgentProvider: (agentId: string) => string | null;
   /** Continue agent execution after iteration limit pause */
@@ -64,45 +76,55 @@ function toWsUrl(httpUrl: string, agentId: string): string {
   return `${httpUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/agents/${agentId}/stream`;
 }
 
-/** Reconnect state — tracked outside zustand to avoid re-render loops */
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectAttempts = 0;
+/** Per-agent reconnect state — tracked outside zustand to avoid re-render loops */
+const reconnectState: Record<string, { timer: ReturnType<typeof setTimeout> | null; attempts: number }> = {};
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
 function scheduleReconnect(agentId: string, gatewayUrl: string) {
-  if (reconnectTimer) return; // already scheduled
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.warn("[ChatStore] Max reconnect attempts reached, giving up");
+  if (!reconnectState[agentId]) {
+    reconnectState[agentId] = { timer: null, attempts: 0 };
+  }
+  const rs = reconnectState[agentId];
+  if (rs.timer) return; // already scheduled
+  if (rs.attempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.warn(`[ChatStore] Max reconnect attempts reached for agent ${agentId}, giving up`);
     return;
   }
-  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.5, reconnectAttempts), RECONNECT_MAX_MS);
-  reconnectAttempts++;
-  console.log(`[ChatStore] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
+  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.5, rs.attempts), RECONNECT_MAX_MS);
+  rs.attempts++;
+  console.log(`[ChatStore] Reconnecting agent ${agentId} in ${Math.round(delay)}ms (attempt ${rs.attempts}/${MAX_RECONNECT_ATTEMPTS})`);
+  rs.timer = setTimeout(() => {
+    rs.timer = null;
     const store = useChatStore.getState();
-    // Only reconnect if still on the same agent
-    if (store.ws === null) {
+    // Only reconnect if this agent has no active ws
+    if (!store.wsMap[agentId]) {
       store.connectStream(agentId, gatewayUrl);
     }
   }, delay);
 }
 
-function resetReconnect() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
+function resetReconnect(agentId: string) {
+  const rs = reconnectState[agentId];
+  if (rs?.timer) {
+    clearTimeout(rs.timer);
+    rs.timer = null;
   }
-  reconnectAttempts = 0;
+  if (rs) rs.attempts = 0;
+}
+
+function resetAllReconnects() {
+  for (const agentId of Object.keys(reconnectState)) {
+    resetReconnect(agentId);
+  }
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
   streamingMessageId: null,
   sending: false,
-  ws: null,
+  wsMap: {},
   tokenUsage: null,
   currentModel: null,
   currentProvider: null,
@@ -115,16 +137,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   hasMoreMessages: false,
   messageCursor: null,
   isLoadingMore: false,
+  currentTurnId: null,
+  streamBuffer: "",
+  thinkingMessageId: null,
+  isInThinkPhase: false,
+
+  getWs: (agentId: string) => get().wsMap[agentId],
 
   connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
     // Update currentAgentId for stop functionality
     set({ currentAgentId: agentId });
     
-    // Cancel any pending reconnect
-    resetReconnect();
+    // Cancel any pending reconnect for this agent
+    resetReconnect(agentId);
 
-    // Close existing connection and clear its handlers to prevent stale callbacks
-    const existing = get().ws;
+    // If this agent already has an OPEN ws, reuse it
+    const existing = get().wsMap[agentId];
+    if (existing && existing.readyState === WebSocket.OPEN) {
+      console.log("[ChatStore] Reusing existing WebSocket for agent:", agentId);
+      return;
+    }
+
+    // Close any stale connection for this specific agent only
     if (existing) {
       existing.onopen = null;
       existing.onmessage = null;
@@ -139,19 +173,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       ws = new WebSocket(wsUrl);
     } catch (e) {
       console.warn("[ChatStore] WebSocket creation failed, will retry:", e);
-      set({ ws: null });
+      set((state) => {
+        const newMap = { ...state.wsMap };
+        delete newMap[agentId];
+        return { wsMap: newMap };
+      });
       scheduleReconnect(agentId, gatewayUrl);
       return;
     }
 
     ws.onopen = () => {
       console.log("[ChatStore] WebSocket connected for agent:", agentId);
-      resetReconnect(); // successful connection resets retry counter
-      // Re-set ws to trigger React re-render with OPEN readyState
-      set({ ws });
+      resetReconnect(agentId); // successful connection resets retry counter
+      // Re-set wsMap entry to trigger React re-render with OPEN readyState
+      set((state) => ({ wsMap: { ...state.wsMap, [agentId]: ws } }));
     };
 
     ws.onmessage = (event) => {
+      // Only process messages for the currently active agent
+      if (get().currentAgentId !== agentId) {
+        return;
+      }
       try {
         const data = JSON.parse(event.data);
         handleMessageEvent(data, set, get);
@@ -162,30 +204,54 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.onclose = () => {
       // Defensive check: ignore stale callbacks from a replaced WebSocket
-      if (get().ws !== ws) {
+      if (get().wsMap[agentId] !== ws) {
         console.log("[ChatStore] Stale WebSocket closed, ignoring");
         return;
       }
-      console.log("[ChatStore] WebSocket closed, scheduling reconnect");
-      set({ ws: null, sending: false, streamingMessageId: null });
+      console.log("[ChatStore] WebSocket closed for agent:", agentId);
+      set((state) => {
+        const newMap = { ...state.wsMap };
+        delete newMap[agentId];
+        return {
+          wsMap: newMap,
+          // Only clear streaming state if this was the active agent
+          ...(state.currentAgentId === agentId ? {
+            sending: false,
+            streamingMessageId: null,
+            streamBuffer: "",
+            thinkingMessageId: null,
+            isInThinkPhase: false,
+          } : {}),
+        };
+      });
       scheduleReconnect(agentId, gatewayUrl);
     };
 
     ws.onerror = (err) => {
       // Defensive check: ignore stale callbacks from a replaced WebSocket
-      if (get().ws !== ws) {
+      if (get().wsMap[agentId] !== ws) {
         console.log("[ChatStore] Stale WebSocket error, ignoring");
         return;
       }
       console.warn("[ChatStore] WebSocket error:", err);
-      // Don't set ws: null here — onclose will fire after onerror
+      // Don't remove from wsMap here — onclose will fire after onerror
     };
 
-    set({ ws, streamingMessageId: null, tokenUsage: null, contextUsage: null, currentAgentId: agentId });
+    set((state) => ({
+      wsMap: { ...state.wsMap, [agentId]: ws },
+      streamingMessageId: null,
+      tokenUsage: null,
+      contextUsage: null,
+      currentAgentId: agentId,
+      streamBuffer: "",
+      thinkingMessageId: null,
+      isInThinkPhase: false,
+      sending: false,
+    }));
   },
 
   sendMessage: async (content: string, agentId: string) => {
-    const { ws } = get();
+    const ws = get().wsMap[agentId];
 
     // Add user message
     const userMsg: ChatMessage = {
@@ -197,24 +263,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => ({
       messages: [...state.messages, userMsg],
       sending: true,
+      currentTurnId: null, // Reset turn tracking for new conversation turn
     }));
 
-    // Helper: send via WebSocket and set up streaming placeholder
+    // Helper: send via WebSocket and set up streaming state
     const sendViaWs = (socket: WebSocket) => {
       socket.send(JSON.stringify({ type: "message", content }));
 
-      // Create placeholder for assistant streaming message
-      const assistantMsgId = `msg-assistant-${Date.now()}`;
-      const assistantMsg: ChatMessage = {
-        id: assistantMsgId,
-        type: "assistant",
-        content: "",
-        timestamp: Date.now(),
-      };
-      set((state) => ({
-        messages: [...state.messages, assistantMsg],
-        streamingMessageId: assistantMsgId,
-      }));
+      // Reset streaming state — messages will be created on first chunk
+      set({ streamBuffer: "", streamingMessageId: null, thinkingMessageId: null, isInThinkPhase: false });
     };
 
     // If WebSocket exists, try to use it
@@ -287,7 +344,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   stopCurrentMessage: async () => {
-    const { currentAgentId, streamingMessageId, ws } = get();
+    const { currentAgentId, streamingMessageId } = get();
     if (!currentAgentId || !streamingMessageId) {
       console.warn("[ChatStore] No active streaming message to stop");
       return;
@@ -296,6 +353,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     console.log("[ChatStore] Stopping current message for agent:", currentAgentId);
 
     // Send stop command via WebSocket if available
+    const ws = get().wsMap[currentAgentId];
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "stop", agentId: currentAgentId }));
     }
@@ -311,24 +369,60 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     // Update UI state immediately
-    set({ sending: false, streamingMessageId: null });
+    set({ sending: false, streamingMessageId: null, streamBuffer: "", thinkingMessageId: null, isInThinkPhase: false });
   },
 
-  disconnectStream: () => {
-    resetReconnect(); // stop any pending reconnect
-    const ws = get().ws;
-    if (ws) {
-      ws.onopen = null;
-      ws.onmessage = null;
-      ws.onclose = null;
-      ws.onerror = null;
-      ws.close();
+  disconnectStream: (agentId?: string) => {
+    if (agentId) {
+      // Disconnect a specific agent's WebSocket
+      resetReconnect(agentId);
+      const ws = get().wsMap[agentId];
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
+      }
+      set((state) => {
+        const newMap = { ...state.wsMap };
+        delete newMap[agentId];
+        return {
+          wsMap: newMap,
+          ...(state.currentAgentId === agentId ? {
+            sending: false,
+            streamingMessageId: null,
+            streamBuffer: "",
+            thinkingMessageId: null,
+            isInThinkPhase: false,
+          } : {}),
+        };
+      });
+    } else {
+      // Disconnect all agents' WebSockets
+      resetAllReconnects();
+      const allWs = get().wsMap;
+      for (const id of Object.keys(allWs)) {
+        const ws = allWs[id];
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
+      }
+      set({
+        wsMap: {},
+        sending: false,
+        streamingMessageId: null,
+        streamBuffer: "",
+        thinkingMessageId: null,
+        isInThinkPhase: false,
+      });
     }
-    set({ ws: null, sending: false, streamingMessageId: null });
   },
 
   clearMessages: () => {
-    set({ messages: [], tokenUsage: null });
+    set({ messages: [], tokenUsage: null, streamBuffer: "", streamingMessageId: null, thinkingMessageId: null, isInThinkPhase: false, sending: false });
   },
   setCurrentModel: (model: string, provider: string, agentId: string) => {
     // Optimistically update UI only — don't cache until confirmed by backend
@@ -336,7 +430,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const prevProvider = get().currentProvider;
     set({ currentModel: model, currentProvider: provider });
     // Send model_switch message to Agent via WebSocket when user changes model
-    const ws = get().ws;
+    const ws = get().wsMap[agentId];
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "model_switch", model, provider, agentId, _prevModel: prevModel }));
     } else {
@@ -418,7 +512,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Convert Episode messages to ChatMessage format
       const historyMessages: ChatMessage[] = data.messages.map((msg) => ({
         id: `history-${msg.turn_index}-${msg.role}-${msg.timestamp}`,
-        type: msg.role === "user" ? "user" : msg.role === "assistant" ? "assistant" : "system",
+        type: (msg.role === "user"
+          ? "user"
+          : msg.role === "assistant"
+            ? "assistant"
+            : msg.role === "think"
+              ? "think"
+              : "system") as ChatMessage["type"],
         content: msg.content,
         timestamp: msg.timestamp * 1000, // Convert seconds to milliseconds
       }));
@@ -528,29 +628,185 @@ function handleMessageEvent(
       break;
 
     case "chunk": {
-      // Streaming text chunk — append to current assistant message
-      const delta = data.delta as string;
-      set((state) => ({
-        messages: state.messages.map((msg) =>
-          msg.id === state.streamingMessageId ? { ...msg, content: msg.content + delta } : msg,
-        ),
-      }));
+      // Streaming text chunk — split think/reply at store level
+      // Fallback to `content` field for backward compatibility with older Gateway versions
+      const delta = (data.delta ?? data.content) as string;
+      const reasoningDelta = data.reasoning_content as string | undefined;
+
+      set((state) => {
+        // DeepSeek-style reasoning_content (independent field, not wrapped in <think>)
+        // NOTE: Do NOT set isInThinkPhase here — that flag is exclusively for <think> tag state machine.
+        // Do NOT set streamingMessageId — so when regular content arrives, it creates a new assistant message.
+        if (reasoningDelta) {
+          if (state.thinkingMessageId) {
+            return {
+              messages: state.messages.map((msg) =>
+                msg.id === state.thinkingMessageId
+                  ? { ...msg, content: msg.content + reasoningDelta }
+                  : msg,
+              ),
+            };
+          } else {
+            const thinkMsgId = `msg-think-${Date.now()}`;
+            const thinkMsg: ChatMessage = {
+              id: thinkMsgId,
+              type: "think",
+              content: reasoningDelta,
+              timestamp: Date.now(),
+              startTime: Date.now(),
+            };
+            return {
+              messages: [...state.messages, thinkMsg],
+              thinkingMessageId: thinkMsgId,
+            };
+          }
+        }
+
+        const newBuffer = state.streamBuffer + delta;
+
+        // Already in think phase — check for </think> close
+        if (state.isInThinkPhase && state.thinkingMessageId) {
+          const closeIdx = newBuffer.indexOf("</think>");
+          if (closeIdx >= 0) {
+            // Think phase ends — extract think content and reply content
+            const thinkStart = newBuffer.indexOf("<think>");
+            const thinkContent = newBuffer.substring(thinkStart + 7, closeIdx);
+            const replyContent = newBuffer.substring(closeIdx + 8).trimStart();
+
+            // Finalize think message (set endTime to stop the timer)
+            const now = Date.now();
+            const messages = state.messages.map((msg) =>
+              msg.id === state.thinkingMessageId
+                ? { ...msg, content: thinkContent, endTime: now }
+                : msg,
+            );
+
+            // Create assistant message for reply
+            const assistantMsgId = `msg-assistant-${Date.now()}`;
+            const assistantMsg: ChatMessage = {
+              id: assistantMsgId,
+              type: "assistant",
+              content: replyContent,
+              timestamp: Date.now(),
+            };
+
+            return {
+              messages: [...messages, assistantMsg],
+              streamBuffer: "",
+              isInThinkPhase: false,
+              thinkingMessageId: null,
+              streamingMessageId: assistantMsgId,
+            };
+          } else {
+            // Still in think phase — append to think message
+            const thinkStart = newBuffer.indexOf("<think>");
+            const thinkContent = newBuffer.substring(thinkStart + 7);
+            return {
+              messages: state.messages.map((msg) =>
+                msg.id === state.thinkingMessageId
+                  ? { ...msg, content: thinkContent }
+                  : msg,
+              ),
+              streamBuffer: newBuffer,
+            };
+          }
+        }
+
+        // Not in think phase — check if entering
+        const trimmed = newBuffer.trimStart();
+        const THINK_OPEN = "<think>";
+
+        if (trimmed.startsWith(THINK_OPEN)) {
+          const thinkStart = newBuffer.indexOf("<think>");
+          const thinkMsgId = `msg-think-${Date.now()}`;
+          const thinkMsg: ChatMessage = {
+            id: thinkMsgId,
+            type: "think",
+            content: newBuffer.substring(thinkStart + 7),
+            timestamp: Date.now(),
+            startTime: Date.now(),
+          };
+          return {
+            messages: [...state.messages, thinkMsg],
+            streamBuffer: newBuffer,
+            isInThinkPhase: true,
+            thinkingMessageId: thinkMsgId,
+            streamingMessageId: thinkMsgId,
+          };
+        }
+
+        // If buffer is non-empty and definitely not starting with <think>,
+        // create or append to assistant message
+        if (trimmed.length > 0) {
+          const definitelyNotThink =
+            trimmed[0] !== "<" ||
+            (trimmed.length >= THINK_OPEN.length && !trimmed.startsWith(THINK_OPEN));
+
+          if (definitelyNotThink) {
+            if (state.streamingMessageId && !state.isInThinkPhase) {
+              return {
+                messages: state.messages.map((msg) =>
+                  msg.id === state.streamingMessageId
+                    ? { ...msg, content: msg.content + delta }
+                    : msg,
+                ),
+                streamBuffer: newBuffer,
+              };
+            } else {
+              const assistantMsgId = `msg-assistant-${Date.now()}`;
+              const assistantMsg: ChatMessage = {
+                id: assistantMsgId,
+                type: "assistant",
+                content: newBuffer,
+                timestamp: Date.now(),
+              };
+              return {
+                messages: [...state.messages, assistantMsg],
+                streamBuffer: newBuffer,
+                streamingMessageId: assistantMsgId,
+              };
+            }
+          }
+        }
+
+        // Buffer is empty or starts with `<` but too short to tell — keep buffering
+        return { streamBuffer: newBuffer };
+      });
       break;
     }
 
     case "tool_call": {
       const toolName = data.name as string;
       const params = data.params as Record<string, unknown>;
+      
+      // Generate or reuse turnId: group tools that happen after a think/assistant message
+      const state = get();
+      let turnId = state.currentTurnId;
+      
+      // If no current turnId, create one
+      if (!turnId) {
+        turnId = `turn-${Date.now()}`;
+        set({ currentTurnId: turnId });
+      }
+      
       const toolMsg: ChatMessage = {
-        id: `msg-tool-${Date.now()}`,
+        id: `msg-tool-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         type: "tool_call",
         content: JSON.stringify(params, null, 2),
         timestamp: Date.now(),
         toolName,
         toolData: params,
+        turnId,
+        startTime: Date.now(),
       };
       set((state) => ({
         messages: [...state.messages, toolMsg],
+        // End current streaming phase: thinking/reply ends when tools start executing.
+        // This ensures the next iteration's content creates new messages.
+        streamingMessageId: null,
+        thinkingMessageId: null,
+        isInThinkPhase: false,
+        streamBuffer: "",
       }));
       break;
     }
@@ -558,14 +814,17 @@ function handleMessageEvent(
     case "tool_result": {
       const toolName = data.name as string;
       const result = data.result as Record<string, unknown>;
+      const state = get();
+      
       const resultMsg: ChatMessage = {
-        id: `msg-result-${Date.now()}`,
+        id: `msg-result-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         type: "tool_result",
         content: JSON.stringify(result, null, 2),
         timestamp: Date.now(),
         toolName,
         toolData: result,
         toolStatus: "success",
+        turnId: state.currentTurnId || undefined,
       };
       set((state) => ({
         messages: [...state.messages, resultMsg],
@@ -577,21 +836,69 @@ function handleMessageEvent(
       // Streaming complete — or non-streaming response with full content
       const usage = data.usage as TokenUsage | undefined;
       const content = data.content as string | undefined;
+      const reasoningContent = data.reasoning_content as string | undefined;
       set((state) => {
-        const messages = [...state.messages];
+        let messages = [...state.messages];
+
         // If there's a streaming message with empty content (non-streaming mode),
         // fill in the content from the done event.
-        if (state.streamingMessageId && content) {
-          const idx = messages.findIndex((m) => m.id === state.streamingMessageId);
-          if (idx >= 0 && !messages[idx].content) {
-            messages[idx] = { ...messages[idx], content };
+        if (content) {
+          if (state.streamingMessageId) {
+            const idx = messages.findIndex((m) => m.id === state.streamingMessageId);
+            if (idx >= 0 && !messages[idx].content) {
+              messages[idx] = { ...messages[idx], content };
+            }
+          } else {
+            // Fallback: create a new assistant message if no streaming message exists.
+            // This handles the case where sendViaWs no longer pre-creates an empty
+            // placeholder and no chunk arrived to create one.
+            const assistantMsgId = `msg-assistant-${Date.now()}`;
+            const assistantMsg: ChatMessage = {
+              id: assistantMsgId,
+              type: "assistant",
+              content,
+              timestamp: Date.now(),
+            };
+            messages = [...messages, assistantMsg];
           }
         }
+
+        // If there's reasoning_content in done event (DeepSeek non-streaming),
+        // create a think message with endTime (thinking is already complete)
+        if (reasoningContent && !state.thinkingMessageId) {
+          const thinkMsgId = `msg-think-${Date.now()}`;
+          const now = Date.now();
+          const thinkMsg: ChatMessage = {
+            id: thinkMsgId,
+            type: "think",
+            content: reasoningContent,
+            timestamp: now,
+            startTime: now,
+            endTime: now,
+          };
+          messages = [...messages, thinkMsg];
+        }
+
+        // Set endTime on the currently streaming think message (if any)
+        // This stops the ThinkBlock timer when the LLM call finishes.
+        if (state.thinkingMessageId) {
+          const endTime = Date.now();
+          messages = messages.map((msg) =>
+            msg.id === state.thinkingMessageId && !msg.endTime
+              ? { ...msg, endTime }
+              : msg,
+          );
+        }
+
         return {
           messages,
           streamingMessageId: null,
           sending: false,
           tokenUsage: usage ?? state.tokenUsage,
+          currentTurnId: null,
+          streamBuffer: "",
+          thinkingMessageId: null,
+          isInThinkPhase: false,
         };
       });
       break;
@@ -640,6 +947,9 @@ function handleMessageEvent(
         messages: [...state.messages, errMsg],
         sending: false,
         streamingMessageId: null,
+        streamBuffer: "",
+        thinkingMessageId: null,
+        isInThinkPhase: false,
       }));
       break;
     }

@@ -218,10 +218,10 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                 });
                 let content = if m.tool_call_id.is_some() {
                     // tool_call_id is a separate field — content is the actual result
-                    if m.content.is_empty() { None } else { Some(m.content.clone()) }
+                    Some(m.content.clone())
                 } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
                     // Legacy format: content JSON contains tool_call_id and content
-                    value.get("content").and_then(serde_json::Value::as_str).map(ToString::to_string)
+                    Some(value.get("content").and_then(serde_json::Value::as_str).unwrap_or("").to_string())
                 } else {
                     Some(m.content.clone())
                 };
