@@ -5,6 +5,7 @@
 
 use std::io::{BufRead, BufReader, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -133,6 +134,9 @@ impl ConversationWriter {
 pub struct ConversationSession {
     session_id: String,
     agent_id: String,
+    created_at: String,
+    /// Whether the session title has been set (first user message).
+    title_set: AtomicBool,
     sender: mpsc::UnboundedSender<WriterCommand>,
     /// Path to the JSONL file (for session-level distillation on close).
     session_file_path: PathBuf,
@@ -155,6 +159,7 @@ impl ConversationSession {
             .open(&file_path)?;
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now_for_self = now.clone();
         let metadata = SessionMetadata {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: session_id.to_string(),
@@ -179,6 +184,8 @@ impl ConversationSession {
         Ok(Self {
             session_id: session_id.to_string(),
             agent_id: agent_id.to_string(),
+            created_at: now_for_self,
+            title_set: AtomicBool::new(false),
             sender: tx,
             session_file_path: file_path,
         })
@@ -206,6 +213,8 @@ impl ConversationSession {
         Ok(Self {
             session_id: session_id.to_string(),
             agent_id: meta.agent_id,
+            created_at: meta.created_at,
+            title_set: AtomicBool::new(meta.title.is_some()),
             sender: tx,
             session_file_path: file_path,
         })
@@ -273,6 +282,47 @@ impl ConversationSession {
         if let Err(e) = self.sender.send(WriterCommand::UpdateMetadata(metadata)) {
             tracing::error!("Failed to send metadata update to conversation writer: {}", e);
         }
+    }
+
+    /// Set the session title from the first user message.
+    ///
+    /// Truncates to 30 characters. Only sets title once —
+    /// subsequent calls are no-ops.
+    pub fn set_title(&self, content: &str) {
+        if self.title_set.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let title = {
+            let chars: Vec<char> = content.chars().collect();
+            if chars.len() <= 30 {
+                content.to_string()
+            } else {
+                // Find the last natural break point within first 30 chars
+                let break_chars = [',', '，', '.', '。', '!', '！', '?', '？', ';', '；', '\n'];
+                if let Some(pos) = chars[..30].iter().rposition(|c| break_chars.contains(c)) {
+                    let truncated: String = chars[..=pos].iter().collect();
+                    if pos < 29 {
+                        truncated
+                    } else {
+                        format!("{}...", truncated)
+                    }
+                } else {
+                    let truncated: String = chars[..30].iter().collect();
+                    format!("{}...", truncated)
+                }
+            }
+        };
+        let metadata = SessionMetadata {
+            version: CONVERSATION_FORMAT_VERSION,
+            session_id: self.session_id.clone(),
+            created_at: self.created_at.clone(),
+            agent_id: self.agent_id.clone(),
+            title: Some(title),
+            updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            message_count: None,
+        };
+        self.update_metadata(metadata);
+        tracing::info!(session_id = %self.session_id, "Session title set");
     }
 }
 

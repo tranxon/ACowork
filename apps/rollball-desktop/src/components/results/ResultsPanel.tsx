@@ -1,8 +1,7 @@
-import { useState } from "react";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { cn } from "../../lib/utils";
-import type { ChatMessage } from "../../lib/types";
+import { PanelRight } from "lucide-react";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
@@ -11,11 +10,6 @@ interface ResultsPanelProps {
 export function ResultsPanel({ onCollapse }: ResultsPanelProps) {
   const { tokenUsage, messages } = useChatStore();
   const { agents, selectedAgentId } = useAgentStore();
-
-  // Collect tool call records from messages
-  const toolCalls = messages.filter(
-    (m) => m.type === "tool_call" || m.type === "tool_result",
-  );
 
   // Selected agent info
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
@@ -35,7 +29,7 @@ export function ResultsPanel({ onCollapse }: ResultsPanelProps) {
           className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
           aria-label="Collapse results panel"
         >
-          ◀
+          <PanelRight className="h-4 w-4" />
         </button>
       </div>
 
@@ -54,23 +48,7 @@ export function ResultsPanel({ onCollapse }: ResultsPanelProps) {
           </div>
         </div>
 
-        {/* Tool call records */}
-        <div className="mb-4">
-          <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-            Tool Calls
-          </h3>
-          {toolCalls.length === 0 ? (
-            <div className="rounded-md bg-white p-3 text-xs text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">
-              No tool calls yet
-            </div>
-          ) : (
-            <div className="space-y-1">
-              {toolCalls.map((msg) => (
-                <ToolCallItem key={msg.id} message={msg} />
-              ))}
-            </div>
-          )}
-        </div>
+        {/* Tool call records - removed as it duplicates chat panel content */}
 
         {/* Agent running status */}
         <div>
@@ -118,40 +96,6 @@ function StatRow({ label, value }: { label: string; value?: string }) {
     <div className="flex justify-between py-1">
       <span className="text-zinc-500">{label}</span>
       <span className="font-mono text-zinc-700 dark:text-zinc-300">{value ?? "—"}</span>
-    </div>
-  );
-}
-
-function ToolCallItem({ message }: { message: ChatMessage }) {
-  const [expanded, setExpanded] = useState(false);
-  const isCall = message.type === "tool_call";
-  const statusIcon =
-    message.toolStatus === "success" ? "✅" : message.toolStatus === "error" ? "" : "⏳";
-
-  const summary = isCall
-    ? `${message.toolName ?? "tool"}`
-    : `${message.toolName ?? "tool"} result`;
-
-  return (
-    <div className="rounded-md bg-white p-2 text-xs dark:bg-zinc-800">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center justify-between text-left"
-      >
-        <span className="flex items-center gap-1">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">{summary}</span>
-        </span>
-        <span className="flex items-center gap-1.5 text-zinc-400">
-          {message.duration && <span>{(message.duration / 1000).toFixed(1)}s</span>}
-          <span>{statusIcon}</span>
-          <span className="text-[10px]">{expanded ? "▼" : "▶"}</span>
-        </span>
-      </button>
-      {expanded && message.content && (
-        <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-zinc-100 p-2 font-mono text-[11px] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
-          {message.content}
-        </pre>
-      )}
     </div>
   );
 }

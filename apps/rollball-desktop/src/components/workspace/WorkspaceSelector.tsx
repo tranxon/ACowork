@@ -4,7 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import type { WorkspaceDir } from "../../stores/workspaceStore";
 import { useToast } from "../common/ToastProvider";
-import { ChevronDown, FolderOpen, FolderPlus, Trash2, Shield, ShieldOff, Search, Check } from "lucide-react";
+import { ChevronDown, FolderOpen, FolderPlus, Trash2, Shield, ShieldOff } from "lucide-react";
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
 
@@ -148,30 +148,9 @@ export function WorkspaceSelector() {
 
         {/* Dropdown menu */}
         {open && (
-          <div className="absolute bottom-full left-0 mb-2 w-80 rounded-lg border border-zinc-200 bg-white p-2 shadow-lg dark:border-zinc-700 dark:bg-zinc-800" style={{ zIndex: 100 }}>
-            {/* Search */}
-            <div className="relative mb-2">
-              <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search workspace..."
-                className="w-full rounded-md border border-zinc-200 bg-white pl-7 pr-3 py-1.5 text-xs outline-none focus:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-200"
-              />
-            </div>
-
-            {/* Add workspace button */}
-            <button
-              onClick={handleBrowse}
-              className="mb-2 flex w-full items-center gap-2 rounded-md border border-dashed border-zinc-300 px-3 py-2 text-xs text-zinc-600 hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-zinc-500 dark:hover:bg-zinc-700/50"
-            >
-              <FolderPlus className="h-3.5 w-3.5" />
-              Add Workspace
-            </button>
-
+          <div className="absolute bottom-full left-0 mb-2 w-80 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800" style={{ zIndex: 100 }}>
             {/* Workspace list */}
-            <div className="max-h-56 overflow-y-auto">
+            <div className="max-h-56 overflow-y-auto py-1">
               {loading ? (
                 <div className="py-4 text-center text-xs text-zinc-400">Loading...</div>
               ) : filteredWorkspaces.length === 0 ? (
@@ -188,25 +167,24 @@ export function WorkspaceSelector() {
                     return (
                       <div
                         key={dir.id}
-                        className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                        className={cn("group flex items-center gap-2 px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
+                          isCurrent && "bg-[#D8D9DC] dark:bg-[#3D3D3F]",
+                        )}
                       >
                         {/* Select workspace button */}
                         <button
                           onClick={() => handleSelect(dir)}
-                          className="flex flex-1 items-center gap-2 text-left"
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
                         >
                           <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                          <div className="flex-1 truncate">
-                            <div className="font-medium text-zinc-800 dark:text-zinc-200">
+                          <div className="min-w-0 flex-1">
+                            <div className={cn("truncate text-xs", isCurrent ? "font-medium text-blue-600 dark:text-blue-400" : "font-medium text-zinc-800 dark:text-zinc-200")}>
                               {displayName}
                             </div>
-                            <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                            <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400" title={dir.path}>
                               {dir.path}
                             </div>
                           </div>
-                          {isCurrent && (
-                            <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                          )}
                         </button>
             
                         {/* Action buttons: access toggle + delete */}
@@ -278,13 +256,19 @@ export function WorkspaceSelector() {
               )}
             </div>
 
-            {/* Footer stats */}
-            {workspaces.length > 0 && (
-              <div className="mt-2 border-t border-zinc-100 pt-2 text-[10px] text-zinc-400 dark:border-zinc-700">
-                {workspaces.length} workspace{workspaces.length > 1 ? "s" : ""} ·{" "}
-                {workspaces.filter((w) => w.access === "read-write").length} read-write
-              </div>
-            )}
+            {/* Divider */}
+            <div className="border-t border-zinc-200 dark:border-zinc-700" />
+
+            {/* Add workspace button */}
+            <div className="p-2">
+              <button
+                onClick={handleBrowse}
+                className="mx-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              >
+                <FolderPlus className="h-3.5 w-3.5" />
+                Add Workspace
+              </button>
+            </div>
           </div>
         )}
       </div>

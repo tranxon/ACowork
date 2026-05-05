@@ -16,23 +16,22 @@ import type { ChatMessage, ContextUsageInfo, VaultKeyEntry, ModelInfo } from "..
 import { ThinkBlock } from "./ThinkBlock";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { SessionPanel } from "./SessionPanel";
-import { SkillBrowser } from "../skills/SkillBrowser";
+import { SkillsPanel } from "../skills/SkillsPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, wsMap, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage } = useChatStore();
+  const { messages, sending, wsMap, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage, isLoadingSession } = useChatStore();
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
-  const [activeDrawer, setActiveDrawer] = useState<"memory" | "skills" | "session" | null>(null);
+  const [activeDrawer, setActiveDrawer] = useState<"memory" | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef<number>(0);
   const isLoadingMoreRef = useRef<boolean>(false);
   const lastInitAgentRef = useRef<string | null>(null);
-  const agentSessionMapRef = useRef<Record<string, string>>({});
   const isInitialLoadRef = useRef<boolean>(false);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
@@ -145,11 +144,11 @@ export function ChatPanel() {
       return;
     }
 
-    // Remember the current session for the agent we're leaving
+    // Remember the current session for the agent we're leaving (saved in store for remount survival)
     const leavingAgentId = lastInitAgentRef.current;
     const leavingSessionId = useSessionStore.getState().currentSessionId;
     if (leavingAgentId && leavingSessionId) {
-      agentSessionMapRef.current[leavingAgentId] = leavingSessionId;
+      useSessionStore.getState().saveSessionForAgent(leavingAgentId, leavingSessionId);
     }
 
     // 1. Clear current messages from previous agent
@@ -184,15 +183,16 @@ export function ChatPanel() {
         await useSessionStore.getState().fetchSessions(selectedAgentId);
         const sessions = useSessionStore.getState().sessions;
         // Restore previously selected session for this agent, fallback to latest
-        const rememberedSessionId = agentSessionMapRef.current[selectedAgentId];
+        const rememberedSessionId = useSessionStore.getState().agentSessionMap[selectedAgentId];
         const targetSession = rememberedSessionId
           ? sessions.find((s) => s.session_id === rememberedSessionId) ?? sessions[0]
           : sessions[0];
         if (targetSession) {
-          useSessionStore.getState().switchSession(targetSession.session_id);
           await useChatStore
             .getState()
             .loadSessionMessages(selectedAgentId, targetSession.session_id);
+          // sync currentSessionId to sessionStore so SessionPanel highlights correctly
+          useSessionStore.getState().switchSession(targetSession.session_id);
         }
         // 5. If no sessions, empty chat is already shown (messages cleared above)
         isInitialLoadRef.current = false;
@@ -211,22 +211,13 @@ export function ChatPanel() {
   // Load messages when active session changes (from SessionPanel)
   useEffect(() => {
     if (!currentSessionId || !selectedAgentId) return;
-    const chatStoreSessionId = useChatStore.getState().currentSessionId;
-    if (currentSessionId === chatStoreSessionId) return;
 
     // Guard: only proceed if this session belongs to the current agent's session list.
-    // During agent switches, currentSessionId may briefly hold the previous agent's
-    // session ID (stale value from the previous render), which would cause a 400 error
-    // and wipe messages loaded by the correct concurrent request.
     const session = useSessionStore
       .getState()
       .sessions.find((s) => s.session_id === currentSessionId);
     if (!session) return;
 
-    if (session.message_count === 0) {
-      useChatStore.getState().clearMessages();
-    }
-    
     // Mark as initial load to trigger scroll-to-bottom after messages are loaded
     isInitialLoadRef.current = true;
     void useChatStore
@@ -362,7 +353,18 @@ export function ChatPanel() {
               <span className="ml-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">Loading more...</span>
             </div>
           )}
-          {messages.length === 0 && (
+          
+          {/* Loading session indicator */}
+          {isLoadingSession && messages.length === 0 && (
+            <div className="flex h-full items-center justify-center">
+              <div className="text-center">
+                <Loader className="mx-auto h-8 w-8 animate-spin text-zinc-400 dark:text-zinc-500" />
+                <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading conversation...</p>
+              </div>
+            </div>
+          )}
+          
+          {!isLoadingSession && messages.length === 0 && (
             <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
               Start a conversation with {selectedAgent.name}
             </div>
@@ -428,34 +430,19 @@ export function ChatPanel() {
             onClick={() => setActiveDrawer(null)}
           >
             <div
-              className={cn(
-                "max-w-full h-full bg-white dark:bg-zinc-900 shadow-xl overflow-y-auto",
-                activeDrawer === "session" ? "w-[280px]" : "w-[480px]",
-              )}
+              className="w-[480px] max-w-full h-full bg-white dark:bg-zinc-900 shadow-xl overflow-y-auto"
               onClick={(e) => e.stopPropagation()}
             >
-              {activeDrawer !== "session" && (
-                <div className="sticky top-0 flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 z-10">
-                  <span className="font-medium text-sm text-zinc-900 dark:text-zinc-100">
-                    {activeDrawer === "memory" ? "Memory" : "Skills"}
-                  </span>
-                  <button
-                    className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                    onClick={() => setActiveDrawer(null)}
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-              )}
+              <div className="sticky top-0 flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 z-10">
+                <span className="font-medium text-sm text-zinc-900 dark:text-zinc-100">Memory</span>
+                <button
+                  className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  onClick={() => setActiveDrawer(null)}
+                >
+                  <X size={16} />
+                </button>
+              </div>
               {activeDrawer === "memory" && <MemoryPanel />}
-              {activeDrawer === "skills" && <SkillBrowser />}
-              {activeDrawer === "session" && selectedAgentId && (
-                <SessionPanel
-                  agentId={selectedAgentId}
-                  onClose={() => setActiveDrawer(null)}
-                  onOpenMemory={() => setActiveDrawer("memory")}
-                />
-              )}
             </div>
           </div>
         )}
@@ -501,27 +488,9 @@ export function ChatPanel() {
             {/* Workspace button */}
             <WorkspaceSelector />
             {/* Session button */}
-            <button
-              className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors ${
-                activeDrawer === "session"
-                  ? "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100"
-                  : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
-              }`}
-              onClick={() => setActiveDrawer(activeDrawer === "session" ? null : "session")}
-            >
-              <MessageSquare size={14} /> Session
-            </button>
-            {/* Skills button */}
-            <button
-              className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors ${
-                activeDrawer === "skills"
-                  ? "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100"
-                  : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
-              }`}
-              onClick={() => setActiveDrawer(activeDrawer === "skills" ? null : "skills")}
-            >
-              <Wrench size={14} /> Skills
-            </button>
+            {selectedAgentId && <SessionPanel agentId={selectedAgentId} onOpenMemory={() => setActiveDrawer("memory")} />}
+            {/* Skills dropdown */}
+            <SkillsPanel />
           </div>
 
           {/* Right: context usage + send/stop button */}
@@ -617,7 +586,7 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
         </div>
 
         {/* Progress bar */}
-        <div className="h-2 rounded-full bg-zinc-700 overflow-hidden">
+        <div className="h-1.5 rounded-full bg-zinc-700 overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-300 ${barColor}`}
             style={{ width: `${percent}%` }}
@@ -1651,7 +1620,7 @@ function ModelMenu({
                 className={cn(
                   "flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors",
                   isActive
-                    ? "bg-zinc-100 text-zinc-900 dark:bg-zinc-700 dark:text-white"
+                    ? "bg-[#D8D9DC] dark:bg-[#3D3D3F] text-zinc-900 dark:text-white"
                     : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
                 )}
               >

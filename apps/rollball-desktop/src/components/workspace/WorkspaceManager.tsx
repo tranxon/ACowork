@@ -203,7 +203,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
         <div className="flex items-center justify-between border-t border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <button
             onClick={() => setShowAddDialog(true)}
-            className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            className="flex items-center gap-2 rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
           >
             <Plus className="h-4 w-4" />
             Add Workspace

@@ -6,6 +6,7 @@ import { AgentDetailDialog } from "./AgentDetailDialog";
 import { cn } from "../../lib/utils";
 import { Play, Square, Trash2, Info, Copy, Plus } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useSessionStore } from "../../stores/sessionStore";
 
 interface AgentListProps {
   width?: number;
@@ -14,6 +15,8 @@ interface AgentListProps {
 export function AgentList({ width }: AgentListProps) {
   const { agents, selectedAgentId, loading, fetchAgents, selectAgent, startAgent, stopAgent, uninstallAgent } =
     useAgentStore();
+  const sessionTitles = useSessionStore((s) => s.sessionTitles);
+  const fetchLatestSessionTitle = useSessionStore((s) => s.fetchLatestSessionTitle);
   const { addToast } = useToast();
   const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -55,6 +58,16 @@ export function AgentList({ width }: AgentListProps) {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  // Fetch latest session title for each agent
+  useEffect(() => {
+    if (agents.length === 0) return;
+    for (const agent of agents) {
+      if (sessionTitles[agent.agent_id] === undefined) {
+        void fetchLatestSessionTitle(agent.agent_id);
+      }
+    }
+  }, [agents, sessionTitles, fetchLatestSessionTitle]);
 
   const handleInstall = async () => {
     try {
@@ -166,7 +179,7 @@ export function AgentList({ width }: AgentListProps) {
 
         {agents.map((agent) => {
           const isSystem = agent.agent_id === "com.rollball.system";
-          const lastActivity = agent.running ? "Active" : "Stopped";
+          const sessionTitle = sessionTitles[agent.agent_id];
           
           return (
             <div
@@ -196,16 +209,16 @@ export function AgentList({ width }: AgentListProps) {
                 {/* Top row: name + system badge */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{agent.name}</span>
+                    <span className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{agent.name}</span>
                     {isSystem && (
                       <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/50 dark:text-blue-300">System</span>
                     )}
                   </div>
                 </div>
-                {/* Bottom row: last activity */}
+                {/* Bottom row: current session title */}
                 <div className="mt-0.5 truncate text-xs">
-                  <span className={agent.running ? "text-green-600 dark:text-green-400" : "text-zinc-500 dark:text-zinc-500"}>
-                    {lastActivity}
+                  <span className="text-zinc-500 dark:text-zinc-400">
+                    {sessionTitle === undefined ? "" : (sessionTitle === null ? "No session" : (sessionTitle || "Untitled session"))}
                   </span>
                 </div>
               </div>

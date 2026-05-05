@@ -370,6 +370,8 @@ impl AgentLoop {
         // Persist user message to JSONL
         if let Some(ref conversation) = self.conversation {
             conversation.append_message("user", user_message, None);
+            // Set session title from first user message (first 100 chars)
+            conversation.set_title(user_message);
         }
 
         let mut iteration = 0u32;

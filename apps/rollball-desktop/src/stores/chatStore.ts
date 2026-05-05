@@ -32,6 +32,8 @@ interface ChatStore {
   messageCursor: string | null;
   /** Whether more messages are being loaded */
   isLoadingMore: boolean;
+  /** Whether initial session messages are being loaded */
+  isLoadingSession: boolean;
   /** Current turn/iteration ID — tracks LLM call cycles for grouping thinking + tools */
   currentTurnId: string | null;
   /** Accumulated raw stream buffer for cross-chunk tag detection */
@@ -40,6 +42,8 @@ interface ChatStore {
   thinkingMessageId: string | null;
   /** Whether the current stream is inside a <think> block */
   isInThinkPhase: boolean;
+  /** Load sequence number to prevent race conditions on fast session switches */
+  loadSequence: number;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string) => Promise<void>;
@@ -137,10 +141,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   hasMoreMessages: false,
   messageCursor: null,
   isLoadingMore: false,
+  isLoadingSession: false,
   currentTurnId: null,
   streamBuffer: "",
   thinkingMessageId: null,
   isInThinkPhase: false,
+  loadSequence: 0,
 
   getWs: (agentId: string) => get().wsMap[agentId],
 
@@ -537,6 +543,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     limit: number = 50,
     direction: string = "backward",
   ) => {
+    // Set loading state for initial load (not for pagination)
+    if (!cursor) {
+      set({ isLoadingSession: true });
+    }
+    
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
@@ -548,6 +559,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as PaginatedMessages;
+
+      console.log(`[ChatStore] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}`);
 
       const converted = (data.messages ?? []).map(convertConversationEntry);
 
@@ -562,6 +575,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messageCursor: data.cursor,
             isLoadingMore: false,
             currentSessionId: sessionId,
+            isLoadingSession: false,
           };
         }
         // Initial load: replace messages
@@ -571,11 +585,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messageCursor: data.cursor,
           isLoadingMore: false,
           currentSessionId: sessionId,
+          isLoadingSession: false,
         };
       });
     } catch (e) {
       console.error("[ChatStore] Failed to load session messages:", e);
-      set({ messages: [], currentSessionId: null, hasMoreMessages: false, messageCursor: null, isLoadingMore: false });
+      set({ messages: [], currentSessionId: null, hasMoreMessages: false, messageCursor: null, isLoadingMore: false, isLoadingSession: false });
     }
   },
 
