@@ -145,6 +145,12 @@ export interface ChatMessage {
   toolStatus?: "success" | "error";
   /** Token usage from done event */
   usage?: TokenUsage;
+  /** Turn/iteration ID — groups thinking + tools + reply in one LLM call cycle */
+  turnId?: string;
+  /** Timestamp when this message started (for duration calculation) */
+  startTime?: number;
+  /** Timestamp when this message ended (set by done event, fixes perpetual timer) */
+  endTime?: number;
 }
 
 /** Token usage stats */

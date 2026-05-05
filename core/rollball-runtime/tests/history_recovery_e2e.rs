@@ -307,7 +307,7 @@ async fn test_agent_restart_with_polluted_history_no_400() {
     let config = test_config();
     let budget = test_budget();
 
-    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None, None);
+    let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
 
     // Inject polluted history — invalid arguments, orphaned tool result
     {

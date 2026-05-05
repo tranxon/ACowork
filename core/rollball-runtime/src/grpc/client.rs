@@ -77,7 +77,7 @@ impl GatewayGrpcClient {
             proto::gateway_service_client::GatewayServiceClient::new(channel);
 
         // Outbound channel: Runtime → Gateway
-        let (outbound_tx, outbound_rx) = mpsc::channel::<proto::ClientMessage>(32);
+        let (outbound_tx, outbound_rx) = mpsc::channel::<proto::ClientMessage>(256);
         let outbound_stream = ReceiverStream::new(outbound_rx);
 
         // Open bidi-stream RPC
@@ -239,6 +239,14 @@ impl GatewayGrpcClient {
         self.send_agent_hello(agent_id, version, "main").await?;
         self.flush_pending_reports().await?;
         Ok(())
+    }
+
+    /// Get a clone of the outbound message sender.
+    ///
+    /// Allows external tasks (e.g. chunk relay) to send messages through
+    /// the shared gRPC stream without needing a full `GatewayGrpcClient`.
+    pub fn outbound_sender(&self) -> mpsc::Sender<proto::ClientMessage> {
+        self.outbound_tx.clone()
     }
 
     // ── Status ─────────────────────────────────────────────────────────────

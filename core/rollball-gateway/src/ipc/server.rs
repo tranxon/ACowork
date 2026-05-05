@@ -148,7 +148,12 @@ pub async fn handle_intent_send(
                     let delta = params.get("content")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    serde_json::json!({ "delta": delta })
+                    let mut payload = serde_json::json!({ "delta": delta });
+                    // Preserve reasoning_content for thinking mode (e.g. DeepSeek)
+                    if let Some(reasoning) = params.get("reasoning_content").and_then(|v| v.as_str()) {
+                        payload["reasoning_content"] = serde_json::Value::String(reasoning.to_string());
+                    }
+                    payload
                 }
                 crate::http::routes::BridgeEventType::Done => {
                     // Include the full response content for 'done' events

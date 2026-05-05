@@ -353,20 +353,13 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         exceeded_action: "warn".to_string(),
     };
 
-    // Step 8: Create AgentLoop with optional streaming chunk channel and tool event channel
+    // Step 8: Create AgentLoop with optional streaming chunk channel
     // In Gateway mode, each StreamEvent::Content delta is forwarded through
     // the on_chunk mpsc channel, then relayed to Gateway via StreamChunk.
-    // Tool events (ToolCall/ToolResult) are forwarded through on_tool_event
-    // and relayed to Gateway via agent_tool_call/agent_tool_result intents.
+    // Tool events (ToolCall/ToolResult) are also routed through on_chunk
+    // for ordering guarantee with content chunks.
     let (chunk_tx, chunk_rx) = if grpc_client.is_some() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::ChunkEvent>(256);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
-
-    let (tool_event_tx, tool_event_rx) = if grpc_client.is_some() {
-        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::ToolEvent>(64);
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -396,6 +389,9 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         tracing::info!(count = sessions.len(), "Background session scan complete");
     });
 
+    // Clone chunk_tx for use in run_gateway_loop (to emit Done events through chunk channel)
+    let chunk_tx_for_done = chunk_tx.clone();
+
     let (mut agent_loop, inbound_tx) = AgentLoop::new(
         config.clone(),
         loaded.manifest.clone(),
@@ -403,7 +399,6 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         active_tools,
         budget,
         chunk_tx,
-        tool_event_tx,
         conversation_session,
     );
 
@@ -430,23 +425,12 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             .to_string();
 
         // Spawn chunk relay task: consumes ChunkEvent from mpsc channel and
-        // forwards each delta to Gateway via gRPC stream (fire-and-forget).
-        // Uses a separate gRPC connection dedicated to outbound streaming chunks.
+        // forwards each event to Gateway via the shared main gRPC connection.
+        // No separate connection needed — gRPC HTTP/2 is full-duplex.
         let chunk_relay = if let Some(mut chunk_rx) = chunk_rx {
-            let agent_id = agent_id.clone();
-            let version = version.clone();
+            let outbound_tx = client.outbound_sender();
             Some(tokio::spawn(async move {
-                // Connect a second gRPC client for chunk relay.
-                let mut chunk_client = match crate::grpc::client::GatewayGrpcClient::connect_and_register_with_role(
-                    "http://127.0.0.1:19877", &agent_id, &version, "chunk-relay",
-                ).await {
-                    Ok(client) => client,
-                    Err(e) => {
-                        tracing::error!("Chunk relay gRPC connection failed: {}", e);
-                        return;
-                    }
-                };
-                tracing::info!("Chunk relay connected to Gateway via gRPC");
+                tracing::info!("Chunk relay started (shared gRPC connection)");
 
                 while let Some(event) = chunk_rx.recv().await {
                     match event {
@@ -454,38 +438,157 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                             let params = serde_json::json!({
                                 "content": delta,
                             });
-                            if let Err(e) = chunk_client
-                                .send_stream_chunk("http-ws", "agent_chunk", params)
-                                .await
-                            {
-                                tracing::warn!("Chunk relay send failed: {}, reconnecting...", e);
-                                // Reconnect chunk relay gRPC
-                                match chunk_client.reconnect_and_reregister(&agent_id, &version).await {
-                                    Ok(()) => {
-                                        tracing::info!("Chunk relay reconnected, resending last chunk");
-                                        // Retry the failed chunk once after reconnect
-                                        let retry_params = serde_json::json!({ "content": delta });
-                                        if let Err(e2) = chunk_client
-                                            .send_stream_chunk("http-ws", "agent_chunk", retry_params)
-                                            .await
-                                        {
-                                            tracing::warn!("Chunk relay retry failed after reconnect: {}", e2);
-                                        }
-                                    }
-                                    Err(e2) => {
-                                        tracing::error!("Chunk relay reconnect failed: {}", e2);
-                                        // Keep consuming chunks but they will be dropped until reconnect succeeds
-                                    }
-                                }
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::StreamChunk(
+                                    rollball_core::proto::StreamChunk {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_chunk".to_string(),
+                                        params_json: params.to_string(),
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("Chunk relay send failed — main connection may be closed");
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::ReasoningDelta(delta) => {
+                            let params = serde_json::json!({
+                                "reasoning_content": delta,
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::StreamChunk(
+                                    rollball_core::proto::StreamChunk {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_chunk".to_string(),
+                                        params_json: params.to_string(),
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("Reasoning chunk relay send failed — main connection may be closed");
                             }
                         }
                         crate::agent::loop_::ChunkEvent::ContextUsage(ctx_info) => {
-                            // Send context usage report to Gateway via gRPC
-                            if let Err(e) = chunk_client
-                                .report_context_usage(&agent_id, ctx_info)
-                                .await
-                            {
-                                tracing::debug!("Context usage report send failed: {}", e);
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::ContextUsageReport(
+                                    rollball_core::proto::ContextUsageReportRequest {
+                                        agent_id: String::new(),
+                                        context: Some((&ctx_info).into()),
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::debug!("Context usage report send failed — main connection may be closed");
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::ToolCall { name, args, id } => {
+                            let parsed_args: serde_json::Value = serde_json::from_str(&args)
+                                .unwrap_or_else(|_| serde_json::json!({ "raw": args }));
+                            let params = serde_json::json!({
+                                "name": name,
+                                "params": parsed_args,
+                                "tool_call_id": id,
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+                                    rollball_core::proto::IntentSendRequest {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_tool_call".to_string(),
+                                        params_json: params.to_string(),
+                                        r#async: false,
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("Tool call relay send failed — main connection may be closed");
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::ToolResult { name, result, tool_call_id } => {
+                            let parsed_result: serde_json::Value = serde_json::from_str(&result)
+                                .unwrap_or_else(|_| serde_json::json!({ "content": result }));
+                            let params = serde_json::json!({
+                                "name": name,
+                                "result": parsed_result,
+                                "tool_call_id": tool_call_id,
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+                                    rollball_core::proto::IntentSendRequest {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_tool_result".to_string(),
+                                        params_json: params.to_string(),
+                                        r#async: false,
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("Tool result relay send failed — main connection may be closed");
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::IterationLimitPaused { iteration, max_iterations } => {
+                            let params = serde_json::json!({
+                                "iteration": iteration,
+                                "max_iterations": max_iterations,
+                                "message": format!("Iteration limit reached ({}/{}). Click Continue to keep going.", iteration, max_iterations),
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+                                    rollball_core::proto::IntentSendRequest {
+                                        target: "http-ws".to_string(),
+                                        action: "iteration_limit_paused".to_string(),
+                                        params_json: params.to_string(),
+                                        r#async: false,
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("Iteration limit paused relay send failed — main connection may be closed");
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::Done { content, message_id } => {
+                            let params = serde_json::json!({
+                                "content": content,
+                                "message_id": message_id,
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+                                    rollball_core::proto::IntentSendRequest {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_response".to_string(),
+                                        params_json: params.to_string(),
+                                        r#async: false,
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::error!("Done (agent_response) relay send failed — main connection may be closed");
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::Error { message, message_id } => {
+                            let params = serde_json::json!({
+                                "content": message,
+                                "message_id": message_id,
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+                                    rollball_core::proto::IntentSendRequest {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_error".to_string(),
+                                        params_json: params.to_string(),
+                                        r#async: false,
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::error!("Error relay send failed — main connection may be closed");
                             }
                         }
                     }
@@ -496,88 +599,14 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             None
         };
 
-        // Spawn tool event relay task: consumes ToolEvent from mpsc channel and
-        // forwards each event to Gateway via IntentSend (agent_tool_call / agent_tool_result).
-        // Uses a dedicated gRPC connection, following the same pattern as chunk_relay.
-        let tool_event_relay = if let Some(mut tool_event_rx) = tool_event_rx {
-            let agent_id = agent_id.clone();
-            let version = version.clone();
-            Some(tokio::spawn(async move {
-                let mut te_client = match crate::grpc::client::GatewayGrpcClient::connect_and_register_with_role(
-                    "http://127.0.0.1:19877", &agent_id, &version, "tool-event-relay",
-                ).await {
-                    Ok(client) => client,
-                    Err(e) => {
-                        tracing::error!("Tool event relay gRPC connection failed: {}", e);
-                        return;
-                    }
-                };
-                tracing::info!("Tool event relay connected to Gateway via gRPC");
-
-                while let Some(event) = tool_event_rx.recv().await {
-                    let (action, params) = match event {
-                        crate::agent::loop_::ToolEvent::ToolCall { name, args, id } => {
-                            // Parse args JSON for structured forwarding; fallback to raw string
-                            let parsed_args: serde_json::Value = serde_json::from_str(&args)
-                                .unwrap_or_else(|_| serde_json::json!({ "raw": args }));
-                            ("agent_tool_call", serde_json::json!({
-                                "name": name,
-                                "params": parsed_args,
-                                "tool_call_id": id,
-                            }))
-                        }
-                        crate::agent::loop_::ToolEvent::ToolResult { name, result, tool_call_id } => {
-                            // Parse result JSON for structured forwarding; fallback to raw string
-                            let parsed_result: serde_json::Value = serde_json::from_str(&result)
-                                .unwrap_or_else(|_| serde_json::json!({ "content": result }));
-                            ("agent_tool_result", serde_json::json!({
-                                "name": name,
-                                "result": parsed_result,
-                                "tool_call_id": tool_call_id,
-                            }))
-                        }
-                        crate::agent::loop_::ToolEvent::IterationLimitPaused { iteration, max_iterations } => {
-                            ("iteration_limit_paused", serde_json::json!({
-                                "iteration": iteration,
-                                "max_iterations": max_iterations,
-                                "message": format!("Iteration limit reached ({}/{}). Click Continue to keep going.", iteration, max_iterations),
-                            }))
-                        }
-                    };
-
-                    if let Err(e) = te_client
-                        .send_intent("http-ws", action, params, true)
-                        .await
-                    {
-                        tracing::warn!("Tool event relay send failed: {}, reconnecting...", e);
-                        match te_client.reconnect_and_reregister(&agent_id, &version).await {
-                            Ok(()) => {
-                                tracing::info!("Tool event relay reconnected");
-                            }
-                            Err(e2) => {
-                                tracing::error!("Tool event relay reconnect failed: {}", e2);
-                            }
-                        }
-                    }
-                }
-                tracing::debug!("Tool event relay task ended");
-            }))
-        } else {
-            None
-        };
-
         let result = run_gateway_loop(
             agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone(),
             socket_path.clone(), agent_id.clone(), version.clone(),
-            log_reload_handle,
+            log_reload_handle, chunk_tx_for_done,
         ).await;
 
         // Chunk relay task will end when chunk_rx is dropped (agent_loop dropped)
         if let Some(handle) = chunk_relay {
-            let _ = handle.await;
-        }
-        // Tool event relay task will end when tool_event_rx is dropped
-        if let Some(handle) = tool_event_relay {
             let _ = handle.await;
         }
 
@@ -815,6 +844,7 @@ async fn run_gateway_loop(
     agent_id_for_reconnect: String,
     version_for_reconnect: String,
     log_reload_handle: Option<LogReloadHandle>,
+    chunk_tx_for_done: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::ChunkEvent>>,
 ) -> Result<()> {
     use rollball_core::protocol::GatewayResponse;
 
@@ -953,28 +983,54 @@ async fn run_gateway_loop(
                                 //   3. Trigger consolidation scheduler after N messages
                                 // Blocked on: Grafeo write API from Runtime process
 
-                                // Send response back to Gateway via bridge channel
-                                // Target is the HTTP client that originated the message
+                                // Send response via chunk channel (ensures ordering with preceding
+                                // content chunks — Done arrives AFTER all Delta/ToolCall/ToolResult).
+                                // Falls back to direct gRPC send if chunk channel is unavailable.
                                 let reply_target = &from;
-                                let intent_params = serde_json::json!({
-                                    "content": response_text,
-                                    "message_id": message_id,
-                                });
-
-                                match grpc_client.send_intent(reply_target, "agent_response", intent_params, false).await {
-                                    Ok(_) => tracing::debug!("Response sent to {}", reply_target),
-                                    Err(e) => tracing::error!("Failed to send response: {}", e),
+                                match chunk_tx_for_done {
+                                    Some(ref tx) => {
+                                        let event = crate::agent::loop_::ChunkEvent::Done {
+                                            content: response_text,
+                                            message_id: message_id.clone(),
+                                        };
+                                        if tx.send(event).await.is_err() {
+                                            tracing::error!("Done event send via chunk channel failed — chunk relay may have crashed");
+                                        }
+                                    }
+                                    None => {
+                                        let intent_params = serde_json::json!({
+                                            "content": response_text,
+                                            "message_id": message_id,
+                                        });
+                                        match grpc_client.send_intent(reply_target, "agent_response", intent_params, false).await {
+                                            Ok(_) => tracing::debug!("Response sent to {}", reply_target),
+                                            Err(e) => tracing::error!("Failed to send response: {}", e),
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
                                 tracing::error!("Agent error: {}", e);
 
-                                // Send error response
-                                let error_params = serde_json::json!({
-                                    "content": format!("Error: {}", e),
-                                    "message_id": message_id,
-                                });
-                                let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
+                                // Route error through chunk channel for ordering guarantee
+                                match chunk_tx_for_done {
+                                    Some(ref tx) => {
+                                        let event = crate::agent::loop_::ChunkEvent::Error {
+                                            message: format!("Error: {}", e),
+                                            message_id: message_id.clone(),
+                                        };
+                                        if tx.send(event).await.is_err() {
+                                            tracing::error!("Error event send via chunk channel failed");
+                                        }
+                                    }
+                                    None => {
+                                        let error_params = serde_json::json!({
+                                            "content": format!("Error: {}", e),
+                                            "message_id": message_id,
+                                        });
+                                        let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1457,27 +1513,6 @@ async fn try_reconnect_gateway(
             tracing::error!("Failed to reconnect to Gateway gRPC: {}", e);
             Err(crate::error::RuntimeError::Ipc(format!(
                 "gRPC reconnect failed: {}", e
-            )))
-        }
-    }
-}
-
-/// Attempt to reconnect the chunk relay gRPC connection with exponential backoff.
-#[allow(dead_code)]
-async fn try_reconnect_chunk_relay(
-    agent_id: &str,
-    version: &str,
-    chunk_client: &mut crate::grpc::client::GatewayGrpcClient,
-) -> Result<()> {
-    match chunk_client.reconnect_and_reregister(agent_id, version).await {
-        Ok(()) => {
-            tracing::info!("Chunk relay reconnected to Gateway gRPC successfully");
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!("Failed to reconnect chunk relay gRPC: {}", e);
-            Err(crate::error::RuntimeError::Ipc(format!(
-                "Chunk relay gRPC reconnect failed: {}", e
             )))
         }
     }
