@@ -23,7 +23,7 @@ use crate::agent::budget_guard::{BudgetCheckResult, BudgetGuard};
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
-use crate::agent::loop_detector::{LoopDetectionResult, LoopDetector, ResponseLevel};
+use crate::agent::loop_detector::{LoopDetectionResult, LoopDetector, LoopPattern, ResponseLevel};
 use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
@@ -631,13 +631,13 @@ impl AgentLoop {
             // ⑤ Tool dispatch — parallel execution (S1.7)
             // ⑤.1 Pre-execution loop detection: block repeated calls before wasting an iteration
             let mut calls_to_execute: Vec<ToolCall> = Vec::new();
-            let mut blocked_indices: Vec<usize> = Vec::new();
+            let mut blocked_info: Vec<(usize, LoopPattern)> = Vec::new();
             for (idx, tc) in deduped_calls.iter().enumerate() {
                 match self.loop_detector.peek_check(&tc.function.name, &tc.function.arguments) {
                     LoopDetectionResult::NoLoop => {
                         calls_to_execute.push(tc.clone());
                     }
-                    LoopDetectionResult::LoopDetected { level, .. } => {
+                    LoopDetectionResult::LoopDetected { level, pattern, .. } => {
                         match level {
                             ResponseLevel::Warning => {
                                 // Warning is handled post-execution; allow the call
@@ -649,7 +649,7 @@ impl AgentLoop {
                                     level = ?level,
                                     "Loop detected (pre-execution), blocking tool call"
                                 );
-                                blocked_indices.push(idx);
+                                blocked_info.push((idx, pattern));
                             }
                         }
                     }
@@ -659,12 +659,19 @@ impl AgentLoop {
             let executed_results = self.execute_tools_parallel(&calls_to_execute).await;
 
             // Merge executed results with pre-blocked results, preserving original order
-            let blocked_msg = "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach.";
             let mut tool_results: Vec<String> = Vec::with_capacity(deduped_calls.len());
             let mut executed_iter = executed_results.into_iter();
             for idx in 0..deduped_calls.len() {
-                if blocked_indices.contains(&idx) {
-                    tool_results.push(blocked_msg.to_string());
+                if let Some(pos) = blocked_info.iter().position(|(i, _)| *i == idx) {
+                    let msg = match &blocked_info[pos].1 {
+                        LoopPattern::SameToolFlood => {
+                            "Loop detected: this tool has been called too many times in a short period. \
+                             Please STOP using this tool and try a different approach \
+                             (e.g., use file_read to verify results, or switch to another tool)."
+                        }
+                        _ => "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach.",
+                    };
+                    tool_results.push(msg.to_string());
                 } else {
                     tool_results.push(executed_iter.next().unwrap_or_default());
                 }
@@ -696,7 +703,7 @@ impl AgentLoop {
             }
 
             // ⑥ Append tool results to history + ⑧ Loop detection
-            for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
+            for (idx, (tc, result_content)) in deduped_calls.iter().zip(tool_results.iter()).enumerate() {
                 let tool_result_message = ChatMessage {
                     role: MessageRole::Tool,
                     content: result_content.clone(),
@@ -708,6 +715,13 @@ impl AgentLoop {
                 self.history.append(tool_result_message);
 
                 // ⑧ Loop detection
+                // Skip loop detection for pre-blocked tool calls to avoid self-reinforcing
+                // false positives: blocked tools return uniform error messages whose identical
+                // hashes would incorrectly trigger NoProgress detection.
+                if blocked_info.iter().any(|(i, _)| *i == idx) {
+                    continue;
+                }
+
                 match self.loop_detector.check(
                     &tc.function.name,
                     &tc.function.arguments,
@@ -715,7 +729,7 @@ impl AgentLoop {
                 ) {
                     LoopDetectionResult::NoLoop => {}
                     LoopDetectionResult::LoopDetected {
-                        pattern: _,
+                        pattern,
                         level,
                         count: _,
                         message,
@@ -723,10 +737,23 @@ impl AgentLoop {
                         tracing::warn!(message = %message, level = ?level, "Loop detected");
                         match level {
                             ResponseLevel::Warning => {
+                                // Customize warning message based on loop pattern
+                                let warning_content = match &pattern {
+                                    LoopPattern::SameToolFlood => {
+                                        format!(
+                                            "[System Warning] {message} \
+                                             This tool has been called excessively. \
+                                             Please STOP using this tool and try a different approach \
+                                             (e.g., use file_read to verify results, or switch to another tool) \
+                                             to complete the task."
+                                        )
+                                    }
+                                    _ => format!("[System Warning] {message}"),
+                                };
                                 // Changed from System to User — MiniMax API rejects non-first system messages
                                 self.history.append(ChatMessage {
                                     role: MessageRole::User,
-                                    content: format!("[System Warning] {message}"),
+                                    content: warning_content,
                                     name: Some("system".to_string()),
                                     tool_call_id: None,
                                     tool_calls: None,
@@ -893,12 +920,22 @@ impl AgentLoop {
                         tool_calls = resp.tool_calls;
                     } else if tool_calls.is_some() {
                         // Finished has no tool_calls — apply accumulated argument chunks
-                        // from the stream to the ToolCallStart entries
+                        // from the stream to the ToolCallStart entries.
+                        // When ToolCallStart already carries initial arguments
+                        // (e.g. GLM/DeepSeek send name+args together), do NOT
+                        // append buffer content — they are already complete.
                         if let Some(ref mut tcs) = tool_calls {
                             for (i, tc) in tcs.iter_mut().enumerate() {
-                                if let Some(args) = tool_call_args_buffer.get(&(i as u64)) {
+                                if let Some(args) = tool_call_args_buffer.get(&(i as u64))
+                                    && (tc.function.arguments.is_empty() || tc.function.arguments == "{}")
+                                {
+                                    // Arguments empty — apply buffer (MiniMax incremental pattern)
                                     tc.function.arguments = args.clone();
                                 }
+                                // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
+                                // they are already complete — do not append buffer content.
+                                // DeepSeek sends duplicate complete arguments in subsequent chunks,
+                                // appending would produce invalid JSON like {"path": "."}{"path": "."}
                             }
                         }
                     }
@@ -932,9 +969,12 @@ impl AgentLoop {
             }
         }
 
-        // Post-stream: Apply accumulated argument chunks to tool calls
+        // Post-stream: Apply accumulated argument chunks to tool calls.
         // This handles the case where the OpenAI SSE stream ends without
         // a Finished event (common with OpenAI-compatible APIs like MiniMax).
+        // When ToolCallStart already carries initial arguments from the same
+        // SSE chunk (e.g. GLM, DeepSeek), do NOT append buffer content —
+        // they are already complete.
         if tool_calls.is_some() && !tool_call_args_buffer.is_empty()
             && let Some(ref mut tcs) = tool_calls
         {
@@ -942,9 +982,14 @@ impl AgentLoop {
                 if let Some(args) = tool_call_args_buffer.get(&(i as u64))
                     && (tc.function.arguments.is_empty() || tc.function.arguments == "{}")
                 {
+                    // Arguments empty — apply buffer (MiniMax incremental pattern)
                     tracing::info!(tool_name = %tc.function.name, index = i, accumulated_len = args.len(), "Applying accumulated arguments to tool call");
                     tc.function.arguments = args.clone();
                 }
+                // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
+                // they are already complete — do not append buffer content.
+                // DeepSeek sends duplicate complete arguments in subsequent chunks,
+                // appending would produce invalid JSON like {"path": "."}{"path": "."}
             }
         }
 
@@ -1161,9 +1206,8 @@ async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> S
 
     match tool {
         Some(tool) => {
-            let params: serde_json::Value = match serde_json::from_str(params_str) {
-                Ok(v) => v,
-                Err(e) => {
+            let params: serde_json::Value = serde_json::from_str(params_str)
+                .unwrap_or_else(|e| {
                     tracing::warn!(
                         tool = %tool_name,
                         params_str = %params_str,
@@ -1171,9 +1215,8 @@ async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> S
                         "Failed to parse tool call arguments as JSON, using empty object"
                     );
                     serde_json::Value::Object(Default::default())
-                }
-            };
-
+                });
+    
             match tool.execute(params).await {
                 Ok(result) => {
                     if result.ok {

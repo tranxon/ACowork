@@ -7,7 +7,7 @@
 //! Data sources (in priority order):
 //!   1. In-memory cache (TTL 5 minutes)
 //!   2. models.dev API (https://models.dev/api.json)
-//!   3. Built-in offline data (offline_providers.json via include_str!)
+//!   3. External offline data file (loaded at runtime)
 //!   4. Empty result
 
 use axum::{
@@ -30,8 +30,7 @@ const CACHE_TTL_SECS: u64 = 300;
 /// models.dev API base URL
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 
-/// Built-in offline provider data (compiled into binary)
-const OFFLINE_PROVIDERS: &str = include_str!("offline_providers.json");
+
 
 /// Providers that have both international and CN variants on models.dev
 const CN_VARIANT_PROVIDERS: &[&str] = &["minimax", "zhipuai", "moonshotai", "alibaba"];
@@ -110,12 +109,73 @@ pub fn models_routes() -> Router<AppState> {
 
 // ── Offline data ──────────────────────────────────────────────────────
 
-/// Load built-in offline provider data (parsed once, cached forever)
+/// Load offline provider data from external file.
+/// Falls back to empty object if file not found or parse error.
 fn offline_providers() -> &'static serde_json::Value {
     static DATA: OnceLock<serde_json::Value> = OnceLock::new();
     DATA.get_or_init(|| {
-        serde_json::from_str(OFFLINE_PROVIDERS).expect("Invalid offline_providers.json")
+        load_offline_providers_from_file()
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
     })
+}
+
+fn load_offline_providers_from_file() -> Option<serde_json::Value> {
+    // Search path priority:
+    // 1. Same directory as the executable / offline_providers.json
+    // 2. Current working directory / offline_providers.json
+    let candidates = build_offline_file_candidates();
+
+    for path in &candidates {
+        if path.exists() {
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    match serde_json::from_str::<serde_json::Value>(&content) {
+                        Ok(data) => {
+                            tracing::info!("Loaded offline providers from: {}", path.display());
+                            return Some(data);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to parse offline_providers.json at {}: {}",
+                                path.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read offline_providers.json at {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    tracing::warn!(
+        "offline_providers.json not found in any candidate path, using empty data"
+    );
+    None
+}
+
+fn build_offline_file_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    // 1. Same directory as the executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("offline_providers.json"));
+        }
+    }
+
+    // 2. Current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("offline_providers.json"));
+    }
+
+    candidates
 }
 
 // ── CN variant helpers ────────────────────────────────────────────────
@@ -471,6 +531,106 @@ fn cross_provider_lookup(
         }
     }
     None
+}
+
+// ── Protocol type lookup (used by IPC to derive protocol from npm field) ──────
+
+/// Derive protocol type from models.dev npm field.
+///
+/// Mapping rules:
+/// - npm contains "anthropic" → ProtocolType::Anthropic
+/// - npm contains "ollama"    → ProtocolType::Ollama
+/// - everything else          → ProtocolType::OpenAI (default)
+fn derive_protocol_type(npm: Option<&str>) -> rollball_core::protocol::ProtocolType {
+    use rollball_core::protocol::ProtocolType;
+    match npm {
+        Some(s) if s.contains("anthropic") => ProtocolType::Anthropic,
+        Some(s) if s.contains("ollama") => ProtocolType::Ollama,
+        _ => ProtocolType::OpenAI,
+    }
+}
+
+/// Look up protocol info for a provider+model combination using offline data.
+///
+/// Returns (protocol_type, api_override):
+/// - protocol_type: derived from npm field (model-level > provider-level > default OpenAI)
+/// - api_override: model-level api URL override if present
+pub fn lookup_protocol_info(
+    provider_id: &str,
+    model_id: Option<&str>,
+) -> (rollball_core::protocol::ProtocolType, Option<String>) {
+    let data = offline_providers();
+    lookup_protocol_info_from_data(data, provider_id, model_id)
+}
+
+/// Look up protocol info with cache freshness (tries network cache first).
+/// Falls back to offline data when cache is unavailable.
+pub(crate) async fn lookup_protocol_info_with_cache(
+    cache: &ModelsCache,
+    provider_id: &str,
+    model_id: Option<&str>,
+) -> (rollball_core::protocol::ProtocolType, Option<String>) {
+    let data = match fetch_models(cache).await {
+        Ok(d) => d,
+        Err(_) => offline_providers().clone(),
+    };
+    lookup_protocol_info_from_data(&data, provider_id, model_id)
+}
+
+/// Internal helper: look up protocol info from a JSON data source.
+///
+/// Priority: model-level npm > provider-level npm > default OpenAI.
+/// Model-level api override is returned when present in the model's provider block.
+fn lookup_protocol_info_from_data(
+    data: &serde_json::Value,
+    provider_id: &str,
+    model_id: Option<&str>,
+) -> (rollball_core::protocol::ProtocolType, Option<String>) {
+    use rollball_core::protocol::ProtocolType;
+
+    let providers = match data.as_object() {
+        Some(obj) => obj,
+        None => return (ProtocolType::OpenAI, None),
+    };
+
+    // Find the provider object
+    let provider_obj = match providers.get(provider_id) {
+        Some(p) => p,
+        None => return (ProtocolType::OpenAI, None),
+    };
+
+    // Provider-level npm
+    let provider_npm = provider_obj.get("npm").and_then(|v| v.as_str());
+
+    // If model_id provided, check model-level override
+    if let Some(mid) = model_id {
+        if let Some(models) = provider_obj.get("models").and_then(|m| m.as_object()) {
+            if let Some(model_obj) = models.get(mid) {
+                if let Some(model_provider) = model_obj.get("provider").and_then(|p| p.as_object()) {
+                    let model_npm = model_provider.get("npm").and_then(|v| v.as_str());
+                    let model_api = model_provider.get("api")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    // Model-level npm takes precedence
+                    if model_npm.is_some() {
+                        return (derive_protocol_type(model_npm), model_api);
+                    }
+
+                    // Model has provider block but no npm → use provider-level npm + model api
+                    if model_api.is_some() {
+                        return (derive_protocol_type(provider_npm), model_api);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to provider-level npm + provider-level api
+    let provider_api = provider_obj.get("api")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    (derive_protocol_type(provider_npm), provider_api)
 }
 
 /// Convert a ModelInfo to ModelCapabilitiesInfo

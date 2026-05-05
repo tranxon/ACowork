@@ -42,7 +42,7 @@ impl AnthropicProvider {
         Self {
             base_url: base_url
                 .map(|u| u.trim_end_matches('/').to_string())
-                .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+                .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string()),
             api_key: api_key.map(ToString::to_string),
             http_client,
         }
@@ -398,7 +398,7 @@ impl Provider for AnthropicProvider {
             "Anthropic chat request"
         );
 
-        let url = format!("{}/v1/messages", self.base_url);
+        let url = format!("{}/messages", self.base_url);
 
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             rollball_core::RollballError::Provider(rollball_core::ProviderError::unauthorized(
@@ -473,7 +473,7 @@ impl Provider for AnthropicProvider {
             "Anthropic chat_stream request"
         );
 
-        let url = format!("{}/v1/messages", self.base_url);
+        let url = format!("{}/messages", self.base_url);
 
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             rollball_core::RollballError::Provider(rollball_core::ProviderError::unauthorized(
@@ -716,7 +716,7 @@ mod tests {
     fn test_provider_creation() {
         let provider = AnthropicProvider::new(Some("sk-ant-test"));
         assert_eq!(provider.name(), "anthropic");
-        assert_eq!(provider.base_url, "https://api.anthropic.com");
+        assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
 
         let custom = AnthropicProvider::with_base_url(
             Some("https://custom-api.example.com"),

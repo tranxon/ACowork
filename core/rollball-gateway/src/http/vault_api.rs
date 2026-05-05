@@ -339,6 +339,13 @@ async fn hot_push_llm_config(state: &AppState) {
             } else {
                 None
             };
+            // Derive protocol type from models.dev npm field
+            let (protocol_type, api_override) =
+                crate::http::models_api::lookup_protocol_info_with_cache(
+                    &state.models_cache, &cfg.provider, cfg.model.as_deref(),
+                ).await;
+            // Model-level api override takes precedence over Vault base_url
+            let effective_base_url = api_override.or(cfg.base_url.clone());
             let mgr = session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
                 // Read max_output_tokens_limit from Gateway config
@@ -348,10 +355,11 @@ async fn hot_push_llm_config(state: &AppState) {
                     provider: cfg.provider.clone(),
                     model: cfg.model.clone(),
                     api_key: cfg.api_key.clone(),
-                    base_url: cfg.base_url.clone(),
+                    base_url: effective_base_url,
                     models: cfg.models.clone(),
                     model_capabilities,
                     max_output_tokens_limit,
+                    protocol_type,
                 }).await;
                 if push_result {
                     tracing::info!(

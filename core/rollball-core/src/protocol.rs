@@ -139,6 +139,35 @@ pub struct ContextUsageInfo {
     pub usage_percent: u8,
 }
 
+/// LLM API protocol type, derived from models.dev npm field.
+///
+/// Used by Gateway to tell Runtime which protocol adapter to use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProtocolType {
+    /// Anthropic Messages API (used by providers with npm: @ai-sdk/anthropic)
+    Anthropic,
+    /// Ollama native API
+    Ollama,
+    /// OpenAI-compatible Chat Completions API (default for all other providers)
+    #[default]
+    #[serde(alias = "openai-compatible")]
+    OpenAI,
+}
+
+impl std::str::FromStr for ProtocolType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "anthropic" => Ok(ProtocolType::Anthropic),
+            "ollama" => Ok(ProtocolType::Ollama),
+            "openai" | "openai-compatible" => Ok(ProtocolType::OpenAI),
+            _ => Err(format!("Unknown protocol type: {}", s)),
+        }
+    }
+}
+
 /// Gateway Service API request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -345,6 +374,9 @@ pub enum GatewayResponse {
         /// Default: 32768 (32K). Set to 0 to disable the limit.
         #[serde(default = "default_max_output_tokens_limit")]
         max_output_tokens_limit: u64,
+        /// Protocol type for the LLM API (anthropic/openai/ollama)
+        #[serde(default)]
+        protocol_type: ProtocolType,
     },
     /// Identity query result from System Agent
     IdentityQueryResult {
@@ -444,6 +476,14 @@ pub enum GatewayResponse {
     CurrentSessionId {
         /// The currently active session ID, or None if no session
         session_id: Option<String>,
+    },
+    /// Log level update (Gateway → Runtime, push)
+    ///
+    /// Gateway pushes a new log level when the user changes it in Settings.
+    /// The Runtime applies the change to its tracing subscriber via reload::Handle.
+    LogLevelUpdate {
+        /// New log level string (e.g. "trace", "debug", "info", "warn", "error")
+        log_level: String,
     },
 }
 

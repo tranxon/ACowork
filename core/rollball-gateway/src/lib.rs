@@ -18,3 +18,9 @@ pub mod permission_store;
 pub mod cron;
 pub mod http;
 pub mod grpc;
+
+/// Type alias for the tracing reload handle used to dynamically change log levels.
+pub type LogReloadHandle = tracing_subscriber::reload::Handle<
+    tracing_subscriber::EnvFilter,
+    tracing_subscriber::Registry,
+>;

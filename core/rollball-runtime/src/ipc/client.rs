@@ -4,6 +4,7 @@
 //! The legacy IPC GatewayClient has been removed in favor of gRPC.
 
 use rollball_core::protocol::ModelCapabilitiesInfo;
+use rollball_core::ProtocolType;
 
 /// LLM configuration received from Gateway
 ///
@@ -25,4 +26,6 @@ pub struct LlmConfigReceived {
     pub model_capabilities: Option<ModelCapabilitiesInfo>,
     /// Global max output tokens limit from Gateway config
     pub max_output_tokens_limit: u64,
+    /// Protocol type for the LLM API (anthropic/openai/ollama)
+    pub protocol_type: ProtocolType,
 }

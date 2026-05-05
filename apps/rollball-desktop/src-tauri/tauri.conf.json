@@ -38,7 +38,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "../../../examples/system-agent"
+      "../../../examples/system-agent",
+      "../../../core/rollball-gateway/src/http/offline_providers.json"
     ]
   }
 }

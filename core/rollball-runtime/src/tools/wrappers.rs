@@ -108,12 +108,19 @@ impl PathGuardedTool {
     /// and prefix-suffix attacks (e.g., "/tmp/agent-workdir-eval/secret").
     /// Uses path component normalization instead of filesystem canonicalize
     /// so it works for paths that don't exist yet.
-    fn validate_path(&self, path: &str) -> Result<(), String> {
+    ///
+    /// Returns the `WorkspaceAccess` level of the **most specific** (longest
+    /// prefix) matching allowed directory. This ensures nested directories
+    /// with stricter access take precedence over broader parent dirs.
+    fn validate_path(&self, path: &str) -> Result<WorkspaceAccess, String> {
         if self.allowed_dirs.is_empty() {
             return Err("No workspace directories configured for this agent".to_string());
         }
 
         let target = std::path::Path::new(path);
+
+        // Track the best (most specific) match: (prefix_length, access)
+        let mut best_match: Option<(usize, WorkspaceAccess)> = None;
 
         // Check against each allowed directory
         for dir in &self.allowed_dirs {
@@ -156,16 +163,25 @@ impl PathGuardedTool {
                 // Verify the prefix match ends at a path boundary
                 let suffix = &target_str[allowed_str.len()..];
                 if suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('\\') {
-                    return Ok(()); // Path is within this allowed directory
+                    // This is a valid match — keep the most specific (longest) prefix
+                    let current_len = allowed_str.len();
+                    let is_better = best_match
+                        .as_ref()
+                        .is_none_or(|(prev_len, _)| current_len > *prev_len);
+                    if is_better {
+                        best_match = Some((current_len, dir.access.clone()));
+                    }
                 }
             }
         }
 
-        // Path is outside all allowed directories
-        Err(format!(
-            "Path '{}' is outside all allowed workspace directories",
-            path
-        ))
+        // Return the access level of the best match, or error if no match
+        best_match
+            .map(|(_, access)| access)
+            .ok_or_else(|| format!(
+                "Path '{}' is outside all allowed workspace directories",
+                path
+            ))
     }
 
     /// Normalize path separators to forward slashes for consistent comparison
@@ -207,6 +223,14 @@ impl PathGuardedTool {
             "file_read" | "file_write" | "file_edit" | "glob_search" | "content_search"
         )
     }
+
+    /// Check if the wrapped tool performs write operations
+    fn is_write_tool(&self) -> bool {
+        matches!(
+            self.inner.name().as_str(),
+            "file_write" | "file_edit"
+        )
+    }
 }
 
 #[async_trait]
@@ -218,25 +242,59 @@ impl Tool for PathGuardedTool {
     async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
         if self.is_filesystem_tool() {
             // Check path parameter
-            if let Some(path) = params["path"].as_str()
-                && let Err(e) = self.validate_path(path) {
-                return Ok(ToolResult {
-                    ok: false,
-                    content: String::new(),
-                    error: Some(e),
-                    token_usage: None,
-                });
+            if let Some(path) = params["path"].as_str() {
+                match self.validate_path(path) {
+                    Ok(access) => {
+                        // Write tools require ReadWrite access
+                        if self.is_write_tool() && access != WorkspaceAccess::ReadWrite {
+                            return Ok(ToolResult {
+                                ok: false,
+                                content: String::new(),
+                                error: Some(format!(
+                                    "Write access denied for path '{}': directory is read-only",
+                                    path
+                                )),
+                                token_usage: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            ok: false,
+                            content: String::new(),
+                            error: Some(e),
+                            token_usage: None,
+                        });
+                    }
+                }
             }
             // file_edit uses "file_path" instead of "path"
             if self.inner.name() == "file_edit"
-                && let Some(file_path) = params["file_path"].as_str()
-                && let Err(e) = self.validate_path(file_path) {
-                return Ok(ToolResult {
-                    ok: false,
-                    content: String::new(),
-                    error: Some(e),
-                    token_usage: None,
-                });
+                && let Some(file_path) = params["file_path"].as_str() {
+                match self.validate_path(file_path) {
+                    Ok(access) => {
+                        // file_edit requires ReadWrite access
+                        if access != WorkspaceAccess::ReadWrite {
+                            return Ok(ToolResult {
+                                ok: false,
+                                content: String::new(),
+                                error: Some(format!(
+                                    "Write access denied for path '{}': directory is read-only",
+                                    file_path
+                                )),
+                                token_usage: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            ok: false,
+                            content: String::new(),
+                            error: Some(e),
+                            token_usage: None,
+                        });
+                    }
+                }
             }
         }
         self.inner.execute(params).await
@@ -434,5 +492,172 @@ mod tests {
             .unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
+    }
+
+    #[tokio::test]
+    async fn test_readonly_allows_read() {
+        // A file_read tool should be allowed in a ReadOnly directory
+        let inner = Arc::new(FileEchoTool);
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-pkg".to_string(),
+            access: WorkspaceAccess::ReadOnly,
+        }]);
+        let result = tool
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }))
+            .await
+            .unwrap();
+        assert!(result.ok);
+    }
+
+    #[tokio::test]
+    async fn test_readonly_blocks_write() {
+        // A file_write tool should be blocked in a ReadOnly directory
+        struct FileWriteEchoTool;
+        #[async_trait]
+        impl Tool for FileWriteEchoTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "file_write".to_string(),
+                    description: "File write echo".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+                Ok(ToolResult {
+                    ok: true,
+                    content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+
+        let inner = Arc::new(FileWriteEchoTool);
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-pkg".to_string(),
+            access: WorkspaceAccess::ReadOnly,
+        }]);
+        let result = tool
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }))
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("read-only"));
+    }
+
+    #[tokio::test]
+    async fn test_readonly_blocks_file_edit() {
+        // A file_edit tool should be blocked in a ReadOnly directory
+        struct FileEditEchoTool;
+        #[async_trait]
+        impl Tool for FileEditEchoTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "file_edit".to_string(),
+                    description: "File edit echo".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+                Ok(ToolResult {
+                    ok: true,
+                    content: format!("Edited: {}", params["file_path"].as_str().unwrap_or("")),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+
+        let inner = Arc::new(FileEditEchoTool);
+        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
+            path: "/tmp/agent-pkg".to_string(),
+            access: WorkspaceAccess::ReadOnly,
+        }]);
+        let result = tool
+            .execute(serde_json::json!({ "file_path": "/tmp/agent-pkg/prompts/system.md" }))
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("read-only"));
+    }
+
+    #[tokio::test]
+    async fn test_nested_readwrite_overrides_readonly() {
+        // When a ReadOnly parent and ReadWrite child both match,
+        // the more specific (longest prefix) ReadWrite should win.
+        // This simulates: package_root=ReadOnly, workspace=ReadWrite
+        let inner = Arc::new(FileEchoTool);
+        let tool = PathGuardedTool::new(inner, vec![
+            WorkspaceDir {
+                path: "/tmp/agent-pkg".to_string(),
+                access: WorkspaceAccess::ReadOnly,
+            },
+            WorkspaceDir {
+                path: "/tmp/agent-pkg/workspace".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+            },
+        ]);
+        // Read within workspace should succeed (ReadWrite wins)
+        let result = tool
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/workspace/file.txt" }))
+            .await
+            .unwrap();
+        assert!(result.ok);
+    }
+
+    #[tokio::test]
+    async fn test_nested_readonly_overrides_readwrite() {
+        // When a ReadWrite parent and ReadOnly child both match,
+        // the more specific (longest prefix) ReadOnly should win.
+        let inner = Arc::new(FileEchoTool);
+        let _tool = PathGuardedTool::new(inner, vec![
+            WorkspaceDir {
+                path: "/tmp/agent-pkg".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+            },
+            WorkspaceDir {
+                path: "/tmp/agent-pkg/readonly".to_string(),
+                access: WorkspaceAccess::ReadOnly,
+            },
+        ]);
+        // A write tool should be blocked in the nested ReadOnly directory
+        struct FileWriteEchoTool2;
+        #[async_trait]
+        impl Tool for FileWriteEchoTool2 {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "file_write".to_string(),
+                    description: "File write echo".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+                Ok(ToolResult {
+                    ok: true,
+                    content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+
+        let write_inner = Arc::new(FileWriteEchoTool2);
+        let write_tool = PathGuardedTool::new(write_inner, vec![
+            WorkspaceDir {
+                path: "/tmp/agent-pkg".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+            },
+            WorkspaceDir {
+                path: "/tmp/agent-pkg/readonly".to_string(),
+                access: WorkspaceAccess::ReadOnly,
+            },
+        ]);
+        // Write within /tmp/agent-pkg/readonly should be blocked
+        let result = write_tool
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/readonly/secret.txt" }))
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("read-only"));
     }
 }

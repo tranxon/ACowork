@@ -541,6 +541,16 @@ async fn handle_ws_text(
         }
 
         if pushed_ok {
+            // Push LLMConfigDelivery so that Runtime rebuilds the Provider instance
+            // when the provider changes (e.g. deepseek → minimax-cn which needs Anthropic protocol).
+            // Always push when the provider field is present — Runtime decides whether
+            // to rebuild based on protocol_type change detection.
+            if let Some(ref provider_name) = provider {
+                push_llm_config_on_switch(
+                    &state, agent_id, provider_name, &model,
+                ).await;
+            }
+
             let ack = serde_json::json!({
                 "type": "ack",
                 "message_id": message_id,
@@ -1251,5 +1261,96 @@ async fn get_latest_conversation_legacy(
             }
         },
         None => (String::new(), vec![]),
+    }
+}
+
+/// Push LLMConfigDelivery to a specific agent after a model_switch.
+///
+/// When the user switches to a different provider (e.g. deepseek → minimax-cn),
+/// the Runtime needs a new LLMConfigDelivery so it can rebuild the Provider
+/// with the correct protocol type, API key, base URL, etc.
+///
+/// If the provider is not found in Vault, logs a warning but does not
+/// interrupt the model_switch flow (the model name is still updated via IntentReceived).
+async fn push_llm_config_on_switch(
+    state: &AppState,
+    agent_id: &str,
+    provider_name: &str,
+    model: &str,
+) {
+    use rollball_core::protocol::GatewayResponse;
+
+    // Read the provider entry from Vault
+    let entry = {
+        let gw = state.gateway_state.read().await;
+        match gw.vault.get_provider(provider_name) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_id,
+                    provider = %provider_name,
+                    "No Vault entry for provider, skipping LLMConfigDelivery on model_switch: {}",
+                    e
+                );
+                return;
+            }
+        }
+    };
+
+    // Resolve model capabilities (user-overridden > models.dev / offline data)
+    let model_capabilities = if entry.model_capabilities.is_some() {
+        entry.model_capabilities.map(rollball_core::protocol::ModelCapabilitiesInfo::from)
+    } else {
+        crate::http::models_api::lookup_model_capabilities_with_cache(
+            &state.models_cache, provider_name, model,
+        ).await
+    };
+
+    // Derive protocol type from models.dev npm field (model-level > provider-level)
+    let (protocol_type, api_override) =
+        crate::http::models_api::lookup_protocol_info_with_cache(
+            &state.models_cache, provider_name, Some(model),
+        ).await;
+
+    // Model-level api override takes precedence over Vault base_url
+    let effective_base_url = api_override.or(entry.base_url);
+
+    // Read max_output_tokens_limit from Gateway config
+    let max_output_tokens_limit = state.gateway_state.read().await.config
+        .as_ref().map(|c| c.max_output_tokens_limit).unwrap_or(32_768);
+
+    // Find the session and push LLMConfigDelivery
+    if let Some(session_mgr) = &state.session_mgr {
+        let mgr = session_mgr.lock().await;
+        if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
+            let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
+                provider: provider_name.to_string(),
+                model: Some(model.to_string()),
+                api_key: entry.api_key,
+                base_url: effective_base_url,
+                models: entry.models,
+                model_capabilities,
+                max_output_tokens_limit,
+                protocol_type,
+            }).await;
+            if push_result {
+                tracing::info!(
+                    agent = %agent_id,
+                    provider = %provider_name,
+                    model = %model,
+                    "Pushed LLMConfigDelivery on model_switch"
+                );
+            } else {
+                tracing::warn!(
+                    agent = %agent_id,
+                    "Failed to push LLMConfigDelivery on model_switch (channel closed)"
+                );
+            }
+        } else {
+            tracing::warn!(
+                agent = %agent_id,
+                "No IPC session found for agent, cannot push LLMConfigDelivery on model_switch"
+            );
+        }
     }
 }

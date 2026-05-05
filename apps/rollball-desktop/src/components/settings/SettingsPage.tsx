@@ -1225,20 +1225,32 @@ function AppearanceTab() {
 /** General settings */
 function GeneralTab() {
   const [config, setConfig] = useState<GatewayConfig | null>(null);
+  const { logLevel, setLogLevel } = useSettingsStore();
 
   useEffect(() => {
-    invoke<GatewayConfig>("get_config").then(setConfig).catch(() => {});
-  }, []);
+    invoke<GatewayConfig>("get_config")
+      .then((cfg) => {
+        setConfig(cfg);
+        // Gateway value takes precedence over localStorage
+        setLogLevel(cfg.log_level);
+      })
+      .catch(() => {});
+  }, [setLogLevel]);
+
+  const currentLogLevel = config?.log_level || logLevel || "info";
 
   return (
     <div className="max-w-lg space-y-6">
       <div>
         <h2 className="mb-3 text-sm font-medium">Log Level</h2>
         <select
-          defaultValue="info"
+          value={currentLogLevel}
           onChange={async (e) => {
+            const val = e.target.value;
             try {
-              await invoke("update_config", { logLevel: e.target.value });
+              await invoke("update_config", { logLevel: val });
+              setConfig((prev) => (prev ? { ...prev, log_level: val } : prev));
+              setLogLevel(val);
             } catch { /* ignore */ }
           }}
           className={selectBase}

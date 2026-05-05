@@ -180,10 +180,38 @@ pub async fn update_config(
 
     // Apply log level change immediately via tracing reload
     if let Some(level) = &body.log_level {
-        // Note: Full tracing reload requires tracing-subscriber reload handle.
-        // For now, log the change; the actual tracing level change
-        // will be implemented when the tracing reload handle is integrated.
-        tracing::info!("Log level change requested: {} (apply via tracing reload handle)", level);
+        // 1. Apply to Gateway itself
+        if let Some(handle) = &state.log_reload_handle {
+            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            if let Err(e) = handle.reload(new_filter) {
+                tracing::warn!("Failed to reload Gateway tracing filter: {}", e);
+            } else {
+                tracing::info!("Gateway log level changed to {}", level);
+            }
+        }
+
+        // 2. Push to all connected Runtimes
+        if let Some(session_mgr) = &state.session_mgr {
+            let mgr = session_mgr.lock().await;
+            let agent_ids: Vec<String> = {
+                let gw = state.gateway_state.read().await;
+                gw.running_agents.keys().cloned().collect()
+            };
+            for agent_id in agent_ids {
+                if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+                    let push_result = session.push_message(
+                        rollball_core::protocol::GatewayResponse::LogLevelUpdate {
+                            log_level: level.clone(),
+                        }
+                    ).await;
+                    if push_result {
+                        tracing::info!(agent = %agent_id, "Pushed LogLevelUpdate to Runtime");
+                    } else {
+                        tracing::warn!(agent = %agent_id, "Failed to push LogLevelUpdate (channel closed)");
+                    }
+                }
+            }
+        }
     }
 
     tracing::info!("Config update applied: {}", updates.join(", "));

@@ -140,6 +140,8 @@ pub struct AppState {
     pub(crate) models_cache: crate::http::models_api::ModelsCache,
     /// Pending session requests for IPC response correlation (S1.14)
     pub session_pending: SessionPendingRequests,
+    /// Tracing reload handle for dynamic log level changes
+    pub log_reload_handle: Option<crate::LogReloadHandle>,
 }
 
 impl AppState {
@@ -160,6 +162,7 @@ impl AppState {
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
+            log_reload_handle: None,
         }
     }
 
@@ -171,6 +174,7 @@ impl AppState {
         bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
         models_cache: crate::http::models_api::ModelsCache,
         session_pending: Option<SessionPendingRequests>,
+        log_reload_handle: Option<crate::LogReloadHandle>,
     ) -> Self {
         Self {
             gateway_state,
@@ -181,6 +185,7 @@ impl AppState {
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
+            log_reload_handle,
         }
     }
 }

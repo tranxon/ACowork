@@ -26,7 +26,7 @@ use rollball_core::error::RollballError;
 use rollball_core::proto;
 use rollball_core::proto::server_message::Payload as ServerPayload;
 use rollball_core::proto_bridge::GatewayRequestToProto;
-use rollball_core::protocol::{GatewayRequest, GatewayResponse};
+use rollball_core::protocol::{GatewayRequest, GatewayResponse, ProtocolType};
 
 use crate::ipc::client::LlmConfigReceived;
 
@@ -364,6 +364,8 @@ impl GatewayGrpcClient {
                             models: cfg.models,
                             model_capabilities: cfg.model_capabilities.map(|c| c.into()),
                             max_output_tokens_limit: cfg.max_output_tokens_limit,
+                            protocol_type: cfg.protocol_type.parse::<rollball_core::ProtocolType>()
+                                .unwrap_or(rollball_core::ProtocolType::OpenAI),
                         });
                     }
                     Some(_) => {
@@ -994,6 +996,11 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             models: cfg.models,
             model_capabilities: cfg.model_capabilities.map(|c| c.into()),
             max_output_tokens_limit: cfg.max_output_tokens_limit,
+            protocol_type: match cfg.protocol_type.as_str() {
+                "anthropic" => ProtocolType::Anthropic,
+                "ollama" => ProtocolType::Ollama,
+                _ => ProtocolType::OpenAI,
+            },
         },
         Some(ServerPayload::IdentityDelivery(id)) => GatewayResponse::IdentityDelivery {
             entries: id.entries.into_iter().map(|e| e.into()).collect(),
@@ -1119,6 +1126,9 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 Some(r.session_id)
             },
         },
+        Some(ServerPayload::LogLevelUpdate(lu)) => GatewayResponse::LogLevelUpdate {
+            log_level: lu.log_level,
+        },
 
         None => {
             tracing::warn!("Received ServerMessage with empty payload");
@@ -1192,6 +1202,7 @@ mod tests {
                     models: vec![],
                     model_capabilities: None,
                     max_output_tokens_limit: 32768,
+                    protocol_type: "openai".to_string(),
                 },
             )),
         };
