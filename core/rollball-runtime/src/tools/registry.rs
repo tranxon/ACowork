@@ -268,10 +268,24 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
             config_path = %config_path.display(),
             "No .agent_workspaces.json found, using work_dir as default"
         );
-        return vec![WorkspaceDir {
+        // Include package root (parent of work_dir) as read-only,
+        // so the Agent can read its own config, prompts, skills, etc.
+        let mut dirs = vec![];
+        if let Some(package_root) = std::path::Path::new(work_dir).parent() {
+            let package_root_str = package_root.to_string_lossy().to_string();
+            // Only add if it's different from work_dir itself
+            if package_root_str != work_dir {
+                dirs.push(WorkspaceDir {
+                    path: package_root_str,
+                    access: WorkspaceAccess::ReadOnly,
+                });
+            }
+        }
+        dirs.push(WorkspaceDir {
             path: work_dir.to_string(),
             access: WorkspaceAccess::ReadWrite,
-        }];
+        });
+        return dirs;
     }
 
     match std::fs::read_to_string(&config_path) {
@@ -289,6 +303,19 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
                         },
                     })
                     .collect();
+
+                // Include package root (parent of work_dir) as read-only,
+                // so the Agent can read its own config, prompts, skills, etc.
+                if let Some(package_root) = std::path::Path::new(work_dir).parent() {
+                    let package_root_str = package_root.to_string_lossy().to_string();
+                    // Only add if it's different from work_dir itself
+                    if package_root_str != work_dir {
+                        dirs.push(WorkspaceDir {
+                            path: package_root_str,
+                            access: WorkspaceAccess::ReadOnly,
+                        });
+                    }
+                }
 
                 // Always include work_dir as the base directory
                 dirs.push(WorkspaceDir {

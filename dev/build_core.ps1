@@ -68,8 +68,21 @@ try {
 
 Write-Host ""
 
-# Step 4: Start Gateway
-Write-Host "[4/4] Starting Gateway in daemon mode..." -ForegroundColor Yellow
+# Step 4: Copy offline_providers.json to release dir
+Write-Host "[4/5] Copying offline_providers.json to release directory..." -ForegroundColor Yellow
+$offlineSrc = Join-Path $CoreDir "rollball-gateway\src\http\offline_providers.json"
+$releaseDir = Join-Path $WorkspaceRoot "target\release"
+if (Test-Path $offlineSrc) {
+    Copy-Item -Path $offlineSrc -Destination $releaseDir -Force
+    Write-Host "  Copied to $releaseDir" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: offline_providers.json not found at $offlineSrc" -ForegroundColor Red
+}
+
+Write-Host ""
+
+# Step 5: Start Gateway
+Write-Host "[5/5] Starting Gateway in daemon mode..." -ForegroundColor Yellow
 $env:ROLLBALL_GATEWAY_DAEMON = "true"
 
 # Start Gateway in background

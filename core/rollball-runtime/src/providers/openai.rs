@@ -619,6 +619,10 @@ impl Stream for ChannelStream {
 /// Parse a single SSE line into a StreamEvent
 fn parse_sse_line(line: &str) -> Option<StreamEvent> {
     let line = line.trim();
+    tracing::debug!(
+        line = %line.chars().take(500).collect::<String>(),
+        "SSE raw line received"
+    );
     if line.is_empty() || line == ":" {
         return None;
     }
@@ -657,7 +661,23 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
         if let Some(tool_calls) = choice.delta.tool_calls {
             for tc_delta in tool_calls {
                 if let Some(func) = tc_delta.function {
-                    if let Some(name) = func.name {
+                    if let Some(name) = func.name
+                        && !name.is_empty()
+                    {
+                        // Capture arguments from the same delta chunk if present.
+                        // Some providers (GLM, DeepSeek) send name and arguments
+                        // together in a single SSE chunk; previously the early
+                        // return discarded arguments, causing empty tool params.
+                        let initial_arguments = func.arguments.unwrap_or_default();
+
+                        tracing::debug!(
+                            has_name = true,
+                            name = %name,
+                            has_arguments = !initial_arguments.is_empty(),
+                            args_preview = ?initial_arguments.chars().take(200).collect::<String>(),
+                            index = ?tc_delta.index,
+                            "SSE tool_call delta details"
+                        );
                         return Some(StreamEvent::ToolCallStart(ToolCall {
                             id: tc_delta
                                 .id
@@ -665,10 +685,20 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
                             call_type: "function".to_string(),
                             function: FunctionCall {
                                 name,
-                                arguments: String::new(),
+                                arguments: initial_arguments,
                             },
                         }));
                     }
+                    // DeepSeek sends empty name string in subsequent tool_call
+                    // chunks; fall through to process arguments instead of
+                    // skipping the entire delta.
+                    tracing::debug!(
+                        has_name = false,
+                        has_arguments = func.arguments.is_some(),
+                        args_preview = ?func.arguments.as_ref().map(|a| a.chars().take(200).collect::<String>()),
+                        index = ?tc_delta.index,
+                        "SSE tool_call delta details"
+                    );
                     if let Some(args) = func.arguments {
                         let idx = tc_delta.index.unwrap_or(0);
                         return Some(StreamEvent::ToolCallChunk { index: idx, arguments: args });

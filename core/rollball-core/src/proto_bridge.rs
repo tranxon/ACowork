@@ -591,6 +591,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 models,
                 model_capabilities,
                 max_output_tokens_limit,
+                protocol_type,
             } => {
                 Some(proto::server_message::Payload::LlmConfigDelivery(
                     proto::LlmConfigDelivery {
@@ -601,6 +602,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         models: models.clone(),
                         model_capabilities: model_capabilities.as_ref().map(|m| m.into()),
                         max_output_tokens_limit: *max_output_tokens_limit,
+                        protocol_type: format!("{:?}", protocol_type).to_lowercase(),
                     },
                 ))
             }
@@ -709,6 +711,11 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             protocol::GatewayResponse::CurrentSessionId { session_id } => {
                 Some(proto::server_message::Payload::CurrentSessionId(
                     proto::CurrentSessionId { session_id: session_id.clone().unwrap_or_default() },
+                ))
+            }
+            protocol::GatewayResponse::LogLevelUpdate { log_level } => {
+                Some(proto::server_message::Payload::LogLevelUpdate(
+                    proto::LogLevelUpdate { log_level: log_level.clone() },
                 ))
             }
         };

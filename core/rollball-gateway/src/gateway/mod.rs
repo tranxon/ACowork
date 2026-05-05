@@ -341,7 +341,10 @@ impl Gateway {
     /// Blocks until shutdown signal is received.
     /// The GatewayState is wrapped in Arc<RwLock> for concurrent access
     /// by multiple IPC connection handlers.
-    pub async fn run(&mut self) -> Result<(), GatewayError> {
+    pub async fn run(
+        &mut self,
+        log_reload_handle: Option<crate::LogReloadHandle>,
+    ) -> Result<(), GatewayError> {
         tracing::info!("Gateway starting");
         tracing::info!("  Socket path: {}", self.config.socket_path);
         tracing::info!("  Vault dir: {}", self.config.vault_dir);
@@ -526,6 +529,7 @@ impl Gateway {
                 http_bridge_tx,
                 http_models_cache,
                 http_session_pending,
+                log_reload_handle,
             ).await {
                 tracing::error!("HTTP server failed: {}", e);
             }

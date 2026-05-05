@@ -106,8 +106,8 @@ pub enum PermissionAction {
 impl Cli {
     /// Run the CLI
     pub fn run(self) -> Result<(), GatewayError> {
-        // Initialize tracing
-        init_tracing(&self.log_level);
+        // Initialize tracing with reload support (daemon mode only needs the handle)
+        let log_reload_handle = init_tracing(&self.log_level);
 
         let config = GatewayConfig::from_cli(&self)?;
         let mut gateway = Gateway::new(config)?;
@@ -164,7 +164,7 @@ impl Cli {
                         .enable_all()
                         .build()
                         .map_err(GatewayError::Io)?;
-                    rt.block_on(async_main(gateway))?;
+                    rt.block_on(async_main(gateway, log_reload_handle))?;
                 } else {
                     // No subcommand and no daemon flag — show help
                     println!("RollBall Gateway — use subcommands or --daemon to start service");
@@ -176,23 +176,32 @@ impl Cli {
     }
 }
 
-/// Initialize tracing subscriber
-fn init_tracing(level: &str) {
-    use tracing_subscriber::EnvFilter;
+/// Initialize tracing subscriber with reload support.
+///
+/// Returns the reload handle so the Gateway can dynamically change
+/// the log level at runtime via the HTTP config API.
+fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
+    use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt};
+    use tracing_subscriber::util::SubscriberInitExt;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
+    let (reloadable_filter, handle) = reload::Layer::new(filter);
+    tracing_subscriber::registry()
+        .with(reloadable_filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
+    Some(handle)
 }
 
 /// Async main entry point for daemon mode
-async fn async_main(mut gateway: Gateway) -> Result<(), GatewayError> {
+async fn async_main(
+    mut gateway: Gateway,
+    log_reload_handle: Option<crate::LogReloadHandle>,
+) -> Result<(), GatewayError> {
     tracing::info!("Gateway daemon starting");
 
     // Run the gateway event loop
-    gateway.run().await?;
+    gateway.run(log_reload_handle).await?;
 
     Ok(())
 }

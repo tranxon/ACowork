@@ -124,6 +124,7 @@ pub(crate) async fn start_http_server(
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     models_cache: crate::http::models_api::ModelsCache,
     session_pending: Option<crate::http::routes::SessionPendingRequests>,
+    log_reload_handle: Option<crate::LogReloadHandle>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -142,6 +143,7 @@ pub(crate) async fn start_http_server(
         bridge_tx,
         models_cache,
         session_pending,
+        log_reload_handle,
     );
 
     // S5.9: Clean up stale pidfile from a previous Gateway run before writing a new one.

@@ -23,7 +23,7 @@ use rollball_runtime::providers::anthropic::AnthropicProvider;
 use rollball_runtime::providers::registry::{
     ModelCapability, ProviderRegistry, RoutingStrategy,
 };
-use rollball_runtime::providers::router::create_provider;
+use rollball_runtime::providers::router::{create_provider, infer_protocol_type};
 use rollball_runtime::token::counter::{BudgetAllocation, TokenCounter};
 
 use async_trait::async_trait;
@@ -344,9 +344,9 @@ fn test_s5_provider_registry_multi_provider() {
     let registry = ProviderRegistry::new();
 
     // Register multiple providers
-    let openai = create_provider("openai", Some("sk-test"), None);
-    let anthropic = create_provider("anthropic", Some("sk-ant-test"), None);
-    let ollama = create_provider("ollama", None, None);
+    let openai = create_provider("openai", &infer_protocol_type("openai"), Some("sk-test"), None);
+    let anthropic = create_provider("anthropic", &infer_protocol_type("anthropic"), Some("sk-ant-test"), None);
+    let ollama = create_provider("ollama", &infer_protocol_type("ollama"), None, None);
 
     registry.register_provider("openai", openai, vec!["gpt-4".to_string(), "gpt-4o".to_string()]);
     registry.register_provider("anthropic", anthropic, vec!["claude-sonnet-4".to_string()]);
@@ -506,9 +506,9 @@ fn test_s5_anthropic_custom_base_url() {
 
 #[test]
 fn test_s5_router_supports_anthropic() {
-    let provider = create_provider("anthropic", Some("sk-ant-test"), None);
+    let provider = create_provider("anthropic", &infer_protocol_type("anthropic"), Some("sk-ant-test"), None);
     assert_eq!(provider.name(), "anthropic");
 
-    let claude_provider = create_provider("claude", Some("sk-ant-test"), None);
+    let claude_provider = create_provider("claude", &infer_protocol_type("claude"), Some("sk-ant-test"), None);
     assert_eq!(claude_provider.name(), "anthropic");
 }

@@ -884,17 +884,17 @@ pub async fn handle_agent_hello(
             // Resolve model capabilities with priority:
             // 1. User-overridden capabilities from Vault entry
             // 2. models.dev cache / offline data
+            let models_cache = {
+                let gw = state.read().await;
+                gw.models_cache.clone()
+            };
             let model_capabilities = if cfg.stored_capabilities.is_some() {
                 cfg.stored_capabilities
             } else if let Some(m) = &cfg.model {
                 // Try cache-first lookup (may fetch fresher data from models.dev)
-                let cache = {
-                    let gw = state.read().await;
-                    gw.models_cache.clone()
-                };
-                if let Some(cache) = cache {
+                if let Some(ref cache) = models_cache {
                     crate::http::models_api::lookup_model_capabilities_with_cache(
-                        &cache, &cfg.provider, m,
+                        cache, &cfg.provider, m,
                     ).await
                 } else {
                     crate::http::models_api::lookup_model_capabilities(&cfg.provider, m)
@@ -902,6 +902,18 @@ pub async fn handle_agent_hello(
             } else {
                 None
             };
+            // Derive protocol type from models.dev npm field (model-level > provider-level)
+            let (protocol_type, api_override) = if let Some(ref cache) = models_cache {
+                crate::http::models_api::lookup_protocol_info_with_cache(
+                    cache, &cfg.provider, cfg.model.as_deref(),
+                ).await
+            } else {
+                crate::http::models_api::lookup_protocol_info(
+                    &cfg.provider, cfg.model.as_deref(),
+                )
+            };
+            // Model-level api override takes precedence over Vault base_url
+            let effective_base_url = api_override.or(cfg.base_url);
             // Use push_message (async) to deliver LLM config via the session's push channel
             // Read max_output_tokens_limit from Gateway config
             let max_output_tokens_limit = {
@@ -912,10 +924,11 @@ pub async fn handle_agent_hello(
                 provider: cfg.provider,
                 model: cfg.model,
                 api_key: cfg.api_key,
-                base_url: cfg.base_url,
+                base_url: effective_base_url,
                 models: cfg.models,
                 model_capabilities,
                 max_output_tokens_limit,
+                protocol_type,
             }).await;
             if !push_result {
                 tracing::warn!("Failed to push LLMConfigDelivery to {} (channel closed)", conn_id);

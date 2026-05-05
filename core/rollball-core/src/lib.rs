@@ -28,7 +28,7 @@ pub mod error;
 
 // Re-exports for convenience
 pub use manifest::{AgentManifest, CapabilityDef, LlmConfig, ProviderConfig, RoutingConfig, LlmBudget, RagToolConfig, ToolDeclaration};
-pub use protocol::{GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo, ModelModalities, SessionInfoDto, ConversationEntryDto};
+pub use protocol::{GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo, ModelModalities, ProtocolType, SessionInfoDto, ConversationEntryDto};
 
 pub use intent::Intent;
 pub use permission::Permission;

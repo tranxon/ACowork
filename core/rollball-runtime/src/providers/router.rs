@@ -1,43 +1,42 @@
 //! LLM Provider router and factory
 //!
-//! Creates the appropriate Provider based on provider ID.
+//! Creates the appropriate Provider based on protocol type.
 //! Supports OpenAI-compatible, Anthropic, and Ollama protocols.
 //!
 //! DESIGN: Runtime always runs under Gateway. base_url and api_key are
 //! delivered via LLMConfigDelivery from Gateway (which has full models.dev
-//! offline data). Runtime's only job is selecting the correct PROTOCOL
-//! (OpenAI vs Anthropic vs Ollama).
+//! offline data). Protocol selection is data-driven via ProtocolType —
+//! no hardcoded provider name matching.
 //!
 //! If Gateway does not deliver a usable provider/model, Runtime refuses
 //! service with a clear error — no silent fallbacks.
 
 use std::sync::Arc;
 
+use rollball_core::ProtocolType;
 use rollball_core::providers::traits::Provider;
 
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::openai::OpenAIProvider;
 use crate::providers::ollama::OllamaProvider;
 
-/// Create a provider based on the provider name.
+/// Create a provider based on protocol type.
 ///
-/// Runtime's role is PROTOCOL SELECTION only:
-///   - Anthropic providers -> AnthropicProvider
-///   - Ollama -> OllamaProvider
-///   - Everything else -> OpenAI-compatible (OpenAIProvider)
+/// Protocol selection is data-driven: Gateway determines the correct
+/// ProtocolType from offline provider metadata and delivers it via
+/// LLMConfigDelivery. Runtime simply instantiates the matching provider.
 ///
 /// base_url is always supplied by Gateway LLMConfigDelivery.
 /// If missing, the provider will likely fail - this is expected since
 /// Runtime cannot function without Gateway.
 pub fn create_provider(
     provider_name: &str,
+    protocol_type: &ProtocolType,
     api_key: Option<&str>,
     base_url: Option<&str>,
 ) -> Arc<dyn Provider> {
-    match provider_name {
-        // ── Anthropic protocol providers ─────────────────────────────────
-        // Per models.dev npm field: @ai-sdk/anthropic
-        "anthropic" | "claude" | "minimax" | "minimax-cn" => {
+    match protocol_type {
+        ProtocolType::Anthropic => {
             tracing::info!(provider = provider_name, "Using Anthropic protocol provider");
             let provider = if let Some(url) = base_url {
                 AnthropicProvider::with_base_url(Some(url), api_key)
@@ -47,8 +46,7 @@ pub fn create_provider(
             Arc::new(provider)
         }
 
-        // ── Ollama protocol ──────────────────────────────────────────────
-        "ollama" => {
+        ProtocolType::Ollama => {
             let provider = if let Some(url) = base_url {
                 OllamaProvider::with_base_url(Some(url))
             } else {
@@ -57,10 +55,7 @@ pub fn create_provider(
             Arc::new(provider)
         }
 
-        // ── OpenAI-compatible providers ──────────────────────────────────
-        // All other providers use OpenAI-compatible protocol.
-        // Gateway delivers the correct base_url per provider.
-        _ => {
+        ProtocolType::OpenAI => {
             tracing::info!(provider = provider_name, "Using OpenAI-compatible provider");
             let provider = if let Some(url) = base_url {
                 OpenAIProvider::with_base_url(Some(url), api_key)
@@ -69,6 +64,20 @@ pub fn create_provider(
             };
             Arc::new(provider)
         }
+    }
+}
+
+/// Infer protocol type from provider name for standalone mode.
+///
+/// In standalone mode (no Gateway), there is no offline metadata to
+/// determine protocol type. This function provides a fallback inference
+/// based on the provider name. Gateway mode should always use the
+/// protocol_type from LLMConfigDelivery instead.
+pub fn infer_protocol_type(provider_name: &str) -> ProtocolType {
+    match provider_name {
+        "anthropic" | "claude" | "minimax" | "minimax-cn" => ProtocolType::Anthropic,
+        "ollama" => ProtocolType::Ollama,
+        _ => ProtocolType::OpenAI,
     }
 }
 
@@ -125,31 +134,36 @@ mod tests {
 
     #[test]
     fn test_create_openai_provider() {
-        let provider = create_provider("openai", Some("sk-test"), None);
+        let provider = create_provider("openai", &ProtocolType::OpenAI, Some("sk-test"), None);
         assert_eq!(provider.name(), "openai");
     }
 
     #[test]
     fn test_create_anthropic_provider() {
-        let provider = create_provider("anthropic", Some("sk-ant-test"), None);
-        assert_eq!(provider.name(), "anthropic");
-    }
-
-    #[test]
-    fn test_create_claude_provider() {
-        let provider = create_provider("claude", Some("sk-ant-test"), None);
+        let provider = create_provider("anthropic", &ProtocolType::Anthropic, Some("sk-ant-test"), None);
         assert_eq!(provider.name(), "anthropic");
     }
 
     #[test]
     fn test_create_ollama_provider() {
-        let provider = create_provider("ollama", None, None);
+        let provider = create_provider("ollama", &ProtocolType::Ollama, None, None);
         assert_eq!(provider.name(), "ollama");
     }
 
     #[test]
     fn test_create_deepseek_provider() {
-        let provider = create_provider("deepseek", Some("sk-test"), None);
-        assert_eq!(provider.name(), "openai"); // Falls through to OpenAI-compatible
+        let provider = create_provider("deepseek", &ProtocolType::OpenAI, Some("sk-test"), None);
+        assert_eq!(provider.name(), "openai"); // Uses OpenAI-compatible protocol
+    }
+
+    #[test]
+    fn test_infer_protocol_type() {
+        assert_eq!(infer_protocol_type("anthropic"), ProtocolType::Anthropic);
+        assert_eq!(infer_protocol_type("claude"), ProtocolType::Anthropic);
+        assert_eq!(infer_protocol_type("minimax"), ProtocolType::Anthropic);
+        assert_eq!(infer_protocol_type("ollama"), ProtocolType::Ollama);
+        assert_eq!(infer_protocol_type("openai"), ProtocolType::OpenAI);
+        assert_eq!(infer_protocol_type("deepseek"), ProtocolType::OpenAI);
+        assert_eq!(infer_protocol_type("unknown-provider"), ProtocolType::OpenAI);
     }
 }

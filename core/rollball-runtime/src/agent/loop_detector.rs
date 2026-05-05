@@ -1,11 +1,11 @@
-//! Loop detection (Exact Repeat / Ping-Pong / No Progress)
+//! Loop detection (Exact Repeat / Ping-Pong / No Progress / Same-Tool Flood)
 //!
-//! Three detection modes + three-level progressive response.
+//! Four detection modes + three-level progressive response.
 //! Adapted from ZeroClaw agent/loop_detector.rs
 //! Rollball deviation: uses rollball-core ToolCall types; result includes
 //! recommended action level.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Normalize tool parameters to ensure consistent comparison across platforms.
 ///
@@ -49,6 +49,8 @@ pub enum LoopPattern {
     PingPong,
     /// Same tool, different params, but same result hash
     NoProgress,
+    /// Same tool called repeatedly within a window
+    SameToolFlood,
 }
 
 /// Progressive response level
@@ -73,6 +75,10 @@ pub struct LoopDetectionConfig {
     pub no_progress_threshold: u32,
     /// Whether No Progress detection is enabled
     pub no_progress_enabled: bool,
+    /// Same-Tool Flood: number of same-tool calls in window to trigger
+    pub same_tool_flood_threshold: u32,
+    /// Same-Tool Flood: window size for counting tool calls
+    pub same_tool_flood_window: u32,
 }
 
 impl Default for LoopDetectionConfig {
@@ -82,6 +88,8 @@ impl Default for LoopDetectionConfig {
             ping_pong_threshold: 4,
             no_progress_threshold: 5,
             no_progress_enabled: true,
+            same_tool_flood_threshold: 8,
+            same_tool_flood_window: 12,
         }
     }
 }
@@ -95,6 +103,8 @@ pub struct LoopDetector {
     ping_pong_state: PingPongState,
     /// Track same tool + same result hash
     no_progress_state: NoProgressState,
+    /// Recent tool call window for Same-Tool Flood detection
+    tool_call_window: VecDeque<String>,
     /// Per-pattern hit count (for progressive response)
     hit_counts: HashMap<String, u32>,
 }
@@ -125,6 +135,7 @@ impl LoopDetector {
             exact_repeat_state: ExactRepeatState::default(),
             ping_pong_state: PingPongState::default(),
             no_progress_state: NoProgressState::default(),
+            tool_call_window: VecDeque::new(),
             hit_counts: HashMap::new(),
         }
     }
@@ -162,6 +173,10 @@ impl LoopDetector {
             && let Some(result) = self.check_no_progress(tool_name, result_content) {
             return result;
         }
+
+        // Same-Tool Flood detection is disabled by design decision:
+        // max_iterations + user continue button serves as the safety net.
+        // The check_same_tool_flood() method is retained for potential future use.
 
         // Reset hit counters if no loop detected (different tool used successfully)
         // Only reset for patterns not currently being tracked
@@ -395,6 +410,73 @@ impl LoopDetector {
         None
     }
 
+    /// Peek same-tool flood detection without modifying state.
+    #[allow(dead_code)]
+    fn peek_same_tool_flood(&self, tool_name: &str) -> Option<LoopDetectionResult> {
+        let mut simulated_window = self.tool_call_window.clone();
+        simulated_window.push_back(tool_name.to_string());
+        let window_size = self.config.same_tool_flood_window as usize;
+        while simulated_window.len() > window_size {
+            simulated_window.pop_front();
+        }
+
+        let count = simulated_window.iter().filter(|t| *t == tool_name).count() as u32;
+
+        if count >= self.config.same_tool_flood_threshold {
+            let level = if count >= self.config.same_tool_flood_threshold + 2 {
+                ResponseLevel::Block
+            } else {
+                ResponseLevel::Warning
+            };
+            let message = format!(
+                "Detected same-tool flood: [{tool_name}] called {count} times in last {} calls",
+                simulated_window.len()
+            );
+
+            return Some(LoopDetectionResult::LoopDetected {
+                pattern: LoopPattern::SameToolFlood,
+                level,
+                count,
+                message,
+            });
+        }
+
+        None
+    }
+
+    /// Check same-tool flood detection.
+    #[allow(dead_code)]
+    fn check_same_tool_flood(&mut self, tool_name: &str) -> Option<LoopDetectionResult> {
+        self.tool_call_window.push_back(tool_name.to_string());
+        let window_size = self.config.same_tool_flood_window as usize;
+        while self.tool_call_window.len() > window_size {
+            self.tool_call_window.pop_front();
+        }
+
+        let count = self.tool_call_window.iter().filter(|t| *t == tool_name).count() as u32;
+
+        if count >= self.config.same_tool_flood_threshold {
+            let level = if count >= self.config.same_tool_flood_threshold + 2 {
+                ResponseLevel::Block
+            } else {
+                ResponseLevel::Warning
+            };
+            let message = format!(
+                "Detected same-tool flood: [{tool_name}] called {count} times in last {} calls",
+                self.tool_call_window.len()
+            );
+
+            return Some(LoopDetectionResult::LoopDetected {
+                pattern: LoopPattern::SameToolFlood,
+                level,
+                count,
+                message,
+            });
+        }
+
+        None
+    }
+
     /// Determine response level based on hit count
     fn response_level(&self, hit_count: u32) -> ResponseLevel {
         match hit_count {
@@ -422,6 +504,7 @@ impl LoopDetector {
         self.exact_repeat_state = ExactRepeatState::default();
         self.ping_pong_state = PingPongState::default();
         self.no_progress_state = NoProgressState::default();
+        self.tool_call_window.clear();
         self.hit_counts.clear();
     }
 }
@@ -501,5 +584,112 @@ mod tests {
         // After reset, should not trigger
         let result = detector.check("weather", "{city:Shanghai}", "Sunny");
         assert!(matches!(result, LoopDetectionResult::NoLoop));
+    }
+
+    #[test]
+    #[ignore = "Same-Tool Flood detection is disabled by design decision"]
+    fn test_same_tool_flood_detection() {
+        let mut detector = LoopDetector::with_defaults();
+
+        // Use different parameters to avoid triggering Exact Repeat
+        // First 7 calls: count < threshold (8) -> NoLoop
+        for i in 1..=7 {
+            let result = detector.check("flood_tool", &format!("p{i}"), &format!("r{i}"));
+            assert!(
+                matches!(result, LoopDetectionResult::NoLoop),
+                "Expected NoLoop at call {i}, got {result:?}"
+            );
+        }
+
+        // 8th call: count == threshold (8) -> Warning
+        let result = detector.check("flood_tool", "p8", "r8");
+        if let LoopDetectionResult::LoopDetected { level, pattern, .. } = &result {
+            assert!(matches!(pattern, LoopPattern::SameToolFlood));
+            assert_eq!(*level, ResponseLevel::Warning);
+        } else {
+            panic!("Expected SameToolFlood Warning, got {result:?}");
+        }
+
+        // 9th call: count == 9 -> still Warning (9 < 8 + 2)
+        let result = detector.check("flood_tool", "p9", "r9");
+        if let LoopDetectionResult::LoopDetected { level, pattern, .. } = &result {
+            assert!(matches!(pattern, LoopPattern::SameToolFlood));
+            assert_eq!(*level, ResponseLevel::Warning);
+        } else {
+            panic!("Expected SameToolFlood Warning, got {result:?}");
+        }
+
+        // 10th call: count == 10 -> Block (10 >= 8 + 2)
+        let result = detector.check("flood_tool", "p10", "r10");
+        if let LoopDetectionResult::LoopDetected { level, pattern, .. } = &result {
+            assert!(matches!(pattern, LoopPattern::SameToolFlood));
+            assert_eq!(*level, ResponseLevel::Block);
+        } else {
+            panic!("Expected SameToolFlood Block, got {result:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "Same-Tool Flood detection is disabled by design decision"]
+    fn test_same_tool_flood_below_threshold() {
+        let mut detector = LoopDetector::with_defaults();
+
+        // 7 calls, threshold is 8 -> no trigger
+        for i in 1..=7 {
+            let result = detector.check("tool", &format!("p{i}"), &format!("r{i}"));
+            assert!(
+                matches!(result, LoopDetectionResult::NoLoop),
+                "Expected NoLoop at call {i}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "Same-Tool Flood detection is disabled by design decision"]
+    fn test_same_tool_flood_mixed_tools() {
+        let mut detector = LoopDetector::with_defaults();
+
+        // Alternate between two tools for 6 calls
+        for i in 0..6 {
+            let tool = if i % 2 == 0 { "tool_a" } else { "tool_b" };
+            let result = detector.check(tool, &format!("p{i}"), &format!("r{i}"));
+            assert!(
+                matches!(result, LoopDetectionResult::NoLoop),
+                "Failed at iteration {i}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_progress_detection() {
+        let mut detector = LoopDetector::with_defaults();
+
+        // 1st call: initializes no-progress state
+        let result = detector.check("tool", "p1", "same_result");
+        assert!(matches!(result, LoopDetectionResult::NoLoop));
+
+        // 2nd call: consecutive_same = 1
+        let result = detector.check("tool", "p2", "same_result");
+        assert!(matches!(result, LoopDetectionResult::NoLoop));
+
+        // 3rd call: consecutive_same = 2
+        let result = detector.check("tool", "p3", "same_result");
+        assert!(matches!(result, LoopDetectionResult::NoLoop));
+
+        // 4th call: consecutive_same = 3
+        let result = detector.check("tool", "p4", "same_result");
+        assert!(matches!(result, LoopDetectionResult::NoLoop));
+
+        // 5th call: consecutive_same = 4
+        let result = detector.check("tool", "p5", "same_result");
+        assert!(matches!(result, LoopDetectionResult::NoLoop));
+
+        // 6th call: consecutive_same = 5 >= threshold(5), triggers NoProgress
+        let result = detector.check("tool", "p6", "same_result");
+        if let LoopDetectionResult::LoopDetected { pattern, .. } = &result {
+            assert!(matches!(pattern, LoopPattern::NoProgress));
+        } else {
+            panic!("Expected NoProgress at 6th call, got {result:?}");
+        }
     }
 }

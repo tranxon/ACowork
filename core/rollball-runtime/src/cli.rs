@@ -1,11 +1,14 @@
 //! CLI definitions for Agent Runtime
 
 use clap::Parser;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
 
 use crate::agent::inbound::InboundMessage;
 use crate::config::RuntimeConfig;
 use crate::error::Result;
+
+/// Type alias for the reload handle used to dynamically change log level.
+pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
 /// Retry interval when Gateway recv encounters a transient error
 const GATEWAY_RECV_RETRY_INTERVAL_MS: u64 = 100;
@@ -57,8 +60,8 @@ pub struct Cli {
 impl Cli {
     /// Run the CLI
     pub fn run(self) -> Result<()> {
-        // Initialize tracing/logging
-        self.init_tracing();
+        // Initialize tracing/logging and obtain reload handle
+        let reload_handle = self.init_tracing();
 
         // Build runtime config from CLI args
         let config = RuntimeConfig::from_cli(&self);
@@ -76,14 +79,17 @@ impl Cli {
             .build()
             .map_err(crate::error::RuntimeError::Io)?;
 
-        rt.block_on(async_main(config))
+        rt.block_on(async_main(config, reload_handle))
     }
 
     /// Initialize tracing subscriber with both stderr and file output.
     ///
     /// Logs are written to stderr (for Gateway capture) AND to
     /// `{work_dir}/logs/runtime.log` for user inspection.
-    fn init_tracing(&self) {
+    ///
+    /// Returns a reload handle that allows dynamic log level changes
+    /// at runtime (e.g. when Gateway pushes LogLevelUpdate).
+    fn init_tracing(&self) -> Option<LogReloadHandle> {
         let env_filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(&self.log_level));
 
@@ -95,17 +101,25 @@ impl Cli {
                 "WARN: failed to create log directory {:?}: {}; falling back to stderr-only",
                 log_dir, e
             );
-            tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_file(false)
+            // Fallback: use reload::Layer even for stderr-only so we can
+            // still dynamically adjust log level at runtime.
+            let (filter, reload_handle) = reload::Layer::new(env_filter);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_target(false)
+                        .with_thread_ids(false)
+                        .with_file(false)
+                )
                 .init();
-            return;
+            return Some(reload_handle);
         }
 
         let file_appender =
             tracing_appender::rolling::never(&log_dir, "runtime.log");
+
+        let (filter, reload_handle) = reload::Layer::new(env_filter);
 
         let stderr_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
@@ -121,10 +135,12 @@ impl Cli {
             .with_ansi(false);
 
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(filter)
             .with(stderr_layer)
             .with(file_layer)
             .init();
+
+        Some(reload_handle)
     }
 }
 
@@ -146,7 +162,7 @@ async fn connect_gateway_client(endpoint: &str, agent_id: &str, version: &str) -
 }
 
 /// Async entry point after tokio runtime is initialized
-async fn async_main(config: RuntimeConfig) -> Result<()> {
+async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHandle>) -> Result<()> {
     use crate::package::loader::load_package;
     use crate::package::prompt_builder::build_system_prompt;
     use crate::agent::context::ContextBuilder;
@@ -207,6 +223,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
                 gateway_max_output_tokens_limit = llm_config.max_output_tokens_limit;
                 let p = crate::providers::router::create_provider(
                     &llm_config.provider,
+                    &llm_config.protocol_type,
                     llm_config.api_key.as_deref(),
                     llm_config.base_url.as_deref(),
                 );
@@ -552,6 +569,7 @@ async fn async_main(config: RuntimeConfig) -> Result<()> {
         let result = run_gateway_loop(
             agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone(),
             socket_path.clone(), agent_id.clone(), version.clone(),
+            log_reload_handle,
         ).await;
 
         // Chunk relay task will end when chunk_rx is dropped (agent_loop dropped)
@@ -636,12 +654,13 @@ fn build_runtime_provider(
     default_base_url: Option<&str>,
 ) -> std::sync::Arc<dyn rollball_core::providers::traits::Provider> {
     use crate::providers::registry::{ProviderRegistry, RoutingStrategy};
-    use crate::providers::router::create_provider;
+    use crate::providers::router::{create_provider, infer_protocol_type};
 
     // If no multi-provider config, use simple single provider
     if manifest.llm.providers.is_empty() {
         return create_provider(
             &manifest.llm.suggested_provider,
+            &infer_protocol_type(&manifest.llm.suggested_provider),
             default_api_key,
             default_base_url,
         );
@@ -661,7 +680,7 @@ fn build_runtime_provider(
             .or(default_api_key);
         let base_url = config.base_url.as_deref()
             .or(default_base_url);
-        let provider = create_provider(name, api_key, base_url);
+        let provider = create_provider(name, &infer_protocol_type(name), api_key, base_url);
         let models = vec![config.model.clone()];
         registry.register_provider(name, provider, models);
     }
@@ -670,6 +689,7 @@ fn build_runtime_provider(
     if !manifest.llm.providers.contains_key(&manifest.llm.suggested_provider) {
         let primary = create_provider(
             &manifest.llm.suggested_provider,
+            &infer_protocol_type(&manifest.llm.suggested_provider),
             default_api_key,
             default_base_url,
         );
@@ -695,6 +715,7 @@ fn build_runtime_provider(
             tracing::warn!("Failed to build ReliableProvider, falling back to single provider");
             create_provider(
                 &manifest.llm.suggested_provider,
+                &infer_protocol_type(&manifest.llm.suggested_provider),
                 default_api_key,
                 default_base_url,
             )
@@ -706,18 +727,24 @@ fn build_runtime_provider(
 ///
 /// Priority:
 /// 1. ROLLBALL_LLM_API_KEY (generic override)
-/// 2. OPENAI_API_KEY / OLLAMA_API_KEY (provider-specific)
+/// 2. Protocol-based env key (OPENAI_API_KEY / OLLAMA_API_KEY / ANTHROPIC_API_KEY)
+///
+/// TODO: In the future, the env key should be looked up from offline_providers.json
+/// `env` field for the specific provider, with ProtocolType as fallback only.
 fn resolve_api_key(manifest: &rollball_core::AgentManifest) -> Option<String> {
     if let Ok(key) = std::env::var("ROLLBALL_LLM_API_KEY")
-        && !key.is_empty() {
+        && !key.is_empty()
+    {
         return Some(key);
     }
 
-    let env_key = match manifest.llm.suggested_provider.as_str() {
-        "ollama" => "OLLAMA_API_KEY",
-        "minimax" => "MINIMAX_API_KEY",
-        "anthropic" | "claude" => "ANTHROPIC_API_KEY",
-        _ => "OPENAI_API_KEY",
+    use crate::providers::router::infer_protocol_type;
+
+    let protocol_type = infer_protocol_type(&manifest.llm.suggested_provider);
+    let env_key = match &protocol_type {
+        rollball_core::ProtocolType::Ollama => "OLLAMA_API_KEY",
+        rollball_core::ProtocolType::Anthropic => "ANTHROPIC_API_KEY",
+        rollball_core::ProtocolType::OpenAI => "OPENAI_API_KEY",
     };
 
     std::env::var(env_key).ok().filter(|k| !k.is_empty())
@@ -787,6 +814,7 @@ async fn run_gateway_loop(
     _socket_path: String,
     agent_id_for_reconnect: String,
     version_for_reconnect: String,
+    log_reload_handle: Option<LogReloadHandle>,
 ) -> Result<()> {
     use rollball_core::protocol::GatewayResponse;
 
@@ -951,7 +979,7 @@ async fn run_gateway_loop(
                         }
                     }
                     // Ignore other push messages (CapabilityUpdate, etc.)
-                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: available_models, model_capabilities, max_output_tokens_limit } => {
+                    GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: available_models, model_capabilities, max_output_tokens_limit, protocol_type, .. } => {
                         tracing::info!(
                             provider = %provider,
                             model = ?model,
@@ -960,6 +988,7 @@ async fn run_gateway_loop(
                         );
                         let new_provider = crate::providers::router::create_provider(
                             &provider,
+                            &protocol_type,
                             Some(&api_key),
                             base_url.as_deref(),
                         );
@@ -995,6 +1024,31 @@ async fn run_gateway_loop(
                             "Received WorkspaceContextUpdate from Gateway — updating workspace context"
                         );
                         context_builder.set_workspace_context(context_text);
+                    }
+                    GatewayResponse::LogLevelUpdate { log_level } => {
+                        tracing::info!(
+                            new_level = %log_level,
+                            "Received LogLevelUpdate from Gateway"
+                        );
+                        if let Some(handle) = &log_reload_handle {
+                            let new_filter = EnvFilter::new(&log_level);
+                            if let Err(e) = handle.reload(new_filter) {
+                                tracing::error!(
+                                    error = %e,
+                                    "Failed to reload log level"
+                                );
+                            } else {
+                                tracing::info!(
+                                    level = %log_level,
+                                    "Log level updated successfully"
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                level = %log_level,
+                                "No reload handle available — cannot update log level dynamically"
+                            );
+                        }
                     }
                     _ => {
                         tracing::debug!("Ignoring non-IntentReceived Gateway message");

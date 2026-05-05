@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use rollball_core::budget;
 use rollball_core::identity;
 use rollball_core::proto;
-use rollball_core::protocol::GatewayResponse;
+use rollball_core::protocol::{GatewayResponse, ProtocolType};
 
 use rollball_gateway::gateway::state::{AgentInfo, GatewayState, RunningAgentInfo};
 use rollball_gateway::http::routes::{BridgeEvent, SessionPendingRequests, SharedSessionMgr};
@@ -760,6 +760,7 @@ async fn test_t25_llm_config_delivery_push() {
                         models: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
                         model_capabilities: None,
                         max_output_tokens_limit: 4096,
+                        protocol_type: ProtocolType::default(),
                     })
                     .await;
                 assert!(pushed, "Push should succeed");
@@ -1209,6 +1210,7 @@ async fn test_t37_full_conversation_chain() {
                         models: vec!["gpt-4".to_string()],
                         model_capabilities: None,
                         max_output_tokens_limit: 4096,
+                        protocol_type: ProtocolType::default(),
                     })
                     .await;
             }

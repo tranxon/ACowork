@@ -58,6 +58,7 @@ message ServerMessage {
     IdentityDelivery        identity_delivery     = 22;
     WorkspaceContextUpdate  workspace_context_update = 23;
     IterationLimitPaused    iteration_limit_paused = 24;
+    LogLevelUpdate          log_level_update     = 25;
   }
 }
 
@@ -100,10 +101,11 @@ message CurrentSessionId        { string session_id = 1; }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; }
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }
-message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; }
+message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; string protocol_type = 8; }
 message IdentityDelivery        { repeated IdentityEntry entries = 1; }
 message WorkspaceContextUpdate  { string context_text = 1; string current_workspace_id = 2; string current_workspace_path = 3; }
 message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
+message LogLevelUpdate           { string log_level = 1; }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }
 

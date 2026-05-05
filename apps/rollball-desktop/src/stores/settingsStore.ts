@@ -4,6 +4,7 @@ import { DEFAULT_GATEWAY_URL } from "../lib/config";
 
 const STORAGE_KEY_THEME = "rollball-theme";
 const STORAGE_KEY_FONT_SIZE = "rollball-font-size";
+const STORAGE_KEY_LOG_LEVEL = "rollball-log-level";
 
 /** Apply theme to DOM by toggling .dark class on <html> */
 function applyTheme(theme: Theme) {
@@ -41,6 +42,15 @@ function getPersistedFontSize(): number {
   return 1.0;
 }
 
+/** Read persisted log level from localStorage, fallback to "info" */
+function getPersistedLogLevel(): string {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_LOG_LEVEL);
+    if (stored) return stored;
+  } catch {}
+  return "info";
+}
+
 interface SettingsStore {
   theme: Theme;
   fontSize: number;
@@ -56,13 +66,14 @@ export const useSettingsStore = create<SettingsStore>((set) => {
   // Initialize from persisted values and apply theme to DOM immediately
   const initialTheme = getPersistedTheme();
   const initialFontSize = getPersistedFontSize();
+  const initialLogLevel = getPersistedLogLevel();
   applyTheme(initialTheme);
 
   return {
     theme: initialTheme,
     fontSize: initialFontSize,
     gatewayUrl: DEFAULT_GATEWAY_URL,
-    logLevel: "info",
+    logLevel: initialLogLevel,
 
     setTheme: (theme) => {
       applyTheme(theme);
@@ -74,6 +85,9 @@ export const useSettingsStore = create<SettingsStore>((set) => {
       set({ fontSize });
     },
     setGatewayUrl: (gatewayUrl) => set({ gatewayUrl }),
-    setLogLevel: (logLevel) => set({ logLevel }),
+    setLogLevel: (logLevel) => {
+      try { localStorage.setItem(STORAGE_KEY_LOG_LEVEL, logLevel); } catch {}
+      set({ logLevel });
+    },
   };
 });
