@@ -3,7 +3,7 @@
 //! Provides `ConversationSession` for managing a single session's JSONL file
 //! and `ConversationWriter` for channel-based single-writer thread architecture.
 
-use std::io::{BufRead, BufReader, Seek, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -103,6 +103,8 @@ impl ConversationWriter {
 
     /// Write a single entry as a JSON line.
     fn write_entry(&mut self, entry: &ConversationEntry) -> std::io::Result<()> {
+        // Always seek to end for append; handles resume where file position may be at 0
+        self.file.seek(std::io::SeekFrom::End(0))?;
         let mut buf_writer = std::io::BufWriter::new(&self.file);
         serde_json::to_writer(&mut buf_writer, entry)?;
         writeln!(buf_writer)?;
@@ -112,17 +114,28 @@ impl ConversationWriter {
 
     /// Rewrite the first line with updated metadata.
     ///
-    /// This seeks to the beginning of the file, overwrites the first line,
-    /// then restores the file position for subsequent appends.
+    /// Reads all content after the first line, truncates the file to 0,
+    /// writes the new metadata, then restores the remaining content.
+    /// This is more reliable than seek-and-overwrite which leaves leftover
+    /// bytes when the new line is shorter than the old one.
     fn rewrite_metadata(&mut self, meta: &SessionMetadata) -> std::io::Result<()> {
-        let mut buf_writer = std::io::BufWriter::new(&self.file);
-        // Seek to start to overwrite the first line
-        buf_writer.seek(std::io::SeekFrom::Start(0))?;
-        serde_json::to_writer(&mut buf_writer, meta)?;
-        writeln!(buf_writer)?;
-        buf_writer.flush()?;
-        // Seek back to end for subsequent appends
-        buf_writer.seek(std::io::SeekFrom::End(0))?;
+        // Read all existing content after the first line
+        let mut reader = std::io::BufReader::new(&self.file);
+        let mut first_line = String::new();
+        reader.read_line(&mut first_line)?; // skip and discard the first line
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest)?;
+        drop(reader);
+
+        // Truncate the file to 0 and rewrite from the start
+        self.file.set_len(0)?;
+        self.file.seek(std::io::SeekFrom::Start(0))?;
+
+        let new_line = serde_json::to_string(meta)?;
+        writeln!(self.file, "{}", new_line)?;
+        self.file.write_all(&rest)?;
+        self.file.flush()?;
+
         Ok(())
     }
 }
@@ -137,6 +150,8 @@ pub struct ConversationSession {
     created_at: String,
     /// Whether the session title has been set (first user message).
     title_set: AtomicBool,
+    /// Currently persisted title, for deduplicating force-update calls.
+    current_title: std::sync::Mutex<Option<String>>,
     sender: mpsc::UnboundedSender<WriterCommand>,
     /// Path to the JSONL file (for session-level distillation on close).
     session_file_path: PathBuf,
@@ -154,6 +169,7 @@ impl ConversationSession {
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(true)
             .open(&file_path)?;
@@ -186,6 +202,7 @@ impl ConversationSession {
             agent_id: agent_id.to_string(),
             created_at: now_for_self,
             title_set: AtomicBool::new(false),
+            current_title: std::sync::Mutex::new(None),
             sender: tx,
             session_file_path: file_path,
         })
@@ -200,7 +217,8 @@ impl ConversationSession {
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
 
         let file = std::fs::OpenOptions::new()
-            .append(true)
+            .read(true)
+            .write(true)
             .open(&file_path)?;
 
         // Read existing metadata to get agent_id
@@ -215,6 +233,7 @@ impl ConversationSession {
             agent_id: meta.agent_id,
             created_at: meta.created_at,
             title_set: AtomicBool::new(meta.title.is_some()),
+            current_title: std::sync::Mutex::new(meta.title.clone()),
             sender: tx,
             session_file_path: file_path,
         })
@@ -317,11 +336,15 @@ impl ConversationSession {
             session_id: self.session_id.clone(),
             created_at: self.created_at.clone(),
             agent_id: self.agent_id.clone(),
-            title: Some(title),
+            title: Some(title.clone()),
             updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             message_count: None,
         };
         self.update_metadata(metadata);
+        // Track current title for dedup
+        if let Ok(mut current) = self.current_title.lock() {
+            *current = Some(title);
+        }
         tracing::info!(session_id = %self.session_id, "Session title set");
     }
 
@@ -329,7 +352,14 @@ impl ConversationSession {
     ///
     /// Unlike `set_title`, this always writes the title even if one was
     /// already set. Used by the `update_session_title` action from Gateway.
-    pub fn update_title_force(&self, title: &str) {
+    /// Returns `true` if the title was actually written (was different from current).
+    pub fn update_title_force(&self, title: &str) -> bool {
+        // No-op if the title hasn't changed
+        if let Ok(current) = self.current_title.lock() {
+            if current.as_deref() == Some(title) {
+                return false;
+            }
+        }
         let truncated = {
             let chars: Vec<char> = title.chars().collect();
             if chars.len() <= 30 {
@@ -349,7 +379,12 @@ impl ConversationSession {
             message_count: None,
         };
         self.update_metadata(metadata);
+        // Track current title for dedup
+        if let Ok(mut current) = self.current_title.lock() {
+            *current = Some(truncated.clone());
+        }
         tracing::info!(session_id = %self.session_id, title = %truncated, "Session title force-updated via API");
+        true
     }
 }
 

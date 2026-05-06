@@ -982,6 +982,10 @@ async fn run_gateway_loop(
                             handle_update_session_title(&mut agent_loop, grpc_client, &params).await;
                             continue;
                         }
+                        if action == "delete_session" {
+                            handle_delete_session(&work_dir, &mut agent_loop, &mut current_session_id, &agent_id_for_reconnect, grpc_client, &params).await;
+                            continue;
+                        }
 
                         // Extract message content from params
                         let mut content = params.get("content")
@@ -1497,20 +1501,106 @@ async fn handle_update_session_title(
         }
     };
 
-    if agent_loop.update_session_title(&title) {
-        let session_id = agent_loop.current_session_id().map(|s| s.to_string()).unwrap_or_default();
-        let data = serde_json::json!({
-            "session_id": session_id,
-            "title": title,
-        });
-        send_session_response(grpc_client, &request_id, data).await;
-    } else {
-        tracing::warn!("update_session_title called but no active session");
-        let data = serde_json::json!({
-            "error": "No active session to update",
-        });
-        send_session_response(grpc_client, &request_id, data).await;
+    match agent_loop.update_session_title(&title) {
+        Ok(true) => {
+            let session_id = agent_loop.current_session_id().map(|s| s.to_string()).unwrap_or_default();
+            let data = serde_json::json!({
+                "session_id": session_id,
+                "title": title,
+                "updated": true,
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+        }
+        Ok(false) => {
+            // Title unchanged — no-op
+            let session_id = agent_loop.current_session_id().map(|s| s.to_string()).unwrap_or_default();
+            let data = serde_json::json!({
+                "session_id": session_id,
+                "title": title,
+                "updated": false,
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+        }
+        Err(_) => {
+            tracing::warn!("update_session_title called but no active session");
+            let data = serde_json::json!({
+                "error": "No active session to update",
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+        }
     }
+}
+
+/// Handle "delete_session" action from Gateway
+///
+/// Deletes the session's JSONL file. If the deleted session is the currently
+/// active one, creates a new session and switches to it automatically.
+async fn handle_delete_session(
+    work_dir: &str,
+    agent_loop: &mut crate::agent::loop_::AgentLoop,
+    current_session_id: &mut String,
+    agent_id: &str,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
+    params: &serde_json::Value,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
+        Some(sid) if !sid.is_empty() => sid.to_string(),
+        _ => {
+            let data = serde_json::json!({
+                "error": "Missing or empty session_id parameter",
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+            return;
+        }
+    };
+
+    let conversations_dir = std::path::Path::new(work_dir).join("conversations");
+    let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
+
+    // Delete the JSONL file
+    if file_path.exists() {
+        if let Err(e) = std::fs::remove_file(&file_path) {
+            tracing::error!(session_id = %session_id, error = %e, "Failed to delete session file");
+            let data = serde_json::json!({
+                "error": format!("Failed to delete session: {}", e),
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+            return;
+        }
+        tracing::info!(session_id = %session_id, "Deleted session JSONL file");
+    }
+
+    // If the deleted session was the currently active one, create a new session
+    let is_current = *current_session_id == session_id;
+    if is_current {
+        let new_session_id = crate::conversation::generate_session_id();
+        match crate::conversation::ConversationSession::new(
+            std::path::Path::new(work_dir),
+            &new_session_id,
+            agent_id,
+        ) {
+            Ok(new_session) => {
+                agent_loop.switch_conversation(new_session);
+                *current_session_id = new_session_id.clone();
+                tracing::info!(new_session_id = %new_session_id, "Switched to new session after deletion");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create new session after deletion");
+            }
+        }
+    }
+
+    let data = serde_json::json!({
+        "deleted": true,
+        "session_id": session_id,
+        "new_session_id": if is_current { current_session_id.clone() } else { String::new() },
+    });
+    send_session_response(grpc_client, &request_id, data).await;
 }
 
 /// Send a session response back to Gateway via IntentSend (S1.14)

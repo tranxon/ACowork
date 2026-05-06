@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useSessionStore } from "../../stores/sessionStore";
-import { Brain, MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2 } from "lucide-react";
+import { Brain, MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 interface SessionPanelProps {
@@ -33,8 +33,11 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
     fetchSessions,
     switchSession,
     createSession,
+    deleteSession,
   } = useSessionStore();
   const [open, setOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   // Fetch sessions when panel opens or agent changes
@@ -60,6 +63,17 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
     await switchSession(sessionId, agentId);
     useSessionStore.getState().saveSessionForAgent(agentId, sessionId);
     setOpen(false);
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    if (deletingId) return;
+    setDeletingId(sessionId);
+    try {
+      await deleteSession(agentId, sessionId);
+    } finally {
+      setDeletingId(null);
+      setConfirmDelete(null);
+    }
   };
 
   return (
@@ -111,35 +125,70 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
 
             {sessions.map((session) => {
               const isActive = session.session_id === currentSessionId;
+              const isDeleting = confirmDelete === session.session_id;
               return (
-                <button
+                <div
                   key={session.session_id}
-                  onClick={() => handleSwitchSession(session.session_id)}
-                  className={cn(
-                    "flex w-full flex-col gap-0.5 px-3 py-2 text-left transition-colors",
-                    "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
-                  )}
+                  className="group flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
                 >
-                  <div className="flex items-center gap-2">
-                    <MessageCircle className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-                    <span className={cn("min-w-0 flex-1 truncate text-xs font-medium", isActive && "text-blue-600 dark:text-blue-400", !isActive && "text-zinc-700 dark:text-zinc-300")}>
-                      {session.title || "Untitled session"}
-                    </span>
-                    {session.status === "active" && (
-                      <span className="shrink-0 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-                        Active
+                  {/* Select session button */}
+                  <button
+                    onClick={() => handleSwitchSession(session.session_id)}
+                    className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <MessageCircle className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      <span className={cn("min-w-0 flex-1 truncate text-xs font-medium", isActive && "text-blue-600 dark:text-blue-400", !isActive && "text-zinc-700 dark:text-zinc-300")}>
+                        {session.title || "Untitled session"}
                       </span>
-                    )}
-                  </div>
-                  <div className="ml-5.5 flex items-center gap-2 text-[10px] text-zinc-400 dark:text-zinc-500">
-                    <span className="flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      {formatRelativeTime(session.created_at)}
-                    </span>
-                    <span>·</span>
-                    <span>{session.message_count} messages</span>
-                  </div>
-                </button>
+                    </div>
+                    <div className="ml-5.5 flex items-center gap-2 text-[10px] text-zinc-400 dark:text-zinc-500">
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {formatRelativeTime(session.created_at)}
+                      </span>
+                      <span>·</span>
+                      <span>{session.message_count} messages</span>
+                    </div>
+                  </button>
+
+                  {/* Delete button */}
+                  {isDeleting ? (
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleDeleteSession(session.session_id);
+                        }}
+                        disabled={deletingId !== null}
+                        className="rounded bg-red-500 px-2 py-0.5 text-xs text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        删除
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDelete(null);
+                        }}
+                        className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-500"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDelete(session.session_id);
+                      }}
+                      disabled={deletingId !== null}
+                      className="rounded p-1 text-zinc-400 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Delete session"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>

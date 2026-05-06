@@ -27,6 +27,7 @@ message ClientMessage {
     GetSessionMessagesRequest get_session_messages = 16;
     CreateSessionRequest    create_session        = 17;
     GetCurrentSessionIdRequest get_current_session_id = 18;
+    DeleteSessionRequest    delete_session        = 26;
     StreamChunk             stream_chunk          = 19;
   }
 }
@@ -52,6 +53,7 @@ message ServerMessage {
     SessionMessages         session_messages      = 16;
     SessionCreated          session_created       = 17;
     CurrentSessionId        current_session_id    = 18;
+    SessionDeleted          session_deleted        = 26;
     IntentReceived          intent_received       = 19;
     CapabilityUpdate        capability_update     = 20;
     LLMConfigDelivery       llm_config_delivery   = 21;
@@ -98,6 +100,9 @@ message SessionList             { repeated SessionInfoDto sessions = 1; }
 message SessionMessages         { repeated ConversationEntryDto messages = 1; string cursor = 2; bool has_more = 3; }
 message SessionCreated          { string session_id = 1; }
 message CurrentSessionId        { string session_id = 1; }
+message SessionDeleted          { bool success = 1; string error = 2; }
+
+message DeleteSessionRequest    { string session_id = 1; }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }

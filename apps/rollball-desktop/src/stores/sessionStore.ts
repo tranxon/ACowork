@@ -19,6 +19,7 @@ interface SessionState {
   switchSession: (sessionId: string, agentId?: string) => Promise<void>;
   saveSessionForAgent: (agentId: string, sessionId: string) => void;
   createSession: (agentId: string) => Promise<void>;
+  deleteSession: (agentId: string, sessionId: string) => Promise<void>;
   setSessionPanelOpen: (open: boolean) => void;
   toggleSessionPanel: () => void;
   /** Update a session's title locally (no API call) */
@@ -137,8 +138,50 @@ export const useSessionStore = create<SessionState>((set) => ({
     }
   },
 
+  deleteSession: async (agentId: string, sessionId: string) => {
+    try {
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
+        { method: "DELETE" },
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = (await resp.json()) as { deleted: boolean; session_id: string; new_session_id?: string };
+
+      // Remove the deleted session from local state
+      const isCurrent = useSessionStore.getState().currentSessionId === sessionId;
+      const remaining = useSessionStore.getState().sessions.filter((s) => s.session_id !== sessionId);
+      const newCurrentId = isCurrent
+        ? (data.new_session_id || (remaining.length > 0 ? remaining[0].session_id : null))
+        : useSessionStore.getState().currentSessionId;
+
+      set({
+        sessions: remaining,
+        currentSessionId: newCurrentId,
+      });
+
+      // If the deleted session was current, clear chat and update agent map
+      if (isCurrent) {
+        useChatStore.getState().clearMessages();
+        useChatStore.setState({
+          hasMoreMessages: false,
+          messageCursor: null,
+          isLoadingMore: false,
+        });
+        if (newCurrentId) {
+          useSessionStore.getState().saveSessionForAgent(agentId, newCurrentId);
+        }
+      }
+
+      // Invalidate session title so it gets re-fetched
+      set((state) => ({
+        sessionTitles: { ...state.sessionTitles, [agentId]: undefined as any },
+      }));
+    } catch (e) {
+      console.error("[SessionStore] Failed to delete session:", e);
+    }
+  },
+
   setSessionPanelOpen: (open: boolean) => {
-    set({ isSessionPanelOpen: open });
   },
 
   toggleSessionPanel: () => {

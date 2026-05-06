@@ -195,13 +195,14 @@ impl AgentLoop {
 
     /// Update the title of the currently active conversation session.
     ///
-    /// Returns `true` if a session was active and its title was updated.
-    pub fn update_session_title(&mut self, title: &str) -> bool {
+    /// Returns `Ok(true)` if the title was actually written (different from current),
+    /// `Ok(false)` if the title was already the same (no-op),
+    /// or `Err(())` if no active session exists.
+    pub fn update_session_title(&mut self, title: &str) -> std::result::Result<bool, ()> {
         if let Some(ref conv) = self.conversation {
-            conv.update_title_force(title);
-            true
+            Ok(conv.update_title_force(title))
         } else {
-            false
+            Err(())
         }
     }
 

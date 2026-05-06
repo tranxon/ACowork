@@ -16,7 +16,7 @@ use axum::{
     http::StatusCode,
     Json,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -38,6 +38,7 @@ pub fn chat_routes() -> Router<AppState> {
         .route("/api/agents/{id}/sessions/{session_id}/activate", post(activate_session))
         .route("/api/agents/{id}/sessions/{session_id}/title", put(update_session_title))
         .route("/api/agents/{id}/sessions/{session_id}/messages", get(get_session_messages))
+        .route("/api/agents/{id}/sessions/{session_id}", delete(delete_session))
         .route("/api/agents/{id}/continue", post(continue_execution))
 }
 
@@ -1136,6 +1137,42 @@ pub async fn update_session_title(
     }
 
     Ok(StatusCode::OK)
+}
+
+/// `DELETE /api/agents/{id}/sessions/{session_id}` — delete a session
+///
+/// Deletes the session from the Runtime. If the deleted session is the
+/// currently active one, the Runtime will automatically create a new session.
+pub async fn delete_session(
+    State(state): State<AppState>,
+    Path((agent_id, session_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
+    }
+
+    let params = serde_json::json!({
+        "session_id": session_id,
+    });
+
+    let data = forward_session_query(&state, &agent_id, "delete_session", params).await?;
+
+    // Check for error response from Runtime
+    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+        return Err(ApiError::internal(error));
+    }
+
+    Ok(Json(data))
 }
 
 // ── S1.14: IPC forwarding helpers ──────────────────────────────────────────────

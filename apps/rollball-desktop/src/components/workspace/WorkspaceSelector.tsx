@@ -211,26 +211,25 @@ export function WorkspaceSelector() {
             
                           {/* Delete button */}
                           {isDeleting ? (
-                            <div className="flex items-center gap-0.5">
-                              <span className="text-[10px] text-zinc-500">?</span>
+                            <div className="flex items-center gap-1">
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void handleDelete(dir.id, displayName);
                                 }}
                                 disabled={deletingId !== null}
-                                className="rounded bg-red-500 px-1.5 py-0.5 text-[10px] text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="rounded bg-red-500 px-2 py-0.5 text-xs text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
-                                ✓
+                                删除
                               </button>
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setConfirmDelete(null);
                                 }}
-                                className="rounded px-1 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-600"
+                                className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-500"
                               >
-                                ✗
+                                取消
                               </button>
                             </div>
                           ) : (

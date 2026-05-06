@@ -1139,6 +1139,14 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 Some(r.session_id)
             },
         },
+        Some(ServerPayload::SessionDeleted(r)) => GatewayResponse::SessionDeleted {
+            success: r.success,
+            error: if r.error.is_empty() {
+                None
+            } else {
+                Some(r.error)
+            },
+        },
         Some(ServerPayload::LogLevelUpdate(lu)) => GatewayResponse::LogLevelUpdate {
             log_level: lu.log_level,
         },

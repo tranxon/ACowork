@@ -716,16 +716,29 @@ function makeSessionTitle(content: string): string {
   return content.replace(/\n/g, " ").trim().substring(0, 30);
 }
 
+/** Tracks which session titles have already been persisted to backend,
+ *  preventing redundant PUT API calls that trigger unnecessary metadata rewrites. */
+const persistedTitles: Set<string> = new Set();
+
 /** Find first user message and update session title if not yet set.
- *  Updates both local state (sessionStore) AND backend JSONL metadata. */
+ *  Updates both local state (sessionStore) AND backend JSONL metadata.
+ *  Avoids redundant API calls — the backend's `set_title` already writes the
+ *  title after the first user message via AgentLoop. */
 function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: string) {
   const firstUserMsg = messages.find((m) => m.type === "user");
   if (!firstUserMsg || !firstUserMsg.content) return;
   const sessionId = useSessionStore.getState().currentSessionId;
   if (!sessionId) return;
   const title = makeSessionTitle(firstUserMsg.content);
+
   // Update local sessionStore
   useSessionStore.getState().updateSessionTitle(sessionId, title);
+
+  // Skip backend API if title was already persisted for this session
+  const cacheKey = `${sessionId}::${title}`;
+  if (persistedTitles.has(cacheKey)) return;
+  persistedTitles.add(cacheKey);
+
   // Persist to backend (best-effort, non-blocking)
   if (agentId) {
     fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/title`, {

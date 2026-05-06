@@ -280,6 +280,15 @@ pub enum GatewayRequest {
     /// Runtime sends this to Gateway to query the currently
     /// active session ID. Gateway responds with CurrentSessionId.
     GetCurrentSessionId,
+    /// Delete session request
+    ///
+    /// Gateway sends this to Runtime to delete a conversation
+    /// session. Runtime deletes the JSONL file and responds
+    /// with SessionDeleted.
+    DeleteSession {
+        /// Session identifier to delete
+        session_id: String,
+    },
 }
 
 /// Gateway Service API response
@@ -481,6 +490,16 @@ pub enum GatewayResponse {
     CurrentSessionId {
         /// The currently active session ID, or None if no session
         session_id: Option<String>,
+    },
+    /// Session deleted result
+    ///
+    /// Sent by Runtime in response to GatewayRequest::DeleteSession.
+    SessionDeleted {
+        /// Whether the session was successfully deleted
+        success: bool,
+        /// Error message if deletion failed
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Log level update (Gateway → Runtime, push)
     ///

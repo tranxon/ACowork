@@ -181,6 +181,13 @@ pub async fn dispatch_grpc_request(
             }
         }
 
+        Some(proto::client_message::Payload::DeleteSession(_req)) => {
+            GatewayResponse::SessionDeleted {
+                success: false,
+                error: Some("DeleteSession is handled by Runtime via IntentReceived".to_string()),
+            }
+        }
+
         Some(proto::client_message::Payload::GetCurrentSessionId(_req)) => {
             GatewayResponse::CurrentSessionId { session_id: None }
         }
