@@ -23,6 +23,7 @@ tonic.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
