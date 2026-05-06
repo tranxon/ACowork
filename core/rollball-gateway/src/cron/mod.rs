@@ -371,6 +371,7 @@ pub async fn run_cron_scheduler(
                         from: format!("cron:{}", agent_id),
                         action: action.clone(),
                         params: params.clone(),
+                        command: None,
                     };
                     let _ = session;
                     drop(mgr);

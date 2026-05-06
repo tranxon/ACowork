@@ -308,6 +308,11 @@ pub enum GatewayResponse {
         from: String,
         action: String,
         params: Value,
+        /// Skill command selected by the user (e.g. "/commit", "/review-pr").
+        /// When present, the Runtime knows the user explicitly chose a skill.
+        /// None for normal chat messages or non-skill intents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
     },
     /// Budget information
     BudgetInfo {
@@ -591,6 +596,59 @@ mod tests {
             assert_eq!(remaining_tokens, 50000);
         } else {
             panic!("Expected BudgetInfo variant");
+        }
+    }
+
+    #[test]
+    fn test_intent_received_without_command() {
+        let resp = GatewayResponse::IntentReceived {
+            from: "http-api".to_string(),
+            action: "chat_message".to_string(),
+            params: serde_json::json!({"content": "hello"}),
+            command: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        // command should be skipped when None
+        assert!(!json.contains("command"));
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        if let GatewayResponse::IntentReceived { from, action, command, .. } = parsed {
+            assert_eq!(from, "http-api");
+            assert_eq!(action, "chat_message");
+            assert!(command.is_none());
+        } else {
+            panic!("Expected IntentReceived variant");
+        }
+    }
+
+    #[test]
+    fn test_intent_received_with_command() {
+        let resp = GatewayResponse::IntentReceived {
+            from: "http-api".to_string(),
+            action: "chat_message".to_string(),
+            params: serde_json::json!({"content": "hello"}),
+            command: Some("/commit".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("command"));
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        if let GatewayResponse::IntentReceived { from, action, command, .. } = parsed {
+            assert_eq!(from, "http-api");
+            assert_eq!(action, "chat_message");
+            assert_eq!(command, Some("/commit".to_string()));
+        } else {
+            panic!("Expected IntentReceived variant");
+        }
+    }
+
+    #[test]
+    fn test_intent_received_backward_compatible() {
+        // Old JSON without command field should deserialize with command=None
+        let json = r#"{"type":"IntentReceived","from":"http-api","action":"chat_message","params":{"content":"hello"}}"#;
+        let parsed: GatewayResponse = serde_json::from_str(json).unwrap();
+        if let GatewayResponse::IntentReceived { command, .. } = parsed {
+            assert!(command.is_none());
+        } else {
+            panic!("Expected IntentReceived variant");
         }
     }
 

@@ -679,6 +679,7 @@ async fn test_t23_intent_received_push() {
                         from: "com.test.sender".to_string(),
                         action: "notify".to_string(),
                         params: serde_json::json!({"msg": "hello"}),
+                        command: None,
                     })
                     .await;
                 assert!(pushed, "Push should succeed");
@@ -687,7 +688,7 @@ async fn test_t23_intent_received_push() {
 
         // Client should receive the push
         match tokio::time::timeout(Duration::from_secs(5), client.recv_message()).await {
-            Ok(Ok(Some(GatewayResponse::IntentReceived { from, action, params }))) => {
+            Ok(Ok(Some(GatewayResponse::IntentReceived { from, action, params, command: _ }))) => {
                 assert_eq!(from, "com.test.sender");
                 assert_eq!(action, "notify");
                 assert_eq!(params["msg"], "hello");
@@ -1367,6 +1368,7 @@ async fn test_t38_multi_agent_isolation() {
                         from: "com.test.sender".to_string(),
                         action: "private_msg".to_string(),
                         params: serde_json::json!({"secret": "for agent1 only"}),
+                        command: None,
                     })
                     .await;
             }

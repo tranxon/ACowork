@@ -4,12 +4,13 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useSkillStore } from "../../stores/skillStore";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 import { toolbarButton, toolbarButtonActive } from "../../lib/ui-styles";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, X, Square, Copy, FileText, Terminal, Plus, RefreshCw, Layers, Cpu, MessageSquare, Loader } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, Check, X, Square, Copy, FileText, Terminal, Plus, RefreshCw, Layers, Cpu, Loader } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContextUsageInfo, VaultKeyEntry, ModelInfo } from "../../lib/types";
@@ -24,6 +25,7 @@ export function ChatPanel() {
   const { messages, sending, wsMap, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage, isLoadingSession } = useChatStore();
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
+  const { activeSkill, clearActiveSkill } = useSkillStore();
   const [inputValue, setInputValue] = useState("");
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
   const [activeDrawer, setActiveDrawer] = useState<"memory" | null>(null);
@@ -275,7 +277,9 @@ export function ChatPanel() {
     if (!content || sending || !selectedAgentId) return;
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
-    void sendMessage(content, selectedAgentId);
+    void sendMessage(content, selectedAgentId, activeSkill?.name).then(() => {
+      clearActiveSkill();
+    });
     setInputValue("");
   };
 
@@ -450,6 +454,22 @@ export function ChatPanel() {
 
       {/* Unified input container with toolbar */}
       <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50">
+        {/* Active skill badge */}
+        {activeSkill && (
+          <div className="flex items-center gap-1 px-3 pt-2">
+            <span className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs font-medium text-blue-700 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800">
+              /{activeSkill.name}
+              <button
+                type="button"
+                onClick={clearActiveSkill}
+                className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-blue-100 dark:hover:bg-blue-800"
+                aria-label="Clear active skill"
+              >
+                <X size={12} />
+              </button>
+            </span>
+          </div>
+        )}
         {/* Textarea area — borderless, transparent background */}
         <textarea
           value={inputValue}
@@ -458,8 +478,12 @@ export function ChatPanel() {
             gatewayStatus !== "connected"
               ? "Gateway not connected"
               : !wsMap[selectedAgentId!] || wsMap[selectedAgentId!].readyState !== WebSocket.OPEN
-                ? "Type a message... (HTTP mode — streaming unavailable)"
-                : "Type a message... (Enter to send, Shift+Enter for new line)"
+                ? activeSkill
+                  ? "输入参数... (HTTP mode — streaming unavailable)"
+                  : "Type a message... (HTTP mode — streaming unavailable)"
+                : activeSkill
+                  ? "输入参数... (Enter to send, Shift+Enter for new line)"
+                  : "Type a message... (Enter to send, Shift+Enter for new line)"
           }
           disabled={inputDisabled}
           rows={3}

@@ -46,7 +46,7 @@ interface ChatStore {
   loadSequence: number;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
-  sendMessage: (content: string, agentId: string) => Promise<void>;
+  sendMessage: (content: string, agentId: string, command?: string) => Promise<void>;
   stopCurrentMessage: () => Promise<void>;
   /** Disconnect a specific agent's WebSocket, or all if no agentId provided */
   disconnectStream: (agentId?: string) => void;
@@ -256,7 +256,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
   },
 
-  sendMessage: async (content: string, agentId: string) => {
+  sendMessage: async (content: string, agentId: string, command?: string) => {
     const ws = get().wsMap[agentId];
 
     // Add user message
@@ -274,7 +274,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Helper: send via WebSocket and set up streaming state
     const sendViaWs = (socket: WebSocket) => {
-      socket.send(JSON.stringify({ type: "message", content }));
+      socket.send(JSON.stringify({ type: "message", content, command }));
 
       // Reset streaming state — messages will be created on first chunk
       set({ streamBuffer: "", streamingMessageId: null, thinkingMessageId: null, isInThinkPhase: false });
@@ -320,7 +320,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const result = await invoke<{ message_id: string; status: string }>(
         "send_message",
-        { agentId, content },
+        { agentId, content, command },
       );
       console.log("[ChatStore] Message sent via HTTP:", result);
       // Show a system message since we can't stream the response

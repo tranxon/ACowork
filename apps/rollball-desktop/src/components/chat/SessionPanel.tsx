@@ -56,17 +56,11 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const handleCreateSession = () => {
-    void createSession(agentId);
-  };
-
   const handleSwitchSession = (sessionId: string) => {
     switchSession(sessionId);
     useSessionStore.getState().saveSessionForAgent(agentId, sessionId);
     setOpen(false);
   };
-
-  const currentSession = sessions.find((s) => s.session_id === currentSessionId);
 
   return (
     <div ref={ref} className="relative">

@@ -9,6 +9,44 @@ use std::collections::HashMap;
 
 use crate::permission::Permission;
 
+/// Skill injection mode for system prompt.
+///
+/// Controls how skill definitions are injected into the Agent's system prompt.
+/// This is an internal runtime representation derived from `[skills]` config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillMode {
+    /// Do not inject any skill content into system prompt.
+    /// Skills are loaded on-demand via command or trigger.
+    #[default]
+    Manual,
+    /// Inject a compact summary list (name + description) of available skills.
+    /// Full instructions are loaded on-demand when a skill is activated.
+    Progressive,
+}
+
+/// Skill configuration section in manifest.toml
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillsConfig {
+    /// Whether to use progressive skill injection mode.
+    /// When `true`, a compact summary (name + description) of available skills
+    /// is injected into the system prompt. When `false` (default), no skill
+    /// content is injected.
+    #[serde(default)]
+    pub progressive: bool,
+}
+
+impl SkillsConfig {
+    /// Convert the boolean flag to the internal `SkillMode` enum.
+    pub fn mode(&self) -> SkillMode {
+        if self.progressive {
+            SkillMode::Progressive
+        } else {
+            SkillMode::Manual
+        }
+    }
+}
+
 /// Complete manifest.toml structure for .agent packages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
@@ -56,9 +94,17 @@ pub struct AgentManifest {
     /// Whether developer mode is enabled
     #[serde(default)]
     pub dev: bool,
+    /// Skill configuration
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 impl AgentManifest {
+    /// Returns the effective skill mode for this agent.
+    pub fn skill_mode(&self) -> SkillMode {
+        self.skills.mode()
+    }
+
     /// Parse manifest from TOML string
     pub fn from_toml(toml_str: &str) -> Result<Self, ManifestError> {
         let manifest: Self = toml::from_str(toml_str)?;

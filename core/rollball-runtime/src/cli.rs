@@ -164,7 +164,7 @@ async fn connect_gateway_client(endpoint: &str, agent_id: &str, version: &str) -
 /// Async entry point after tokio runtime is initialized
 async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHandle>) -> Result<()> {
     use crate::package::loader::load_package;
-    use crate::package::prompt_builder::build_system_prompt;
+    use crate::package::prompt_builder::build_system_prompt_with_mode;
     use crate::agent::context::ContextBuilder;
     use crate::agent::loop_::AgentLoop;
     use crate::tools::builtin;
@@ -192,11 +192,26 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     }
 
     // Step 3: Build system prompt
-    let system_prompt = build_system_prompt(&loaded.package_dir)?;
+    let skill_mode = resolve_skill_mode(&loaded.manifest, &config.work_dir);
+    let system_prompt = build_system_prompt_with_mode(&loaded.package_dir, skill_mode)?;
     tracing::debug!(
         prompt_len = system_prompt.len(),
         "System prompt built"
     );
+
+    // Step 3.5: Load skill registry for command-based skill injection
+    // SkillRegistry is needed in the Gateway loop to inject skill instructions
+    // into user messages when a command (e.g., "meeting-notes") is specified.
+    let skills_dir = loaded.package_dir.join("skills");
+    let skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                skills_dir = %skills_dir.display(),
+                error = %e,
+                "Failed to load skills registry, proceeding without skills"
+            );
+            crate::skills::parser::SkillRegistry::new()
+        });
 
     // Step 3: Initialize LLM Provider
     //
@@ -602,7 +617,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         let result = run_gateway_loop(
             agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone(),
             socket_path.clone(), agent_id.clone(), version.clone(),
-            log_reload_handle, chunk_tx_for_done,
+            log_reload_handle, chunk_tx_for_done, skill_registry,
         ).await;
 
         // Chunk relay task will end when chunk_rx is dropped (agent_loop dropped)
@@ -845,6 +860,7 @@ async fn run_gateway_loop(
     version_for_reconnect: String,
     log_reload_handle: Option<LogReloadHandle>,
     chunk_tx_for_done: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::ChunkEvent>>,
+    skill_registry: crate::skills::parser::SkillRegistry,
 ) -> Result<()> {
     use rollball_core::protocol::GatewayResponse;
 
@@ -867,7 +883,7 @@ async fn run_gateway_loop(
                 tracing::debug!("Received Gateway message: {:?}", response);
 
                 match response {
-                    GatewayResponse::IntentReceived { from, action, params } => {
+                    GatewayResponse::IntentReceived { from, action, params, command } => {
                         tracing::info!("Received intent from {}: {}", from, action);
 
                         // Budget pre-check: skip processing if budget is exhausted
@@ -959,10 +975,27 @@ async fn run_gateway_loop(
                         }
 
                         // Extract message content from params
-                        let content = params.get("content")
+                        let mut content = params.get("content")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+
+                        // If a command is specified, inject the skill instructions into the user message.
+                        // This ensures the skill context enters conversation history for subsequent turns.
+                        if let Some(skill_name) = command {
+                            if let Some(skill) = skill_registry.get(&skill_name) {
+                                tracing::info!(
+                                    skill = %skill_name,
+                                    "Injecting skill instructions into user message"
+                                );
+                                content = format!("{}\n\n{}", skill.instructions, content);
+                            } else {
+                                tracing::warn!(
+                                    skill = %skill_name,
+                                    "Command skill not found in registry"
+                                );
+                            }
+                        }
 
                         let message_id = params.get("message_id")
                             .and_then(|v| v.as_str())
@@ -1401,6 +1434,70 @@ mod tests {
             "Should gracefully fallback to None on connection failure"
         );
     }
+}
+
+// ── Skill mode resolution (manifest default + user override) ────────────
+
+/// User runtime override for skill configuration.
+///
+/// Stored at `{work_dir}/.agent_skills.json` and takes precedence over
+/// the manifest's default `[skills]` configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct AgentSkillsOverride {
+    /// Whether to use progressive skill injection mode.
+    #[serde(default)]
+    progressive: Option<bool>,
+}
+
+/// Resolve the effective skill mode by merging manifest default with user override.
+///
+/// Priority: `{work_dir}/.agent_skills.json` > manifest `[skills]` default.
+fn resolve_skill_mode(
+    manifest: &rollball_core::AgentManifest,
+    work_dir: &str,
+) -> rollball_core::SkillMode {
+    let default_progressive = manifest.skills.progressive;
+
+    // Check for user override in workspace
+    let override_path = std::path::Path::new(work_dir).join(".agent_skills.json");
+    if override_path.exists() {
+        match std::fs::read_to_string(&override_path) {
+            Ok(content) => {
+                match serde_json::from_str::<AgentSkillsOverride>(&content) {
+                    Ok(override_config) => {
+                        if let Some(progressive) = override_config.progressive {
+                            tracing::info!(
+                                progressive = %progressive,
+                                manifest_default = %default_progressive,
+                                "Skill mode overridden by .agent_skills.json"
+                            );
+                            return if progressive {
+                                rollball_core::SkillMode::Progressive
+                            } else {
+                                rollball_core::SkillMode::Manual
+                            };
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %override_path.display(),
+                            error = %e,
+                            "Failed to parse .agent_skills.json, using manifest default"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %override_path.display(),
+                    error = %e,
+                    "Failed to read .agent_skills.json, using manifest default"
+                );
+            }
+        }
+    }
+
+    manifest.skill_mode()
 }
 
 // ── Per-agent model persistence ──────────────────────────────────────────

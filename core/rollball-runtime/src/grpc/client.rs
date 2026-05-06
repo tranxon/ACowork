@@ -981,6 +981,7 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 from: ir.from,
                 action: ir.action,
                 params,
+                command: if ir.command.is_empty() { None } else { Some(ir.command) },
             }
         }
         Some(ServerPayload::CapabilityUpdate(cu)) => GatewayResponse::CapabilityUpdate {
@@ -1184,11 +1185,12 @@ mod tests {
                 from: "com.test.agent".to_string(),
                 action: "chat_message".to_string(),
                 params_json: r#"{"content":"hello"}"#.to_string(),
+                command: String::new(),
             })),
         };
         let resp = proto_to_gateway_response(msg);
         match resp {
-            GatewayResponse::IntentReceived { from, action, params } => {
+            GatewayResponse::IntentReceived { from, action, params, command: _ } => {
                 assert_eq!(from, "com.test.agent");
                 assert_eq!(action, "chat_message");
                 assert_eq!(params["content"], "hello");

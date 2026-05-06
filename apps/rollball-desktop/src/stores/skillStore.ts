@@ -12,6 +12,8 @@ interface SkillStore {
   selectedSkillName: string | null;
   selectedSkillDetail: SkillDetailResponse | null;
   executionHistory: SkillExecutionHistoryResponse | null;
+  /** Currently active skill for chat command injection */
+  activeSkill: SkillListEntry | null;
 
   loading: boolean;
   error: string | null;
@@ -20,16 +22,20 @@ interface SkillStore {
   fetchSkills: (agentId: string) => Promise<void>;
   selectSkill: (agentId: string, skillName: string) => Promise<void>;
   fetchExecutionHistory: (agentId: string, skillName: string, page?: number) => Promise<void>;
+  importSkill: (agentId: string, sourcePath: string, mode?: string) => Promise<{ success: boolean; skillName?: string; message?: string }>;
   clearSkills: () => void;
   deselectSkill: () => void;
+  setActiveSkill: (skill: SkillListEntry | null) => void;
+  clearActiveSkill: () => void;
 }
 
-export const useSkillStore = create<SkillStore>((set) => ({
+export const useSkillStore = create<SkillStore>((set, get) => ({
   skills: [],
   total: 0,
   selectedSkillName: null,
   selectedSkillDetail: null,
   executionHistory: null,
+  activeSkill: null,
   loading: false,
   error: null,
 
@@ -72,6 +78,25 @@ export const useSkillStore = create<SkillStore>((set) => ({
     }
   },
 
+  importSkill: async (agentId, sourcePath, mode) => {
+    try {
+      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/skills/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_path: sourcePath, mode: mode || "copy" }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, message: data.message || `HTTP ${res.status}` };
+      }
+      // Refresh skill list after successful import
+      await get().fetchSkills(agentId);
+      return { success: true, skillName: data.skill_name, message: data.message };
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : "Unknown error" };
+    }
+  },
+
   clearSkills: () =>
     set({
       skills: [],
@@ -79,6 +104,7 @@ export const useSkillStore = create<SkillStore>((set) => ({
       selectedSkillName: null,
       selectedSkillDetail: null,
       executionHistory: null,
+      activeSkill: null,
       error: null,
     }),
 
@@ -88,4 +114,7 @@ export const useSkillStore = create<SkillStore>((set) => ({
       selectedSkillDetail: null,
       executionHistory: null,
     }),
+
+  setActiveSkill: (skill) => set({ activeSkill: skill }),
+  clearActiveSkill: () => set({ activeSkill: null }),
 }));

@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from "react";
-import { Wrench, ChevronDown, FolderPlus } from "lucide-react";
+import { Wrench, ChevronDown, FolderPlus, Check } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentStore } from "../../stores/agentStore";
 
 export function SkillsPanel() {
   const { selectedAgentId } = useAgentStore();
-  const { skills, loading, fetchSkills } = useSkillStore();
+  const { skills, loading, fetchSkills, activeSkill, setActiveSkill, clearActiveSkill } = useSkillStore();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -66,29 +66,49 @@ export function SkillsPanel() {
                 <div className="py-4 text-center text-xs text-zinc-400">No skills loaded</div>
               ) : (
                 <div className="space-y-0.5">
-                  {skills.map((skill) => (
-                    <div
-                      key={skill.name}
-                      className="flex items-center gap-2 px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
-                    >
-                      <Wrench className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-xs text-zinc-800 dark:text-zinc-200">
-                          {skill.name}
-                        </div>
-                        {skill.description && (
-                          <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
-                            {skill.description}
-                          </div>
+                  {skills.map((skill) => {
+                    const isActive = activeSkill?.name === skill.name;
+                    return (
+                      <button
+                        key={skill.name}
+                        type="button"
+                        onClick={() => {
+                          if (isActive) {
+                            clearActiveSkill();
+                          } else {
+                            setActiveSkill(skill);
+                          }
+                          setOpen(false);
+                        }}
+                        className={cn(
+                          "flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors",
+                          isActive
+                            ? "bg-blue-50 dark:bg-blue-900/20"
+                            : "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
                         )}
-                      </div>
-                      {skill.triggers.length > 0 && (
-                        <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
-                          {skill.triggers.length}
-                        </span>
-                      )}
-                    </div>
-                  ))}
+                      >
+                        <Wrench className={cn("h-3.5 w-3.5 shrink-0", isActive ? "text-blue-500" : "text-zinc-400")} />
+                        <div className="min-w-0 flex-1">
+                          <div className={cn("truncate text-xs", isActive ? "text-blue-700 dark:text-blue-300 font-medium" : "text-zinc-800 dark:text-zinc-200")}>
+                            {skill.name}
+                          </div>
+                          {skill.description && (
+                            <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                              {skill.description}
+                            </div>
+                          )}
+                        </div>
+                        {isActive && (
+                          <Check className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                        )}
+                        {!isActive && skill.triggers.length > 0 && (
+                          <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
+                            {skill.triggers.length}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>

@@ -15,7 +15,7 @@ export function WorkspaceSelector() {
   const { workspaces, currentWorkspaceId, loading, fetchWorkspaces, setCurrentWorkspace } =
     useWorkspaceStore();
   const [open, setOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, _setSearchQuery] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);

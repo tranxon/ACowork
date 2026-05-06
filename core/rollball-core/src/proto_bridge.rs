@@ -525,12 +525,13 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     proto::IntentDelivered { message_id: message_id.clone() },
                 ))
             }
-            protocol::GatewayResponse::IntentReceived { from, action, params } => {
+            protocol::GatewayResponse::IntentReceived { from, action, params, command } => {
                 Some(proto::server_message::Payload::IntentReceived(
                     proto::IntentReceived {
                         from: from.clone(),
                         action: action.clone(),
                         params_json: params.to_string(),
+                        command: command.clone().unwrap_or_default(),
                     },
                 ))
             }

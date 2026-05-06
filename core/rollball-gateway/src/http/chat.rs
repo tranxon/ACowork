@@ -49,6 +49,9 @@ pub struct SendMessageRequest {
     /// Optional conversation ID for multi-turn
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Skill command selected by the user (e.g. "/commit", "/review-pr")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// Response for send message
@@ -112,6 +115,9 @@ struct WsClientMessage {
     model: Option<String>,
     /// Provider name for model_switch messages
     provider: Option<String>,
+    /// Skill command selected by the user (e.g. "/commit", "/review-pr")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -178,6 +184,7 @@ pub async fn send_message(
                     "message_id": message_id,
                     "conversation_id": body.conversation_id,
                 }),
+                command: body.command.clone(),
             };
             let pushed = session.push_message(intent).await;
             if !pushed {
@@ -235,6 +242,7 @@ pub async fn get_conversations(
             params: serde_json::json!({
                 "request_id": request_id,
             }),
+            command: None,
         };
 
         let pushed = {
@@ -307,6 +315,7 @@ pub async fn get_latest_conversation(
             params: serde_json::json!({
                 "request_id": curr_request_id,
             }),
+            command: None,
         };
 
         let curr_pushed = {
@@ -338,6 +347,7 @@ pub async fn get_latest_conversation(
                         "limit": 100,
                         "direction": "backward",
                     }),
+                    command: None,
                 };
 
                 let msg_pushed = {
@@ -535,6 +545,7 @@ async fn handle_ws_text(
                     from: "http-ws".to_string(),
                     action: "model_switch".to_string(),
                     params,
+                    command: None,
                 };
                 pushed_ok = session.push_message(intent).await;
             }
@@ -547,7 +558,7 @@ async fn handle_ws_text(
             // to rebuild based on protocol_type change detection.
             if let Some(ref provider_name) = provider {
                 push_llm_config_on_switch(
-                    &state, agent_id, provider_name, &model,
+                    state, agent_id, provider_name, &model,
                 ).await;
             }
 
@@ -591,6 +602,7 @@ async fn handle_ws_text(
                     params: serde_json::json!({
                         "reason": "user_requested",
                     }),
+                    command: None,
                 };
                 pushed_ok = session.push_message(intent).await;
             }
@@ -656,6 +668,7 @@ async fn handle_ws_text(
                     "content": content,
                     "message_id": message_id,
                 }),
+                command: client_msg.command.clone(),
             };
             pushed_ok = session.push_message(intent).await;
         }
@@ -691,6 +704,7 @@ mod tests {
         let req: SendMessageRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.content, "Hello, agent!");
         assert!(req.conversation_id.is_none());
+        assert!(req.command.is_none());
     }
 
     #[test]
@@ -699,6 +713,15 @@ mod tests {
         let req: SendMessageRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.content, "Hello!");
         assert_eq!(req.conversation_id, Some("conv-123".to_string()));
+        assert!(req.command.is_none());
+    }
+
+    #[test]
+    fn test_send_message_request_with_command() {
+        let json = r#"{"content": "Fix the bug", "command": "/commit"}"#;
+        let req: SendMessageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.content, "Fix the bug");
+        assert_eq!(req.command, Some("/commit".to_string()));
     }
 
     #[test]
@@ -718,6 +741,16 @@ mod tests {
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.msg_type, "message");
         assert_eq!(msg.content, Some("Hi there".to_string()));
+        assert!(msg.command.is_none());
+    }
+    
+    #[test]
+    fn test_ws_client_message_with_command() {
+        let json = r#"{"type": "message", "content": "Review code", "command": "/review-pr"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.msg_type, "message");
+        assert_eq!(msg.content, Some("Review code".to_string()));
+        assert_eq!(msg.command, Some("/review-pr".to_string()));
     }
 
     #[test]
@@ -779,6 +812,7 @@ pub async fn continue_execution(
                 params: serde_json::json!({
                     "reason": "user_requested",
                 }),
+                command: None,
             };
             let pushed = session.push_message(intent).await;
             if !pushed {
@@ -1061,6 +1095,7 @@ async fn forward_session_query(
         from: "http-api".to_string(),
         action: action.to_string(),
         params: query_params,
+        command: None,
     };
 
     if !session.push_message(intent).await {

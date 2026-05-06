@@ -109,13 +109,18 @@ pub fn models_routes() -> Router<AppState> {
 
 // ── Offline data ──────────────────────────────────────────────────────
 
+/// Embedded offline provider data (compile-time fallback).
+const EMBEDDED_OFFLINE_PROVIDERS: &str = include_str!("offline_providers.json");
+
 /// Load offline provider data from external file.
-/// Falls back to empty object if file not found or parse error.
+/// Falls back to embedded data if file not found, then to empty object on parse error.
 fn offline_providers() -> &'static serde_json::Value {
     static DATA: OnceLock<serde_json::Value> = OnceLock::new();
     DATA.get_or_init(|| {
-        load_offline_providers_from_file()
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
+        load_offline_providers_from_file().unwrap_or_else(|| {
+            serde_json::from_str(EMBEDDED_OFFLINE_PROVIDERS)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+        })
     })
 }
 
@@ -164,10 +169,10 @@ fn build_offline_file_candidates() -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
 
     // 1. Same directory as the executable
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("offline_providers.json"));
-        }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        candidates.push(exe_dir.join("offline_providers.json"));
     }
 
     // 2. Current working directory
@@ -603,26 +608,24 @@ fn lookup_protocol_info_from_data(
     let provider_npm = provider_obj.get("npm").and_then(|v| v.as_str());
 
     // If model_id provided, check model-level override
-    if let Some(mid) = model_id {
-        if let Some(models) = provider_obj.get("models").and_then(|m| m.as_object()) {
-            if let Some(model_obj) = models.get(mid) {
-                if let Some(model_provider) = model_obj.get("provider").and_then(|p| p.as_object()) {
-                    let model_npm = model_provider.get("npm").and_then(|v| v.as_str());
-                    let model_api = model_provider.get("api")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+    if let Some(mid) = model_id
+        && let Some(models) = provider_obj.get("models").and_then(|m| m.as_object())
+        && let Some(model_obj) = models.get(mid)
+        && let Some(model_provider) = model_obj.get("provider").and_then(|p| p.as_object())
+    {
+        let model_npm = model_provider.get("npm").and_then(|v| v.as_str());
+        let model_api = model_provider.get("api")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-                    // Model-level npm takes precedence
-                    if model_npm.is_some() {
-                        return (derive_protocol_type(model_npm), model_api);
-                    }
+        // Model-level npm takes precedence
+        if model_npm.is_some() {
+            return (derive_protocol_type(model_npm), model_api);
+        }
 
-                    // Model has provider block but no npm → use provider-level npm + model api
-                    if model_api.is_some() {
-                        return (derive_protocol_type(provider_npm), model_api);
-                    }
-                }
-            }
+        // Model has provider block but no npm → use provider-level npm + model api
+        if model_api.is_some() {
+            return (derive_protocol_type(provider_npm), model_api);
         }
     }
 
@@ -684,7 +687,7 @@ mod tests {
         // Verify all expected providers exist
         let expected = [
             "openai", "anthropic", "google", "deepseek", "minimax", "minimax-cn",
-            "zhipuai", "zhipuai-coding-plan", "moonshotai", "moonshotai-cn",
+            "zhipuai", "moonshotai", "moonshotai-cn",
             "alibaba", "alibaba-cn", "groq", "mistral", "xai", "openrouter",
             "azure", "lmstudio",
         ];
@@ -718,7 +721,7 @@ mod tests {
         let data = offline_providers();
         // Providers that should have an api field in the source data
         let providers_with_api = [
-            "deepseek", "minimax", "minimax-cn", "zhipuai", "zhipuai-coding-plan",
+            "deepseek", "minimax", "minimax-cn", "zhipuai",
             "moonshotai", "moonshotai-cn", "alibaba", "alibaba-cn",
             "openrouter", "lmstudio",
         ];

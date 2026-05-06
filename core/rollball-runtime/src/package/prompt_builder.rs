@@ -10,12 +10,28 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::{Result, RuntimeError};
+use crate::skills::parser::SkillRegistry;
 
-/// Build system prompt from package files
+/// Build system prompt from package files (default: Manual skill mode).
+///
+/// Backward-compatible wrapper that defaults to `SkillMode::Manual`,
+/// meaning no skill content is injected into the system prompt.
+/// For explicit mode control, use [`build_system_prompt_with_mode`].
+pub fn build_system_prompt(package_dir: &Path) -> Result<String> {
+    build_system_prompt_with_mode(package_dir, rollball_core::SkillMode::Manual)
+}
+
+/// Build system prompt from package files with explicit skill mode.
 ///
 /// Reads prompt files in alphabetical order and concatenates them.
-/// Skills are appended after prompt sections.
-pub fn build_system_prompt(package_dir: &Path) -> Result<String> {
+/// Skill injection behavior is controlled by `skill_mode`:
+/// - `Manual`: no skill content is injected.
+/// - `Progressive`: a compact summary (name + description) of available skills
+///   is appended after prompt sections.
+pub fn build_system_prompt_with_mode(
+    package_dir: &Path,
+    skill_mode: rollball_core::SkillMode,
+) -> Result<String> {
     let mut sections = Vec::new();
 
     // Load prompt files
@@ -42,26 +58,33 @@ pub fn build_system_prompt(package_dir: &Path) -> Result<String> {
         }
     }
 
-    // Load skill files
+    // Load skill files based on skill_mode
     let skills_dir = package_dir.join("skills");
     if skills_dir.exists() {
-        let skill_files = collect_skill_files(&skills_dir)?;
-
-        for path in &skill_files {
-            let content = fs::read_to_string(path).map_err(|e| {
-                RuntimeError::Package(format!(
-                    "Failed to read skill file {}: {e}",
-                    path.display()
-                ))
-            })?;
-
-            let skill_name = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-
-            sections.push(format!("## Skill: {skill_name}\n\n{content}"));
+        match skill_mode {
+            rollball_core::SkillMode::Manual => {
+                tracing::debug!(
+                    skills_dir = %skills_dir.display(),
+                    "Skill mode is Manual — skipping skill injection"
+                );
+            }
+            rollball_core::SkillMode::Progressive => {
+                match SkillRegistry::load_from_dir(&skills_dir) {
+                    Ok(registry) => {
+                        let summary = registry.build_skill_summary();
+                        if !summary.is_empty() {
+                            sections.push(summary);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            skills_dir = %skills_dir.display(),
+                            error = %e,
+                            "Failed to load skills for summary injection"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -98,38 +121,14 @@ fn collect_markdown_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     Ok(files)
 }
 
-/// Collect SKILL.md files from skills/ subdirectories
-fn collect_skill_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut files = Vec::new();
-    let entries = fs::read_dir(dir).map_err(|e| {
-        RuntimeError::Package(format!("Failed to read skills dir: {e}"))
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|e| {
-            RuntimeError::Package(format!("Failed to read dir entry: {e}"))
-        })?;
-
-        let path = entry.path();
-        if path.is_dir() {
-            let skill_md = path.join("SKILL.md");
-            if skill_md.exists() {
-                files.push(skill_md);
-            }
-        }
-    }
-
-    Ok(files)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
 
-    fn create_test_package() -> PathBuf {
-        let dir = std::env::temp_dir().join("rollball-test-prompt-builder");
+    fn create_test_package(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rollball-test-prompt-builder-{name}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
         fs::create_dir_all(dir.join("skills").join("greeting")).unwrap();
@@ -155,11 +154,60 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_with_files() {
-        let dir = create_test_package();
+        let dir = create_test_package("default");
         let prompt = build_system_prompt(&dir).unwrap();
         assert!(prompt.contains("weather assistant"));
         assert!(prompt.contains("user's language"));
-        assert!(prompt.contains("Greeting"));
+        // Default mode is Manual — skill content should NOT be injected
+        assert!(!prompt.contains("Greeting"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_manual_mode() {
+        let dir = create_test_package("manual");
+        let prompt = build_system_prompt_with_mode(&dir, rollball_core::SkillMode::Manual).unwrap();
+        assert!(prompt.contains("weather assistant"));
+        assert!(!prompt.contains("Greeting"));
+        assert!(!prompt.contains("Skill:"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_progressive_mode() {
+        let dir = std::env::temp_dir().join("rollball-test-prompt-progressive");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::create_dir_all(dir.join("skills").join("greeting")).unwrap();
+
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a test assistant.",
+        )
+        .unwrap();
+
+        // Write a valid SKILL.md with YAML frontmatter
+        fs::write(
+            dir.join("skills").join("greeting").join("SKILL.md"),
+            r#"---
+name: greeting
+description: Greet users warmly
+triggers:
+  - hello
+---
+
+# Greeting Skill
+
+Be friendly and welcoming.
+"#,
+        )
+        .unwrap();
+
+        let prompt = build_system_prompt_with_mode(&dir, rollball_core::SkillMode::Progressive).unwrap();
+        assert!(prompt.contains("You are a test assistant."));
+        assert!(prompt.contains("## Available Skills"));
+        assert!(prompt.contains("greeting"));
+        assert!(prompt.contains("Greet users warmly"));
+        // Full instructions should NOT appear in progressive mode
+        assert!(!prompt.contains("Be friendly and welcoming."));
     }
 
     #[test]

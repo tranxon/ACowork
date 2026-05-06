@@ -12,7 +12,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     Json,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ pub fn skills_routes() -> Router<AppState> {
         .route("/api/agents/{id}/skills", get(list_skills))
         .route("/api/agents/{id}/skills/{name}", get(get_skill_detail))
         .route("/api/agents/{id}/skills/{name}/history", get(get_skill_history))
+        .route("/api/agents/{id}/skills/import", post(import_skill))
 }
 
 // ── Query parameters ──────────────────────────────────────────────────
@@ -180,6 +181,72 @@ fn agent_skills_dir(install_path: &str) -> PathBuf {
     PathBuf::from(install_path).join("skills")
 }
 
+// ── Import skill types ─────────────────────────────────────────────────
+
+/// Request body for importing a skill from an external directory
+#[derive(Debug, Deserialize)]
+pub struct ImportSkillRequest {
+    /// External skill directory path (absolute or relative)
+    pub source_path: String,
+    /// Import mode: "copy" (default) or "symlink"
+    pub mode: Option<String>,
+}
+
+/// Response body for skill import result
+#[derive(Serialize)]
+pub struct ImportSkillResponse {
+    pub success: bool,
+    pub skill_name: String,
+    pub message: String,
+}
+
+// ── Import helpers ────────────────────────────────────────────────────
+
+/// Recursively copy a directory and all its contents
+fn copy_dir_recursive(src: &StdPath, dst: &StdPath) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Create a directory junction (Windows) or symbolic link (Unix)
+fn create_dir_link(src: &StdPath, dst: &StdPath) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, use a junction point which does not require elevated privileges
+        std::process::Command::new("cmd")
+            .args([
+                "/C", "mklink", "/J",
+                &dst.to_string_lossy(),
+                &src.to_string_lossy(),
+            ])
+            .output()
+            .and_then(|o| {
+                if o.status.success() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other(format!(
+                        "Failed to create junction: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    )))
+                }
+            })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────
 
 /// `GET /api/agents/{id}/skills` — list skills for an agent
@@ -263,6 +330,108 @@ pub async fn get_skill_detail(
         triggers: parsed.entry.triggers.clone(),
         tool_deps: parsed.entry.tool_deps.clone(),
         instructions: parsed.instructions.clone(),
+    }))
+}
+
+/// `POST /api/agents/{id}/skills/import` — import a skill from an external directory
+///
+/// Validates the source directory, parses its SKILL.md to extract the skill name,
+/// then copies or links the skill into the agent's skills directory.
+pub async fn import_skill(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(body): Json<ImportSkillRequest>,
+) -> Result<Json<ImportSkillResponse>, (StatusCode, Json<ApiError>)> {
+    // Resolve import mode
+    let mode = body.mode.as_deref().unwrap_or("copy");
+    if mode != "copy" && mode != "symlink" {
+        return Err(ApiError::bad_request(&format!(
+            "Invalid import mode '{}': must be 'copy' or 'symlink'", mode
+        )));
+    }
+
+    // Validate source path exists and is a directory
+    let source = StdPath::new(&body.source_path);
+    if !source.exists() {
+        return Err(ApiError::bad_request(&format!(
+            "Source path does not exist: {}", body.source_path
+        )));
+    }
+    if !source.is_dir() {
+        return Err(ApiError::bad_request(&format!(
+            "Source path is not a directory: {}", body.source_path
+        )));
+    }
+
+    // Validate SKILL.md exists in source directory
+    let skill_md_path = source.join("SKILL.md");
+    if !skill_md_path.exists() {
+        return Err(ApiError::bad_request(&format!(
+            "Source directory does not contain SKILL.md: {}", body.source_path
+        )));
+    }
+
+    // Parse SKILL.md to extract skill name
+    let skill_content = std::fs::read_to_string(&skill_md_path)
+        .map_err(|e| ApiError::internal(&format!(
+            "Failed to read SKILL.md: {}", e
+        )))?;
+    let parsed = parse_skill_md(&skill_content)
+        .ok_or_else(|| ApiError::bad_request(
+            "Invalid SKILL.md format: missing or malformed YAML frontmatter"
+        ))?;
+    let skill_name = parsed.entry.name;
+
+    // Verify agent exists and get install path
+    let gw = state.gateway_state.read().await;
+    let info = gw.installed_agents.get(&agent_id)
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+    let skills_dir = agent_skills_dir(&info.install_path);
+    drop(gw);
+
+    // Ensure the agent's skills directory exists
+    if !skills_dir.exists() {
+        std::fs::create_dir_all(&skills_dir)
+            .map_err(|e| ApiError::internal(&format!(
+                "Failed to create skills directory: {}", e
+            )))?;
+    }
+
+    // Check if a skill with the same name already exists
+    let target_skill_dir = skills_dir.join(&skill_name);
+    if target_skill_dir.exists() {
+        return Err(ApiError::bad_request(&format!(
+            "Skill '{}' already exists for agent '{}' (will not overwrite)",
+            skill_name, agent_id
+        )));
+    }
+
+    // Perform the import
+    match mode {
+        "copy" => {
+            copy_dir_recursive(source, &target_skill_dir)
+                .map_err(|e| ApiError::internal(&format!(
+                    "Failed to copy skill directory: {}", e
+                )))?;
+        }
+        "symlink" => {
+            // Resolve source to absolute path for symlink/junction
+            let abs_source = std::fs::canonicalize(source)
+                .map_err(|e| ApiError::internal(&format!(
+                    "Failed to resolve source path: {}", e
+                )))?;
+            create_dir_link(&abs_source, &target_skill_dir)
+                .map_err(|e| ApiError::internal(&format!(
+                    "Failed to create directory link: {}", e
+                )))?;
+        }
+        _ => unreachable!(), // Already validated above
+    }
+
+    Ok(Json(ImportSkillResponse {
+        success: true,
+        skill_name: skill_name.clone(),
+        message: format!("Skill '{}' imported successfully (mode: {})", skill_name, mode),
     }))
 }
 
@@ -424,5 +593,58 @@ Body
     fn test_load_skills_from_nonexistent_dir() {
         let skills = load_skills_from_dir(StdPath::new("/nonexistent/path"));
         assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn test_import_skill_request_deserialization() {
+        let json = r#"{"source_path": "/tmp/my-skill"}"#;
+        let req: ImportSkillRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.source_path, "/tmp/my-skill");
+        assert!(req.mode.is_none());
+    }
+
+    #[test]
+    fn test_import_skill_request_with_mode() {
+        let json = r#"{"source_path": "/tmp/my-skill", "mode": "symlink"}"#;
+        let req: ImportSkillRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.mode.as_deref(), Some("symlink"));
+    }
+
+    #[test]
+    fn test_import_skill_response_serialization() {
+        let resp = ImportSkillResponse {
+            success: true,
+            skill_name: "weekly-report".to_string(),
+            message: "Skill 'weekly-report' imported successfully (mode: copy)".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("weekly-report"));
+    }
+
+    #[test]
+    fn test_copy_dir_recursive() {
+        let tmp = std::env::temp_dir().join("rollball_test_copy_dir_recursive");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Create source structure
+        let src = tmp.join("source_skill");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "---\nname: test\ndescription: Test\ntriggers:\n  - test\n---\nBody").unwrap();
+        std::fs::create_dir_all(src.join("templates")).unwrap();
+        std::fs::write(src.join("templates").join("report.txt"), "template content").unwrap();
+
+        // Copy to destination
+        let dst = tmp.join("target_skill");
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        // Verify
+        assert!(dst.join("SKILL.md").exists());
+        assert!(dst.join("templates/report.txt").exists());
+        let content = std::fs::read_to_string(dst.join("templates/report.txt")).unwrap();
+        assert_eq!(content, "template content");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -2,7 +2,9 @@ import { useState, useEffect, useMemo } from "react";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { SkillDetail } from "./SkillDetail";
-import { RefreshCw, AlertTriangle, Wrench } from "lucide-react";
+import { RefreshCw, AlertTriangle, Wrench, FolderPlus } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useToast } from "../common/ToastProvider";
 import { cn } from "../../lib/utils";
 
 export function SkillBrowser() {
@@ -16,10 +18,13 @@ export function SkillBrowser() {
     error,
     fetchSkills,
     selectSkill,
+    importSkill,
     clearSkills,
   } = useSkillStore();
 
+  const { addToast } = useToast();
   const [searchQuery, setSearchQuery] = useState("");
+  const [importing, setImporting] = useState(false);
 
   // Load skills when agent changes
   useEffect(() => {
@@ -31,6 +36,29 @@ export function SkillBrowser() {
   const handleRefresh = () => {
     if (!selectedAgentId) return;
     void fetchSkills(selectedAgentId);
+  };
+
+  const handleImport = async () => {
+    if (!selectedAgentId) return;
+    try {
+      const selected = await open({
+        directory: true,
+        title: "Select Skill Directory",
+      });
+      if (selected) {
+        setImporting(true);
+        const result = await importSkill(selectedAgentId, selected, "copy");
+        if (result.success) {
+          addToast({ type: "success", message: result.message || `Skill '${result.skillName}' imported successfully` });
+        } else {
+          addToast({ type: "error", message: result.message || "Failed to import skill" });
+        }
+      }
+    } catch (e) {
+      addToast({ type: "error", message: e instanceof Error ? e.message : "Failed to import skill" });
+    } finally {
+      setImporting(false);
+    }
   };
 
   const handleSelectSkill = (skillName: string) => {
@@ -69,14 +97,24 @@ export function SkillBrowser() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
         <h1 className="text-xl font-semibold">Skills</h1>
-        <button
-          onClick={handleRefresh}
-          disabled={loading}
-          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-        >
-          <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleImport}
+            disabled={importing || loading}
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            <FolderPlus className={cn("h-3.5 w-3.5", importing && "animate-pulse")} />
+            Import
+          </button>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Error banner */}

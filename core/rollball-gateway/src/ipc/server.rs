@@ -286,6 +286,7 @@ pub async fn handle_intent_send(
                         from: from.clone(),
                         action: action.to_string(),
                         params: params.clone(),
+                        command: None,
                     };
                     session.push_message(intent_msg).await
                 } else {
@@ -1526,6 +1527,7 @@ mod tests {
                 from,
                 action,
                 params,
+                command: _,
             } => {
                 assert_eq!(from, "com.example.sender");
                 assert_eq!(action, "weather_query");

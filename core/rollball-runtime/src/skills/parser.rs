@@ -338,6 +338,23 @@ impl SkillRegistry {
         }
         output
     }
+
+    /// Build a compact skill summary for system prompt injection
+    ///
+    /// Generates a formatted string containing only skill names and descriptions,
+    /// used in Progressive mode to keep the system prompt compact while still
+    /// making the LLM aware of available skills.
+    pub fn build_skill_summary(&self) -> String {
+        if self.skills.is_empty() {
+            return String::new();
+        }
+
+        let mut output = String::from("## Available Skills\n\n");
+        for skill in self.skills.values() {
+            output.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
+        }
+        output
+    }
 }
 
 #[cfg(test)]
@@ -626,5 +643,24 @@ Auto skill instructions.
     fn test_skill_registry_empty_instructions() {
         let registry = SkillRegistry::new();
         assert!(registry.build_skill_instructions().is_empty());
+    }
+
+    #[test]
+    fn test_skill_registry_build_skill_summary() {
+        let mut registry = SkillRegistry::new();
+        registry.register(parse_skill_md(sample_skill_md()).unwrap());
+
+        let summary = registry.build_skill_summary();
+        assert!(summary.contains("## Available Skills"));
+        assert!(summary.contains("weekly-report"));
+        assert!(summary.contains("汇总本周工作内容生成结构化周报"));
+        // Instructions should NOT appear in summary
+        assert!(!summary.contains("执行步骤"));
+    }
+
+    #[test]
+    fn test_skill_registry_empty_summary() {
+        let registry = SkillRegistry::new();
+        assert!(registry.build_skill_summary().is_empty());
     }
 }
