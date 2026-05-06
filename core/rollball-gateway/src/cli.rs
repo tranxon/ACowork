@@ -176,20 +176,62 @@ impl Cli {
     }
 }
 
-/// Initialize tracing subscriber with reload support.
+/// Initialize tracing subscriber with reload support and file logging.
+///
+/// Logs are written to stderr AND to `~/.config/rollball-gateway/logs/gateway.log`.
 ///
 /// Returns the reload handle so the Gateway can dynamically change
 /// the log level at runtime via the HTTP config API.
 fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
     use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
-    let filter = EnvFilter::try_from_default_env()
+    use crate::config::GatewayConfig;
+
+    let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
-    let (reloadable_filter, handle) = reload::Layer::new(filter);
+
+    // Log directory: ~/.config/rollball-gateway/logs/
+    let log_dir = GatewayConfig::project_config_dir().join("logs");
+
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "WARN: failed to create log directory {:?}: {}; falling back to stderr-only",
+            log_dir, e
+        );
+        // Fallback: stderr-only with reload support
+        let (filter, handle) = reload::Layer::new(env_filter);
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_target(false))
+            .init();
+        return Some(handle);
+    }
+
+    // File appender for persistent logging
+    let file_appender = tracing_appender::rolling::never(&log_dir, "gateway.log");
+    let (filter, handle) = reload::Layer::new(env_filter);
+
+    // Stderr layer (for terminal output, no colors)
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_ansi(false);
+
+    // File layer (for user inspection)
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_appender)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_ansi(false);
+
     tracing_subscriber::registry()
-        .with(reloadable_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(filter)
+        .with(stderr_layer)
+        .with(file_layer)
         .init();
+
     Some(handle)
 }
 

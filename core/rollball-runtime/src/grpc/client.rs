@@ -9,7 +9,7 @@
 //! Key improvements over the legacy IPC client:
 //! - **No frame interleaving**: gRPC stream multiplexes inherently
 //! - **Concurrent requests**: each gets a unique `request_id`; `&self` sends
-//! - **Exponential backoff reconnect**: `connect_with_retry()` with configurable bounds
+//! - **Exponential backoff reconnect**: [`connect`] wraps [`connect_once`] with configurable bounds
 //! - **Protocol buffer types**: strongly-typed messages replace ad-hoc JSON frames
 
 use std::collections::{HashMap, VecDeque};
@@ -61,12 +61,15 @@ pub struct GatewayGrpcClient {
 impl GatewayGrpcClient {
     // ── Connection ─────────────────────────────────────────────────────────
 
-    /// Connect to the Gateway gRPC endpoint and establish bidirectional stream.
+    /// Connect to Gateway gRPC endpoint (single attempt, no retry).
     ///
     /// Creates a tonic `Channel`, instantiates the `GatewayServiceClient`,
     /// and opens the `Connect` bidi-stream RPC. An inbound receive loop is
     /// spawned as a background task that demuxes responses and push messages.
-    pub async fn connect(endpoint: &str) -> Result<Self, RollballError> {
+    ///
+    /// Prefer [`connect`] for production use — it wraps this with exponential
+    /// backoff retry.
+    async fn connect_once(endpoint: &str) -> Result<Self, RollballError> {
         let channel = Channel::from_shared(endpoint.to_string())
             .map_err(|e| RollballError::Ipc(format!("Invalid gRPC endpoint: {}", e)))?
             .connect()
@@ -149,10 +152,11 @@ impl GatewayGrpcClient {
         })
     }
 
-    /// Connect with exponential backoff retry.
+    /// Connect to Gateway gRPC with exponential backoff retry.
     ///
     /// Initial delay 100 ms, max delay 30 s, total timeout 300 s.
-    pub async fn connect_with_retry(endpoint: &str) -> Result<Self, RollballError> {
+    /// This is the primary connection method for production use.
+    pub async fn connect(endpoint: &str) -> Result<Self, RollballError> {
         const INITIAL_DELAY_MS: u64 = 100;
         const MAX_DELAY_MS: u64 = 30_000;
         const MAX_ELAPSED_SECS: u64 = 300;
@@ -161,7 +165,7 @@ impl GatewayGrpcClient {
         let mut delay_ms = INITIAL_DELAY_MS;
 
         loop {
-            match Self::connect(endpoint).await {
+            match Self::connect_once(endpoint).await {
                 Ok(client) => {
                     tracing::info!(
                         endpoint = %endpoint,
@@ -228,7 +232,7 @@ impl GatewayGrpcClient {
             std::mem::take(&mut *guard)
         };
 
-        *self = Self::connect_with_retry(&self.endpoint).await?;
+        *self = Self::connect(&self.endpoint).await?;
 
         // Restore pending reports
         {

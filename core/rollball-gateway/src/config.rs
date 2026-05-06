@@ -109,14 +109,14 @@ fn default_max_output_tokens_limit() -> u64 { 32_768 }
 
 impl GatewayConfig {
     /// Get the project config directory
-    fn project_config_dir() -> std::path::PathBuf {
+    pub(crate) fn project_config_dir() -> std::path::PathBuf {
         ProjectDirs::from("com", "rollball", "rollball-gateway")
             .map(|pd| pd.config_dir().to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from(".").join(".rollball-gateway"))
     }
 
     /// Get the project data directory
-    fn project_data_dir() -> std::path::PathBuf {
+    pub(crate) fn project_data_dir() -> std::path::PathBuf {
         ProjectDirs::from("com", "rollball", "rollball-gateway")
             .map(|pd| pd.data_dir().to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from(".").join(".rollball-gateway-data"))
