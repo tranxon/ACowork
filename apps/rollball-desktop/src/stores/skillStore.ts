@@ -22,7 +22,7 @@ interface SkillStore {
   fetchSkills: (agentId: string) => Promise<void>;
   selectSkill: (agentId: string, skillName: string) => Promise<void>;
   fetchExecutionHistory: (agentId: string, skillName: string, page?: number) => Promise<void>;
-  importSkill: (agentId: string, sourcePath: string, mode?: string) => Promise<{ success: boolean; skillName?: string; message?: string }>;
+  importSkill: (agentId: string, file: File) => Promise<{ success: boolean; skillName?: string; message?: string }>;
   clearSkills: () => void;
   deselectSkill: () => void;
   setActiveSkill: (skill: SkillListEntry | null) => void;
@@ -78,12 +78,14 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
     }
   },
 
-  importSkill: async (agentId, sourcePath, mode) => {
+  importSkill: async (agentId, file) => {
     try {
+      const formData = new FormData();
+      formData.append("package", file);
+
       const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/skills/import`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source_path: sourcePath, mode: mode || "copy" }),
+        body: formData,
       });
       const data = await res.json();
       if (!res.ok) {

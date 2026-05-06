@@ -19,6 +19,11 @@ function applyTheme(theme: Theme) {
   }
 }
 
+/** Apply fontSize to CSS custom property on root */
+function applyFontSize(size: number) {
+  document.documentElement.style.setProperty("--ui-font-size", `${size}rem`);
+}
+
 /** Read persisted theme from localStorage, fallback to "system" */
 function getPersistedTheme(): Theme {
   try {
@@ -68,6 +73,7 @@ export const useSettingsStore = create<SettingsStore>((set) => {
   const initialFontSize = getPersistedFontSize();
   const initialLogLevel = getPersistedLogLevel();
   applyTheme(initialTheme);
+  applyFontSize(initialFontSize);
 
   return {
     theme: initialTheme,
@@ -80,10 +86,13 @@ export const useSettingsStore = create<SettingsStore>((set) => {
       try { localStorage.setItem(STORAGE_KEY_THEME, theme); } catch {}
       set({ theme });
     },
+
     setFontSize: (fontSize) => {
+      applyFontSize(fontSize);
       try { localStorage.setItem(STORAGE_KEY_FONT_SIZE, String(fontSize)); } catch {}
       set({ fontSize });
     },
+
     setGatewayUrl: (gatewayUrl) => set({ gatewayUrl }),
     setLogLevel: (logLevel) => {
       try { localStorage.setItem(STORAGE_KEY_LOG_LEVEL, logLevel); } catch {}

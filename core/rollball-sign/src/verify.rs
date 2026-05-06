@@ -16,12 +16,19 @@ use crate::error::{Result, SignError};
 use crate::sign::create_signature_data;
 use crate::signing_block::{SigningBlock, SignerIdentity};
 
-/// Verify a .agent package signature
+/// Verify a .agent package signature from a file path.
+///
+/// This is the sole verification entry point. All callers (CLI install,
+/// HTTP multipart upload, etc.) must write their input to a file first and
+/// pass the path here.
 pub fn verify_package(package_path: &Path) -> Result<VerificationResult> {
-    let data = fs::read(package_path)?;
+    let zip_data = fs::read(package_path)?;
+    verify_package_impl(&zip_data)
+}
 
-    // Extract signing block from ZIP
-    let block = extract_signing_block(&data)?;
+/// Core verification logic operating on in-memory ZIP data.
+fn verify_package_impl(zip_data: &[u8]) -> Result<VerificationResult> {
+    let block = extract_signing_block(zip_data)?;
 
     if block.signers.is_empty() {
         return Err(SignError::InvalidPackage("No signers found".into()));
@@ -31,7 +38,7 @@ pub fn verify_package(package_path: &Path) -> Result<VerificationResult> {
     let signer = &block.signers[0];
 
     // Recompute digests
-    let computed_digests = recompute_digests(&data)?;
+    let computed_digests = recompute_digests(zip_data)?;
 
     // Verify digests match
     if signer.digests.len() != computed_digests.len() {

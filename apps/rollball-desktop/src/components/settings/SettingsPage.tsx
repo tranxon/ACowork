@@ -1163,12 +1163,13 @@ function ProvidersTab() {
 function AppearanceTab() {
   const { theme, setTheme, fontSize, setFontSize } = useSettingsStore();
 
+  // Font size options: M = previous default (text-sm = 0.875rem)
   const fontSizes = [
-    { label: "S", value: 0.875 },
-    { label: "M", value: 1.0 },
-    { label: "L", value: 1.125 },
-    { label: "XL", value: 1.25 },
-    { label: "XXL", value: 1.375 },
+    { label: "S", value: 0.75 },
+    { label: "M", value: 0.875 },
+    { label: "L", value: 1.0 },
+    { label: "XL", value: 1.125 },
+    { label: "XXL", value: 1.25 },
   ];
 
   return (

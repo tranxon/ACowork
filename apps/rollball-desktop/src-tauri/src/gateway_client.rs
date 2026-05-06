@@ -6,11 +6,41 @@
 //! (host, port, URL) to avoid hardcoded duplication.
 
 use anyhow::Result;
+use reqwest::Response;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use rollball_core::defaults;
 
 /// Default Gateway base URL (from shared core constants)
 const DEFAULT_BASE_URL: &str = defaults::GATEWAY_HTTP_URL;
+
+/// Gateway error response format (matches Gateway's `ApiError` struct)
+#[derive(Deserialize)]
+struct GatewayErrorResponse {
+    error: String,
+    #[allow(dead_code)]
+    code: u16,
+}
+
+/// Unified response parser for all Gateway API calls.
+///
+/// - Success (2xx): deserializes the response body into `T`.
+/// - Failure: attempts to extract the `error` field from Gateway's
+///   `ApiError` JSON format for a clear message; falls back to raw text.
+async fn parse_gateway_response<T: DeserializeOwned>(resp: Response) -> Result<T> {
+    let status = resp.status();
+    if status.is_success() {
+        resp.json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to parse Gateway response: {}", e))
+    } else {
+        let text = resp.text().await.unwrap_or_default();
+        match serde_json::from_str::<GatewayErrorResponse>(&text) {
+            Ok(err) => anyhow::bail!("Gateway {}: {}", status, err.error),
+            Err(_) => anyhow::bail!("Gateway {}: {}", status, text),
+        }
+    }
+}
 
 /// Gateway HTTP client
 pub struct GatewayClient {
@@ -50,8 +80,7 @@ impl GatewayClient {
     /// `GET /health`
     pub async fn health(&self) -> Result<HealthResponse> {
         let resp = self.client.get(format!("{}/health", self.base_url)).send().await?;
-        let health: HealthResponse = resp.json().await?;
-        Ok(health)
+        parse_gateway_response(resp).await
     }
 
     // ── System Status ──────────────────────────────────────────────────
@@ -59,8 +88,7 @@ impl GatewayClient {
     /// `GET /api/status`
     pub async fn system_status(&self) -> Result<SystemStatusResponse> {
         let resp = self.client.get(format!("{}/api/status", self.base_url)).send().await?;
-        let status: SystemStatusResponse = resp.json().await?;
-        Ok(status)
+        parse_gateway_response(resp).await
     }
 
     // ── Agent Management ───────────────────────────────────────────────
@@ -68,8 +96,7 @@ impl GatewayClient {
     /// `GET /api/agents`
     pub async fn list_agents(&self) -> Result<Vec<AgentListEntry>> {
         let resp = self.client.get(format!("{}/api/agents", self.base_url)).send().await?;
-        let agents: Vec<AgentListEntry> = resp.json().await?;
-        Ok(agents)
+        parse_gateway_response(resp).await
     }
 
     /// `GET /api/agents/:id`
@@ -79,21 +106,28 @@ impl GatewayClient {
             .get(format!("{}/api/agents/{}", self.base_url, agent_id))
             .send()
             .await?;
-        let detail: AgentDetailResponse = resp.json().await?;
-        Ok(detail)
+        parse_gateway_response(resp).await
     }
 
-    /// `POST /api/agents/install`
-    pub async fn install_agent(&self, package_path: &str, dev_mode: bool) -> Result<GenericMessageResponse> {
-        let body = serde_json::json!({ "package_path": package_path, "dev_mode": dev_mode });
+    /// `POST /api/agents/install` — upload .agent package via multipart
+    pub async fn install_agent(&self, package_bytes: &[u8], dev_mode: bool) -> Result<GenericMessageResponse> {
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "package",
+                reqwest::multipart::Part::bytes(package_bytes.to_vec())
+                    .file_name("package.agent")
+                    .mime_str("application/octet-stream")
+                    .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
+            )
+            .text("dev_mode", dev_mode.to_string());
+
         let resp = self
             .client
             .post(format!("{}/api/agents/install", self.base_url))
-            .json(&body)
+            .multipart(form)
             .send()
             .await?;
-        let result: GenericMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     /// `DELETE /api/agents/:id`
@@ -103,8 +137,7 @@ impl GatewayClient {
             .delete(format!("{}/api/agents/{}", self.base_url, agent_id))
             .send()
             .await?;
-        let result: GenericMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     /// `POST /api/agents/:id/start`
@@ -114,8 +147,7 @@ impl GatewayClient {
             .post(format!("{}/api/agents/{}/start", self.base_url, agent_id))
             .send()
             .await?;
-        let result: GenericMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     /// `POST /api/agents/:id/stop`
@@ -125,8 +157,7 @@ impl GatewayClient {
             .post(format!("{}/api/agents/{}/stop", self.base_url, agent_id))
             .send()
             .await?;
-        let result: GenericMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     // ── Chat ───────────────────────────────────────────────────────────
@@ -140,14 +171,7 @@ impl GatewayClient {
             .json(&body)
             .send()
             .await?;
-        // Check for error status
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_else(|_| "unknown error".to_string());
-            anyhow::bail!("HTTP {}: {}", status, text);
-        }
-        let result: SendMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     /// Get the WebSocket URL for streaming chat
@@ -167,8 +191,7 @@ impl GatewayClient {
             .get(format!("{}/api/vault/keys", self.base_url))
             .send()
             .await?;
-        let keys: Vec<VaultKeyEntry> = resp.json().await?;
-        Ok(keys)
+        parse_gateway_response(resp).await
     }
 
     /// `POST /api/vault/keys` (with optional base_url, default_model, models, and model_capabilities)
@@ -210,8 +233,7 @@ impl GatewayClient {
             .json(&body)
             .send()
             .await?;
-        let result: GenericMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     /// `DELETE /api/vault/keys/:provider`
@@ -221,8 +243,7 @@ impl GatewayClient {
             .delete(format!("{}/api/vault/keys/{}", self.base_url, provider))
             .send()
             .await?;
-        let result: GenericMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     /// `PUT /api/vault/keys/:provider` (supports partial updates — key is optional)
@@ -238,33 +259,39 @@ impl GatewayClient {
         models: Option<&[String]>,
         model_capabilities: Option<&ModelCapabilities>,
     ) -> Result<GenericMessageResponse> {
-        let mut body = serde_json::json!({});
+        let mut body = serde_json::Map::new();
         if let Some(k) = key {
             if !k.is_empty() {
-                body["key"] = serde_json::Value::String(k.to_string());
+                body.insert("key".to_string(), serde_json::Value::String(k.to_string()));
             }
         }
         if let Some(url) = base_url {
-            body["base_url"] = serde_json::Value::String(url.to_string());
+            body.insert("base_url".to_string(), serde_json::Value::String(url.to_string()));
         }
         // Send models list if provided; otherwise fallback to default_model
         if let Some(models_list) = models {
             if !models_list.is_empty() {
-                body["models"] = serde_json::Value::Array(
-                    models_list.iter().map(|m| serde_json::Value::String(m.clone())).collect()
+                body.insert(
+                    "models".to_string(),
+                    serde_json::Value::Array(
+                        models_list.iter().map(|m| serde_json::Value::String(m.clone())).collect()
+                    ),
                 );
             }
         } else if let Some(model) = default_model {
-            body["default_model"] = serde_json::Value::String(model.to_string());
+            body.insert("default_model".to_string(), serde_json::Value::String(model.to_string()));
         }
         // Send model_capabilities if provided
         if let Some(caps) = model_capabilities {
-            body["model_capabilities"] = serde_json::to_value(caps)
-                .unwrap_or_else(|_| serde_json::json!({
-                    "context_window": caps.context_window,
-                    "max_output_tokens": caps.max_output_tokens,
-                    "supports_tool_calling": caps.supports_tool_calling,
-                }));
+            body.insert(
+                "model_capabilities".to_string(),
+                serde_json::to_value(caps)
+                    .unwrap_or_else(|_| serde_json::json!({
+                        "context_window": caps.context_window,
+                        "max_output_tokens": caps.max_output_tokens,
+                        "supports_tool_calling": caps.supports_tool_calling,
+                    })),
+            );
         }
         let resp = self
             .client
@@ -272,15 +299,7 @@ impl GatewayClient {
             .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Gateway returned {}: {}", status, error_text));
-        }
-        let result: GenericMessageResponse = resp.json().await.map_err(|e| {
-            anyhow::anyhow!("Failed to parse Gateway response: {}", e)
-        })?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 
     // ── Config ─────────────────────────────────────────────────────────
@@ -292,8 +311,7 @@ impl GatewayClient {
             .get(format!("{}/api/config", self.base_url))
             .send()
             .await?;
-        let config: ConfigResponse = resp.json().await?;
-        Ok(config)
+        parse_gateway_response(resp).await
     }
 
     /// `PUT /api/config`
@@ -333,8 +351,7 @@ impl GatewayClient {
             .json(&body)
             .send()
             .await?;
-        let result: GenericMessageResponse = resp.json().await?;
-        Ok(result)
+        parse_gateway_response(resp).await
     }
 }
 

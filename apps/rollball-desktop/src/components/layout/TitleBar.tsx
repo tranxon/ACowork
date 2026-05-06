@@ -41,7 +41,7 @@ export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="flex h-7 w-full items-center justify-between select-none bg-[#BEBFC5] px-3 dark:bg-[#292A2C]"
+      className="flex h-7 w-full items-center justify-between select-none bg-[#E2E3E9] px-3 dark:bg-[#292A2C]"
       style={{ "-webkit-app-region": "drag" } as React.CSSProperties}
     >
       {/* Left: App title */}

@@ -1,31 +1,38 @@
 //! .agent package installation
 //!
-//! Install flow: ZIP extract → signature verify → manifest validate → copy to install dir
+//! Install flow: read ZIP from path → signature verify → manifest validate → extract to install dir
+//!
+//! All installation paths (local filesystem, HTTP multipart upload) converge
+//! on [`install_package`] which takes a file path. Callers that receive bytes
+//! (e.g. multipart handlers) must spool to a temp file first.
 
-use std::path::Path;
 use std::io::Read;
+use std::path::Path;
 use crate::error::GatewayError;
 use crate::gateway::state::{AgentInfo, GatewayState};
 
-/// Install a .agent package
+/// Install a .agent package from a file path.
 ///
-/// When `dev_mode` is true, unsigned packages are allowed (for local development).
-/// In production mode, packages must have a valid signature.
+/// This is the sole installation entry point. When `dev_mode` is true,
+/// unsigned packages are allowed (for local development). In production mode,
+/// packages must have a valid signature.
 pub fn install_package(
     package_path: &Path,
     install_dir: &Path,
     state: &mut GatewayState,
     dev_mode: bool,
 ) -> Result<AgentInfo, GatewayError> {
-    // 1. Open ZIP file
-    let file = std::fs::File::open(package_path)
-        .map_err(|e| GatewayError::Package(format!("Failed to open package '{}': {}", package_path.display(), e)))?;
-    let mut archive = zip::ZipArchive::new(file)
+    // 1. Read and open ZIP
+    let data = std::fs::read(package_path)
+        .map_err(|e| GatewayError::Package(format!("Failed to read package '{}': {}", package_path.display(), e)))?;
+    let reader = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| GatewayError::Package(format!("Failed to read ZIP '{}': {}", package_path.display(), e)))?;
 
     // 2. Verify package signature (delegate to rollball-sign)
+    // Re-read for verification (avoids keeping the full Vec alive across the verify call;
+    // the double read is acceptable since packages are small — KB to low-MB range)
     if dev_mode {
-        // Dev mode: attempt verification but allow unsigned packages
         match rollball_sign::verify::verify_package(package_path) {
             Ok(result) => {
                 tracing::info!(
@@ -38,7 +45,6 @@ pub fn install_package(
             }
         }
     } else {
-        // Production mode: reject unsigned or invalid packages
         match rollball_sign::verify::verify_package(package_path) {
             Ok(result) => {
                 tracing::info!(
@@ -78,7 +84,7 @@ pub fn install_package(
             Some(path) => agent_install_dir.join(path),
             None => continue,
         };
-        
+
         if file.is_dir() {
             std::fs::create_dir_all(&outpath).ok();
         } else {
@@ -148,7 +154,7 @@ pub fn install_package(
 }
 
 /// Extract manifest.toml from ZIP archive
-fn extract_manifest(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<rollball_core::AgentManifest, GatewayError> {
+fn extract_manifest(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<rollball_core::AgentManifest, GatewayError> {
     let mut manifest_file = archive.by_name("manifest.toml")
         .map_err(|e| GatewayError::Package(format!("manifest.toml not found in package: {}", e)))?;
     

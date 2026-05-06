@@ -15,7 +15,7 @@ const navItems: { view: NavView; icon: typeof MessageSquare; label: string }[] =
 export function NavBar({ currentView, onViewChange }: NavBarProps) {
   return (
     <nav
-      className="flex w-[48px] flex-col items-center gap-2.5 bg-[#BEBFC5] py-2 dark:bg-[#292A2C]"
+      className="flex w-[48px] flex-col items-center gap-2.5 bg-[#E2E3E9] py-2 dark:bg-[#292A2C]"
       role="navigation"
       aria-label="Main navigation"
     >

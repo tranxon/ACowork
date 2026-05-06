@@ -9,7 +9,7 @@
 //! - POST   /api/agents/:id/stop  — stop a running agent
 
 use axum::{
-    extract::{Path, State},
+    extract::{Multipart, Path, State},
     http::StatusCode,
     Json,
     routing::{get, post},
@@ -17,6 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::error::GatewayError;
 use crate::http::routes::{ApiError, AppState};
 
 /// Build the agent management router
@@ -57,10 +58,10 @@ pub struct AgentDetailResponse {
     pub started_at: Option<String>,
 }
 
-/// Install request
+/// Install request (kept for reference; actual install uses Multipart)
 #[derive(Deserialize)]
 pub struct InstallRequest {
-    /// Path to the .agent package file
+    /// Path to the .agent package file (legacy path-based install)
     pub package_path: String,
     /// Skip signature verification (dev mode)
     #[serde(default)]
@@ -166,15 +167,47 @@ pub async fn get_agent_detail(
 
 /// `POST /api/agents/install` — install a .agent package
 ///
-/// P1-9 fix: Uses spawn_blocking because install_package performs
-/// heavy filesystem operations (ZIP extraction) and synchronous
-/// database operations (CronStore insert) that would block the
-/// tokio runtime if called directly in an async handler.
+/// Accepts `multipart/form-data` with:
+/// - `package`: the .agent ZIP file bytes (required)
+/// - `dev_mode`: "true" or "false" (optional, defaults to Gateway config)
+///
+/// The uploaded bytes are spooled to a temp file so that [`install_package`]
+/// (which takes a `&Path`) can operate on it. The temp file is cleaned up
+/// after installation completes — whether success or failure.
 pub async fn install_agent(
     State(state): State<AppState>,
-    Json(body): Json<InstallRequest>,
+    mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
-    // Determine packages dir from Gateway config (canonical source of truth)
+    // Parse multipart fields
+    let mut package_bytes: Option<Vec<u8>> = None;
+    let mut request_dev_mode: Option<bool> = None;
+
+    while let Some(field) = multipart.next_field().await
+        .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {}", e)))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "package" => {
+                let bytes = field.bytes().await
+                    .map_err(|e| ApiError::bad_request(&format!("Failed to read package field: {}", e)))?;
+                package_bytes = Some(bytes.to_vec());
+            }
+            "dev_mode" => {
+                let text = field.text().await.unwrap_or_default();
+                request_dev_mode = Some(text == "true" || text == "1");
+            }
+            _ => {} // ignore unknown fields
+        }
+    }
+
+    let package_bytes = package_bytes
+        .ok_or_else(|| ApiError::bad_request("Missing required field: 'package'"))?;
+
+    if package_bytes.is_empty() {
+        return Err(ApiError::bad_request("Package file is empty"));
+    }
+
+    // Determine packages dir and dev_mode from Gateway config
     let packages_dir = {
         let gw = state.gateway_state.read().await;
         gw.config
@@ -183,28 +216,55 @@ pub async fn install_agent(
             .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
     };
 
-    // Wrap the synchronous install in spawn_blocking
-    let package_path_display = body.package_path.clone();
-    // Inherit dev_mode from Gateway config if not explicitly set by the client.
-    // This ensures that unsigned packages can be installed when the Gateway
-    // is running in dev_mode without the client having to know about it.
-    let dev_mode = body.dev_mode || {
-        let gw = state.gateway_state.read().await;
-        gw.config.as_ref().map(|c| c.dev_mode).unwrap_or(false)
+    let dev_mode = match request_dev_mode {
+        Some(v) => v,
+        None => {
+            let gw = state.gateway_state.read().await;
+            gw.config.as_ref().map(|c| c.dev_mode).unwrap_or(false)
+        }
     };
+
+    // Spool uploaded bytes to a temp file, then call install_package(&Path)
     let install_result = tokio::task::spawn_blocking(move || {
-        let mut gw = state.gateway_state.blocking_write();
-        crate::package_manager::install::install_package(
-            std::path::Path::new(&body.package_path),
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!(
+            "rollball-install-{}-{}.agent",
+            std::process::id(),
+            timestamp_nanos(),
+        ));
+
+        // Write bytes to temp file (ensures install_package always has a real path)
+        if let Err(e) = std::fs::write(&temp_file, &package_bytes) {
+            return Err(GatewayError::Package(format!(
+                "Failed to write upload to temp file: {}", e
+            )));
+        }
+
+        // Perform install using the original path-based API
+        let result = crate::package_manager::install::install_package(
+            &temp_file,
             &packages_dir,
-            &mut gw,
+            &mut state.gateway_state.blocking_write(),
             dev_mode,
-        )
+        );
+
+        // Best-effort cleanup of temp file (log but don't fail on cleanup error)
+        let _ = std::fs::remove_file(&temp_file);
+
+        result
     }).await;
 
+    /// Simple nanosecond timestamp for unique temp filenames
+    fn timestamp_nanos() -> u128 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now().duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+
     match install_result {
-        Ok(Ok(_)) => Ok((StatusCode::CREATED, Json(MessageResponse {
-            message: format!("Package installed: {}", package_path_display),
+        Ok(Ok(info)) => Ok((StatusCode::CREATED, Json(MessageResponse {
+            message: format!("Package installed: {}", info.agent_id),
         }))),
         Ok(Err(e)) => Err(ApiError::bad_request(&format!("Install failed: {}", e))),
         Err(e) => Err(ApiError::internal(&format!("Install task failed: {}", e))),

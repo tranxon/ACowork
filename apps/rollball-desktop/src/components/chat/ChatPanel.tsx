@@ -331,7 +331,7 @@ export function ChatPanel() {
   const inputDisabled = sending || gatewayStatus !== "connected";
 
   return (
-    <div className="flex flex-1 flex-col bg-white dark:bg-zinc-900">
+    <div className="flex flex-1 flex-col bg-[#FAFAFA] dark:bg-zinc-900">
       {/* LLM config warning */}
       {hasLlmConfig === false && (
         <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 dark:border-amber-900 dark:bg-amber-950">
@@ -919,12 +919,14 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
 /** Single message bubble */
 function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStreaming: boolean }) {
   const [expanded, setExpanded] = useState(false);
+  // Use CSS custom property for font size — set once in store, global effect
+  const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
 
   if (message.type === "user") {
     return (
       <MessageContentWrapper>
         <div className="flex justify-end">
-          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-[#9DF29F] px-3 py-2 text-sm text-zinc-900 select-text">
+          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-[#9DF29F] px-3 py-2 text-zinc-900 select-text" style={fontSizeStyle}>
             {message.content}
           </div>
         </div>
@@ -938,9 +940,9 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <MessageContentWrapper>
         <div className="flex justify-start">
-          <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200 select-text">
+          <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 dark:bg-zinc-800 dark:text-zinc-200 select-text" style={fontSizeStyle}>
             {message.content && (
-              <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert select-text">
+              <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert select-text" style={fontSizeStyle}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
               </div>
             )}

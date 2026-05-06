@@ -259,14 +259,14 @@ export function AgentList({ width }: AgentListProps) {
                 {/* Top row: name + system badge */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{agent.name}</span>
+                    <span className="truncate font-medium text-zinc-900 dark:text-zinc-100" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.name}</span>
                     {isSystem && (
                       <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/50 dark:text-blue-300">System</span>
                     )}
                   </div>
                 </div>
                 {/* Bottom row: current session title */}
-                <div className="mt-0.5 truncate text-xs">
+                <div className="mt-0.5 truncate" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
                   <span className="text-zinc-500 dark:text-zinc-400">
                     {sessionTitle === undefined ? "" : (sessionTitle === null ? "No session" : (sessionTitle || "Untitled session"))}
                   </span>

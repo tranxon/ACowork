@@ -72,7 +72,7 @@ export function AppLayout() {
   }, [handleMouseMove, handleMouseUp, sidebarWidth]);
 
   return (
-    <div className="flex h-full w-full flex-col bg-[#BEBFC5] dark:bg-[#292A2C]">
+    <div className="flex h-full w-full flex-col bg-[#E2E3E9] dark:bg-[#292A2C]">
       {/* Custom title bar */}
       <TitleBar />
 
