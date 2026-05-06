@@ -110,3 +110,144 @@ body {
     transition-duration: 0ms !important;
   }
 }
+
+/* ── Markdown rendering (prose) — elegant & subtle ── */
+/* Override Tailwind typography for a softer, more refined look */
+.prose {
+  --tw-prose-body: hsl(240 5% 15%);
+  --tw-prose-headings: hsl(240 5% 12%);
+  --tw-prose-lead: hsl(240 5% 25%);
+  --tw-prose-links: hsl(240 50% 40%);
+  --tw-prose-bold: hsl(240 5% 12%);
+  --tw-prose-counters: hsl(240 5% 40%);
+  --tw-prose-bullets: hsl(240 5% 70%);
+  --tw-prose-hr: hsl(240 5% 85%);
+  --tw-prose-quotes: hsl(240 5% 20%);
+  --tw-prose-quote-borders: hsl(240 5% 80%);
+  --tw-prose-captions: hsl(240 5% 35%);
+  --tw-prose-code: hsl(240 5% 18%);
+  --tw-prose-pre-code: hsl(240 5% 20%);
+  --tw-prose-pre-bg: hsl(240 5% 92%);
+  --tw-prose-th-borders: hsl(240 5% 80%);
+  --tw-prose-td-borders: hsl(240 5% 90%);
+}
+
+/* Dark mode — muted & comfortable */
+.dark .prose {
+  --tw-prose-body: hsl(240 5% 85%);
+  --tw-prose-headings: hsl(240 5% 90%);
+  --tw-prose-lead: hsl(240 5% 75%);
+  --tw-prose-links: hsl(240 50% 70%);
+  --tw-prose-bold: hsl(240 5% 90%);
+  --tw-prose-counters: hsl(240 5% 60%);
+  --tw-prose-bullets: hsl(240 5% 45%);
+  --tw-prose-hr: hsl(240 5% 25%);
+  --tw-prose-quotes: hsl(240 5% 80%);
+  --tw-prose-quote-borders: hsl(240 5% 30%);
+  --tw-prose-captions: hsl(240 5% 60%);
+  --tw-prose-code: hsl(240 5% 80%);
+  --tw-prose-pre-code: hsl(240 5% 80%);
+  --tw-prose-pre-bg: hsl(240 5% 18%);
+  --tw-prose-th-borders: hsl(240 5% 30%);
+  --tw-prose-td-borders: hsl(240 5% 25%);
+}
+
+/* Code blocks — softer background, no harsh borders */
+.prose pre {
+  background-color: hsl(240 5% 94%);
+  border: 1px solid hsl(240 5% 88%);
+  border-radius: 6px;
+}
+
+.dark .prose pre {
+  background-color: hsl(240 5% 15%);
+  border: 1px solid hsl(240 5% 22%);
+}
+
+.prose code {
+  background-color: hsl(240 5% 94%);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.dark .prose code {
+  background-color: hsl(240 5% 18%);
+}
+
+/* Inline code — less prominent */
+.prose :where(code):not(:where(pre code)) {
+  background-color: transparent;
+  padding: 0;
+  font-weight: 400;
+}
+
+/* Links — subtle, not harsh blue */
+.prose a {
+  color: hsl(240 50% 45%);
+  text-decoration: underline;
+  text-decoration-color: hsl(240 50% 80%);
+  text-underline-offset: 2px;
+}
+
+.prose a:hover {
+  text-decoration-color: hsl(240 50% 45%);
+}
+
+.dark .prose a {
+  color: hsl(240 50% 65%);
+  text-decoration-color: hsl(240 5% 30%);
+}
+
+.dark .prose a:hover {
+  text-decoration-color: hsl(240 50% 70%);
+}
+
+/* Headings — softer weight, refined spacing */
+.prose h1 { font-weight: 600; letter-spacing: -0.02em; }
+.prose h2 { font-weight: 600; letter-spacing: -0.01em; }
+.prose h3 { font-weight: 600; }
+.prose h4 { font-weight: 500; }
+
+/* Lists — softer bullets */
+.prose ul > li::marker { color: hsl(240 5% 65%); }
+.prose ol > li::marker { color: hsl(240 5% 55%); }
+.dark .prose ul > li::marker { color: hsl(240 5% 45%); }
+.dark .prose ol > li::marker { color: hsl(240 5% 40%); }
+
+/* Blockquotes — elegant borders */
+.prose blockquote {
+  border-left: 3px solid hsl(240 5% 75%);
+  padding-left: 1em;
+  color: hsl(240 5% 25%);
+  font-style: italic;
+}
+
+.dark .prose blockquote {
+  border-left-color: hsl(240 5% 35%);
+  color: hsl(240 5% 75%);
+}
+
+/* Tables — subtle borders */
+.prose table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.prose th {
+  background-color: hsl(240 5% 96%);
+}
+
+.dark .prose th {
+  background-color: hsl(240 5% 16%);
+}
+
+/* Horizontal rules — refined */
+.prose hr {
+  border-color: hsl(240 5% 88%);
+  opacity: 0.6;
+}
+
+.dark .prose hr {
+  border-color: hsl(240 5% 25%);
+}
