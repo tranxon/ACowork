@@ -167,9 +167,7 @@ export function WorkspaceSelector() {
                     return (
                       <div
                         key={dir.id}
-                        className={cn("group flex items-center gap-2 px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
-                          isCurrent && "bg-[#D8D9DC] dark:bg-[#3D3D3F]",
-                        )}
+                        className="group flex items-center gap-2 px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
                       >
                         {/* Select workspace button */}
                         <button

@@ -193,6 +193,18 @@ impl AgentLoop {
         self.conversation.as_ref().map(|c| c.session_id())
     }
 
+    /// Update the title of the currently active conversation session.
+    ///
+    /// Returns `true` if a session was active and its title was updated.
+    pub fn update_session_title(&mut self, title: &str) -> bool {
+        if let Some(ref conv) = self.conversation {
+            conv.update_title_force(title);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Look up model capabilities by model name.
     /// Falls back to the first entry if the model name is not found.
     fn get_model_capabilities(&self, model_name: Option<&str>) -> Option<&ModelCapabilitiesInfo> {
@@ -307,6 +319,99 @@ impl AgentLoop {
     ///
     /// Distillation is best-effort and non-blocking.
     pub async fn close_session_with_distillation(&mut self) -> Result<()> {
+        self.close_session_inner().await
+    }
+
+    /// Switch to a new conversation session.
+    ///
+    /// This is the **single canonical way** to change the active conversation
+    /// on an AgentLoop. It:
+    /// 1. Closes the old session (triggers distillation)
+    /// 2. Replaces `self.conversation` with the new session
+    /// 3. Returns the old session (already closed)
+    ///
+    /// # Why this matters
+    ///
+    /// Before this method, `handle_create_session` in cli.rs created a new
+    /// `ConversationSession` but **dropped it immediately** — the AgentLoop's
+    /// `conversation` field was never updated, so all subsequent messages were
+    /// still written to the old JSONL file. This was the P0 root cause of
+    /// messages appearing in wrong sessions (see ADR-session-fix).
+    pub fn switch_conversation(
+        &mut self,
+        new_session: ConversationSession,
+    ) -> Option<ConversationSession> {
+        let _old_id = self.current_session_id().map(|s| s.to_string());
+        let new_id = new_session.session_id().to_string();
+
+        // In pre-async context, we can't await close_session_with_distillation.
+        // Instead, we take the old session and spawn its close+distill asynchronously.
+        let old_session = self.conversation.take();
+
+        if let Some(ref old) = old_session {
+            tracing::info!(
+                old_session_id = %old.session_id(),
+                new_session_id = %new_id,
+                "Switching conversation session"
+            );
+        } else {
+            tracing::info!(new_session_id = %new_id, "Activating first conversation session");
+        }
+
+        self.conversation = Some(new_session);
+
+        // Spawn async close + distill for the old session (best-effort)
+        // We need to extract data from old_session without fully moving it,
+        // because we still return it at the end. Use as_ref() pattern.
+        if let Some(ref old) = old_session {
+            let session_id = old.session_id().to_string();
+            let session_path = old.session_path().to_path_buf();
+            let provider = self.provider.clone();
+            let model_name = self
+                .gateway_model_capabilities
+                .values()
+                .min_by(|a, b| {
+                    let cost_a = crate::episode_distill::model_cost_score(a);
+                    let cost_b = crate::episode_distill::model_cost_score(b);
+                    cost_a.partial_cmp(&cost_b).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .and_then(|m| m.name.clone())
+                .unwrap_or_else(|| "default".to_string());
+
+            tokio::spawn(async move {
+                // Distill the old session
+                match crate::episode_distill::EpisodeDistiller::distill_on_session_end(
+                    &session_path,
+                    &session_id,
+                    provider.as_ref(),
+                    &model_name,
+                )
+                .await
+                {
+                    Ok(episode) => {
+                        tracing::info!(
+                            summary = %episode.summary,
+                            importance = episode.importance,
+                            "Session-level distillation completed for switched-out session"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Session-level distillation failed for switched-out session (non-fatal)"
+                        );
+                    }
+                }
+                // Note: The old session's ConversationWriter will be shut down when
+                // the ConversationSession is dropped. File flush is best-effort.
+            });
+        }
+
+        old_session
+    }
+
+    /// Inner implementation for closing the current session.
+    async fn close_session_inner(&mut self) -> Result<()> {
         if let Some(ref conversation) = self.conversation {
             let session_id = conversation.session_id().to_string();
             let session_path = conversation.session_path().to_path_buf();

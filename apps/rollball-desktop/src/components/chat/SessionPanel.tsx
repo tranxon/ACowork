@@ -56,8 +56,8 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const handleSwitchSession = (sessionId: string) => {
-    switchSession(sessionId);
+  const handleSwitchSession = async (sessionId: string) => {
+    await switchSession(sessionId, agentId);
     useSessionStore.getState().saveSessionForAgent(agentId, sessionId);
     setOpen(false);
   };
@@ -117,9 +117,7 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
                   onClick={() => handleSwitchSession(session.session_id)}
                   className={cn(
                     "flex w-full flex-col gap-0.5 px-3 py-2 text-left transition-colors",
-                    isActive
-                      ? "bg-[#D8D9DC] dark:bg-[#3D3D3F]"
-                      : "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
+                    "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
                   )}
                 >
                   <div className="flex items-center gap-2">

@@ -159,7 +159,6 @@ export function ChatPanel() {
     useSessionStore.getState().reset();
     // Clear additional chat state for a clean agent switch
     useChatStore.setState({
-      currentSessionId: null,
       hasMoreMessages: false,
       messageCursor: null,
       isLoadingMore: false,
@@ -194,7 +193,7 @@ export function ChatPanel() {
             .getState()
             .loadSessionMessages(selectedAgentId, targetSession.session_id);
           // sync currentSessionId to sessionStore so SessionPanel highlights correctly
-          useSessionStore.getState().switchSession(targetSession.session_id);
+          await useSessionStore.getState().switchSession(targetSession.session_id, selectedAgentId);
         }
         // 5. If no sessions, empty chat is already shown (messages cleared above)
         isInitialLoadRef.current = false;
@@ -210,9 +209,12 @@ export function ChatPanel() {
     };
   }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadModels]);
 
-  // Load messages when active session changes (from SessionPanel)
+  // Load messages when active session changes (from SessionPanel or createSession)
   useEffect(() => {
     if (!currentSessionId || !selectedAgentId) return;
+
+    // Skip if agent initialization is in progress — initSession already calls loadSessionMessages
+    if (isInitialLoadRef.current) return;
 
     // Guard: only proceed if this session belongs to the current agent's session list.
     const session = useSessionStore
@@ -258,8 +260,8 @@ export function ChatPanel() {
     const container = messagesContainerRef.current;
     if (!container || !selectedAgentId) return;
 
-    const { isLoadingMore, hasMoreMessages, currentSessionId } =
-      useChatStore.getState();
+    const { isLoadingMore, hasMoreMessages } = useChatStore.getState();
+    const currentSessionId = useSessionStore.getState().currentSessionId;
     if (isLoadingMore || !hasMoreMessages || !currentSessionId) return;
 
     // Trigger when within 50px of the top
@@ -1646,7 +1648,7 @@ function ModelMenu({
                 className={cn(
                   "flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors",
                   isActive
-                    ? "bg-[#D8D9DC] dark:bg-[#3D3D3F] text-zinc-900 dark:text-white"
+                    ? "text-zinc-900 dark:text-white"
                     : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
                 )}
               >

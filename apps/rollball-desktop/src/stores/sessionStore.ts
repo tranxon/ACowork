@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { SessionInfo } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
+import { useChatStore } from "./chatStore";
 
 interface SessionState {
   sessions: SessionInfo[];
@@ -15,7 +16,7 @@ interface SessionState {
   // Actions
   fetchSessions: (agentId: string) => Promise<void>;
   fetchLatestSessionTitle: (agentId: string) => Promise<string | null>;
-  switchSession: (sessionId: string) => void;
+  switchSession: (sessionId: string, agentId?: string) => Promise<void>;
   saveSessionForAgent: (agentId: string, sessionId: string) => void;
   createSession: (agentId: string) => Promise<void>;
   setSessionPanelOpen: (open: boolean) => void;
@@ -34,7 +35,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   agentSessionMap: {},
 
   fetchSessions: async (agentId: string) => {
-    set({ isLoading: true, sessions: [] }); // Clear immediately to avoid stale data
+    set({ isLoading: true }); // Keep old sessions visible while loading
     try {
       const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -73,7 +74,26 @@ export const useSessionStore = create<SessionState>((set) => ({
     }
   },
 
-  switchSession: (sessionId: string) => {
+  switchSession: async (sessionId: string, agentId?: string) => {
+    // Cancel any in-flight session message loading before switching
+    useChatStore.getState().abortSessionLoad();
+
+    // Notify Runtime to switch its active ConversationSession (S1.14)
+    if (agentId) {
+      try {
+        const resp = await fetch(
+          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/activate`,
+          { method: "POST" },
+        );
+        if (!resp.ok) {
+          console.warn(`[SessionStore] activate_session failed: HTTP ${resp.status}`);
+          // Continue with local state update anyway — best-effort
+        }
+      } catch (e) {
+        console.warn("[SessionStore] activate_session failed:", e);
+        // Continue with local state update — best-effort
+      }
+    }
     set({ currentSessionId: sessionId });
   },
 
@@ -105,6 +125,13 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessions: [newSession, ...state.sessions],
         currentSessionId: data.session_id,
       }));
+      // Clear chatStore messages immediately so old session's content doesn't leak
+      useChatStore.getState().clearMessages();
+      useChatStore.setState({
+        hasMoreMessages: false,
+        messageCursor: null,
+        isLoadingMore: false,
+      });
     } catch (e) {
       console.error("[SessionStore] Failed to create session:", e);
     }
@@ -121,7 +148,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   updateSessionTitle: (sessionId: string, title: string) => {
     set((state) => ({
       sessions: state.sessions.map((s) =>
-        s.session_id === sessionId && !s.title ? { ...s, title } : s,
+        s.session_id === sessionId && (!s.title || s.title.trim() === "") ? { ...s, title } : s,
       ),
     }));
   },

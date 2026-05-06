@@ -25,8 +25,6 @@ interface ChatStore {
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
   /** Context usage info from Runtime (updated after each LLM call) */
   contextUsage: ContextUsageInfo | null;
-  /** Current active session ID */
-  currentSessionId: string | null;
   /** Whether there are more older messages to load */
   hasMoreMessages: boolean;
   /** Cursor for pagination (message ID of the oldest loaded message) */
@@ -35,6 +33,13 @@ interface ChatStore {
   isLoadingMore: boolean;
   /** Whether initial session messages are being loaded */
   isLoadingSession: boolean;
+  /** Per-session message cache: sessionId → { messages, cursor, hasMore, loadedAt } */
+  sessionMessagesCache: Record<string, {
+    messages: ChatMessage[];
+    cursor: string | null;
+    hasMore: boolean;
+    loadedAt: number;
+  }>;
   /** Current turn/iteration ID — tracks LLM call cycles for grouping thinking + tools */
   currentTurnId: string | null;
   /** Accumulated raw stream buffer for cross-chunk tag detection */
@@ -45,6 +50,8 @@ interface ChatStore {
   isInThinkPhase: boolean;
   /** Load sequence number to prevent race conditions on fast session switches */
   loadSequence: number;
+  /** AbortController for cancelling in-flight loadSessionMessages requests */
+  abortController: AbortController | null;
 
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string, command?: string) => Promise<void>;
@@ -72,6 +79,8 @@ interface ChatStore {
     limit?: number,
     direction?: string,
   ) => Promise<void>;
+  /** Abort any in-flight loadSessionMessages request */
+  abortSessionLoad: () => void;
   /** Load more older messages (triggered by scroll to top) */
   loadMoreMessages: (agentId: string, sessionId: string) => Promise<void>;
 }
@@ -138,7 +147,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   currentAgentId: null,
   iterationLimitPaused: null,
   contextUsage: null,
-  currentSessionId: null,
   hasMoreMessages: false,
   messageCursor: null,
   isLoadingMore: false,
@@ -148,6 +156,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   thinkingMessageId: null,
   isInThinkPhase: false,
   loadSequence: 0,
+  abortController: null,
+  sessionMessagesCache: {},
 
   getWs: (agentId: string) => get().wsMap[agentId],
 
@@ -283,6 +293,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       sending: true,
       currentTurnId: null, // Reset turn tracking for new conversation turn
     }));
+
+    // Update session title immediately when first message is sent
+    updateSessionTitleFromMessages(get().messages, agentId);
 
     // Helper: send via WebSocket and set up streaming state
     const sendViaWs = (socket: WebSocket) => {
@@ -555,11 +568,39 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     limit: number = 50,
     direction: string = "backward",
   ) => {
-    // Set loading state for initial load (not for pagination)
+    // Increment loadSequence — stale responses with old sequence will be discarded
+    const seq = get().loadSequence + 1;
+    set({ loadSequence: seq });
+
+    // Abort any in-flight request before starting a new one
+    const oldController = get().abortController;
+    if (oldController) {
+      oldController.abort();
+    }
+    const controller = new AbortController();
+    set({ abortController: controller });
+
+    // Cache check: for initial load (no cursor), try cache first
+    const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+    if (!cursor) {
+      const cached = get().sessionMessagesCache[sessionId];
+      if (cached && Date.now() - cached.loadedAt < CACHE_TTL) {
+        console.log(`[ChatStore] Using cached messages for session ${sessionId}`);
+        set({
+          messages: cached.messages,
+          hasMoreMessages: cached.hasMore,
+          messageCursor: cached.cursor,
+          isLoadingSession: false,
+        });
+        // Still bump sequence so any pending requests are discarded
+        return;
+      }
+    }
+
     if (!cursor) {
       set({ isLoadingSession: true });
     }
-    
+
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
@@ -568,15 +609,36 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       const resp = await fetch(
         `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
+        { signal: controller.signal },
       );
+
+      // Discard stale response: if loadSequence has changed, this response is outdated
+      if (get().loadSequence !== seq) {
+        console.log(`[ChatStore] Discarding stale loadSessionMessages response (seq ${seq} vs current ${get().loadSequence})`);
+        return;
+      }
+
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
       const data = (await resp.json()) as PaginatedMessages;
+
+      // Check again after await — another request may have started
+      if (get().loadSequence !== seq) {
+        console.log(`[ChatStore] Discarding stale response after json parse (seq ${seq} vs current ${get().loadSequence})`);
+        return;
+      }
 
       console.log(`[ChatStore] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}`);
 
       const converted = (data.messages ?? []).map(convertConversationEntry);
 
       set((state) => {
+        // Discard if sequence changed while we were building state
+        if (state.loadSequence !== seq) {
+          console.log(`[ChatStore] Discarding state update — sequence changed`);
+          return {};
+        }
+
         if (cursor) {
           // Loading more: prepend older messages
           const existingIds = new Set(state.messages.map((m) => m.id));
@@ -586,24 +648,59 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             hasMoreMessages: data.has_more,
             messageCursor: data.cursor,
             isLoadingMore: false,
-            currentSessionId: sessionId,
             isLoadingSession: false,
           };
         }
-        // Initial load: replace messages
+
+        // Initial load: replace messages AND write to cache
+        const newCache = { ...state.sessionMessagesCache };
+        newCache[sessionId] = {
+          messages: converted,
+          cursor: data.cursor,
+          hasMore: data.has_more,
+          loadedAt: Date.now(),
+        };
+
         return {
           messages: converted,
           hasMoreMessages: data.has_more,
           messageCursor: data.cursor,
           isLoadingMore: false,
-          currentSessionId: sessionId,
           isLoadingSession: false,
+          sessionMessagesCache: newCache,
         };
       });
-    } catch (e) {
+    } catch (e: unknown) {
+      // Discard errors from stale/aborted requests
+      if (get().loadSequence !== seq) {
+        console.log(`[ChatStore] Discarding stale error response (seq ${seq})`);
+        return;
+      }
+      // AbortError is expected — don't log as error
+      if (e instanceof DOMException && e.name === "AbortError") {
+        console.log(`[ChatStore] loadSessionMessages aborted (seq ${seq})`);
+        set({ isLoadingMore: false, isLoadingSession: false });
+        return;
+      }
       console.error("[ChatStore] Failed to load session messages:", e);
-      set({ messages: [], currentSessionId: null, hasMoreMessages: false, messageCursor: null, isLoadingMore: false, isLoadingSession: false });
+      set({ messages: [], hasMoreMessages: false, messageCursor: null, isLoadingMore: false, isLoadingSession: false });
+    } finally {
+      // Clear the controller if it's still the one we created
+      const currentController = get().abortController;
+      if (currentController === controller) {
+        set({ abortController: null });
+      }
     }
+  },
+
+  abortSessionLoad: () => {
+    const controller = get().abortController;
+    if (controller) {
+      controller.abort();
+      set({ abortController: null });
+    }
+    // Also bump loadSequence so pending responses are discarded
+    set((state) => ({ loadSequence: state.loadSequence + 1 }));
   },
 
   loadMoreMessages: async (agentId: string, sessionId: string) => {
@@ -619,13 +716,26 @@ function makeSessionTitle(content: string): string {
   return content.replace(/\n/g, " ").trim().substring(0, 30);
 }
 
-/** Find first user message and update session title if not yet set */
-function updateSessionTitleFromMessages(messages: ChatMessage[]) {
+/** Find first user message and update session title if not yet set.
+ *  Updates both local state (sessionStore) AND backend JSONL metadata. */
+function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: string) {
   const firstUserMsg = messages.find((m) => m.type === "user");
   if (!firstUserMsg || !firstUserMsg.content) return;
   const sessionId = useSessionStore.getState().currentSessionId;
   if (!sessionId) return;
-  useSessionStore.getState().updateSessionTitle(sessionId, makeSessionTitle(firstUserMsg.content));
+  const title = makeSessionTitle(firstUserMsg.content);
+  // Update local sessionStore
+  useSessionStore.getState().updateSessionTitle(sessionId, title);
+  // Persist to backend (best-effort, non-blocking)
+  if (agentId) {
+    fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/title`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }).catch((e) => {
+      console.warn("[ChatStore] Failed to persist title to backend:", e);
+    });
+  }
 }
 
 /** Convert a ConversationEntry from Gateway to UI ChatMessage */
@@ -970,7 +1080,7 @@ function handleMessageEvent(
       };
     });
     // Update session title from first user message (only if not yet set)
-    updateSessionTitleFromMessages(get().messages);
+    updateSessionTitleFromMessages(get().messages, get().currentAgentId ?? undefined);
     break;
     }
 

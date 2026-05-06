@@ -324,6 +324,33 @@ impl ConversationSession {
         self.update_metadata(metadata);
         tracing::info!(session_id = %self.session_id, "Session title set");
     }
+
+    /// Force-update the session title (used by API, not first-message auto-set).
+    ///
+    /// Unlike `set_title`, this always writes the title even if one was
+    /// already set. Used by the `update_session_title` action from Gateway.
+    pub fn update_title_force(&self, title: &str) {
+        let truncated = {
+            let chars: Vec<char> = title.chars().collect();
+            if chars.len() <= 30 {
+                title.to_string()
+            } else {
+                format!("{}...", chars[..30].iter().collect::<String>())
+            }
+        };
+        self.title_set.store(true, Ordering::Relaxed);
+        let metadata = SessionMetadata {
+            version: CONVERSATION_FORMAT_VERSION,
+            session_id: self.session_id.clone(),
+            created_at: self.created_at.clone(),
+            agent_id: self.agent_id.clone(),
+            title: Some(truncated.clone()),
+            updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            message_count: None,
+        };
+        self.update_metadata(metadata);
+        tracing::info!(session_id = %self.session_id, title = %truncated, "Session title force-updated via API");
+    }
 }
 
 // Safety: ConversationSession only contains String and UnboundedSender,

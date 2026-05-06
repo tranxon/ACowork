@@ -16,7 +16,7 @@ use axum::{
     http::StatusCode,
     Json,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -35,6 +35,8 @@ pub fn chat_routes() -> Router<AppState> {
         .route("/api/agents/{id}/conversations", get(get_conversations))
         .route("/api/agents/{id}/conversations/latest", get(get_latest_conversation))
         .route("/api/agents/{id}/sessions", get(list_sessions).post(create_session))
+        .route("/api/agents/{id}/sessions/{session_id}/activate", post(activate_session))
+        .route("/api/agents/{id}/sessions/{session_id}/title", put(update_session_title))
         .route("/api/agents/{id}/sessions/{session_id}/messages", get(get_session_messages))
         .route("/api/agents/{id}/continue", post(continue_execution))
 }
@@ -1050,6 +1052,90 @@ pub async fn create_session(
         StatusCode::OK,
         Json(SessionCreatedResponse { session_id }),
     ))
+}
+
+/// `POST /api/agents/{id}/sessions/{session_id}/activate` — activate an existing session (S1.14)
+///
+/// Tells the Runtime to switch its active ConversationSession to the specified
+/// existing session. The Runtime will resume the session's JSONL file and
+/// subsequent messages will be written to it.
+///
+/// This is the **only correct way** to switch sessions at runtime. Without it,
+/// the frontend can update its own sessionStore but the Runtime keeps writing
+/// to the old JSONL file — causing messages to appear in wrong sessions.
+pub async fn activate_session(
+    State(state): State<AppState>,
+    Path((agent_id, session_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
+    }
+
+    let params = serde_json::json!({
+        "session_id": session_id,
+    });
+
+    let data = forward_session_query(&state, &agent_id, "activate_session", params).await?;
+
+    // Check for error response from Runtime
+    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+        return Err(ApiError::internal(error));
+    }
+
+    Ok(StatusCode::OK)
+}
+
+/// `PUT /api/agents/{id}/sessions/{session_id}/title` — update session title (S1.14)
+///
+/// Persists the session title to the JSONL metadata via Runtime's
+/// `update_session_title` action. This is the canonical way to set a
+/// session title that survives frontend refreshes.
+#[derive(Deserialize)]
+pub struct UpdateTitleRequest {
+    pub title: String,
+}
+
+pub async fn update_session_title(
+    State(state): State<AppState>,
+    Path((agent_id, _session_id)): Path<(String, String)>,
+    Json(body): Json<UpdateTitleRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
+    }
+
+    let params = serde_json::json!({
+        "title": body.title,
+    });
+
+    let data = forward_session_query(&state, &agent_id, "update_session_title", params).await?;
+
+    // Check for error response from Runtime
+    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+        return Err(ApiError::internal(error));
+    }
+
+    Ok(StatusCode::OK)
 }
 
 // ── S1.14: IPC forwarding helpers ──────────────────────────────────────────────

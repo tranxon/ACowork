@@ -156,9 +156,7 @@ export function SkillsPanel() {
                         }}
                         className={cn(
                           "flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors",
-                          isActive
-                            ? "bg-blue-50 dark:bg-blue-900/20"
-                            : "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
+                            "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
                         )}
                       >
                         <Wrench className={cn("h-3.5 w-3.5 shrink-0", isActive ? "text-blue-500" : "text-zinc-400")} />

@@ -967,11 +967,19 @@ async fn run_gateway_loop(
                             continue;
                         }
                         if action == "create_session" {
-                            handle_create_session(&work_dir, &agent_id_for_reconnect, &mut current_session_id, grpc_client, &params).await;
+                            handle_create_session(&work_dir, &agent_id_for_reconnect, &mut agent_loop, &mut current_session_id, grpc_client, &params).await;
                             continue;
                         }
                         if action == "get_current_session_id" {
                             handle_get_current_session_id(grpc_client, &params, &current_session_id).await;
+                            continue;
+                        }
+                        if action == "activate_session" {
+                            handle_activate_session(&work_dir, &mut agent_loop, &mut current_session_id, grpc_client, &params).await;
+                            continue;
+                        }
+                        if action == "update_session_title" {
+                            handle_update_session_title(&mut agent_loop, grpc_client, &params).await;
                             continue;
                         }
 
@@ -1309,10 +1317,15 @@ async fn handle_get_session_messages(
 
 /// Handle "create_session" action from Gateway (S1.14)
 ///
-/// Creates a new ConversationSession and updates the tracked session ID.
+/// Creates a new ConversationSession and **switches the AgentLoop's active
+/// conversation** to it via `switch_conversation`. This is the only correct
+/// way to activate a new session — creating a ConversationSession without
+/// calling switch_conversation would cause messages to still be written to
+/// the old JSONL file (P0 bug fixed in ADR-session-fix).
 async fn handle_create_session(
     work_dir: &str,
     agent_id: &str,
+    agent_loop: &mut crate::agent::loop_::AgentLoop,
     current_session_id: &mut String,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     params: &serde_json::Value,
@@ -1325,15 +1338,23 @@ async fn handle_create_session(
     let new_session_id = crate::conversation::generate_session_id();
 
     match crate::conversation::ConversationSession::new(
-        std::path::Path::new(work_dir),  // Pass workspace root — new() joins "conversations" internally
+        std::path::Path::new(work_dir),
         &new_session_id,
         agent_id,
     ) {
-        Ok(_session) => {
+        Ok(new_session) => {
+            let old_session_id = agent_loop.current_session_id().map(|s| s.to_string());
+
+            // P0 FIX: Switch the AgentLoop's active conversation to the new session.
+            // Before this fix, the new_session was dropped here (bound as `_session`),
+            // leaving AgentLoop.conversation pointing to the OLD session — causing
+            // all subsequent messages to be appended to the wrong JSONL file.
+            agent_loop.switch_conversation(new_session);
+
             tracing::info!(
                 new_session_id = %new_session_id,
-                old_session_id = %current_session_id,
-                "Created new conversation session via Gateway request"
+                old_session_id = ?old_session_id,
+                "Created and activated new conversation session via Gateway request"
             );
             *current_session_id = new_session_id.clone();
 
@@ -1375,6 +1396,121 @@ async fn handle_get_current_session_id(
         "session_id": session_id,
     });
     send_session_response(grpc_client, &request_id, data).await;
+}
+
+/// Handle "activate_session" action from Gateway (S1.14)
+///
+/// Resumes an existing ConversationSession from its JSONL file and switches
+/// the AgentLoop's active conversation to it. This is the Runtime-side
+/// implementation of the session switch protocol:
+///
+/// 1. Frontend calls POST /api/agents/{id}/sessions/{session_id}/activate
+/// 2. Gateway forwards "activate_session" IntentReceived to Runtime
+/// 3. Runtime resumes the JSONL file → creates ConversationSession
+/// 4. Runtime calls agent_loop.switch_conversation() to activate it
+/// 5. All subsequent messages are written to the new (resumed) JSONL file
+///
+/// Without this, switching sessions on the frontend only updates UI state —
+/// the Runtime keeps writing to whatever session it had active, causing the
+/// "messages in wrong session" bug.
+async fn handle_activate_session(
+    work_dir: &str,
+    agent_loop: &mut crate::agent::loop_::AgentLoop,
+    current_session_id: &mut String,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
+    params: &serde_json::Value,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
+        Some(sid) if !sid.is_empty() => sid.to_string(),
+        _ => {
+            let data = serde_json::json!({
+                "error": "Missing or empty session_id parameter",
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+            return;
+        }
+    };
+
+    // Resume the existing session's JSONL file
+    match crate::conversation::ConversationSession::resume(
+        std::path::Path::new(work_dir),
+        &session_id,
+    ) {
+        Ok(resumed_session) => {
+            let old_session_id = agent_loop.current_session_id().map(|s| s.to_string());
+
+            // Switch the AgentLoop's active conversation
+            agent_loop.switch_conversation(resumed_session);
+
+            tracing::info!(
+                activated_session_id = %session_id,
+                old_session_id = ?old_session_id,
+                "Activated existing conversation session via Gateway request"
+            );
+            *current_session_id = session_id.clone();
+
+            let data = serde_json::json!({
+                "session_id": session_id,
+                "activated": true,
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+        }
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "Failed to resume session for activation");
+            let data = serde_json::json!({
+                "error": format!("Failed to activate session: {}", e),
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+        }
+    }
+}
+
+/// Handle "update_session_title" action from Gateway (S1.14)
+///
+/// Force-updates the title of the currently active ConversationSession.
+/// Unlike `set_title` (which only sets once from the first user message),
+/// this always writes the title — used by the HTTP API for manual/programmatic
+/// title updates that persist in the JSONL metadata.
+async fn handle_update_session_title(
+    agent_loop: &mut crate::agent::loop_::AgentLoop,
+    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
+    params: &serde_json::Value,
+) {
+    let request_id = params.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let title = match params.get("title").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            let data = serde_json::json!({
+                "error": "Missing or empty title parameter",
+            });
+            send_session_response(grpc_client, &request_id, data).await;
+            return;
+        }
+    };
+
+    if agent_loop.update_session_title(&title) {
+        let session_id = agent_loop.current_session_id().map(|s| s.to_string()).unwrap_or_default();
+        let data = serde_json::json!({
+            "session_id": session_id,
+            "title": title,
+        });
+        send_session_response(grpc_client, &request_id, data).await;
+    } else {
+        tracing::warn!("update_session_title called but no active session");
+        let data = serde_json::json!({
+            "error": "No active session to update",
+        });
+        send_session_response(grpc_client, &request_id, data).await;
+    }
 }
 
 /// Send a session response back to Gateway via IntentSend (S1.14)
