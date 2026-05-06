@@ -203,11 +203,16 @@ body {
   text-decoration-color: hsl(240 50% 70%);
 }
 
-/* Headings — softer weight, refined spacing */
-.prose h1 { font-weight: 600; letter-spacing: -0.02em; }
-.prose h2 { font-weight: 600; letter-spacing: -0.01em; }
-.prose h3 { font-weight: 600; }
-.prose h4 { font-weight: 500; }
+/* Headings — softer weight, refined spacing, lighter colors */
+.prose h1 { font-weight: 500; letter-spacing: -0.02em; color: hsl(240 5% 25%); }
+.prose h2 { font-weight: 500; letter-spacing: -0.01em; color: hsl(240 5% 28%); }
+.prose h3 { font-weight: 500; color: hsl(240 5% 32%); }
+.prose h4 { font-weight: 500; color: hsl(240 5% 35%); }
+
+.dark .prose h1 { color: hsl(240 5% 75%); }
+.dark .prose h2 { color: hsl(240 5% 70%); }
+.dark .prose h3 { color: hsl(240 5% 65%); }
+.dark .prose h4 { color: hsl(240 5% 60%); }
 
 /* Lists — softer bullets */
 .prose ul > li::marker { color: hsl(240 5% 65%); }
