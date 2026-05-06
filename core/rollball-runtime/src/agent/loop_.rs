@@ -511,11 +511,30 @@ impl AgentLoop {
 
                 // Compute and emit context usage report
                 let model_caps = self.gateway_model_capabilities.values().next();
+                tracing::debug!(
+                    has_chunk_tx = self.on_chunk.is_some(),
+                    has_model_caps = model_caps.is_some(),
+                    caps_count = self.gateway_model_capabilities.len(),
+                    has_usage = true,
+                    "ContextUsage: checking preconditions"
+                );
                 if let (Some(chunk_tx), Some(caps)) = (&self.on_chunk, model_caps) {
                     let ctx_usage = crate::agent::context::compute_context_usage(caps, usage, self.max_output_tokens_limit);
+                    tracing::debug!(
+                        context_window = ctx_usage.context_window,
+                        total_tokens = ctx_usage.total_tokens,
+                        usage_percent = ctx_usage.usage_percent,
+                        "ContextUsage: sending report"
+                    );
                     let _ = chunk_tx.send(
                         crate::agent::loop_::ChunkEvent::ContextUsage(ctx_usage)
                     ).await;
+                } else {
+                    tracing::warn!(
+                        has_chunk_tx = self.on_chunk.is_some(),
+                        has_model_caps = model_caps.is_some(),
+                        "ContextUsage: NOT sent — missing on_chunk channel or model capabilities"
+                    );
                 }
             }
 

@@ -1340,6 +1340,13 @@ async fn push_llm_config_on_switch(
             &state.models_cache, provider_name, model,
         ).await
     };
+    tracing::info!(
+        agent = %agent_id,
+        provider = %provider_name,
+        model = %model,
+        has_capabilities = model_capabilities.is_some(),
+        "LLMConfigDelivery: resolved model capabilities"
+    );
 
     // Derive protocol type from models.dev npm field (model-level > provider-level)
     let (protocol_type, api_override) =

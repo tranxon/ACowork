@@ -582,12 +582,12 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
       </button>
 
       {/* Tooltip popup — appears on hover */}
-      <div className="absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-zinc-700/50 bg-zinc-800 px-4 py-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+      <div className="absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 dark:border-zinc-700/50 dark:bg-zinc-800">
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
-          <span className="text-sm font-semibold text-zinc-100">Context Usage</span>
+          <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">Context Usage</span>
           <span className={`text-xs font-medium ${
-            percent >= 90 ? "text-red-400" : percent >= 70 ? "text-amber-400" : "text-emerald-400"
+            percent >= 90 ? "text-red-500 dark:text-red-400" : percent >= 70 ? "text-amber-500 dark:text-amber-400" : "text-emerald-500 dark:text-emerald-400"
           }`}>
             {percent}%
           </span>
@@ -596,21 +596,21 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
         {/* Stats */}
         <div className="space-y-2 mb-3">
           <div className="flex justify-between text-xs">
-            <span className="text-zinc-400">Used</span>
-            <span className="text-zinc-200 font-mono">{total} tokens</span>
+            <span className="text-zinc-500 dark:text-zinc-400">Used</span>
+            <span className="text-zinc-700 font-mono dark:text-zinc-200">{total} tokens</span>
           </div>
           <div className="flex justify-between text-xs">
-            <span className="text-zinc-400">Available</span>
-            <span className="text-zinc-200 font-mono">{usable} tokens</span>
+            <span className="text-zinc-500 dark:text-zinc-400">Available</span>
+            <span className="text-zinc-700 font-mono dark:text-zinc-200">{usable} tokens</span>
           </div>
           <div className="flex justify-between text-xs">
-            <span className="text-zinc-400">Context Window</span>
-            <span className="text-zinc-200 font-mono">{formatTokenCount(usage.context_window)}</span>
+            <span className="text-zinc-500 dark:text-zinc-400">Context Window</span>
+            <span className="text-zinc-700 font-mono dark:text-zinc-200">{formatTokenCount(usage.context_window)}</span>
           </div>
         </div>
 
         {/* Progress bar */}
-        <div className="h-1.5 rounded-full bg-zinc-700 overflow-hidden">
+        <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700">
           <div
             className={`h-full rounded-full transition-all duration-300 ${barColor}`}
             style={{ width: `${percent}%` }}
@@ -618,7 +618,7 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
         </div>
 
         {/* Arrow pointer */}
-        <div className="absolute -bottom-1 right-6 w-2 h-2 rotate-45 bg-zinc-800 border-r border-b border-zinc-700/50" />
+        <div className="absolute -bottom-1 right-6 w-2 h-2 rotate-45 bg-white border-r border-b border-zinc-200/80 dark:bg-zinc-800 dark:border-zinc-700/50" />
       </div>
     </div>
   );

@@ -442,6 +442,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         // Spawn chunk relay task: consumes ChunkEvent from mpsc channel and
         // forwards each event to Gateway via the shared main gRPC connection.
         // No separate connection needed — gRPC HTTP/2 is full-duplex.
+        let agent_id_for_relay = agent_id.clone();
         let chunk_relay = if let Some(mut chunk_rx) = chunk_rx {
             let outbound_tx = client.outbound_sender();
             Some(tokio::spawn(async move {
@@ -490,7 +491,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                                 request_id: 0,
                                 payload: Some(rollball_core::proto::client_message::Payload::ContextUsageReport(
                                     rollball_core::proto::ContextUsageReportRequest {
-                                        agent_id: String::new(),
+                                        agent_id: agent_id_for_relay.clone(),
                                         context: Some((&ctx_info).into()),
                                     },
                                 )),

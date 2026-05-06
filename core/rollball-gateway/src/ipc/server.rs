@@ -833,6 +833,13 @@ pub async fn handle_context_usage_report(
     _session_mgr: &SharedSessionMgr,
     bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> GatewayResponse {
+    tracing::info!(
+        agent = %agent_id,
+        context_window = context.context_window,
+        total_tokens = context.total_tokens,
+        has_bridge = bridge_tx.is_some(),
+        "ContextUsageReport received from Runtime"
+    );
     // Broadcast context_usage event to all WebSocket bridge subscribers
     if let Some(tx) = bridge_tx {
         let event = crate::http::routes::BridgeEvent {
@@ -841,9 +848,15 @@ pub async fn handle_context_usage_report(
             event_type: crate::http::routes::BridgeEventType::ContextUsage,
             payload: serde_json::to_value(context).unwrap_or_default(),
         };
-        if let Err(e) = tx.send(event) {
-            tracing::debug!("Failed to forward context_usage to bridge: {}", e);
+        match tx.send(event) {
+            Ok(count) => tracing::info!(agent = %agent_id, receivers = count, "ContextUsage broadcast to WS bridge"),
+            Err(e) => tracing::warn!("Failed to forward context_usage to bridge: {}", e),
         }
+    } else {
+        tracing::warn!(
+            agent = %agent_id,
+            "ContextUsage: NO bridge_tx — WS bridge not connected, event dropped"
+        );
     }
     GatewayResponse::ContextUsageAck {}
 }

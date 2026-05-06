@@ -198,6 +198,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.onmessage = (event) => {
       // Only process messages for the currently active agent
       if (get().currentAgentId !== agentId) {
+        // Debug: log dropped context_usage to diagnose invisible button
+        try {
+          const parsed = JSON.parse(event.data as string);
+          if (parsed.type === "context_usage") {
+            console.warn("[ChatStore] context_usage DROPPED:", {
+              wsAgentId: agentId,
+              currentAgentId: get().currentAgentId,
+              usage: parsed,
+            });
+          }
+        } catch { /* ignore */ }
         return;
       }
       try {
@@ -1010,6 +1021,7 @@ function handleMessageEvent(
 
     case "context_usage": {
       const usage = data as unknown as ContextUsageInfo;
+      console.log("[ChatStore] context_usage RECEIVED:", usage);
       set({ contextUsage: usage });
       break;
     }
