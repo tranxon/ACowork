@@ -209,10 +209,10 @@ body {
 .prose h3 { font-weight: 500; color: hsl(240 5% 26%); }
 .prose h4 { font-weight: 500; color: hsl(240 5% 30%); }
 
-.dark .prose h1 { color: hsl(240 5% 80%); }
-.dark .prose h2 { color: hsl(240 5% 75%); }
-.dark .prose h3 { color: hsl(240 5% 70%); }
-.dark .prose h4 { color: hsl(240 5% 65%); }
+.dark .prose h1 { color: hsl(240 5% 88%); }
+.dark .prose h2 { color: hsl(240 5% 82%); }
+.dark .prose h3 { color: hsl(240 5% 78%); }
+.dark .prose h4 { color: hsl(240 5% 72%); }
 
 /* Lists — softer bullets */
 .prose ul > li::marker { color: hsl(240 5% 65%); }
