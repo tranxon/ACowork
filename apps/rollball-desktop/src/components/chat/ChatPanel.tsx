@@ -108,6 +108,7 @@ export function ChatPanel() {
     getScrollElement: () => messagesContainerRef.current,
     estimateSize: () => 80,
     overscan: 5,
+    gap: 4,
   });
 
   // Load available models from Vault keys
@@ -452,7 +453,7 @@ export function ChatPanel() {
                       width: '100%',
                       transform: `translateY(${virtualRow.start}px)`,
                     }}
-                    className="mb-2"
+                    className=""
                   >
                     {/* Tool group - multiple consecutive tool calls/results */}
                     {displayItem.type === 'tool_group' && (
