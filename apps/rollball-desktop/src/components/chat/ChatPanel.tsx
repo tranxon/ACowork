@@ -36,6 +36,7 @@ export function ChatPanel() {
   const isLoadingMoreRef = useRef<boolean>(false);
   const lastInitAgentRef = useRef<string | null>(null);
   const isInitialLoadRef = useRef<boolean>(false);
+  const initAbortedRef = useRef(false);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
 
@@ -191,8 +192,29 @@ export function ChatPanel() {
       // 3. Fetch sessions and 4. restore previously selected session (or latest)
       const initSession = async () => {
         isInitialLoadRef.current = true;
-        await useSessionStore.getState().fetchSessions(selectedAgentId);
-        const sessions = useSessionStore.getState().sessions;
+        initAbortedRef.current = false;
+
+        // Retry fetching sessions until Agent is ready (max 10 attempts, 1s interval)
+        const maxRetries = 10;
+        let sessions = useSessionStore.getState().sessions;
+
+        for (let i = 0; i < maxRetries; i++) {
+          if (initAbortedRef.current) return;
+          await useSessionStore.getState().fetchSessions(selectedAgentId);
+          sessions = useSessionStore.getState().sessions;
+          if (sessions.length > 0) break;
+          if (i < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+
+        if (initAbortedRef.current) return;
+
+        if (sessions.length === 0) {
+          isInitialLoadRef.current = false;
+          return;
+        }
+
         // Restore previously selected session for this agent, fallback to latest
         const rememberedSessionId = useSessionStore.getState().agentSessionMap[selectedAgentId];
         const targetSession = rememberedSessionId
@@ -202,10 +224,8 @@ export function ChatPanel() {
           await useChatStore
             .getState()
             .loadSessionMessages(selectedAgentId, targetSession.session_id);
-          // sync currentSessionId to sessionStore so SessionPanel highlights correctly
           await useSessionStore.getState().switchSession(targetSession.session_id, selectedAgentId);
         }
-        // 5. If no sessions, empty chat is already shown (messages cleared above)
         isInitialLoadRef.current = false;
       };
       void initSession();
@@ -213,6 +233,7 @@ export function ChatPanel() {
       lastInitAgentRef.current = null;
     }
     return () => {
+      initAbortedRef.current = true;
       // Do NOT disconnect the old agent's ws — keep it alive for reuse.
       // Only clear reconnect timers for the old agent to avoid stale reconnects.
       // The ws connections are per-agent and managed in wsMap.
@@ -453,7 +474,7 @@ export function ChatPanel() {
                     )}
 
                     {/* Regular message */}
-                    {!displayItem.type && (
+                    {displayItem.type !== 'tool_group' && displayItem.type !== 'think_group' && (
                       <MessageBubble message={item as ChatMessage} isStreaming={(item as ChatMessage).id === streamingMessageId} />
                     )}
                   </div>
