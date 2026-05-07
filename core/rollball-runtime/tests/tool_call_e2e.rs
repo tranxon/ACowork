@@ -815,7 +815,10 @@ async fn test_shell_command_valid() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::shell::ShellTool::new(&work_dir);
+    let info = rollball_runtime::platform::detected_shell();
+    let tool = builtin::shell::ShellTool::new(
+        "test-shell", info.display_name, info.binary, info.binary, info.arg, &work_dir,
+    );
     let result = tool
         .execute(serde_json::json!({ "command": "echo hello_world" }))
         .await
@@ -830,7 +833,10 @@ async fn test_shell_command_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::shell::ShellTool::new(&work_dir);
+    let info = rollball_runtime::platform::detected_shell();
+    let tool = builtin::shell::ShellTool::new(
+        "test-shell", info.display_name, info.binary, info.binary, info.arg, &work_dir,
+    );
     let result = tool
         .execute(serde_json::json!({ "command": "" }))
         .await
@@ -845,7 +851,10 @@ async fn test_shell_command_missing_param() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::shell::ShellTool::new(&work_dir);
+    let info = rollball_runtime::platform::detected_shell();
+    let tool = builtin::shell::ShellTool::new(
+        "test-shell", info.display_name, info.binary, info.binary, info.arg, &work_dir,
+    );
     let result = tool
         .execute(serde_json::json!({}))
         .await

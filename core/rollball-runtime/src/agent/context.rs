@@ -122,11 +122,20 @@ impl ContextBuilder {
 
         // 3. Environment platform info (runtime detection)
         let shell_info = crate::platform::detected_shell();
+        let available_shells = crate::platform::detected_shells();
+        let shell_tools_desc: Vec<String> = available_shells
+            .iter()
+            .map(|s| {
+                let primary = if s.is_primary { " (primary)" } else { " (fallback)" };
+                format!("{}{}", s.tool_name, primary)
+            })
+            .collect();
         system_content.push_str(&format!(
-            "\n\n## Environment\n- Operating System: {}\n- Architecture: {}\n- Shell: {}",
+            "\n\n## Environment\n- Operating System: {}\n- Architecture: {}\n- Shell: {}\n- Available Shell Tools: {}",
             std::env::consts::OS,
             std::env::consts::ARCH,
-            shell_info.display_name
+            shell_info.display_name,
+            shell_tools_desc.join(", ")
         ));
 
         // 3.5 Tool definitions are passed separately in ChatRequest

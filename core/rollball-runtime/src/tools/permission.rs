@@ -33,7 +33,7 @@ pub fn tool_required_permission(tool_name: &str) -> Option<Permission> {
         "memory_store" => Some(Permission::MemoryWrite),
         "http_request" | "web_fetch" => Some(Permission::Network(None)),
         "web_search" => Some(Permission::Network(None)), // design doc says search:web, mapped to Network for now
-        "shell" => Some(Permission::Shell),
+        "shell" | "bash" | "powershell" => Some(Permission::Shell),
         "file_read" | "glob_search" | "content_search" => Some(Permission::FilesystemRead(None)),
         "file_write" | "file_edit" => Some(Permission::FilesystemWrite(None)),
         "intent_send" => Some(Permission::IntentSend(None)),
