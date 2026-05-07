@@ -19,11 +19,13 @@ use rollball_core::tools::traits::Tool;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
-use crate::agent::budget_guard::{BudgetCheckResult, BudgetGuard};
+use crate::agent::agent_core::AgentCore;
+use crate::agent::budget_guard::BudgetCheckResult;
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
-use crate::agent::loop_detector::{LoopDetectionResult, LoopDetector, LoopPattern, ResponseLevel};
+use crate::agent::loop_detector::{LoopDetectionResult, LoopPattern, ResponseLevel};
+use crate::agent::session_state::SessionState;
 use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
@@ -73,36 +75,12 @@ pub enum ChunkEvent {
 
 /// Agent loop runner
 pub struct AgentLoop {
-    /// Runtime configuration
-    config: RuntimeConfig,
-    /// Agent manifest
-    manifest: rollball_core::AgentManifest,
-    /// LLM Provider
-    provider: Arc<dyn Provider>,
-    /// Tool registry
-    tools: Vec<Arc<dyn Tool>>,
-    /// History manager
-    history: HistoryManager,
-    /// Budget guard
-    budget_guard: BudgetGuard,
-    /// Loop detector
-    loop_detector: LoopDetector,
+    /// Cross-session shared state (config, provider, tools, capabilities)
+    core: AgentCore,
+    /// Per-session state (history, conversation, loop detector, budget)
+    session: SessionState,
     /// Inbound message receiver for external message injection
     inbound_rx: tokio::sync::mpsc::Receiver<InboundMessage>,
-    /// Optional streaming chunk sender (like ZeroClaw's on_delta).
-    /// When set, each StreamEvent::Content delta is forwarded here
-    /// so the caller can relay chunks to Gateway via StreamChunk.
-    on_chunk: Option<mpsc::Sender<ChunkEvent>>,
-    /// Model capabilities from Gateway, keyed by model name.
-    /// When Gateway delivers capabilities for a model, they are stored here
-    /// so that ContextBuilder can look them up at build() time.
-    gateway_model_capabilities: HashMap<String, ModelCapabilitiesInfo>,
-    /// Global max output tokens limit from Gateway config.
-    /// When a model's max_output_tokens exceeds this value, the value is capped.
-    /// Default: 32768 (32K). Set to 0 to disable the limit.
-    max_output_tokens_limit: u64,
-    /// Optional conversation session for JSONL persistence.
-    conversation: Option<ConversationSession>,
 }
 
 impl AgentLoop {
@@ -128,61 +106,47 @@ impl AgentLoop {
         let max_tokens = config.history_max_tokens;
         let keep_full = config.keep_full_results;
         let loop_ = Self {
-            config,
-            manifest,
-            provider,
-            tools,
-            history: HistoryManager::new(max_tokens, keep_full),
-            budget_guard: BudgetGuard::new(budget),
-            loop_detector: LoopDetector::with_defaults(),
+            core: AgentCore::new(config, manifest, provider, tools, on_chunk),
+            session: SessionState::new(max_tokens, keep_full, budget, conversation),
             inbound_rx,
-            on_chunk,
-            gateway_model_capabilities: HashMap::new(),
-            max_output_tokens_limit: 32_768,
-            conversation,
         };
         (loop_, inbound_tx)
+    }
+
+    /// Create an AgentLoop from pre-built components (for multi-session Actor model).
+    ///
+    /// This constructor accepts an owned `AgentCore` and `SessionState`,
+    /// used by `SessionTask` to spawn independent sessions that share
+    /// provider/tools/config via Arc but have independent history,
+    /// budget, and loop detection.
+    ///
+    /// The caller typically clones `AgentCore` data from a shared `Arc<AgentCore>`
+    /// template before passing it here, so each session gets its own owned copy
+    /// while the heavy fields (provider, tools) remain Arc-shared behind the scenes.
+    pub(crate) fn from_core_and_session(
+        core: AgentCore,
+        session: SessionState,
+    ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
+        (Self { core, session, inbound_rx }, inbound_tx)
     }
 
     /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
     /// LLMConfigDelivery from Gateway).
     pub fn update_provider(&mut self, new_provider: Arc<dyn Provider>, model: String) {
-        let old_name = self.provider.name().to_string();
-        self.provider = new_provider;
-        tracing::info!(
-            old_provider = %old_name,
-            new_provider = %self.provider.name(),
-            model = %model,
-            "LLM provider updated at runtime via LLMConfigDelivery"
-        );
+        self.core.update_provider(new_provider, model);
     }
 
     /// Update gateway model capabilities at runtime (e.g., after receiving a
     /// hot-pushed LLMConfigDelivery from Gateway).
     /// The capabilities are stored keyed by model name for multi-model support.
     pub fn update_gateway_model_capabilities(&mut self, caps: ModelCapabilitiesInfo) {
-        let model_name = caps.name.clone().unwrap_or_else(|| "default".to_string());
-        tracing::info!(
-            model = %model_name,
-            context_window = caps.context_window,
-            max_output_tokens = caps.max_output_tokens,
-            supports_tool_calling = caps.supports_tool_calling,
-            supports_reasoning = ?caps.supports_reasoning,
-            cost = ?caps.cost.as_ref().map(|c| (c.input_per_million, c.output_per_million)),
-            source = "gateway",
-            "AgentLoop received model capabilities from Gateway"
-        );
-        self.gateway_model_capabilities.insert(model_name, caps);
+        self.core.update_gateway_model_capabilities(caps);
     }
 
     /// Update the max output tokens limit from Gateway config.
     pub fn update_max_output_tokens_limit(&mut self, limit: u64) {
-        tracing::info!(
-            old_limit = self.max_output_tokens_limit,
-            new_limit = limit,
-            "AgentLoop max_output_tokens_limit updated from Gateway"
-        );
-        self.max_output_tokens_limit = limit;
+        self.core.update_max_output_tokens_limit(limit);
     }
 
     /// Get the current conversation session ID (S1.14)
@@ -190,7 +154,7 @@ impl AgentLoop {
     /// Returns the session ID of the active ConversationSession,
     /// or None if no session is active.
     pub fn current_session_id(&self) -> Option<&str> {
-        self.conversation.as_ref().map(|c| c.session_id())
+        self.session.conversation.as_ref().map(|c| c.session_id())
     }
 
     /// Update the title of the currently active conversation session.
@@ -199,33 +163,20 @@ impl AgentLoop {
     /// `Some(false)` if the title was already the same (no-op),
     /// or `None` if no active session exists.
     pub fn update_session_title(&mut self, title: &str) -> Option<bool> {
-        self.conversation.as_ref().map(|conv| conv.update_title_force(title))
+        self.session.conversation.as_ref().map(|conv| conv.update_title_force(title))
     }
 
     /// Look up model capabilities by model name.
     /// Falls back to the first entry if the model name is not found.
     fn get_model_capabilities(&self, model_name: Option<&str>) -> Option<&ModelCapabilitiesInfo> {
-        if let Some(name) = model_name
-            && let Some(caps) = self.gateway_model_capabilities.get(name)
-        {
-            return Some(caps);
-        }
-        // Fallback: return any available capabilities
-        self.gateway_model_capabilities.values().next()
+        self.core.get_model_capabilities(model_name)
     }
 
     /// Get the context window budget for history trimming.
     /// Uses Gateway model capabilities (context_window) if available,
     /// otherwise falls back to config.history_max_tokens.
     fn context_trim_budget(&self) -> u64 {
-        self.get_model_capabilities(None)
-            .map(|caps| caps.context_window)
-            .unwrap_or_else(|| {
-                tracing::debug!(
-                    "No model capabilities received from Gateway, using config.history_max_tokens as fallback."
-                );
-                self.config.history_max_tokens
-            })
+        self.core.context_trim_budget()
     }
 
     /// Trim history to fit within the context window budget.
@@ -239,7 +190,7 @@ impl AgentLoop {
         let budget = self.context_trim_budget();
         // Reserve 20% of context window for new response + overhead
         let trim_budget = (budget as f64 * 0.8) as u64;
-        let trimmed_messages = self.history.preemptive_trim_drain(trim_budget);
+        let trimmed_messages = self.session.history.preemptive_trim_drain(trim_budget);
 
         // Spawn async distillation for evicted messages (best-effort, non-blocking)
         if !trimmed_messages.is_empty() {
@@ -247,7 +198,7 @@ impl AgentLoop {
         }
 
         // Also truncate any single message that exceeds per-message limit
-        self.history.truncate_large_messages(trim_budget / 4);
+        self.session.history.truncate_large_messages(trim_budget / 4);
     }
 
     /// Spawn an asynchronous episode distillation task for trimmed messages.
@@ -256,13 +207,13 @@ impl AgentLoop {
     /// to Grafeo. Failures are logged but never panic or block the main loop.
     fn spawn_trim_distillation(&self, trimmed_messages: Vec<ChatMessage>) {
         let session_id = self
-            .conversation
+            .session.conversation
             .as_ref()
             .map(|c| c.session_id().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let provider = self.provider.clone();
+        let provider = self.core.provider.clone();
         let model_name = self
-            .gateway_model_capabilities
+            .core.gateway_model_capabilities
             .values()
             .min_by(|a, b| {
                 let cost_a = crate::episode_distill::model_cost_score(a);
@@ -343,7 +294,7 @@ impl AgentLoop {
 
         // In pre-async context, we can't await close_session_with_distillation.
         // Instead, we take the old session and spawn its close+distill asynchronously.
-        let old_session = self.conversation.take();
+        let old_session = self.session.conversation.take();
 
         if let Some(ref old) = old_session {
             tracing::info!(
@@ -355,7 +306,7 @@ impl AgentLoop {
             tracing::info!(new_session_id = %new_id, "Activating first conversation session");
         }
 
-        self.conversation = Some(new_session);
+        self.session.conversation = Some(new_session);
 
         // Spawn async close + distill for the old session (best-effort)
         // We need to extract data from old_session without fully moving it,
@@ -363,9 +314,9 @@ impl AgentLoop {
         if let Some(ref old) = old_session {
             let session_id = old.session_id().to_string();
             let session_path = old.session_path().to_path_buf();
-            let provider = self.provider.clone();
+            let provider = self.core.provider.clone();
             let model_name = self
-                .gateway_model_capabilities
+                .core.gateway_model_capabilities
                 .values()
                 .min_by(|a, b| {
                     let cost_a = crate::episode_distill::model_cost_score(a);
@@ -409,12 +360,12 @@ impl AgentLoop {
 
     /// Inner implementation for closing the current session.
     async fn close_session_inner(&mut self) -> Result<()> {
-        if let Some(ref conversation) = self.conversation {
+        if let Some(ref conversation) = self.session.conversation {
             let session_id = conversation.session_id().to_string();
             let session_path = conversation.session_path().to_path_buf();
-            let provider = self.provider.clone();
+            let provider = self.core.provider.clone();
             let model_name = self
-                .gateway_model_capabilities
+                .core.gateway_model_capabilities
                 .values()
                 .min_by(|a, b| {
                     let cost_a = crate::episode_distill::model_cost_score(a);
@@ -467,10 +418,10 @@ impl AgentLoop {
     /// Run the agent loop for a single user message
     pub async fn run(&mut self, user_message: &str, context_builder: &ContextBuilder) -> Result<String> {
         // Add user message to history
-        self.history.append(ChatMessage::user(user_message));
+        self.session.history.append(ChatMessage::user(user_message));
 
         // Persist user message to JSONL
-        if let Some(ref conversation) = self.conversation {
+        if let Some(ref conversation) = self.session.conversation {
             conversation.append_message("user", user_message, None);
             // Set session title from first user message (first 100 chars)
             conversation.set_title(user_message);
@@ -482,25 +433,25 @@ impl AgentLoop {
             iteration += 1;
             tracing::info!(
                 iteration,
-                history_token_count = self.history.token_count(),
-                history_message_count = self.history.len(),
-                history_max_tokens = self.config.history_max_tokens,
+                history_token_count = self.session.history.token_count(),
+                history_message_count = self.session.history.len(),
+                history_max_tokens = self.core.config.history_max_tokens,
                 "Starting loop iteration"
             );
 
             // ⑨ Iteration limit check — pause and await user decision
-            if iteration > self.config.max_iterations {
+            if iteration > self.core.config.max_iterations {
                 tracing::warn!(
                     iteration,
-                    max_iterations = self.config.max_iterations,
+                    max_iterations = self.core.config.max_iterations,
                     "Max iterations reached, pausing for user decision"
                 );
 
                 // Notify Gateway/Desktop App that iteration limit was reached
-                if let Some(ref tx) = self.on_chunk {
+                if let Some(ref tx) = self.core.on_chunk {
                     let _ = tx.try_send(ChunkEvent::IterationLimitPaused {
                         iteration,
-                        max_iterations: self.config.max_iterations,
+                        max_iterations: self.core.config.max_iterations,
                     });
                 }
 
@@ -528,10 +479,10 @@ impl AgentLoop {
                             let (msg, _) = other.enforce_size_limit();
                             match msg {
                                 InboundMessage::UserMessage(text) => {
-                                    self.history.append(ChatMessage::user(text));
+                                    self.session.history.append(ChatMessage::user(text));
                                 }
                                 InboundMessage::SystemNotification { notification_type, data } => {
-                                    self.history.append(ChatMessage {
+                                    self.session.history.append(ChatMessage {
                                         role: MessageRole::User,
                                         content: format!("[system:{}] {}", notification_type, data),
                                         name: Some("system".to_string()),
@@ -539,7 +490,7 @@ impl AgentLoop {
                                     });
                                 }
                                 InboundMessage::IntentMessage { from, action, params } => {
-                                    self.history.append(ChatMessage::user(
+                                    self.session.history.append(ChatMessage::user(
                                         format!("[intent:{}:{}] {}", from, action, params),
                                     ));
                                 }
@@ -562,8 +513,8 @@ impl AgentLoop {
             }
 
             // ① Budget pre-check
-            let estimated_tokens = self.history.estimate_total_tokens() + 500; // +500 for new response
-            match self.budget_guard.check(estimated_tokens) {
+            let estimated_tokens = self.session.history.estimate_total_tokens() + 500; // +500 for new response
+            match self.session.budget_guard.check(estimated_tokens) {
                 BudgetCheckResult::Allowed => {}
                 BudgetCheckResult::Exceeded { reason, action } => {
                     tracing::warn!(reason = %reason, action = %action, "Budget exceeded");
@@ -573,7 +524,7 @@ impl AgentLoop {
                         }
                         "warn" => {
                             // Changed from System to User — MiniMax API rejects non-first system messages
-                            self.history.append(ChatMessage {
+                            self.session.history.append(ChatMessage {
                                 role: MessageRole::User,
                                 content: format!("[System Warning] {reason}"),
                                 name: Some("system".to_string()),
@@ -590,14 +541,14 @@ impl AgentLoop {
             self.trim_history_to_budget();
 
             // ②.5 Build context (now with trimmed history)
-            let chat_request = context_builder.build(&self.manifest, &self.history, self.get_model_capabilities(None), self.max_output_tokens_limit);
+            let chat_request = context_builder.build(&self.core.manifest, &self.session.history, self.get_model_capabilities(None), self.core.max_output_tokens_limit);
 
             tracing::info!(
                 request_messages_count = chat_request.messages.len(),
                 request_model = %chat_request.model,
                 request_max_tokens = ?chat_request.max_tokens,
                 request_tools_count = chat_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
-                history_tokens = self.history.token_count(),
+                history_tokens = self.session.history.token_count(),
                 "Built chat request for LLM (after preemptive trim)"
             );
 
@@ -609,19 +560,19 @@ impl AgentLoop {
 
             // Update budget
             if let Some(usage) = &response.usage {
-                self.budget_guard.update_usage(usage.total_tokens, 0.0);
+                self.session.budget_guard.update_usage(usage.total_tokens, 0.0);
 
                 // Compute and emit context usage report
-                let model_caps = self.gateway_model_capabilities.values().next();
+                let model_caps = self.core.gateway_model_capabilities.values().next();
                 tracing::debug!(
-                    has_chunk_tx = self.on_chunk.is_some(),
+                    has_chunk_tx = self.core.on_chunk.is_some(),
                     has_model_caps = model_caps.is_some(),
-                    caps_count = self.gateway_model_capabilities.len(),
+                    caps_count = self.core.gateway_model_capabilities.len(),
                     has_usage = true,
                     "ContextUsage: checking preconditions"
                 );
-                if let (Some(chunk_tx), Some(caps)) = (&self.on_chunk, model_caps) {
-                    let ctx_usage = crate::agent::context::compute_context_usage(caps, usage, self.max_output_tokens_limit);
+                if let (Some(chunk_tx), Some(caps)) = (&self.core.on_chunk, model_caps) {
+                    let ctx_usage = crate::agent::context::compute_context_usage(caps, usage, self.core.max_output_tokens_limit);
                     tracing::debug!(
                         context_window = ctx_usage.context_window,
                         total_tokens = ctx_usage.total_tokens,
@@ -633,7 +584,7 @@ impl AgentLoop {
                     ).await;
                 } else {
                     tracing::warn!(
-                        has_chunk_tx = self.on_chunk.is_some(),
+                        has_chunk_tx = self.core.on_chunk.is_some(),
                         has_model_caps = model_caps.is_some(),
                         "ContextUsage: NOT sent — missing on_chunk channel or model capabilities"
                     );
@@ -645,8 +596,7 @@ impl AgentLoop {
                 let content = response.content.clone();
 
                 // Persist think block (if present) and assistant response to JSONL
-                if let Some(ref conversation) = self.conversation {
-                    // DeepSeek reasoning_content (separate field) takes priority
+                if let Some(ref conversation) = self.session.conversation {
                     if let Some(ref reasoning) = response.reasoning_content {
                         if !reasoning.is_empty() {
                             conversation.append_message("think", reasoning, None);
@@ -659,8 +609,7 @@ impl AgentLoop {
                     conversation.append_message("assistant", &assistant_text, None);
                 }
 
-                self.history.append(ChatMessage {
-                    reasoning_content: response.reasoning_content,
+                self.session.history.append(ChatMessage {
                     ..ChatMessage::assistant(response.content)
                 });
 
@@ -682,7 +631,7 @@ impl AgentLoop {
                 .collect();
 
             // Persist think block (if present) to JSONL
-            if let Some(ref conversation) = self.conversation {
+            if let Some(ref conversation) = self.session.conversation {
                 // DeepSeek reasoning_content (separate field) takes priority
                 if let Some(ref reasoning) = response.reasoning_content {
                     if !reasoning.is_empty() {
@@ -694,14 +643,14 @@ impl AgentLoop {
             }
 
             // Add assistant message with tool_calls to history
-            self.history.append(ChatMessage {
+            self.session.history.append(ChatMessage {
                 reasoning_content: response.reasoning_content.clone(),
                 tool_calls: Some(deduped_calls.clone()),
                 ..ChatMessage::assistant(response.content.clone())
             });
 
             // Persist tool calls to JSONL
-            if let Some(ref conversation) = self.conversation {
+            if let Some(ref conversation) = self.session.conversation {
                 for tc in &deduped_calls {
                     let metadata = serde_json::json!({
                         "tool_name": tc.function.name,
@@ -712,7 +661,7 @@ impl AgentLoop {
             }
 
             // Emit ToolCall events via chunk channel (ensures ordering with content chunks)
-            if let Some(ref tx) = self.on_chunk {
+            if let Some(ref tx) = self.core.on_chunk {
                 for tc in &deduped_calls {
                     let event = ChunkEvent::ToolCall {
                         name: tc.function.name.clone(),
@@ -730,7 +679,7 @@ impl AgentLoop {
             let mut calls_to_execute: Vec<ToolCall> = Vec::new();
             let mut blocked_info: Vec<(usize, LoopPattern)> = Vec::new();
             for (idx, tc) in deduped_calls.iter().enumerate() {
-                match self.loop_detector.peek_check(&tc.function.name, &tc.function.arguments) {
+                match self.session.loop_detector.peek_check(&tc.function.name, &tc.function.arguments) {
                     LoopDetectionResult::NoLoop => {
                         calls_to_execute.push(tc.clone());
                     }
@@ -775,7 +724,7 @@ impl AgentLoop {
             }
 
             // Persist tool results to JSONL
-            if let Some(ref conversation) = self.conversation {
+            if let Some(ref conversation) = self.session.conversation {
                 for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
                     let metadata = serde_json::json!({
                         "tool_name": tc.function.name,
@@ -786,7 +735,7 @@ impl AgentLoop {
             }
 
             // Emit ToolResult events via chunk channel (ensures ordering with content chunks)
-            if let Some(ref tx) = self.on_chunk {
+            if let Some(ref tx) = self.core.on_chunk {
                 for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
                     let event = ChunkEvent::ToolResult {
                         name: tc.function.name.clone(),
@@ -805,7 +754,7 @@ impl AgentLoop {
                     name: Some(tc.function.name.clone()),
                     ..ChatMessage::tool(tc.id.clone(), result_content.clone())
                 };
-                self.history.append(tool_result_message);
+                self.session.history.append(tool_result_message);
             }
 
             // ⑧ Loop detection — run AFTER all tool results are appended to avoid
@@ -821,7 +770,7 @@ impl AgentLoop {
                     continue;
                 }
 
-                match self.loop_detector.check(
+                match self.session.loop_detector.check(
                     &tc.function.name,
                     &tc.function.arguments,
                     result_content,
@@ -864,7 +813,7 @@ impl AgentLoop {
 
             // Append deferred warning messages AFTER all tool results
             for warning_content in deferred_warnings {
-                self.history.append(ChatMessage {
+                self.session.history.append(ChatMessage {
                     role: MessageRole::User,
                     content: warning_content,
                     name: Some("system".to_string()),
@@ -901,12 +850,12 @@ impl AgentLoop {
             let (msg, _truncated) = msg.enforce_size_limit();
             match msg {
                 InboundMessage::UserMessage(text) => {
-                    self.history.append(ChatMessage::user(text));
+                    self.session.history.append(ChatMessage::user(text));
                 }
                 InboundMessage::SystemNotification { notification_type, data } => {
                     tracing::info!("System notification: {} = {:?}", notification_type, data);
                     // Changed from System to User — MiniMax API rejects non-first system messages
-                    self.history.append(ChatMessage {
+                    self.session.history.append(ChatMessage {
                         role: MessageRole::User,
                         content: format!("[system:{}] {}", notification_type, data),
                         name: Some("system".to_string()),
@@ -915,7 +864,7 @@ impl AgentLoop {
                 }
                 InboundMessage::IntentMessage { from, action, params } => {
                     tracing::info!("Intent from {}: {} params={:?}", from, action, params);
-                    self.history.append(ChatMessage::user(
+                    self.session.history.append(ChatMessage::user(
                         format!("[intent:{}:{}] {}", from, action, params),
                     ));
                 }
@@ -951,7 +900,7 @@ impl AgentLoop {
     fn call_llm_streaming_no_retry<'a>(
         &'a mut self,
         chat_request: &'a rollball_core::providers::traits::ChatRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ChatResponse>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ChatResponse>> + Send + 'a>> {
         Box::pin(async move {
             self.call_llm_streaming_inner(chat_request, None).await
         })
@@ -974,7 +923,7 @@ impl AgentLoop {
             messages_count = chat_request.messages.len(),
             "Sending LLM request"
         );
-        let stream = self.provider.chat_stream(chat_request.clone()).await?;
+        let stream = self.core.provider.chat_stream(chat_request.clone()).await?;
         let mut stream = Box::into_pin(stream);
         let mut accumulated_content = String::new();
         let mut accumulated_reasoning_content = String::new();
@@ -996,7 +945,7 @@ impl AgentLoop {
 
                     // Forward delta to on_chunk channel (like ZeroClaw's on_delta)
                     // so the caller can relay streaming chunks to Gateway
-                    if let Some(ref tx) = self.on_chunk {
+                    if let Some(ref tx) = self.core.on_chunk {
                         // Use try_send to avoid blocking the LLM stream
                         if tx.try_send(ChunkEvent::Delta(chunk.clone())).is_err() {
                             tracing::debug!("on_chunk channel full or closed, dropping delta");
@@ -1006,7 +955,7 @@ impl AgentLoop {
                 StreamEvent::ReasoningContent(chunk) => {
                     accumulated_reasoning_content.push_str(&chunk);
                     // Forward reasoning delta to on_chunk channel for real-time streaming
-                    if let Some(ref tx) = self.on_chunk
+                    if let Some(ref tx) = self.core.on_chunk
                         && tx.try_send(ChunkEvent::ReasoningDelta(chunk.clone())).is_err()
                     {
                         tracing::debug!("on_chunk channel full or closed, dropping reasoning delta");
@@ -1080,12 +1029,12 @@ impl AgentLoop {
                             || e.contains("token limit"))
                     {
                         tracing::warn!("Context overflow detected in stream, attempting emergency trim");
-                        let removed = self.history.emergency_trim();
+                        let removed = self.session.history.emergency_trim();
                         if removed > 0 {
                             tracing::info!("Emergency trim removed {} messages, retrying", removed);
                             let chat_request = context_builder
                                 .unwrap()
-                                .build(&self.manifest, &self.history, self.get_model_capabilities(None), self.max_output_tokens_limit);
+                                .build(&self.core.manifest, &self.session.history, self.get_model_capabilities(None), self.core.max_output_tokens_limit);
                             return self.call_llm_streaming_no_retry(&chat_request).await;
                         } else {
                             return Err(RuntimeError::Provider(e));
@@ -1162,7 +1111,7 @@ impl AgentLoop {
         // allowed tools proceed to parallel execution.
         let mut permission_results: Vec<Option<String>> = Vec::with_capacity(tool_calls.len());
         for tool_call in tool_calls {
-            match crate::tools::permission::validate_permission(&self.manifest, &tool_call.function.name) {
+            match crate::tools::permission::validate_permission(&self.core.manifest, &tool_call.function.name) {
                 Ok(()) => permission_results.push(None),
                 Err(e) => {
                     tracing::warn!("Permission denied for tool '{}': {}", tool_call.function.name, e);
@@ -1187,8 +1136,8 @@ impl AgentLoop {
         // TODO(Phase 3): Implement approval gate for high-risk tools
 
         // Phase 3: Parallel execution with spawn + select + deadline
-        let tool_timeout = Duration::from_millis(self.config.tool_timeout_ms);
-        let iteration_timeout = Duration::from_millis(self.config.iteration_timeout_ms);
+        let tool_timeout = Duration::from_millis(self.core.config.tool_timeout_ms);
+        let iteration_timeout = Duration::from_millis(self.core.config.iteration_timeout_ms);
 
         // Channel to collect results from spawned tasks
         let (tx, mut rx) = mpsc::channel::<(usize, String)>(tool_calls.len());
@@ -1197,7 +1146,7 @@ impl AgentLoop {
         let handles: Vec<tokio::task::JoinHandle<()>> = allowed_indices
             .iter()
             .map(|&idx| {
-                let tools = self.tools.clone();
+                let tools = self.core.tools.clone();
                 let tc = tool_calls[idx].clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
@@ -1289,17 +1238,17 @@ impl AgentLoop {
 
     /// Get reference to history manager
     pub fn history(&self) -> &HistoryManager {
-        &self.history
+        &self.session.history
     }
 
     /// Get reference to the agent manifest
     pub fn manifest(&self) -> &rollball_core::AgentManifest {
-        &self.manifest
+        &self.core.manifest
     }
 
     /// Get mutable reference to history manager
     pub fn history_mut(&mut self) -> &mut HistoryManager {
-        &mut self.history
+        &mut self.session.history
     }
 }
 

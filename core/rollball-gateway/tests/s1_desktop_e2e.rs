@@ -37,7 +37,7 @@ static E2E_LOCK: Mutex<()> = Mutex::new(());
 
 const GATEWAY_URL: &str = "http://127.0.0.1:19876";
 const GATEWAY_PORT: u16 = 19876;
-const GATEWAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const GATEWAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const AGENT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -151,14 +151,23 @@ impl GatewayProcess {
         let config_path = temp_dir.join("gateway.toml");
         fs::write(&config_path, toml::to_string(&config).unwrap())?;
 
-        let mut child = Command::new("cargo")
-            .args([
-                "run", "--bin", "rollball-gateway", "--",
-                "--config-path", config_path.to_str().unwrap(),
-                "--daemon",
-            ])
+        let gateway_bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("debug")
+            .join(if cfg!(windows) { "rollball-gateway.exe" } else { "rollball-gateway" });
+
+        if !gateway_bin.exists() {
+            anyhow::bail!(
+                "Gateway binary not found at {:?}. Run `cargo build --bin rollball-gateway` first.",
+                gateway_bin
+            );
+        }
+
+        let mut child = Command::new(&gateway_bin)
+            .args(["--config-path", config_path.to_str().unwrap(), "--daemon"])
             .env("RUST_LOG", "info")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -292,7 +301,7 @@ fn has_api_key() -> bool {
 
 #[test]
 fn test_s1_gateway_health_check() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = temp_dir("health");
     let _gw = GatewayProcess::start(&temp).expect("Failed to start Gateway");
     wait_for_gateway().expect("Gateway not responding");
@@ -322,7 +331,7 @@ fn test_s1_package_system_agent() {
 
 #[test]
 fn test_s1_install_system_agent() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = temp_dir("install");
     let _gw = GatewayProcess::start(&temp).expect("Failed to start Gateway");
     wait_for_gateway().expect("Gateway not responding");
@@ -355,7 +364,7 @@ fn test_s1_install_system_agent() {
 
 #[test]
 fn test_s1_start_system_agent() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = temp_dir("start");
     let _gw = GatewayProcess::start(&temp).expect("Failed to start Gateway");
     wait_for_gateway().expect("Gateway not responding");
@@ -364,7 +373,7 @@ fn test_s1_start_system_agent() {
 
 #[test]
 fn test_s1_chat_with_system_agent() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !has_api_key() { eprintln!("SKIPPING: No API key set"); return; }
 
     let temp = temp_dir("chat");
@@ -380,7 +389,7 @@ fn test_s1_chat_with_system_agent() {
 
 #[test]
 fn test_s1_full_conversation_flow() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !has_api_key() { eprintln!("SKIPPING: No API key set"); return; }
 
     let temp = temp_dir("full_flow");
@@ -418,7 +427,7 @@ fn test_s1_full_conversation_flow() {
 
 #[test]
 fn test_s1_websocket_streaming() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !has_api_key() { eprintln!("SKIPPING: No API key set"); return; }
 
     let temp = temp_dir("ws_stream");

@@ -1,8 +1,17 @@
 # 对话持久化与 Session 机制设计
 
-> 版本：v3.10 | 更新日期：2026-05-03
+> 版本：v3.12 | 更新日期：2026-05-06
 
-> 本文档定义 RollBall Agent 的对话持久化架构，采用“原始文件 + 提炼记忆”双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Grafeo Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。主要变更（v3.10）：Grafeo 文件名去掉 agent_id 改为 private.grafeo（§0.2）、Desktop Memory 按钮改为 Session 选择器（§6.2）、打包数据隔离改为默认排除+用户自选 checklist（§5）、Runtime 启动时异步扫描 conversations 目录（§1.4/§1.6）、Episode consolidated 状态与提炼去重机制（§3.3）、巩固产出补全三类节点 KnowledgeNode/ProceduralNode/AutobiographicalNode（§3.3/§3.5）。
+> 本文档定义 RollBall Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Grafeo Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。主要变更（v3.12）：**Token 预算分配策略**（§1.8）：per-session 隔离 + 全局上限；**JSONL 安全性保证**（§1.9）：轮转事务性、并发读写保护、Episode offset 原子更新；IPC 消息格式见通信协议文档（§06-communication.md §1.5）。主要变更（v3.11）：Session Actor 多会话并发模型（§1.7）、selectedSession 前端模型（§1.7）、配置作用域矩阵（§1.8）。主要变更（v3.10）：Grafeo private.grafeo、Session 选择器、打包数据隔离、异步扫描、Episode consolidated 状态、巩固产出三类节点。
+
+**交叉引用**：
+- Session Actor 架构：本文档 §1.7
+- Agent 运行时主循环：`03-agent-runtime.md` §2
+- Session IPC 消息格式：`06-communication.md` §1.5
+- Episode 提炼触发点：`03-agent-runtime.md` §2（主循环图 §②.5 和 §⑦）
+- Token 预算分配策略：本文档 §1.8
+- JSONL 安全保证（轮转事务性/并发读写/offset）：本文档 §1.9
+- 会话管理 gRPC Proto 定义：`06-communication.md` §1.5
 
 ---
 
@@ -460,6 +469,178 @@ Runtime 初始化 ConversationSession（立即）：
 - Ended 表示用户主动结束对话，新对话从新 session 开始符合用户预期
 - 自动恢复旧 session 可能导致上下文混乱（用户可能已经忘了之前的对话内容）
 - 用户可通过 Desktop App 的"历史会话"列表手动恢复
+
+---
+
+### 1.7 Session Actor 多会话并发模型
+
+**设计背景**：原设计中 `AgentLoop` 混合了 Agent 身份（共享状态）和 Session 状态（per-session 状态），导致同一时刻只能有一个 Session 活跃。其他 Agent 应用（ChatGPT、Claude 等）支持多 Session 同时运行——创建新 Session 不影响旧 Session 继续工作。
+
+**架构：AgentCore + SessionState 分离**
+
+```
+AgentCore（per-agent，跨所有 Session 共享，Arc）
+├── provider: Arc<dyn Provider>
+├── tools: Vec<Arc<dyn Tool>>
+├── manifest: AgentManifest
+├── budget_guard: BudgetGuard
+├── gateway_model_capabilities: HashMap<String, ModelCapabilitiesInfo>
+└── max_output_tokens_limit: u64
+
+SessionState（per-session，完全独立）
+├── session_id: String
+├── history: HistoryManager
+├── conversation: Option<ConversationSession>
+├── loop_detector: LoopDetector
+├── model_override: Option<String>     // per-session 模型选择
+├── iteration_count: usize
+└── token_usage: TokenUsage
+
+SessionTask（每个 Session 独立的 tokio task）
+├── core: Arc<AgentCore>              // 共享引用
+├── state: SessionState               // 独占
+└── inbound_rx: mpsc::Receiver<SessionMessage>  // 消息邮箱
+```
+
+**Gateway 消息循环**：从阻塞调用改为纯路由模式
+
+```rust
+// 之前：阻塞在 agent_loop.run()
+match agent_loop.run(&content, &context_builder).await { ... }
+
+// 之后：纯路由，按 session_id 分发
+loop {
+    match grpc_client.recv_message().await {
+        Some(msg) => route_message(msg, &session_manager).await,
+        None => { /* reconnect */ }
+    }
+}
+```
+
+**前端模型**：`selectedSession` 替代 `currentSession`
+
+- 后端不维护 currentSession，所有 Session 独立运行
+- 前端 `selectedSessionId` 决定显示哪个 Session 的消息
+- 切换 Session 不需要通知后端（纯前端操作）
+- WebSocket 单连接，所有事件带 `session_id`，前端按 `selectedSessionId` 过滤
+
+### 1.8 配置作用域矩阵
+
+| 配置项 | 作用域 | 变更方式 | 影响范围 |
+|--------|--------|---------|--------|
+| 可用模型列表 | Agent | 设置页添加/删除 Provider | 所有 Session 立即可选 |
+| 当前使用模型 | Session | 聊天面板模型选择器 | 仅 selectedSession |
+| Provider API Key | Agent | 设置页 | 所有 Session 共享 |
+| Workspace 目录 | Agent | 不可运行时变更 | 所有 Session 共享 |
+| Workspace 上下文焦点 | Session（隐式） | 由对话历史和 Grafeo 检索自然决定 | 每个 Session 不同 |
+| 工具权限 | Agent | manifest 声明 | 所有 Session 共享 |
+| Token 预算 | **两层：Agent 总预算 + Session 配额** | 设置页（Agent 级） | 见下方详细策略 |
+| 对话历史 | Session | — | 独立 |
+| Token 用量统计 | Session | — | 独立 |
+| 迭代计数器 | Session | — | 独立 |
+
+#### Token 预算分配策略（per-session 隔离 + 全局上限）
+
+```
+AgentCore: BudgetGuard
+├── total_tokens: u64      // 来自 Gateway 的总预算上限
+├── remaining: u64        // 当前剩余总量
+└── per_session_quota: u64 // 每个 Session 的默认配额（如 128K）
+
+SessionState:
+├── budget_quota: u64      // 该 Session 的配额
+├── current_usage: u64     // 该 Session 已用
+└── budget_guard: Arc<tokio::sync::Mutex<BudgetGuard>> // 共享引用
+```
+
+
+**分配规则**：
+
+| 场景 | 行为 |
+|------|------|
+| Session A 用完配额 | 该 Session 停止并通知前端，其他 Session 不受影响 |
+| 所有 Session 共享总预算耗尽 | 所有 Session 停止，拒绝新消息 |
+| Session 长时间空闲 | 配额可超时回收（可选项，减少资源占用） |
+| 某 Session 超过 per_session_quota | 仅该 Session 停止，总预算中剩余量仍可供其他 Session 使用 |
+
+**实现要点**：
+- 预算使用 `tokio::sync::Mutex` 保护，保证并发安全
+- 每条 LLM 调用前检查 `remaining >= min_cost`，不足则拒绝
+- Episode 提炼使用 cost 最低的模型，不计入对话预算（后台任务）
+
+### 1.9 JSONL 安全性与事务性保证
+
+#### 1.9.1 Session 轮转事务性
+
+**问题**：如果在「旧 session 写 ended_at」和「创建新 session」之间崩溃，会丢失活跃对话状态。
+
+
+**解决方案**：**先创建新文件，再标记旧文件为 ended**。
+
+
+```rust
+// 切换 Session 时的 JSONL 操作（原子化）
+async fn switch_session(
+    old: &ConversationSession,
+    new: &ConversationSession,
+) {
+    // 1. 先创建新文件（新 Session 开始）
+    new.create().await;   // ← 先执行
+
+    // 2. 标记旧文件为 ended（旧 Session 结束）
+    old.end().await;      // ← 后执行
+}
+```
+
+**崩溃场景验证**：
+
+| 崩溃时机 | 结果 | 恢复后 |
+|---------|------|--------|
+| 步骤 1 之后 | 新文件存在（active），旧文件 active | Resume 新文件 |
+| 步骤 2 之后 | 新文件 active 或 ended，旧文件 ended | 正常 |
+
+不可能出现「旧文件 active + 新文件不存在」的错误状态。
+
+#### 1.9.2 并发读写保护
+
+**问题**：Writer 线程写入 JSONL 时，Desktop App 读取可能看到不完整的行。
+
+**当前方案**：读端跳过损坏行，写端保证写入完整性。
+
+- JSONL 每条消息是独立行，写入使用 `append` 模式
+- 读端检测到 JSON 解析失败时跳过该行，继续读下一行
+- Desktop App 读取 JSONL 是**按需的**（点击 Session 才读取），不频繁，偶发跳过不影响体验
+
+**增强方案**（未来可选项）：版本号机制
+
+```json
+{
+    "_version": 1,
+    "_line": 42,
+    "role": "user",
+    "content": "hello"
+}
+```
+
+- 写入端：每条消息递增 `_line`，保证顺序
+- 读端：跳过 `_version` 不匹配的行
+
+#### 1.9.3 Episode offset 原子更新
+
+**问题**：崩溃后可能重复提炼同一段对话。
+
+**解决方案**：在 Grafeo 中维护 `DistillOffset` 记录。
+
+```
+Episode 节点 metadata 包含：
+  source_offset: 42    // 处理到 JSONL 第 42 行
+  source_session_id: "20260502_abc123"
+  distill_type: "trimmed" | "session_summary"
+```
+
+- 每次提炼前读取 `source_offset` 作为起始位置
+- 提炼完成后更新 `source_offset`（Grafeo 写入事务保证）
+- Session 结束时做全局摘要，设置 `source_offset = EOF`，防止重复提炼
 
 ---
 

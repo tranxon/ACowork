@@ -1,6 +1,6 @@
 # Phase 5: Desktop App + 开发框架 — 实施计划
 
-> 版本：v1.1 | 更新日期：2026-04-28
+> 版本：v1.2 | 更新日期：2026-05-06
 > 前置条件：Phase 4（M15~M19）全部完成
 > 预计周期：19~22 周
 > 预计里程碑：M20~M25
@@ -45,11 +45,11 @@
 | 阶段 | 主题 | 任务数 | 预期测试 | 预计周期 |
 |------|------|--------|---------|---------|
 | S1 | Desktop App 骨架 + 系统托盘 + 对话持久化 | 18 | 150 | 7 周 |
-| S2 | Debug Protocol 实现 | 9 | 58 | 4~5 周 |
+| S2 | Debug Protocol + Session Actor 重构 | 13 | 93 | 5.5~6.5 周 |
 | S3 | 开发框架高级能力 | 8 | 48 | 3~4 周 |
 | S4 | 发布工具链 | 7 | 25 | 2 周 |
 | S5 | Phase 4 遗留技术债务 + 集成验证 | 10 | 50 | 3~4 周 |
-| **合计** | | **52** | **331** | **19~22 周** |
+| **合计** | | **56** | **366** | **20.5~23.5 周** |
 
 ---
 
@@ -209,6 +209,200 @@ Agent Runtime DevMode 的完整实现，包含 Debug Protocol Server、执行控
 
 **涉及 crate**：`rollball-runtime`（新增 `debug/` 模块）、`rollball-gateway`（新增 DevMode 启动参数）
 
+### S2 架构决策：Session Actor 多会话并发模型
+
+**问题发现过程**：最初发现 `run_gateway_loop()` 在 `agent_loop.run()` 处同步阻塞，导致 `continue_execution` 死锁。经过编译验证（`select_borrow_check_test.rs`），发现 `tokio::select!` 方案存在 `&mut agent_loop` 和 `&context_builder` 借用冲突（E0499 / E0502）。进一步分析发现，这些借用冲突的根因是 **AgentLoop 混合了 Agent 身份和 Session 状态**，导致单 Session 模型无法支持多 Session 并发——而这是其他 Agent 应用（ChatGPT、Claude 等）的基本能力。
+
+**核心原则**：
+1. **消息路由永远不应该被 Agent 执行阻塞**
+2. **每个 Session 是独立的执行实体，互不阻塞**
+3. **前端驱动 Session 选择（selectedSession），后端不维护 currentSession**
+
+> **关联设计文档**：
+> - Session Actor 详细架构：`15-conversation-persistence.md` §1.7
+> - Agent 运行时主循环（Episode 触发点标注）：`03-agent-runtime.md` §2
+> - Session 管理 IPC 消息 Proto 定义：`06-communication.md` §1.5
+> - Token 预算分配策略：`15-conversation-persistence.md` §1.8
+> - JSONL 安全保证（轮转事务性/并发读写/offset）：`15-conversation-persistence.md` §1.9
+
+#### 架构：AgentCore + SessionState 分离 + Session Actor
+
+```
+Gateway Message Loop（纯路由，永不阻塞）
+  │
+  ├── chat_message(session_id=X)    → route to sessions[X].inbound_tx
+  ├── continue_execution(session_id) → route to sessions[X].inbound_tx
+  ├── create_session               → SessionManager::create() → spawn SessionTask
+  ├── LLMConfigDelivery            → broadcast to all SessionTasks
+  └── model_switch(session_id)     → route to sessions[X].inbound_tx
+       │
+       ▼
+  ┌──────────────────────────────────────────┐
+  │ SessionTask A        SessionTask B       │
+  │  ├── SessionState     ├── SessionState   │
+  │  │   ├── history       │   ├── history    │
+  │  │   ├── conversation  │   ├── conversation│
+  │  │   ├── model_override│   ├── model_override│
+  │  │   └── loop_detector │   └── loop_detector│
+  │  └── inbound_rx       └── inbound_rx     │
+  │       │                    │             │
+  │   独立 LLM 调用         独立 LLM 调用    │
+  │   独立工具执行         独立工具执行      │
+  └──────────────────────────────────────────┘
+                    │
+              共享 AgentCore (Arc)
+              ├── provider: Arc<dyn Provider>
+              ├── tools: Vec<Arc<dyn Tool>>
+              ├── manifest: AgentManifest
+              ├── budget_guard: BudgetGuard
+              ├── gateway_model_capabilities
+              └── max_output_tokens_limit
+```
+
+**关键结构体重构**：
+
+```rust
+/// Per-agent 共享状态（跨所有 Session）
+struct AgentCore {
+    provider: Arc<dyn Provider>,
+    tools: Vec<Arc<dyn Tool>>,
+    manifest: AgentManifest,
+    budget_guard: BudgetGuard,
+    gateway_model_capabilities: HashMap<String, ModelCapabilitiesInfo>,
+    max_output_tokens_limit: u64,
+    on_chunk: mpsc::Sender<ChunkEvent>,
+}
+
+/// Per-session 独立状态（完全隔离）
+struct SessionState {
+    session_id: String,
+    history: HistoryManager,
+    conversation: Option<ConversationSession>,
+    loop_detector: LoopDetector,
+    model_override: Option<String>,     // per-session 模型选择
+    iteration_count: usize,
+    token_usage: TokenUsage,
+}
+
+/// Session Actor：每个 Session 独立的 tokio task
+async fn session_task(
+    core: Arc<AgentCore>,
+    state: SessionState,
+    mut inbound_rx: mpsc::Receiver<SessionMessage>,
+) {
+    loop {
+        tokio::select! {
+            msg = inbound_rx.recv() => {
+                match msg {
+                    ChatMessage { content } => state.run(&core, &content).await,
+                    ContinueExecution { .. } => state.continue_execution().await,
+                    Interrupt { .. } => state.interrupt(),
+                    ModelSwitch { model } => state.model_override = Some(model),
+                    DebugContinue { step } => state.debug_continue(step).await,
+                }
+            }
+        }
+    }
+}
+```
+
+**Gateway 消息循环重构**（从阻塞调用变为纯路由）：
+
+```rust
+// 之前：阻塞在 agent_loop.run()
+match agent_loop.run(&content, &context_builder).await { ... }
+
+// 之后：纯路由，永不阻塞
+loop {
+    match grpc_client.recv_message().await {
+        Some(msg) => route_message(msg, &session_manager).await,
+        None => { /* reconnect */ }
+    }
+}
+```
+
+#### 前端模型：selectedSession 替代 currentSession
+
+```
+旧模型：currentSession（后端驱动）
+  后端："当前活跃 Session 是 X，所有消息发给 X"
+  切换：前端请求切换 → 后端暂停旧的 → 启动新的 → 前端更新
+
+新模型：selectedSession（前端驱动）
+  后端："所有 Session 都在独立运行，不管你看哪个"
+  前端："我选择看 Session X，显示它的消息流"
+  切换：前端切换 selectedSessionId → 订阅新 Session 的流 → 完成
+```
+
+前端状态模型：
+
+```typescript
+// 之前
+interface ChatStore {
+  currentSessionId: string;
+  messages: ChatMessage[];
+  isStreaming: boolean;
+}
+
+// 之后
+interface ChatStore {
+  selectedSessionId: string;       // 前端选择查看的 Session
+  sessions: Map<string, {         // 所有 Session 独立状态
+    messages: ChatMessage[];
+    isStreaming: boolean;
+    model: string;                 // per-session 模型
+  }>;
+}
+```
+
+WebSocket 流复用：单个 WebSocket 连接，所有 Session 事件带 `session_id`，前端按 `selectedSessionId` 过滤显示。
+
+#### 配置作用域矩阵
+
+| 配置项 | 作用域 | 变更方式 | 影响范围 |
+|--------|--------|---------|--------|
+| 可用模型列表 | Agent | 设置页添加/删除 Provider | 所有 Session 立即可选 |
+| 当前使用模型 | Session | 聊天面板模型选择器 | 仅 selectedSession |
+| Provider API Key | Agent | 设置页 | 所有 Session 共享 |
+| Workspace 目录 | Agent | 不可运行时变更 | 所有 Session 共享 |
+| Workspace 上下文焦点 | Session（隐式） | 由对话历史和 Grafeo 检索自然决定 | 每个 Session 不同 |
+| 工具权限 | Agent | manifest 声明 | 所有 Session 共享 |
+| Token 预算 | Agent | 设置页 | 所有 Session 共享（共享预算池） |
+| 对话历史 | Session | — | 独立 |
+| Token 用量统计 | Session | — | 独立 |
+| 迭代计数器 | Session | — | 独立 |
+
+#### Debug Protocol 覆盖
+
+Session Actor 模型下，Debug 协议自然适配：
+
+| 需求 | 覆盖方式 |
+|------|---------|
+| 断点暂停后 Continue/Step | `session.inbound_tx.send(DebugContinue)` → SessionTask 处理 |
+| 暂停期间读取状态 | Session 主动上报 `ChunkEvent::DebugPaused` 快照 |
+| 暂停期间修改状态 | `SessionMessage::DebugModify` → SessionTask 处理 |
+| 运行时设置断点 | `SessionMessage::SetBreakpoint` → SessionTask 处理 |
+| 迭代限制 Continue | `SessionMessage::ContinueExecution` → SessionTask 处理 |
+| 跨 Session 调试 | 可同时暂停多个 Session，独立步进 |
+
+#### 方案演进记录
+
+| 版本 | 方案 | 结论 |
+|------|------|------|
+| v1 | `tokio::select!` + 分类路由 | 编译验证发现 E0499/E0502 借用冲突，需分类路由绕过 |
+| v2 | `tokio::select!` + inbound_tx 转发 + Queue+Interrupt | 可行但复杂，Session 切换仍需中断 |
+| **v3** | **Session Actor 模型** | **根本性重构，消除所有借用冲突，支持多 Session 并发** |
+
+编译验证代码：`rollball-runtime/tests/select_borrow_check_test.rs`（保留作为借用模式参考）
+
+### Wave 0：Session Actor 重构（1~1.5 周，3 项） — S2 前置任务
+
+| 任务 | 内容 | 预期测试 | 验收标准 |
+|------|------|---------|----------|
+| S2.0a AgentCore + SessionState 分离 | 从 `AgentLoop` 提取 `AgentCore`（共享状态：provider、tools、manifest、budget_guard）和 `SessionState`（per-session 状态：history、conversation、loop_detector、model_override）；`AgentLoop` 重构为持有 `Arc<AgentCore>` + `SessionState`；所有现有测试通过（行为不变） | 12 | 现有 266 测试全部通过、AgentCore/SessionState 结构体编译正确 |
+| S2.0b SessionTask + SessionManager | 新增 `session/` 模块：`SessionTask`（每个 session 一个 tokio task，通过 `inbound_rx` 接收 `SessionMessage`）；`SessionManager`（管理 session 创建/销毁/查找，`HashMap<String, SessionHandle>`）；`SessionHandle`（inbound_tx + JoinHandle + on_chunk_sender） | 10 | 多 Session 并发运行互不阻塞、Session 创建/销毁正确 |
+| S2.0c Gateway 消息循环重构 | `run_gateway_loop()` 从阻塞调用 `agent_loop.run()` 改为纯路由模式；消息按 `session_id` 路由到对应 `SessionHandle`；`chat_message` 包含 `session_id` 字段；`LLMConfigDelivery` 广播到所有 SessionTask；移除 `current_session_id` 追踪逻辑 | 8 | Gateway loop 不再阻塞、多 Session 消息正确路由 |
+
 ### Wave A：Debug Protocol Server + 执行控制（2 周，4 项）
 
 | 任务 | 内容 | 预期测试 | 验收标准 |
@@ -229,6 +423,18 @@ Agent Runtime DevMode 的完整实现，包含 Debug Protocol Server、执行控
 | S2.9 记忆调试面板（开发者模式） | **Debug Protocol 扩展**：<br>• `debugger.getMemoryState`：返回当前 Grafeo 状态（节点数、边数、各层分布）<br>• `debugger.getEpisodicFragments`：返回 Episodic 片段列表（含 decay_score 实时值）<br>• `debugger.triggerConsolidation`：手动触发离线巩固，返回合并结果报告<br>• `debugger.getConflictLog`：返回冲突检测日志（Negation/Evolution 事件）<br>• `debugger.triggerForgettingScan`：手动触发遗忘扫描，返回标记为 Dormant/Purged 的节点列表<br>**Desktop UI**：<br>• Episodic 片段浏览 + decay_score 实时显示（进度条/颜色编码）<br>• 巩固过程可视化（触发时机、合并结果、生成的新节点）<br>• 冲突检测日志查看（时间线形式，支持过滤）<br>• 手动触发遗忘扫描按钮 + 扫描结果预览 | 6 | 记忆调试命令正确响应、UI 实时展示 decay_score、巩固和遗忘扫描结果准确 |
 
 > **前置依赖**：S2.9 依赖 S1.10 的 Gateway 记忆 API 已就绪；依赖 Grafeo 引擎的调试接口（`grafeo::debug` 模块）；巩固和遗忘扫描调用 `rollball-grafeo` 内部 API。
+
+#### S2.10 Session Actor 边界场景测试（补充 Alex Review 建议）
+
+| 编号 | 测试用例 | 预期 | 验收标准 |
+|------|---------|------|----------|
+| T51 | 多 Session 并发读写 JSONL | 两个 Session 同时写入各自 JSONL，Desktop App 读取不损坏 | JSONL 文件完整，无交错或损坏行 |
+| T52 | Session 轮转原子性 | 模拟崩溃（步骤 1 后、步骤 2 后），恢复后状态正确 | 新文件存在 + 旧文件 ended，无错误状态 |
+| T53 | Gateway IPC 断连降级 | Runtime 断开与 Gateway 的连接，5s 后重连 | 重连后 Session 继续运行，不丢消息 |
+| T54 | Token 预算 per-session 隔离 | Session A 用完配额，Session B 仍可使用 | Session B 的 LLM 调用不受 Session A 配额影响 |
+| T55 | Episode offset 去重 | 重复触发提炼，offset 正确递增 | 不产生重复 Episode |
+
+> **前置依赖**：S2.0a AgentCore+SessionState 分离；依赖 conversation.rs 的 JSONL 操作和 episode_distill.rs 的 offset 逻辑。
 
 **里程碑 M21：Debug Protocol 可用** — 连接 DevMode Agent → 暂停/步进 → 设断点 → 查看状态 → 编辑消息 → 记忆调试
 

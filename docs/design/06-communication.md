@@ -1,6 +1,13 @@
 # 通信协议
 
-> 版本：v3.5 | 更新日期：2026-04-17
+> 版本：v3.6 | 更新日期：2026-05-06
+
+> **v3.6 变更**：新增 §1.5 Session 管理 IPC 消息 Proto 定义，支持 Session Actor 多会话并发模型。Session 相关 Gateway ↔ Runtime IPC 消息通过 gRPC Bidirectional Streaming 传输，与 GatewayRequest/Response 的自定义二进制帧分离。
+
+**交叉引用**：
+- Session Actor 架构：`15-conversation-persistence.md` §1.7
+- Agent 运行时主循环：`03-agent-runtime.md` §2
+- Session 生命周期与 JSONL 安全：`15-conversation-persistence.md` §1.5、§1.9
 
 ---
 
@@ -183,6 +190,96 @@ enum GatewayResponse {
 ## 2. 跨 Agent 通信（Intent 机制）
 
 Agent 通过 Gateway 的 Intent Router 发送消息请求调用另一个 Agent 的能力。
+
+### 1.5 Session 管理 IPC 消息（gRPC）
+
+> v3.6 新增（2026-05-06）：支持 Session Actor 多会话并发模型。
+
+Session 相关的 Gateway ↔ Runtime IPC 消息通过 gRPC Bidirectional Streaming 传输。消息格式基于 Protocol Buffers，与 GatewayRequest/Response 的自定义二进制帧分离。
+
+#### Proto 定义
+
+```protobuf
+// session.proto — Session 管理消息格式
+
+// Runtime → Gateway：Session 列表查询响应
+message SessionList {
+    repeated SessionInfo sessions = 1;
+}
+
+message SessionInfo {
+    string session_id = 1;
+    string title = 2;
+    int64 message_count = 3;
+    string status = 4;  // "active" | "idle" | "ended"
+    int64 created_at = 5;     // Unix timestamp ms
+    int64 last_active_at = 6; // Unix timestamp ms
+}
+
+// Runtime → Gateway：Session 消息查询响应
+message ConversationMessages {
+    repeated ConversationLine lines = 1;
+    bool has_more = 2;
+    optional string cursor = 3;     // 下一批的起始行号
+}
+
+message ConversationLine {
+    string id = 1;
+    string role = 2;    // "user" | "assistant" | "tool_call" | "tool_result" | "think" | "system"
+    string content = 3;
+    map<string, string> metadata = 4;  // tool_name, tool_call_id, model 等
+    int64 ts = 5;                       // Unix timestamp ms
+}
+
+
+// Runtime → Gateway：创建 Session 响应
+message CreateSessionResponse {
+    string session_id = 1;
+    bool success = 2;
+    optional string error = 3;
+}
+
+// Runtime → Gateway：激活 Session 响应
+message ActivateSessionResponse {
+    string session_id = 1;
+    bool success = 2;
+    optional string error = 3;
+}
+
+// Runtime → Gateway：删除 Session 响应
+message DeleteSessionResponse {
+    bool success = 1;
+    optional string error = 2;
+}
+```
+
+#### 与 GatewayRequest/Response 的关系
+
+
+| 消息类型 | 通道 | 协议 | 用途 |
+|---------|------|------|------|
+| `GatewayRequest / Response` | Socket API | 自定义二进制帧 | Key、Intent、Budget、Rate、Permission |
+| `SessionList / ConversationMessages` 等 | gRPC Bidirectional Stream | Protocol Buffers | Session CRUD、消息查询 |
+| `IntentReceived`（含 action=chat_message） | gRPC Push | Protocol Buffers | **Chat 消息**（包含 session_id） |
+
+
+**为什么 Session 用 gRPC 而非 Socket API**：
+- Session 消息查询需要返回大量结构化数据（历史消息列表），二进制帧不适合批量数据
+- gRPC 的 streaming 支持自然对应"Gateway push → Runtime"的实时消息模式
+- 与 LLMConfigDelivery 等现有 gRPC 消息共用同一连接
+
+#### 未知 role 类型的降级处理
+
+当前 `ConversationLine.role` 支持：
+- `user` / `assistant` / `tool_call` / `tool_result` / `think` / `system`
+- 未来可能扩展（如 `system_message` / `error`）
+
+**降级规则**：
+```
+读到未知 role → 当 "system" 类型处理
+前端行为：展示为普通消息（content 正常显示）
+向后兼容：新 role 类型出现时不会破坏已有 Session 的读取
+```
 
 ### 2.1 Intent 消息格式
 

@@ -3,9 +3,12 @@
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
 
-use crate::agent::inbound::InboundMessage;
+use crate::agent::agent_core::AgentCore;
+
+use crate::agent::session::{SessionManager, SessionManagerConfig, SessionMessage};
 use crate::config::RuntimeConfig;
 use crate::error::Result;
+use std::sync::Arc;
 
 /// Type alias for the reload handle used to dynamically change log level.
 pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
@@ -318,7 +321,13 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 
     // Step 6: Build context builder (with identity injection from Gateway)
     let identity_context = load_identity_delivery(&config.work_dir);
-    let mut context_builder = ContextBuilder::new(system_prompt)
+
+    // Clone tool_definitions and identity_context for SessionManagerConfig
+    // (Gateway mode) before they are moved into the standalone ContextBuilder.
+    let tool_definitions_for_session = tool_definitions.clone();
+    let identity_context_for_session = identity_context.clone();
+
+    let mut context_builder = ContextBuilder::new(system_prompt.clone())
         .with_identity(identity_context)
         .with_tools(tool_definitions);
 
@@ -404,33 +413,10 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         tracing::info!(count = sessions.len(), "Background session scan complete");
     });
 
-    // Clone chunk_tx for use in run_gateway_loop (to emit Done events through chunk channel)
-    let chunk_tx_for_done = chunk_tx.clone();
-
-    let (mut agent_loop, inbound_tx) = AgentLoop::new(
-        config.clone(),
-        loaded.manifest.clone(),
-        provider,
-        active_tools,
-        budget,
-        chunk_tx,
-        conversation_session,
-    );
-
-    // Inject Gateway model capabilities into AgentLoop (sole holder)
-    // ContextBuilder no longer stores capabilities — it receives them
-    // at build() time via the gateway_capabilities parameter.
-    if let Some(caps) = gateway_model_capabilities {
-        agent_loop.update_gateway_model_capabilities(caps);
-    }
-
-    // Inject max_output_tokens_limit from Gateway config
-    agent_loop.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
-
     // Step 9: Run the appropriate loop based on connection mode
     if let Some(mut client) = grpc_client {
-        // Gateway mode: run message loop to receive messages from Gateway
-        tracing::info!("Running in Gateway mode");
+        // Gateway mode: create SessionManager for multi-session routing
+        tracing::info!("Running in Gateway mode with SessionManager");
 
         // Extract reconnect parameters before spawning tasks
         let agent_id = config.agent_id.clone();
@@ -438,6 +424,49 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         let socket_path = config.get_gateway_address()
             .expect("gateway address must be set in Gateway mode")
             .to_string();
+
+        // Build shared AgentCore for all sessions
+        let mut core = Arc::new(AgentCore::new(
+            config.clone(),
+            loaded.manifest.clone(),
+            provider,
+            active_tools,
+            chunk_tx.clone(),
+        ));
+
+        // Inject Gateway model capabilities into the shared core.
+        // Arc::get_mut only succeeds when the refcount is 1, so we must use
+        // `&mut core` directly (not `core.clone()` which bumps refcount to 2
+        // and makes get_mut always return None).
+        if let Some(c) = Arc::get_mut(&mut core) {
+            if let Some(caps) = gateway_model_capabilities {
+                c.update_gateway_model_capabilities(caps);
+            }
+            c.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
+        }
+
+        let session_manager_config = SessionManagerConfig {
+            inbound_channel_capacity: 64,
+            system_prompt: system_prompt.clone(),
+            per_session_budget: budget,
+            history_max_tokens: config.history_max_tokens,
+            keep_full_results: config.keep_full_results,
+            chunk_tx,
+            tool_definitions: tool_definitions_for_session,
+            identity_context: identity_context_for_session,
+        };
+
+        let mut session_manager = SessionManager::new(core, session_manager_config);
+
+        // Create initial session with the resumed/created conversation
+        let initial_session_id = if let Some(conv) = conversation_session {
+            let sid = conv.session_id().to_string();
+            session_manager.create_session_with_id_and_conversation(sid.clone(), Some(conv)).await?;
+            sid
+        } else {
+            session_manager.create_session().await?
+        };
+        tracing::info!(initial_session_id = %initial_session_id, "Initial session created");
 
         // Spawn chunk relay task: consumes ChunkEvent from mpsc channel and
         // forwards each event to Gateway via the shared main gRPC connection.
@@ -616,20 +645,42 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         };
 
         let result = run_gateway_loop(
-            agent_loop, inbound_tx, &mut client, context_builder, config.work_dir.clone(),
-            socket_path.clone(), agent_id.clone(), version.clone(),
-            log_reload_handle, chunk_tx_for_done, skill_registry,
+            &mut session_manager,
+            &mut client,
+            config.work_dir.clone(),
+            socket_path.clone(),
+            agent_id.clone(),
+            version.clone(),
+            log_reload_handle,
+            skill_registry,
+            initial_session_id,
         ).await;
 
-        // Chunk relay task will end when chunk_rx is dropped (agent_loop dropped)
+        // Chunk relay task will end when chunk_rx is dropped (all senders dropped)
         if let Some(handle) = chunk_relay {
             let _ = handle.await;
         }
 
         result
     } else {
-        // Standalone mode: run interactive stdin chat loop
+        // Standalone mode: create AgentLoop and run interactive stdin chat loop
         tracing::info!("Running in standalone mode");
+
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            config.clone(),
+            loaded.manifest.clone(),
+            provider,
+            active_tools,
+            budget,
+            chunk_tx,
+            conversation_session,
+        );
+
+        if let Some(caps) = gateway_model_capabilities {
+            agent_loop.update_gateway_model_capabilities(caps);
+        }
+        agent_loop.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
+
         run_chat_loop(&mut agent_loop, &context_builder).await
     }
 }
@@ -842,42 +893,36 @@ async fn run_chat_loop(
     Ok(())
 }
 
-/// Run Gateway message loop — receives messages from Gateway and processes them.
+/// Run Gateway message loop — receives messages from Gateway and routes them.
 ///
-/// This loop:
-/// 1. Receives IntentReceived messages from Gateway via IPC
-/// 2. Checks remaining budget before processing each message
-/// 3. Runs the agent loop for each message
-/// 4. Sends responses back to Gateway
+/// This loop is **pure routing**: it never blocks on any Session's execution.
+/// Messages are forwarded to the appropriate SessionHandle's inbound channel
+/// and the loop immediately returns to recv the next message.
 #[allow(clippy::too_many_arguments)]
 async fn run_gateway_loop(
-    mut agent_loop: crate::agent::loop_::AgentLoop,
-    inbound_tx: tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>,
+    session_manager: &mut SessionManager,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
-    mut context_builder: crate::agent::context::ContextBuilder,
     work_dir: String,
     _socket_path: String,
     agent_id_for_reconnect: String,
     version_for_reconnect: String,
     log_reload_handle: Option<LogReloadHandle>,
-    chunk_tx_for_done: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::ChunkEvent>>,
     skill_registry: crate::skills::parser::SkillRegistry,
+    initial_session_id: String,
 ) -> Result<()> {
     use rollball_core::protocol::GatewayResponse;
 
     // Retrieve the provider name for budget queries
-    let budget_provider = agent_loop.manifest().llm.suggested_provider.clone();
+    let budget_provider = session_manager.provider_name();
 
-    // S1.14: Track the current session ID for session query responses
-    // The ConversationSession is owned by AgentLoop, so we track the
-    // session_id separately here for responding to Gateway queries.
-    let mut current_session_id = agent_loop.current_session_id()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+    // Track the current session ID for backward compatibility.
+    // When a message does not specify session_id, it routes here.
+    // Initialize with the initial session created on startup.
+    let mut current_session_id = initial_session_id;
 
-    tracing::info!("Gateway message loop started");
+    tracing::info!("Gateway message loop started (pure routing mode)");
 
-    // Main message loop — receive messages from Gateway and process them
+    // Main message loop — receive messages from Gateway and route them
     loop {
         match grpc_client.recv_message().await {
             Ok(Some(response)) => {
@@ -886,6 +931,13 @@ async fn run_gateway_loop(
                 match response {
                     GatewayResponse::IntentReceived { from, action, params, command } => {
                         tracing::info!("Received intent from {}: {}", from, action);
+
+                        // Determine target session: explicit session_id param > current_session_id
+                        let target_session_id = params.get("session_id")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| current_session_id.clone());
 
                         // Budget pre-check: skip processing if budget is exhausted
                         if let Ok((remaining_tokens, _)) = grpc_client.query_budget(&budget_provider).await
@@ -906,17 +958,18 @@ async fn run_gateway_loop(
                         }
                         // If budget query fails (e.g. provider not tracked), proceed anyway
 
-                        // Handle model_switch: update context_builder's model override
-                        // and persist to workspace so the preference survives restarts
+                        // Handle model_switch: broadcast to all sessions
                         if action == "model_switch" {
                             if let Some(model) = params.get("model").and_then(|v| v.as_str()) {
                                 let provider = params.get("provider").and_then(|v| v.as_str());
-                                context_builder.set_override_model(model.to_string());
                                 save_agent_model(&work_dir, model, provider);
+                                session_manager.broadcast(SessionMessage::ModelSwitch {
+                                    model: model.to_string(),
+                                });
                                 tracing::info!(
                                     model = %model,
                                     provider = ?provider,
-                                    "Model switched via model_switch message (persisted to workspace)"
+                                    "Model switched via model_switch message (broadcast to all sessions)"
                                 );
                             } else {
                                 tracing::warn!(
@@ -926,17 +979,15 @@ async fn run_gateway_loop(
                             continue;
                         }
 
-                        // Handle interrupt: send interrupt signal to agent loop
+                        // Handle interrupt: route to target session
                         if action == "interrupt" {
                             let reason = params.get("reason")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown")
                                 .to_string();
-                            tracing::info!(reason = %reason, "Forwarding interrupt signal to agent loop");
-                            
-                            // Send interrupt to agent loop via inbound channel
-                            if inbound_tx.send(InboundMessage::Interrupt { reason }).await.is_err() {
-                                tracing::warn!("Failed to send interrupt signal — agent loop may have exited");
+                            tracing::info!(reason = %reason, session_id = %target_session_id, "Routing interrupt to session");
+                            if let Err(e) = session_manager.send_to_session(&target_session_id, SessionMessage::Interrupt { reason }) {
+                                tracing::warn!("Failed to route interrupt: {}", e);
                             }
                             continue;
                         }
@@ -946,18 +997,14 @@ async fn run_gateway_loop(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("user_requested")
                                 .to_string();
-                            tracing::info!(reason = %reason, "Forwarding continue_execution signal to agent loop");
-
-                            if inbound_tx.send(InboundMessage::ContinueExecution { reason }).await.is_err() {
-                                tracing::warn!("Failed to send continue signal — agent loop may have exited");
+                            tracing::info!(reason = %reason, session_id = %target_session_id, "Routing continue_execution to session");
+                            if let Err(e) = session_manager.send_to_session(&target_session_id, SessionMessage::ContinueExecution) {
+                                tracing::warn!("Failed to route continue signal: {}", e);
                             }
                             continue;
                         }
 
                         // S1.14: Session query actions from Gateway HTTP API
-                        // Gateway pushes these IntentReceived actions when the Desktop App
-                        // requests session/conversation data. Runtime processes them using
-                        // conversation.rs functions and sends results back via IntentSend.
                         if action == "list_sessions" {
                             handle_list_sessions(&work_dir, grpc_client, &params).await;
                             continue;
@@ -967,7 +1014,37 @@ async fn run_gateway_loop(
                             continue;
                         }
                         if action == "create_session" {
-                            handle_create_session(&work_dir, &agent_id_for_reconnect, &mut agent_loop, &mut current_session_id, grpc_client, &params).await;
+                            let request_id = params.get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let new_session_id = crate::conversation::generate_session_id();
+                            match crate::conversation::ConversationSession::new(
+                                std::path::Path::new(&work_dir),
+                                &new_session_id,
+                                &agent_id_for_reconnect,
+                            ) {
+                                Ok(new_session) => {
+                                    if let Err(e) = session_manager.create_session_with_id_and_conversation(
+                                        new_session_id.clone(),
+                                        Some(new_session),
+                                    ).await {
+                                        tracing::error!("Failed to create session: {}", e);
+                                        let data = serde_json::json!({ "error": format!("Failed to create session: {}", e) });
+                                        send_session_response(grpc_client, &request_id, data).await;
+                                    } else {
+                                        current_session_id = new_session_id.clone();
+                                        tracing::info!(new_session_id = %new_session_id, "Created new session via Gateway request");
+                                        let data = serde_json::json!({ "session_id": new_session_id });
+                                        send_session_response(grpc_client, &request_id, data).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to create new session: {}", e);
+                                    let data = serde_json::json!({ "error": format!("Failed to create session: {}", e) });
+                                    send_session_response(grpc_client, &request_id, data).await;
+                                }
+                            }
                             continue;
                         }
                         if action == "get_current_session_id" {
@@ -975,15 +1052,118 @@ async fn run_gateway_loop(
                             continue;
                         }
                         if action == "activate_session" {
-                            handle_activate_session(&work_dir, &mut agent_loop, &mut current_session_id, grpc_client, &params).await;
+                            let request_id = params.get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
+                                Some(sid) if !sid.is_empty() => sid.to_string(),
+                                _ => {
+                                    let data = serde_json::json!({ "error": "Missing or empty session_id parameter" });
+                                    send_session_response(grpc_client, &request_id, data).await;
+                                    continue;
+                                }
+                            };
+                            // In multi-session mode, activation updates current_session_id for routing
+                            current_session_id = session_id.clone();
+                            let data = serde_json::json!({
+                                "session_id": session_id,
+                                "activated": true,
+                            });
+                            send_session_response(grpc_client, &request_id, data).await;
                             continue;
                         }
                         if action == "update_session_title" {
-                            handle_update_session_title(&mut agent_loop, grpc_client, &params).await;
+                            let request_id = params.get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let title = match params.get("title").and_then(|v| v.as_str()) {
+                                Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+                                _ => {
+                                    let data = serde_json::json!({ "error": "Missing or empty title parameter" });
+                                    send_session_response(grpc_client, &request_id, data).await;
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = session_manager.send_to_session(&target_session_id, SessionMessage::UpdateSessionTitle { title: title.clone() }) {
+                                tracing::warn!("Failed to route update_session_title: {}", e);
+                                let data = serde_json::json!({ "error": format!("Session not found: {}", target_session_id) });
+                                send_session_response(grpc_client, &request_id, data).await;
+                            } else {
+                                let data = serde_json::json!({
+                                    "session_id": target_session_id,
+                                    "title": title,
+                                    "updated": true,
+                                });
+                                send_session_response(grpc_client, &request_id, data).await;
+                            }
                             continue;
                         }
                         if action == "delete_session" {
-                            handle_delete_session(&work_dir, &mut agent_loop, &mut current_session_id, &agent_id_for_reconnect, grpc_client, &params).await;
+                            let request_id = params.get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
+                                Some(sid) if !sid.is_empty() => sid.to_string(),
+                                _ => {
+                                    let data = serde_json::json!({ "error": "Missing or empty session_id parameter" });
+                                    send_session_response(grpc_client, &request_id, data).await;
+                                    continue;
+                                }
+                            };
+
+                            // Delete the JSONL file
+                            let conversations_dir = std::path::Path::new(&work_dir).join("conversations");
+                            let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
+                            if file_path.exists() {
+                                if let Err(e) = std::fs::remove_file(&file_path) {
+                                    tracing::error!(session_id = %session_id, error = %e, "Failed to delete session file");
+                                    let data = serde_json::json!({ "error": format!("Failed to delete session: {}", e) });
+                                    send_session_response(grpc_client, &request_id, data).await;
+                                    continue;
+                                }
+                                tracing::info!(session_id = %session_id, "Deleted session JSONL file");
+                            }
+
+                            // Destroy the session task
+                            let is_current = current_session_id == session_id;
+                            if let Err(e) = session_manager.destroy_session(&session_id).await {
+                                tracing::warn!("Failed to destroy session {}: {}", session_id, e);
+                            }
+
+                            // If the deleted session was current, create a replacement
+                            if is_current {
+                                let new_session_id = crate::conversation::generate_session_id();
+                                match crate::conversation::ConversationSession::new(
+                                    std::path::Path::new(&work_dir),
+                                    &new_session_id,
+                                    &agent_id_for_reconnect,
+                                ) {
+                                    Ok(new_session) => {
+                                        if let Err(e) = session_manager.create_session_with_id_and_conversation(
+                                            new_session_id.clone(),
+                                            Some(new_session),
+                                        ).await {
+                                            tracing::error!("Failed to create replacement session: {}", e);
+                                        } else {
+                                            current_session_id = new_session_id.clone();
+                                            tracing::info!(new_session_id = %new_session_id, "Switched to new session after deletion");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to create replacement session: {}", e);
+                                    }
+                                }
+                            }
+
+                            let data = serde_json::json!({
+                                "deleted": true,
+                                "session_id": session_id,
+                                "new_session_id": if is_current { current_session_id.clone() } else { String::new() },
+                            });
+                            send_session_response(grpc_client, &request_id, data).await;
                             continue;
                         }
 
@@ -994,7 +1174,6 @@ async fn run_gateway_loop(
                             .to_string();
 
                         // If a command is specified, inject the skill instructions into the user message.
-                        // This ensures the skill context enters conversation history for subsequent turns.
                         if let Some(skill_name) = command {
                             if let Some(skill) = skill_registry.get(&skill_name) {
                                 tracing::info!(
@@ -1015,88 +1194,29 @@ async fn run_gateway_loop(
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| format!("msg-{}", chrono::Utc::now().timestamp_millis()));
 
-                        // Process the message through the agent loop
-                        match agent_loop.run(&content, &context_builder).await {
-                            Ok(response_text) => {
-                                let preview: String = response_text.chars().take(100).collect();
-                                tracing::info!("Agent response: {}", preview);
-
-                                // TODO(conversation-persist): Persist user message + assistant response
-                                // to Grafeo memory engine for long-term recall.
-                                // Requires Grafeo persistence interface integration:
-                                //   1. Write user message as EpisodicNode
-                                //   2. Write assistant response as EpisodicNode
-                                //   3. Trigger consolidation scheduler after N messages
-                                // Blocked on: Grafeo write API from Runtime process
-
-                                // Send response via chunk channel (ensures ordering with preceding
-                                // content chunks — Done arrives AFTER all Delta/ToolCall/ToolResult).
-                                // Falls back to direct gRPC send if chunk channel is unavailable.
-                                let reply_target = &from;
-                                match chunk_tx_for_done {
-                                    Some(ref tx) => {
-                                        let event = crate::agent::loop_::ChunkEvent::Done {
-                                            content: response_text,
-                                            message_id: message_id.clone(),
-                                        };
-                                        if tx.send(event).await.is_err() {
-                                            tracing::error!("Done event send via chunk channel failed — chunk relay may have crashed");
-                                        }
-                                    }
-                                    None => {
-                                        let intent_params = serde_json::json!({
-                                            "content": response_text,
-                                            "message_id": message_id,
-                                        });
-                                        match grpc_client.send_intent(reply_target, "agent_response", intent_params, false).await {
-                                            Ok(_) => tracing::debug!("Response sent to {}", reply_target),
-                                            Err(e) => tracing::error!("Failed to send response: {}", e),
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Agent error: {}", e);
-
-                                // Route error through chunk channel for ordering guarantee
-                                match chunk_tx_for_done {
-                                    Some(ref tx) => {
-                                        let event = crate::agent::loop_::ChunkEvent::Error {
-                                            message: format!("Error: {}", e),
-                                            message_id: message_id.clone(),
-                                        };
-                                        if tx.send(event).await.is_err() {
-                                            tracing::error!("Error event send via chunk channel failed");
-                                        }
-                                    }
-                                    None => {
-                                        let error_params = serde_json::json!({
-                                            "content": format!("Error: {}", e),
-                                            "message_id": message_id,
-                                        });
-                                        let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
-                                    }
-                                }
-                            }
+                        // Pure routing: send to session's inbound channel, immediately return
+                        if let Err(e) = session_manager.send_to_session(&target_session_id, SessionMessage::ChatMessage {
+                            content,
+                            message_id: message_id.clone(),
+                        }) {
+                            tracing::error!("Failed to route message to session {}: {}", target_session_id, e);
+                            let error_params = serde_json::json!({
+                                "content": format!("Session not found: {}", target_session_id),
+                                "message_id": message_id,
+                            });
+                            let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
                         }
                     }
-                    // Ignore other push messages (CapabilityUpdate, etc.)
                     GatewayResponse::LLMConfigDelivery { provider, model, api_key, base_url, models: available_models, model_capabilities, max_output_tokens_limit, protocol_type, .. } => {
                         tracing::info!(
                             provider = %provider,
                             model = ?model,
                             max_output_tokens_limit = max_output_tokens_limit,
-                            "Received LLMConfigDelivery at runtime — updating provider"
+                            "Received LLMConfigDelivery at runtime — broadcasting to all sessions"
                         );
-                        let new_provider = crate::providers::router::create_provider(
-                            &provider,
-                            &protocol_type,
-                            Some(&api_key),
-                            base_url.as_deref(),
-                        );
+
                         // Model resolution: prefer explicit model > first from user-selected models
-                        // If neither is available, refuse service — Runtime cannot guess.
-                        let resolved = model
+                        let resolved_model = model
                             .or_else(|| available_models.first().cloned())
                             .unwrap_or_else(|| {
                                 tracing::error!(
@@ -1106,14 +1226,25 @@ async fn run_gateway_loop(
                                 );
                                 format!("NO_MODEL_FOR_{}", provider.to_uppercase())
                             });
-                        agent_loop.update_provider(new_provider, resolved);
 
-                        // Sync updated model capabilities if provided by Gateway
-                        // AgentLoop is the sole holder; ContextBuilder receives at build() time
-                        if let Some(caps) = model_capabilities {
-                            agent_loop.update_gateway_model_capabilities(caps);
+                        // Broadcast provider update to all active sessions
+                        for sid in session_manager.active_sessions() {
+                            let _ = session_manager.send_to_session(&sid, SessionMessage::UpdateProvider {
+                                provider_name: provider.clone(),
+                                protocol_type: protocol_type.clone(),
+                                api_key: Some(api_key.clone()),
+                                base_url: base_url.clone(),
+                                model: resolved_model.clone(),
+                            });
+                            if let Some(ref caps) = model_capabilities {
+                                let _ = session_manager.send_to_session(&sid, SessionMessage::UpdateCapabilities {
+                                    caps: caps.clone(),
+                                });
+                            }
+                            let _ = session_manager.send_to_session(&sid, SessionMessage::UpdateMaxOutputTokens {
+                                limit: max_output_tokens_limit,
+                            });
                         }
-                        agent_loop.update_max_output_tokens_limit(max_output_tokens_limit);
                     }
                     GatewayResponse::WorkspaceContextUpdate {
                         context_text,
@@ -1123,9 +1254,9 @@ async fn run_gateway_loop(
                         tracing::info!(
                             current_id = ?current_workspace_id,
                             current_path = ?current_workspace_path,
-                            "Received WorkspaceContextUpdate from Gateway — updating workspace context"
+                            "Received WorkspaceContextUpdate from Gateway — broadcasting to all sessions"
                         );
-                        context_builder.set_workspace_context(context_text);
+                        session_manager.broadcast(SessionMessage::UpdateWorkspaceContext { context_text });
                     }
                     GatewayResponse::LogLevelUpdate { log_level } => {
                         tracing::info!(
@@ -1327,6 +1458,8 @@ async fn handle_get_session_messages(
 /// way to activate a new session — creating a ConversationSession without
 /// calling switch_conversation would cause messages to still be written to
 /// the old JSONL file (P0 bug fixed in ADR-session-fix).
+#[allow(dead_code)]
+// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
 async fn handle_create_session(
     work_dir: &str,
     agent_id: &str,
@@ -1418,6 +1551,8 @@ async fn handle_get_current_session_id(
 /// Without this, switching sessions on the frontend only updates UI state —
 /// the Runtime keeps writing to whatever session it had active, causing the
 /// "messages in wrong session" bug.
+#[allow(dead_code)]
+// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
 async fn handle_activate_session(
     work_dir: &str,
     agent_loop: &mut crate::agent::loop_::AgentLoop,
@@ -1481,6 +1616,8 @@ async fn handle_activate_session(
 /// Unlike `set_title` (which only sets once from the first user message),
 /// this always writes the title — used by the HTTP API for manual/programmatic
 /// title updates that persist in the JSONL metadata.
+#[allow(dead_code)]
+// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
 async fn handle_update_session_title(
     agent_loop: &mut crate::agent::loop_::AgentLoop,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
@@ -1536,6 +1673,8 @@ async fn handle_update_session_title(
 ///
 /// Deletes the session's JSONL file. If the deleted session is the currently
 /// active one, creates a new session and switches to it automatically.
+#[allow(dead_code)]
+// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
 async fn handle_delete_session(
     work_dir: &str,
     agent_loop: &mut crate::agent::loop_::AgentLoop,
