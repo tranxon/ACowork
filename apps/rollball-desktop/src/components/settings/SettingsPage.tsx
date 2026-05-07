@@ -1161,7 +1161,18 @@ function ProvidersTab() {
 
 /** Appearance settings */
 function AppearanceTab() {
-  const { theme, setTheme, fontSize, setFontSize } = useSettingsStore();
+  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth } = useSettingsStore();
+
+  // Content width options: 40-100%, step 10
+  const contentWidths = [
+    { label: "40%", value: 40 },
+    { label: "50%", value: 50 },
+    { label: "60%", value: 60 },
+    { label: "70%", value: 70 },
+    { label: "80%", value: 80 },
+    { label: "90%", value: 90 },
+    { label: "100%", value: 100 },
+  ];
 
   // Font size options: M = previous default (text-sm = 0.875rem)
   const fontSizes = [
@@ -1194,6 +1205,27 @@ function AppearanceTab() {
       </div>
 
       <div>
+        <h2 className="mb-3 text-sm font-medium">Content Width</h2>
+        <p className="mb-2 text-xs text-zinc-500">聊天消息、工具调用、Thinking 的最大显示宽度</p>
+        <div className="flex gap-1">
+          {contentWidths.map((cw) => (
+            <button
+              key={cw.label}
+              onClick={() => setContentWidth(cw.value)}
+              className={cn(
+                "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
+                contentWidth === cw.value
+                  ? "border-zinc-800 bg-zinc-800 text-white dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-900"
+                  : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800",
+              )}
+            >
+              {cw.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
         <h2 className="mb-3 text-sm font-medium">Font Size</h2>
         <div className="flex gap-1">
           {fontSizes.map((fs) => (
@@ -1214,7 +1246,7 @@ function AppearanceTab() {
       </div>
 
       <button
-        onClick={() => { setTheme("system"); setFontSize(1.0); }}
+        onClick={() => { setTheme("system"); setFontSize(1.0); setContentWidth(80); }}
         className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
       >
         Reset to defaults

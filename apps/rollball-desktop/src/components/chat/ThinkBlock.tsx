@@ -55,7 +55,7 @@ export function ThinkBlock({ content, isStreaming: _isStreaming, startTime, endT
       {expanded && (
         <div
           ref={contentRef}
-          className="ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-sm text-zinc-600 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-y-auto"
+          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-sm text-zinc-600 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-y-auto"
           style={{ maxHeight: `${MAX_VISIBLE_LINES * LINE_HEIGHT_REM}rem` }}
         >
           <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert">

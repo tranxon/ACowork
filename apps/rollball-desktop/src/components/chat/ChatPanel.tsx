@@ -431,7 +431,7 @@ export function ChatPanel() {
           </div>
           {/* Iteration limit pause — Continue button */}
           {iterationLimitPaused && (
-            <div className="flex items-center justify-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/20">
+            <div className="flex w-fit items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/20">
               <span className="text-sm text-amber-700 dark:text-amber-300">
                 Iteration limit reached ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
               </span>
@@ -761,7 +761,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
       {/* Collapsed/Summary card */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-fit max-w-[85%] items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        className="flex w-fit max-w-[min(var(--content-max-width),900px)] items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
       >
         <Icon className="h-4 w-4 shrink-0 text-zinc-400" />
         <span className="font-medium">
@@ -789,7 +789,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
                 {/* Tool call row */}
                 <button
                   onClick={() => setExpandedItem(isExpanded ? null : idx)}
-                  className="flex w-fit max-w-[85%] items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                  className="flex w-fit max-w-[min(var(--content-max-width),900px)] items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800"
                 >
                   <Wrench className="h-3 w-3 shrink-0" />
                   <span className="font-medium">{call.toolName}</span>
@@ -834,7 +834,7 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
                           <Check className="h-3 w-3" />
                           Result ({result.content.length} chars)
                         </div>
-                        <pre className="w-fit max-w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-emerald-50/30 p-2 text-[10px] text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400">
+                        <pre className="w-fit max-w-full overflow-x-auto whitespace-pre-wrap break-all rounded bg-zinc-50 p-2 text-[10px] text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
                           {result.content.length > 500 
                             ? result.content.substring(0, 500) + "\n\n... (truncated)"
                             : result.content
@@ -964,9 +964,9 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <MessageContentWrapper>
         <div className="flex justify-start">
-          <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 dark:bg-zinc-800 dark:text-zinc-200 select-text" style={fontSizeStyle}>
+          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
             {message.content && (
-              <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert select-text" style={fontSizeStyle}>
+              <div className="prose prose-sm prose-zinc max-w-none prose-headings:my-2 prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold dark:prose-invert select-text" style={fontSizeStyle}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
               </div>
             )}
@@ -984,7 +984,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <MessageContentWrapper>
         <div className="flex justify-start">
-          <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200 select-text">
+          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200 select-text break-words">
             <ThinkBlock
               content={message.content}
               isStreaming={isStreaming}
@@ -1014,7 +1014,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <div className="flex justify-start">
         <button
-          className="flex w-fit max-w-[85%] items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="flex w-fit max-w-[min(var(--content-max-width),900px)] items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
           onClick={() => setExpanded(!expanded)}
         >
           <Wrench className="mt-0.5 h-3 w-3 shrink-0" />
@@ -1031,7 +1031,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
       <MessageContentWrapper>
         <div className="flex justify-start">
           <button
-            className="flex w-full max-w-[85%] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="flex w-full max-w-[min(var(--content-max-width),900px)] items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
             onClick={() => setExpanded(!expanded)}
           >
             <Wrench className="h-3 w-3 shrink-0" />
@@ -1041,7 +1041,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
             {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
           </button>
           {expanded && (
-            <pre className="mt-1 max-w-[85%] overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400 select-text">
+            <pre className="mt-1 max-w-[min(var(--content-max-width),900px)] overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400 select-text">
               {message.content}
             </pre>
           )}

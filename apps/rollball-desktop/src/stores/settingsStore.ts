@@ -5,6 +5,7 @@ import { DEFAULT_GATEWAY_URL } from "../lib/config";
 const STORAGE_KEY_THEME = "rollball-theme";
 const STORAGE_KEY_FONT_SIZE = "rollball-font-size";
 const STORAGE_KEY_LOG_LEVEL = "rollball-log-level";
+const STORAGE_KEY_CONTENT_WIDTH = "rollball-content-width";
 
 /** Apply theme to DOM by toggling .dark class on <html> */
 function applyTheme(theme: Theme) {
@@ -22,6 +23,11 @@ function applyTheme(theme: Theme) {
 /** Apply fontSize to CSS custom property on root */
 function applyFontSize(size: number) {
   document.documentElement.style.setProperty("--ui-font-size", `${size}rem`);
+}
+
+/** Apply contentWidth to CSS custom property on root */
+function applyContentWidth(width: number) {
+  document.documentElement.style.setProperty("--content-max-width", `${width}%`);
 }
 
 /** Read persisted theme from localStorage, fallback to "system" */
@@ -56,13 +62,27 @@ function getPersistedLogLevel(): string {
   return "info";
 }
 
+/** Read persisted content width from localStorage, fallback to 80 */
+function getPersistedContentWidth(): number {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_CONTENT_WIDTH);
+    if (stored) {
+      const val = parseInt(stored, 10);
+      if (!isNaN(val) && val >= 40 && val <= 100) return val;
+    }
+  } catch {}
+  return 80;
+}
+
 interface SettingsStore {
   theme: Theme;
   fontSize: number;
+  contentWidth: number;
   gatewayUrl: string;
   logLevel: string;
   setTheme: (theme: Theme) => void;
   setFontSize: (size: number) => void;
+  setContentWidth: (width: number) => void;
   setGatewayUrl: (url: string) => void;
   setLogLevel: (level: string) => void;
 }
@@ -72,12 +92,15 @@ export const useSettingsStore = create<SettingsStore>((set) => {
   const initialTheme = getPersistedTheme();
   const initialFontSize = getPersistedFontSize();
   const initialLogLevel = getPersistedLogLevel();
+  const initialContentWidth = getPersistedContentWidth();
   applyTheme(initialTheme);
   applyFontSize(initialFontSize);
+  applyContentWidth(initialContentWidth);
 
   return {
     theme: initialTheme,
     fontSize: initialFontSize,
+    contentWidth: initialContentWidth,
     gatewayUrl: DEFAULT_GATEWAY_URL,
     logLevel: initialLogLevel,
 
@@ -91,6 +114,12 @@ export const useSettingsStore = create<SettingsStore>((set) => {
       applyFontSize(fontSize);
       try { localStorage.setItem(STORAGE_KEY_FONT_SIZE, String(fontSize)); } catch {}
       set({ fontSize });
+    },
+
+    setContentWidth: (contentWidth) => {
+      applyContentWidth(contentWidth);
+      try { localStorage.setItem(STORAGE_KEY_CONTENT_WIDTH, String(contentWidth)); } catch {}
+      set({ contentWidth });
     },
 
     setGatewayUrl: (gatewayUrl) => set({ gatewayUrl }),
