@@ -11,6 +11,7 @@
 //! | http_request | network:<url> |
 //! | web_fetch | network:<url> |
 //! | web_search | search:web |
+//! | bash | filesystem:exec |\n//! | powershell | filesystem:exec |
 //! | shell | filesystem:exec |
 //! | file_read | filesystem:read:<path> |
 //! | file_write | filesystem:write:<path> |
@@ -43,7 +44,11 @@ pub mod rag_query;
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
 
-/// Create the standard 15 built-in tools (without RAG)
+/// Create the standard built-in tools (without RAG).
+///
+/// Shell tools are registered dynamically based on platform detection:
+/// - Windows: Git Bash (bash) + PowerShell, or just PowerShell if Git not found
+/// - Linux/macOS: Single "shell" tool using system shell
 ///
 /// # Arguments
 /// * `work_dir` - Working directory for filesystem/shell tools
@@ -52,13 +57,27 @@ pub fn all_builtin_tools(
     work_dir: &str,
     agent_id: &str,
 ) -> Vec<Arc<dyn Tool>> {
-    let tools: Vec<Arc<dyn Tool>> = vec![
+    // Register shell tools based on platform detection
+    let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
+        .into_iter()
+        .map(|s| {
+            Arc::new(shell::ShellTool::new(
+                &s.tool_name,
+                &s.display_name,
+                &s.binary,
+                &s.path,
+                &s.arg,
+                work_dir,
+            )) as Arc<dyn Tool>
+        })
+        .collect();
+
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(memory_recall::MemoryRecallTool::new(agent_id)),
         Arc::new(memory_store::MemoryStoreTool::new(agent_id)),
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::new()),
         Arc::new(web_search::WebSearchTool::new()),
-        Arc::new(shell::ShellTool::new(work_dir)),
         Arc::new(file_read::FileReadTool::new(work_dir)),
         Arc::new(file_write::FileWriteTool::new(work_dir)),
         Arc::new(file_edit::FileEditTool::new(work_dir)),
@@ -69,5 +88,8 @@ pub fn all_builtin_tools(
         Arc::new(identity_query::IdentityQueryTool::new(agent_id)),
         Arc::new(identity_observe::IdentityObserveTool::new(agent_id)),
     ];
+
+    // Append platform-specific shell tools
+    tools.extend(shell_tools);
     tools
 }

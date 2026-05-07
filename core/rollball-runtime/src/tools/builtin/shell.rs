@@ -1,26 +1,91 @@
 //! Shell command execution tool
+//!
+//! Platform-aware shell registration: on Windows, Git Bash and PowerShell are
+//! registered as separate tools so the LLM can prefer bash and fall back to
+//! PowerShell. On Linux/macOS, a single "shell" tool uses the system shell.
+//!
+//! Runtime safety: each invocation checks whether the shell binary still exists
+//! (e.g. user uninstalled Git) and returns an LLM-actionable error pointing to
+//! the fallback tool instead of a cryptic "command not found".
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
+use std::path::Path;
 
-/// Shell tool — executes commands in the system shell
+/// A concrete shell executor registered as a tool.
+///
+/// Different instances represent different shells (bash, powershell, etc.)
+/// so the LLM sees distinct tools with distinct descriptions and can make
+/// informed choices about which to use.
 pub struct ShellTool {
+    /// Tool name exposed to LLM (e.g. "bash", "powershell", "shell")
+    tool_name: String,
+    /// Human-readable shell identifier for error messages
+    shell_name: String,
+    /// Shell binary to invoke (e.g. "bash", "pwsh", "/bin/zsh")
+    shell_binary: String,
+    /// Full path resolved at registration time (used for existence check)
+    shell_path: String,
+    /// CLI flag for passing a command string (e.g. "-c", "-Command")
+    shell_arg: String,
+    /// Working directory for command execution
     work_dir: String,
 }
 
 impl ShellTool {
-    /// Create a new shell tool with the given working directory
-    pub fn new(work_dir: &str) -> Self {
+    /// Create a shell tool with explicit binary path.
+    ///
+    /// `shell_path` is the fully-resolved path used for existence checks.
+    /// `shell_binary` is what's passed to `std::process::Command::new()`.
+    pub fn new(
+        tool_name: &str,
+        shell_name: &str,
+        shell_binary: &str,
+        shell_path: &str,
+        shell_arg: &str,
+        work_dir: &str,
+    ) -> Self {
         Self {
+            tool_name: tool_name.to_string(),
+            shell_name: shell_name.to_string(),
+            shell_binary: shell_binary.to_string(),
+            shell_path: shell_path.to_string(),
+            shell_arg: shell_arg.to_string(),
             work_dir: work_dir.to_string(),
         }
     }
 
-    fn spec_value() -> ToolSpec {
+    /// Build the ToolSpec with a platform-appropriate description.
+    ///
+    /// Bash tools get Unix-style guidance; PowerShell tools get Windows-style
+    /// guidance so the LLM produces syntactically correct commands.
+    fn build_spec(&self) -> ToolSpec {
+        let description = match self.tool_name.as_str() {
+            "bash" => format!(
+                "Execute a command in Git Bash (Unix-style shell on Windows). \
+                 Supports standard Unix commands (ls, grep, find, cat, etc.) \
+                 and Unix path conventions (/c/Users/...). \
+                 {}",
+                self.fallback_hint()
+            ),
+            "powershell" => format!(
+                "Execute a command in {} ({}). \
+                 Supports PowerShell cmdlets and Windows conventions. \
+                 Use this if 'bash' is unavailable or for Windows-specific tasks. \
+                 {}",
+                self.shell_name, self.shell_binary,
+                self.fallback_hint()
+            ),
+            _ => format!(
+                "Execute a command in {} ({}). Use with caution.",
+                self.shell_name, self.shell_binary
+            ),
+        };
+
         ToolSpec {
-            name: "shell".to_string(),
-            description: "Execute a shell command and return the output. Use with caution.".to_string(),
+            name: self.tool_name.clone(),
+            description,
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -33,12 +98,48 @@ impl ShellTool {
             }),
         }
     }
+
+    /// Hint about fallback tools when this shell is unavailable at runtime.
+    fn fallback_hint(&self) -> String {
+        match self.tool_name.as_str() {
+            "bash" => "If this tool returns an error about 'bash' not found, \
+                       use the 'powershell' tool instead — Git Bash may have \
+                       been uninstalled or moved.".to_string(),
+            "powershell" => "If this tool returns an error about 'powershell' not found, \
+                             try the 'bash' tool if available.".to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Check whether the shell binary still exists on disk.
+    ///
+    /// Covers the case where Git (bash.exe) or PowerShell was uninstalled
+    /// after the agent process started.
+    fn binary_exists(&self) -> bool {
+        // Fast path: check the resolved path from registration time
+        if Path::new(&self.shell_path).exists() {
+            return true;
+        }
+        // Slow path: try executing a trivial command using the shell's own
+        // argument convention. This is the same approach used by detect_shell()
+        // and is more reliable than `where`/`which` on Windows where PowerShell
+        // may be registered differently.
+        let test_cmd = if cfg!(windows) { "echo ok" } else { "true" };
+        std::process::Command::new(&self.shell_binary)
+            .arg(&self.shell_arg)
+            .arg(test_cmd)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 #[async_trait]
 impl Tool for ShellTool {
     fn spec(&self) -> ToolSpec {
-        Self::spec_value()
+        self.build_spec()
     }
 
     async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
@@ -53,20 +154,47 @@ impl Tool for ShellTool {
             });
         }
 
-        // Use runtime-detected shell (pwsh > powershell > cmd on Windows, $SHELL on Unix)
-        let shell_info = crate::platform::detected_shell();
-        let (shell, shell_arg) = (shell_info.binary, shell_info.arg);
+        // Runtime existence check — handles post-startup uninstall of Git/PowerShell
+        if !self.binary_exists() {
+            let hint = self.fallback_hint();
+            let error_msg = if hint.is_empty() {
+                format!(
+                    "Shell binary '{}' ({}) not found. \
+                     This may happen if the shell was uninstalled or moved. \
+                     This command was NOT executed: {}",
+                    self.shell_name, self.shell_path, command
+                )
+            } else {
+                format!(
+                    "Shell binary '{}' ({}) not found. {} \
+                     This command was NOT executed: {}",
+                    self.shell_name, self.shell_path, hint, command
+                )
+            };
+            tracing::warn!(
+                tool = %self.tool_name,
+                shell_binary = %self.shell_binary,
+                shell_path = %self.shell_path,
+                "shell: binary not found at runtime"
+            );
+            return Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some(error_msg),
+                token_usage: None,
+            });
+        }
 
         tracing::debug!(
             command = %command,
-            shell = %shell,
+            shell = %self.shell_binary,
             work_dir = %self.work_dir,
             "shell: executing command"
         );
 
-        let output = tokio::process::Command::new(shell)
-            .arg(shell_arg)
-            .arg(command)
+        let output = tokio::process::Command::new(&self.shell_binary)
+            .arg(&self.shell_arg)
+            .arg(&command)
             .current_dir(&self.work_dir)
             .output()
             .await;
@@ -85,7 +213,14 @@ impl Tool for ShellTool {
                 Ok(ToolResult {
                     ok: output.status.success(),
                     content,
-                    error: if output.status.success() { None } else { Some(format!("Exit code: {}", output.status.code().unwrap_or(-1))) },
+                    error: if output.status.success() {
+                        None
+                    } else {
+                        Some(format!(
+                            "Exit code: {}",
+                            output.status.code().unwrap_or(-1)
+                        ))
+                    },
                     token_usage: None,
                 })
             }
@@ -103,5 +238,79 @@ impl Tool for ShellTool {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool(name: &str, binary: &str) -> ShellTool {
+        ShellTool::new(name, name, binary, binary, "-c", "/tmp")
+    }
+
+    #[tokio::test]
+    async fn test_missing_command_parameter() {
+        let tool = make_tool("bash", "bash");
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Missing 'command'"));
+    }
+
+    #[tokio::test]
+    async fn test_empty_command_parameter() {
+        let tool = make_tool("bash", "bash");
+        let result = tool.execute(serde_json::json!({"command": ""})).await.unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Missing 'command'"));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_binary_missing_error_includes_hint() {
+        // Use a binary name that definitely does not exist
+        let tool = ShellTool::new(
+            "bash",
+            "Git Bash",
+            "definitely_does_not_exist_shell_xyz",
+            "/definitely/not/a/real/path/bash.exe",
+            "-c",
+            "/tmp",
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello"}))
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.unwrap();
+        assert!(err.contains("not found"), "Error should mention binary not found: {}", err);
+        assert!(err.contains("powershell"), "Error should hint at fallback tool: {}", err);
+        assert!(err.contains("NOT executed"), "Error should state command was not executed: {}", err);
+    }
+
+    #[tokio::test]
+    async fn test_valid_command_executes() {
+        // Use detected_shells() which provides the fully-resolved path
+        let shells = crate::platform::detected_shells();
+        let primary = shells.first()
+            .expect("Should have at least one available shell");
+
+        let tool = ShellTool::new(
+            &primary.tool_name,
+            &primary.display_name,
+            &primary.binary,
+            &primary.path,
+            &primary.arg,
+            ".",
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello_rollball"}))
+            .await
+            .unwrap();
+        assert!(result.ok, "echo should succeed: {:?}", result.error);
+        assert!(
+            result.content.contains("hello_rollball"),
+            "Output should contain echo text: {}",
+            result.content
+        );
     }
 }
