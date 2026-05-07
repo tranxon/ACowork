@@ -246,7 +246,8 @@ mod tests {
 /// platform detector registered "bash" + "powershell", they should still pass
 /// the activation filter.
 fn is_shell_alias(tool_name: &str, manifest: &AgentManifest) -> bool {
-    matches!(tool_name, "bash" | "powershell" | "shell") && manifest.has_tool("shell")
+    matches!(tool_name, "bash" | "powershell" | "pwsh" | "shell")
+        && (manifest.has_tool("shell") || manifest.has_tool("pwsh"))
 }
 
 /// Load workspace directories from `.agent_workspaces.json`
