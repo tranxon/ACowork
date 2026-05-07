@@ -294,32 +294,44 @@ pub fn build_tool_definitions(
     /// Shell tool names that are interchangeable in manifest declarations.
     const SHELL_NAMES: &[&str] = &["shell", "bash", "powershell"];
 
+    // No tool declarations → all tools available (consistent with Registry.activate)
+    if manifest.tools.is_empty() {
+        return tool_specs.iter().map(|(_, schema)| schema.clone()).collect();
+    }
+
     let has_shell_decl = manifest.tools.iter().any(|t| SHELL_NAMES.contains(&t.name.as_str()));
 
-    let mut defs: Vec<serde_json::Value> = manifest
-        .tools
-        .iter()
-        .filter_map(|decl| {
-            // Direct match
-            if let Some(spec) = tool_specs.iter().find(|(name, _)| name == &decl.name) {
-                return Some(spec.1.clone());
-            }
-            // Shell alias: "shell" in manifest → match "bash"/"powershell" specs
-            if SHELL_NAMES.contains(&decl.name.as_str()) {
-                return tool_specs
-                    .iter()
-                    .find(|(name, _)| SHELL_NAMES.contains(&name.as_str()))
-                    .map(|(_, schema)| schema.clone());
-            }
-            None
-        })
-        .collect();
+    let mut defs: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-    // Plus any shell specs that exist but weren't explicitly declared
+    // First pass: add exact matches for declared tools (with shell aliasing)
+    for decl in &manifest.tools {
+        let name = decl.name.as_str();
+        if seen.contains(name) {
+            continue;
+        }
+        // Direct match
+        if let Some((_, schema)) = tool_specs.iter().find(|(n, _)| n == name) {
+            seen.insert(name);
+            defs.push(schema.clone());
+        } else if SHELL_NAMES.contains(&name) {
+            // Shell alias: any shell name in manifest → all available shell specs
+            for (n, schema) in tool_specs {
+                if SHELL_NAMES.contains(&n.as_str()) && !seen.contains(n.as_str()) {
+                    seen.insert(n.as_str());
+                    defs.push(schema.clone());
+                }
+            }
+        }
+    }
+
+    // Second pass: if manifest has shell declaration, also include any shell
+    // specs not captured above (e.g. manifest says "bash" but "powershell"
+    // is also available)
     if has_shell_decl {
-        let declared: Vec<&str> = manifest.tools.iter().map(|t| t.name.as_str()).collect();
         for (name, schema) in tool_specs {
-            if SHELL_NAMES.contains(&name.as_str()) && !declared.contains(&name.as_str()) {
+            if SHELL_NAMES.contains(&name.as_str()) && !seen.contains(name.as_str()) {
+                seen.insert(name.as_str());
                 defs.push(schema.clone());
             }
         }
