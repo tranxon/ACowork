@@ -1004,8 +1004,14 @@ impl AgentLoop {
                                     if serde_json::from_str::<serde_json::Value>(args).is_ok() {
                                         tc.function.arguments = args.clone();
                                     } else {
-                                        tracing::error!(tool_name = %tc.function.name, index = i, raw_args = %args, "Accumulated tool call arguments are not valid JSON, discarding");
-                                        tc.function.arguments = "{}".to_string();
+                                        tracing::error!(
+                                            tool_name = %tc.function.name,
+                                            index = i,
+                                            raw_len = args.len(),
+                                            raw_preview = %&args[..args.len().min(200)],
+                                            "Accumulated tool call arguments are not valid JSON"
+                                        );
+                                        tc.function.arguments = make_incomplete_marker(&tc.function.name, args.len());
                                     }
                                 }
                                 // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
@@ -1064,8 +1070,14 @@ impl AgentLoop {
                         tracing::info!(tool_name = %tc.function.name, index = i, accumulated_len = args.len(), "Applying accumulated arguments to tool call");
                         tc.function.arguments = args.clone();
                     } else {
-                        tracing::error!(tool_name = %tc.function.name, index = i, raw_args = %args, "Accumulated tool call arguments are not valid JSON, discarding");
-                        tc.function.arguments = "{}".to_string();
+                        tracing::error!(
+                            tool_name = %tc.function.name,
+                            index = i,
+                            raw_len = args.len(),
+                            raw_preview = %&args[..args.len().min(200)],
+                            "Accumulated tool call arguments are not valid JSON"
+                        );
+                        tc.function.arguments = make_incomplete_marker(&tc.function.name, args.len());
                     }
                 }
                 // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
@@ -1285,6 +1297,41 @@ async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> S
     let tool_name = &tool_call.function.name;
     let params_str = &tool_call.function.arguments;
 
+    // Parse arguments before tool lookup — we need to detect the
+    // TOOL_CALL_INCOMPLETE marker (valid JSON injected by streaming assembler)
+    // and reject genuinely unparseable arguments (e.g. LLM hallucinated output).
+    // Early return on parse failure avoids the old silent "{}" degradation
+    // that caused LLM retry loops.
+    let params: serde_json::Value = match serde_json::from_str(params_str) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                tool = %tool_name,
+                params_len = params_str.len(),
+                params_preview = %&params_str[..params_str.len().min(200)],
+                error = %e,
+                "Failed to parse tool call arguments as JSON — returning error to LLM"
+            );
+            return format!(
+                "Error: Tool '{}' arguments are not valid JSON and could not be parsed: {}. \
+                 This call was NOT executed. \
+                 Arguments preview (first 200 bytes): {}",
+                tool_name, e,
+                &params_str[..params_str.len().min(200)]
+            );
+        }
+    };
+
+    // Detect truncated/incomplete tool calls: the streaming assembler injects a
+    // special error marker when arguments are truncated. Skip actual execution
+    // and return a clear error so the LLM knows to regenerate (not retry blindly).
+    if let Some("TOOL_CALL_INCOMPLETE") = params.get("error").and_then(|v| v.as_str()) {
+        return params.get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Tool call arguments were truncated during streaming")
+            .to_string();
+    }
+
     // Find the tool
     let tool = tools.iter().find(|t| {
         let spec = t.spec();
@@ -1293,17 +1340,6 @@ async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> S
 
     match tool {
         Some(tool) => {
-            let params: serde_json::Value = serde_json::from_str(params_str)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool = %tool_name,
-                        params_str = %params_str,
-                        error = %e,
-                        "Failed to parse tool call arguments as JSON, using empty object"
-                    );
-                    serde_json::Value::Object(Default::default())
-                });
-    
             match tool.execute(params).await {
                 Ok(result) => {
                     if result.ok {
@@ -1317,6 +1353,29 @@ async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> S
         }
         None => format!("Unknown tool: {tool_name}"),
     }
+}
+
+/// Build a structured error marker for truncated/incomplete tool call arguments.
+///
+/// Returns valid JSON that `execute_single_tool` can parse and detect,
+/// causing it to skip actual tool execution and return a clear error message
+/// to the LLM. This avoids the "empty `{}`" silent degradation that previously
+/// caused LLM retry loops.
+///
+/// IMPORTANT: The message string is a *prompt-level* constraint, not a code-level
+/// guarantee — its effectiveness depends on the LLM's ability to follow instructions.
+fn make_incomplete_marker(tool_name: &str, raw_len: usize) -> String {
+    serde_json::json!({
+        "error": "TOOL_CALL_INCOMPLETE",
+        "message": format!(
+            "Tool '{}' arguments were truncated during streaming \
+             (received {} bytes, invalid JSON). \
+             This call was NOT executed — do NOT retry with the same call. \
+             If the task requires this tool, generate the full arguments in a new call.",
+            tool_name, raw_len
+        )
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -2461,5 +2520,82 @@ mod tests {
         // Second tool (shell) should have permission denied
         assert!(tool_results[1].content.contains("Permission denied"),
             "Shell tool should have permission denied: {}", tool_results[1].content);
+    }
+
+    // ── S1.9: Tool call argument robustness tests ──────────────────────
+
+    /// Verify that TOOL_CALL_INCOMPLETE marker is detected and tool execution
+    /// is skipped, returning the embedded message to the LLM.
+    #[tokio::test]
+    async fn test_incomplete_tool_call_skipped() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+
+        // Simulate the marker that the streaming assembler injects
+        let incomplete_args = make_incomplete_marker("echo", 42);
+        let tc = ToolCall {
+            id: "call_incomplete".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "echo".to_string(),
+                arguments: incomplete_args.clone(),
+            },
+        };
+
+        let result = execute_single_tool(&tools, &tc).await;
+
+        // Must NOT contain "Echo:" — tool was never called
+        assert!(!result.contains("Echo:"), "Tool should NOT be executed, got: {}", result);
+        // Must contain the error message from the marker
+        assert!(result.contains("truncated during streaming"),
+            "Result should explain truncation: {}", result);
+        assert!(result.contains("NOT executed"),
+            "Result should state it was NOT executed: {}", result);
+    }
+
+    /// Verify that genuinely unparseable JSON (e.g. LLM hallucinated output)
+    /// does not silently degrade to {} — it returns a clear error.
+    #[tokio::test]
+    async fn test_invalid_json_tool_call_error() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+
+        // Simulate LLM producing broken JSON (not from streaming truncation)
+        let tc = ToolCall {
+            id: "call_broken".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "echo".to_string(),
+                arguments: r#"{"message": "hello"#.to_string(), // missing closing brace
+            },
+        };
+
+        let result = execute_single_tool(&tools, &tc).await;
+
+        // Must NOT execute the tool
+        assert!(!result.contains("Echo:"), "Tool should NOT be executed on invalid JSON, got: {}", result);
+        // Must contain error explanation
+        assert!(result.contains("not valid JSON"),
+            "Result should explain JSON parse failure: {}", result);
+        assert!(result.contains("NOT executed"),
+            "Result should state it was NOT executed: {}", result);
+    }
+
+    /// Verify that valid JSON tool arguments execute normally (regression test
+    /// for the INCOMPLETE/invalid-JSON guard).
+    #[tokio::test]
+    async fn test_valid_json_tool_call_executes_normally() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+
+        let tc = ToolCall {
+            id: "call_ok".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "echo".to_string(),
+                arguments: r#"{"message": "hello world"}"#.to_string(),
+            },
+        };
+
+        let result = execute_single_tool(&tools, &tc).await;
+        assert_eq!(result, "Echo: hello world",
+            "Valid tool call should execute normally, got: {}", result);
     }
 }
