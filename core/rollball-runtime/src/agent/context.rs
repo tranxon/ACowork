@@ -281,21 +281,51 @@ impl ContextBuilder {
     }
 }
 
-/// Build tool definitions from manifest tool declarations
+/// Build tool definitions from manifest tool declarations.
+///
+/// Handles shell tool aliasing: if the manifest declares "shell", "bash",
+/// or "powershell", ALL platform-available shell tool specs are included
+/// (bash + powershell on Windows, shell on Linux/macOS) so the LLM always
+/// sees the full set regardless of which name was declared.
 pub fn build_tool_definitions(
     manifest: &AgentManifest,
     tool_specs: &[(String, serde_json::Value)], // (name, schema) pairs
 ) -> Vec<serde_json::Value> {
-    manifest
+    /// Shell tool names that are interchangeable in manifest declarations.
+    const SHELL_NAMES: &[&str] = &["shell", "bash", "powershell"];
+
+    let has_shell_decl = manifest.tools.iter().any(|t| SHELL_NAMES.contains(&t.name.as_str()));
+
+    let mut defs: Vec<serde_json::Value> = manifest
         .tools
         .iter()
         .filter_map(|decl| {
-            tool_specs
-                .iter()
-                .find(|(name, _)| name == &decl.name)
-                .map(|(_, schema)| schema.clone())
+            // Direct match
+            if let Some(spec) = tool_specs.iter().find(|(name, _)| name == &decl.name) {
+                return Some(spec.1.clone());
+            }
+            // Shell alias: "shell" in manifest → match "bash"/"powershell" specs
+            if SHELL_NAMES.contains(&decl.name.as_str()) {
+                return tool_specs
+                    .iter()
+                    .find(|(name, _)| SHELL_NAMES.contains(&name.as_str()))
+                    .map(|(_, schema)| schema.clone());
+            }
+            None
         })
-        .collect()
+        .collect();
+
+    // Plus any shell specs that exist but weren't explicitly declared
+    if has_shell_decl {
+        let declared: Vec<&str> = manifest.tools.iter().map(|t| t.name.as_str()).collect();
+        for (name, schema) in tool_specs {
+            if SHELL_NAMES.contains(&name.as_str()) && !declared.contains(&name.as_str()) {
+                defs.push(schema.clone());
+            }
+        }
+    }
+
+    defs
 }
 
 #[allow(clippy::items_after_test_module)]
