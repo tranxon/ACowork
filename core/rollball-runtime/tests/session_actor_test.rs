@@ -188,6 +188,7 @@ fn make_session_config(budget: Budget) -> SessionManagerConfig {
         chunk_tx: None,
         tool_definitions: Vec::new(),
         identity_context: None,
+        override_model: None,
     }
 }
 

@@ -73,6 +73,8 @@ pub(crate) struct SessionTask {
     tool_definitions: Vec<serde_json::Value>,
     /// Identity context string injected by Gateway
     identity_context: Option<String>,
+    /// Model override from Gateway (takes precedence over manifest's suggested_model)
+    override_model: Option<String>,
 }
 
 impl SessionTask {
@@ -88,6 +90,7 @@ impl SessionTask {
         session_id: String,
         tool_definitions: Vec<serde_json::Value>,
         identity_context: Option<String>,
+        override_model: Option<String>,
     ) -> Self {
         Self {
             core,
@@ -98,6 +101,7 @@ impl SessionTask {
             session_id,
             tool_definitions,
             identity_context,
+            override_model,
         }
     }
 
@@ -117,6 +121,12 @@ impl SessionTask {
         let mut context_builder = ContextBuilder::new(self.system_prompt.clone())
             .with_identity(self.identity_context.clone())
             .with_tools(self.tool_definitions.clone());
+
+        // Apply Gateway-resolved model override so the first message uses
+        // the correct model (not the manifest's suggested_model fallback).
+        if let Some(ref model) = self.override_model {
+            context_builder = context_builder.with_override_model(model.clone());
+        }
 
         loop {
             let msg = self.inbound_rx.recv().await;

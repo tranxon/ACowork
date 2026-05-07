@@ -41,6 +41,8 @@ pub struct SessionManagerConfig {
     pub tool_definitions: Vec<serde_json::Value>,
     /// Identity context string injected by Gateway for ContextBuilder.
     pub identity_context: Option<String>,
+    /// Model override from Gateway (takes precedence over manifest's suggested_model)
+    pub override_model: Option<String>,
 }
 
 impl Default for SessionManagerConfig {
@@ -60,6 +62,7 @@ impl Default for SessionManagerConfig {
             chunk_tx: None,
             tool_definitions: Vec::new(),
             identity_context: None,
+            override_model: None,
         }
     }
 }
@@ -132,6 +135,7 @@ impl SessionManager {
             session_id.clone(),
             self.config.tool_definitions.clone(),
             self.config.identity_context.clone(),
+            self.config.override_model.clone(),
         );
 
         // Spawn the session task with panic isolation

@@ -128,6 +128,7 @@ fn make_session_config(budget: Budget, chunk_tx: Option<mpsc::Sender<ChunkEvent>
         chunk_tx,
         tool_definitions: vec![],
         identity_context: None,
+        override_model: None,
     }
 }
 

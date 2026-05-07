@@ -413,6 +413,14 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         tracing::info!(count = sessions.len(), "Background session scan complete");
     });
 
+    // Calculate model override for SessionManagerConfig BEFORE grpc_client is moved.
+    // In Gateway mode, the resolved_model takes precedence over manifest.suggested_model.
+    let override_model = if grpc_client.is_some() && resolved_model != loaded.manifest.llm.suggested_model {
+        Some(resolved_model.clone())
+    } else {
+        None
+    };
+
     // Step 9: Run the appropriate loop based on connection mode
     if let Some(mut client) = grpc_client {
         // Gateway mode: create SessionManager for multi-session routing
@@ -454,6 +462,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             chunk_tx,
             tool_definitions: tool_definitions_for_session,
             identity_context: identity_context_for_session,
+            override_model,
         };
 
         let mut session_manager = SessionManager::new(core, session_manager_config);
