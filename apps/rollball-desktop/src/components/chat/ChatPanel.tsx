@@ -901,7 +901,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <MessageContentWrapper>
         <div className="flex justify-end">
-          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-[#9DF29F] px-3 py-2 text-zinc-900 select-text" style={fontSizeStyle}>
+          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-[#9DF29F] px-4 py-2.5 text-zinc-900 select-text" style={fontSizeStyle}>
             {message.content}
           </div>
         </div>
@@ -915,7 +915,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <MessageContentWrapper>
         <div className="flex justify-start">
-          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
             {message.content && (
               <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text" style={fontSizeStyle}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
@@ -935,7 +935,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     return (
       <MessageContentWrapper>
         <div className="flex justify-start">
-          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
             <ThinkBlock
               content={message.content}
               isStreaming={isStreaming}
