@@ -24,10 +24,13 @@ import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 // Module-level: persists across ChatPanel mount/unmount cycles
 // so nav-back (Settings→Chat) doesn't trigger full reinit
 let lastInitAgentId: string | null = null;
+/** Tracks the last session ID for which messages were loaded.
+ *  Prevents redundant reload when remounting after navigation. */
+let lastLoadedSessionId: string | null = null;
 
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
-  const { messages, sending, wsMap, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage, isLoadingSession, loadError } = useChatStore();
+  const { messages, sending, wsMap, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, thinkingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage, isLoadingSession, loadError } = useChatStore();
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
@@ -40,6 +43,10 @@ export function ChatPanel() {
   const isLoadingMoreRef = useRef<boolean>(false);
   const isInitialLoadRef = useRef<boolean>(false);
   const initAbortedRef = useRef(false);
+  /** Tracks previous running state to detect genuine agent stop vs transient remount. */
+  const wasRunningRef = useRef(false);
+  /** True only during the first useEffect run of this mount. */
+  const justMountedRef = useRef(true);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
 
@@ -160,6 +167,11 @@ export function ChatPanel() {
       return;
     }
 
+    // DEFENSIVE: If we reached here for the SAME agent (e.g. remount after
+    // Settings→Chat navigation where selectedAgent?.running was temporarily
+    // falsy), skip all destructive init to preserve WebSocket-streamed messages.
+    const isSameAgentRemount = !!(selectedAgentId && selectedAgentId === lastInitAgentId);
+
     // Remember the current session for the agent we're leaving (saved in store for remount survival)
     const leavingAgentId = lastInitAgentId;
     const leavingSessionId = useSessionStore.getState().currentSessionId;
@@ -167,23 +179,28 @@ export function ChatPanel() {
       useSessionStore.getState().saveSessionForAgent(leavingAgentId, leavingSessionId);
     }
 
-    // 1. Clear current messages from previous agent
-    useChatStore.getState().clearMessages();
-    // 2. Reset session state (sessions, currentSessionId, etc.)
-    useSessionStore.getState().reset();
-    // Clear additional chat state for a clean agent switch
-    useChatStore.setState({
-      hasMoreMessages: false,
-      messageCursor: null,
-      isLoadingMore: false,
-      iterationLimitPaused: null,
-      contextUsage: null,
-      sessionMessagesCache: {},
-    });
+    if (!isSameAgentRemount) {
+      // 1. Clear current messages from previous agent
+      useChatStore.getState().clearMessages();
+      lastLoadedSessionId = null; // Allow reload for new agent/session
+      // 2. Reset session state (sessions, currentSessionId, etc.)
+      useSessionStore.getState().reset();
+      // Clear additional chat state for a clean agent switch
+      useChatStore.setState({
+        hasMoreMessages: false,
+        messageCursor: null,
+        isLoadingMore: false,
+        iterationLimitPaused: null,
+        contextUsage: null,
+        sessionMessagesCache: {},
+      });
+    }
 
     if (selectedAgentId && selectedAgent?.running) {
-      lastInitAgentId = selectedAgentId;
-      connectStream(selectedAgentId, getGatewayUrl());
+      if (!isSameAgentRemount) {
+        lastInitAgentId = selectedAgentId;
+        connectStream(selectedAgentId, getGatewayUrl());
+      }
       // Load model from Gateway API FIRST (reads per-agent .agent_model.json),
       // THEN reload the model list. This ensures currentModel is set before
       // setAvailableModels runs, preventing the fallback-to-first-model bug.
@@ -193,49 +210,58 @@ export function ChatPanel() {
       };
       void initModel();
 
-      // 3. Fetch sessions and 4. restore previously selected session (or latest)
-      const initSession = async () => {
-        isInitialLoadRef.current = true;
-        initAbortedRef.current = false;
+      if (!isSameAgentRemount) {
+        // 3. Fetch sessions and 4. restore previously selected session (or latest)
+        const initSession = async () => {
+          isInitialLoadRef.current = true;
+          initAbortedRef.current = false;
 
-        // Retry fetching sessions until Agent is ready (max 10 attempts, 1s interval)
-        const maxRetries = 10;
-        let sessions = useSessionStore.getState().sessions;
+          // Retry fetching sessions until Agent is ready (max 10 attempts, 1s interval)
+          const maxRetries = 10;
+          let sessions = useSessionStore.getState().sessions;
 
-        for (let i = 0; i < maxRetries; i++) {
-          if (initAbortedRef.current) return;
-          await useSessionStore.getState().fetchSessions(selectedAgentId);
-          sessions = useSessionStore.getState().sessions;
-          if (sessions.length > 0) break;
-          if (i < maxRetries - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
+          for (let i = 0; i < maxRetries; i++) {
+            if (initAbortedRef.current) return;
+            await useSessionStore.getState().fetchSessions(selectedAgentId);
+            sessions = useSessionStore.getState().sessions;
+            if (sessions.length > 0) break;
+            if (i < maxRetries - 1) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
           }
-        }
 
-        if (initAbortedRef.current) return;
+          if (initAbortedRef.current) return;
 
-        if (sessions.length === 0) {
+          if (sessions.length === 0) {
+            isInitialLoadRef.current = false;
+            return;
+          }
+
+          // Restore previously selected session for this agent, fallback to latest
+          const rememberedSessionId = useSessionStore.getState().agentSessionMap[selectedAgentId];
+          const targetSession = rememberedSessionId
+            ? sessions.find((s) => s.session_id === rememberedSessionId) ?? sessions[0]
+            : sessions[0];
+          if (targetSession) {
+            await useChatStore
+              .getState()
+              .loadSessionMessages(selectedAgentId, targetSession.session_id);
+            await useSessionStore.getState().switchSession(targetSession.session_id, selectedAgentId);
+          }
           isInitialLoadRef.current = false;
-          return;
-        }
-
-        // Restore previously selected session for this agent, fallback to latest
-        const rememberedSessionId = useSessionStore.getState().agentSessionMap[selectedAgentId];
-        const targetSession = rememberedSessionId
-          ? sessions.find((s) => s.session_id === rememberedSessionId) ?? sessions[0]
-          : sessions[0];
-        if (targetSession) {
-          await useChatStore
-            .getState()
-            .loadSessionMessages(selectedAgentId, targetSession.session_id);
-          await useSessionStore.getState().switchSession(targetSession.session_id, selectedAgentId);
-        }
-        isInitialLoadRef.current = false;
-      };
-      void initSession();
-    } else {
+        };
+        void initSession();
+      }
+    } else if (!isSameAgentRemount) {
       lastInitAgentId = null;
     }
+    // Only reset lastInitAgentId on genuine agent stop (running true→false
+    // within the same component lifecycle), not during a remount transient.
+    if (!selectedAgent?.running && wasRunningRef.current && !justMountedRef.current) {
+      lastInitAgentId = null;
+    }
+    wasRunningRef.current = selectedAgent?.running ?? false;
+    justMountedRef.current = false;
     return () => {
       initAbortedRef.current = true;
       // Do NOT disconnect the old agent's ws — keep it alive for reuse.
@@ -256,6 +282,12 @@ export function ChatPanel() {
       .getState()
       .sessions.find((s) => s.session_id === currentSessionId);
     if (!session) return;
+
+    // If this session was already loaded (e.g. returning from Settings navigation
+    // while WebSocket was still streaming), skip reload to avoid overwriting
+    // in-flight messages.
+    if (currentSessionId === lastLoadedSessionId) return;
+    lastLoadedSessionId = currentSessionId;
 
     // Mark as initial load to trigger scroll-to-bottom after messages are loaded
     isInitialLoadRef.current = true;
@@ -468,8 +500,8 @@ export function ChatPanel() {
                       <div className="max-w-[min(var(--content-max-width),900px)]">
                         <ThinkBlock
                           content={displayItem.item.content}
-                          isStreaming={displayItem.item.id === streamingMessageId}
-                          hasReplyStarted={displayItem.item.id !== streamingMessageId}
+                          isStreaming={displayItem.item.id === thinkingMessageId}
+                          hasReplyStarted={displayItem.item.id !== thinkingMessageId}
                           startTime={displayItem.item.startTime}
                           endTime={displayItem.item.endTime}
                           defaultExpanded={false}

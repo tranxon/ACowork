@@ -88,6 +88,7 @@ body {
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -101,6 +102,12 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(215.4 16.3% 50%);
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(215.4 16.3% 70%) transparent;
 }
 
 /* Reduced motion */
