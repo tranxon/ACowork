@@ -266,17 +266,19 @@ body {
 .prose hr {
   border-color: hsl(240 5% 88%);
   opacity: 0.6;
+  margin-top: 1.15em;
+  margin-bottom: 1.15em;
 }
 
 .dark .prose hr {
   border-color: hsl(240 5% 25%);
 }
 
-/* ── Chat-context spacing — tighter than article prose ── */
-/* Paragraphs — reduced spacing for chat bubbles */
+/* ── Chat-context spacing — half of prose-sm defaults ── */
+/* Paragraphs */
 .prose p {
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
 }
 
 .prose p:first-child {
@@ -287,24 +289,24 @@ body {
   margin-bottom: 0;
 }
 
-/* Lists — compact spacing */
+/* Lists */
 .prose ul,
 .prose ol {
-  margin-top: 0.4em;
-  margin-bottom: 0.4em;
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
   padding-left: 1.5em;
 }
 
 .prose li {
-  margin-top: 0.15em;
-  margin-bottom: 0.15em;
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
 }
 
-/* Nested lists — even tighter */
+/* Nested lists */
 .prose li > ul,
 .prose li > ol {
-  margin-top: 0.2em;
-  margin-bottom: 0.2em;
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
 }
 
 /* Images — rounded with max constraint */
@@ -314,18 +316,18 @@ body {
   height: auto;
 }
 
-/* Pre + code blocks spacing in chat */
+/* Pre + code blocks spacing */
 .prose pre {
-  margin-top: 0.6em;
-  margin-bottom: 0.6em;
+  margin-top: 0.85em;
+  margin-bottom: 0.85em;
 }
 
-/* Headings spacing — tighter for chat */
+/* Headings spacing */
 .prose h1,
 .prose h2,
 .prose h3,
 .prose h4 {
-  margin-top: 0.8em;
+  margin-top: 1em;
   margin-bottom: 0.4em;
 }
 
@@ -345,11 +347,11 @@ body {
 
 /* Blockquote spacing */
 .prose blockquote {
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
 }
 
 .prose blockquote > p {
-  margin-top: 0.25em;
-  margin-bottom: 0.25em;
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
 }

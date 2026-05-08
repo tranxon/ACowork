@@ -17,6 +17,9 @@ export interface ThinkBlockProps {
 /** Max visible lines in the think content area (overflow scrolls to bottom) */
 const MAX_VISIBLE_LINES = 5;
 const LINE_HEIGHT_REM = 1.5; // text-sm line-height
+/** Font size: 90% of app font size, matches ExploreBlock items */
+const THINK_HEADER_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.9)";
+const THINK_DURATION_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
 
 /**
  * Simple collapsible think block with timer.
@@ -44,11 +47,12 @@ export function ThinkBlock({ content, isStreaming, startTime, endTime, defaultEx
     <div className="my-1">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300 transition-colors"
+        className="flex items-center gap-2 text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300 transition-colors"
+        style={{ fontSize: THINK_HEADER_FONT_SIZE }}
       >
         <Zap className="h-3 w-3 shrink-0" />
         <span>{(!isStreaming || endTime != null) ? "Thought" : "Thinking"}</span>
-        {duration !== null && <span className="text-[10px]">({duration}s)</span>}
+        {duration !== null && <span style={{ fontSize: THINK_DURATION_FONT_SIZE }}>({duration}s)</span>}
         {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
       </button>
 

@@ -10,6 +10,11 @@ interface ExploreBlockProps {
 
 const SHELL_TOOLS = ["bash", "powershell", "shell"];
 
+/** Font size for ExploreBlock content: 90% of app font size */
+const EXPLORE_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.9)";
+/** Font size for detail panels (params/result): 80% of app font size */
+const EXPLORE_DETAIL_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
+
 function isShellTool(name: string): boolean {
   return SHELL_TOOLS.includes(name);
 }
@@ -46,7 +51,8 @@ export function ExploreBlock({ items, isStreaming }: ExploreBlockProps) {
       {/* Header: clickable toggle */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-fit items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
+        className="flex w-fit items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-zinc-600 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
+        style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Brain className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
         <span className="font-medium">
@@ -145,7 +151,7 @@ function PairedExploreItem({ item, isStreaming }: { item: PairedItem; isStreamin
 
   // Fallback
   return (
-    <div className="text-xs text-zinc-500 dark:text-zinc-400">
+    <div className="text-zinc-500 dark:text-zinc-400" style={{ fontSize: EXPLORE_FONT_SIZE }}>
       {item.msg.content.slice(0, 120)}
     </div>
   );
@@ -184,7 +190,8 @@ function ToolCallItem({ call, result }: { call: ChatMessage; result?: ChatMessag
     <div className="min-w-0">
       <button
         onClick={() => setShowDetails(!showDetails)}
-        className="flex w-fit max-w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700"
+        className="flex w-fit max-w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700"
+        style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
         <span className="font-medium text-zinc-700 dark:text-zinc-300">{toolName}</span>
@@ -210,12 +217,12 @@ function ToolCallItem({ call, result }: { call: ChatMessage; result?: ChatMessag
       {showDetails && (
         <div className="mt-1 ml-5 space-y-1">
           {/* Call params */}
-          <pre className="overflow-x-auto rounded bg-zinc-100 p-2 text-[10px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+          <pre className="overflow-x-auto rounded bg-zinc-100 p-2 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
             {call.content}
           </pre>
           {/* Result */}
           {result && (
-            <pre className={`overflow-x-auto rounded p-2 text-[10px] ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-emerald-50 text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400"}`}>
+            <pre className={`overflow-x-auto rounded p-2 ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-emerald-50 text-zinc-600 dark:bg-emerald-900/10 dark:text-zinc-400"}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
               {result.content.length > 500 ? result.content.slice(0, 500) + "\n..." : result.content}
             </pre>
           )}
