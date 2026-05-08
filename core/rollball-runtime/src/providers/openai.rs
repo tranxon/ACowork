@@ -345,6 +345,8 @@ fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> Cha
         reasoning_content: msg.reasoning_content,
         tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
         usage: usage_info,
+        reasoning_started_at: None,
+        reasoning_finished_at: None,
     }
 }
 

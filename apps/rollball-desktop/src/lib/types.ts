@@ -127,7 +127,7 @@ export interface SendMessageResponse {
 export type GatewayStatus = "connected" | "disconnected" | "error";
 
 /** Chat message types */
-export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "think";
+export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought";
 
 /** Chat message in the UI */
 export interface ChatMessage {
@@ -364,7 +364,7 @@ export interface SessionInfo {
 export interface ConversationEntry {
   id: string;
   ts: string;
-  role: "user" | "assistant" | "think" | "tool_call" | "tool_result" | "system";
+  role: "user" | "assistant" | "think" | "thought" | "tool_call" | "tool_result" | "system";
   content: string;
   metadata?: Record<string, unknown>;
 }

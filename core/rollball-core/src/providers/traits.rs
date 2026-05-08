@@ -249,6 +249,12 @@ pub struct ChatResponse {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default)]
     pub usage: Option<UsageInfo>,
+    /// Unix timestamp ms when reasoning/think started (set by streaming loop)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_started_at: Option<i64>,
+    /// Unix timestamp ms when reasoning/think finished (set by streaming loop)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_finished_at: Option<i64>,
 }
 
 /// Usage information

@@ -23,7 +23,7 @@ pub struct ConversationEntry {
     pub id: String,
     /// ISO 8601 timestamp with millisecond precision
     pub ts: String,
-    /// Message role: "user" | "assistant" | "think" | "tool_call" | "tool_result" | "system"
+    /// Message role: "user" | "assistant" | "thought" | "tool_call" | "tool_result" | "system"
     pub role: String,
     /// Full message content
     pub content: String,

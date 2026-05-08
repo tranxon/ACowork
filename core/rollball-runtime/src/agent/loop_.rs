@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use chrono::Utc;
 use futures::StreamExt;
 use rollball_core::providers::traits::{
     ChatMessage, ChatResponse, MessageRole, Provider, StreamEvent, ToolCall,
@@ -597,13 +598,14 @@ impl AgentLoop {
 
                 // Persist think block (if present) and assistant response to JSONL
                 if let Some(ref conversation) = self.session.conversation {
+                    let think_meta = build_think_metadata(&response);
                     if let Some(ref reasoning) = response.reasoning_content {
                         if !reasoning.is_empty() {
-                            conversation.append_message("think", reasoning, None);
+                            conversation.append_message("thought", reasoning, think_meta.clone());
                         }
                     } else if let Some(think_content) = extract_think_block(&content) {
                         // Fallback: extract from <think> tags in content
-                        conversation.append_message("think", &think_content, None);
+                        conversation.append_message("thought", &think_content, think_meta);
                     }
                     let assistant_text = strip_think_block(&content);
                     conversation.append_message("assistant", &assistant_text, None);
@@ -617,7 +619,20 @@ impl AgentLoop {
                 return Ok(content);
             }
 
-            // Has tool calls — process them
+            // Persist think block (if present) to JSONL
+            if let Some(ref conversation) = self.session.conversation {
+                let think_meta = build_think_metadata(&response);
+                // DeepSeek reasoning_content (separate field) takes priority
+                if let Some(ref reasoning) = response.reasoning_content {
+                    if !reasoning.is_empty() {
+                        conversation.append_message("thought", reasoning, think_meta.clone());
+                    }
+                } else if let Some(think_content) = extract_think_block(&response.content) {
+                    conversation.append_message("thought", &think_content, think_meta);
+                }
+            }
+
+            // Has tool calls — process them (moved after think metadata to avoid partial move)
             let tool_calls = response.tool_calls.unwrap_or_default();
 
             // ④.5 Tool call deduplication (same iteration)
@@ -629,18 +644,6 @@ impl AgentLoop {
                     seen.insert(sig)
                 })
                 .collect();
-
-            // Persist think block (if present) to JSONL
-            if let Some(ref conversation) = self.session.conversation {
-                // DeepSeek reasoning_content (separate field) takes priority
-                if let Some(ref reasoning) = response.reasoning_content {
-                    if !reasoning.is_empty() {
-                        conversation.append_message("think", reasoning, None);
-                    }
-                } else if let Some(think_content) = extract_think_block(&response.content) {
-                    conversation.append_message("think", &think_content, None);
-                }
-            }
 
             // Add assistant message with tool_calls to history
             self.session.history.append(ChatMessage {
@@ -929,6 +932,9 @@ impl AgentLoop {
         let mut accumulated_reasoning_content = String::new();
         let mut tool_calls: Option<Vec<ToolCall>> = None;
         let mut usage = None;
+        let mut reasoning_started_at: Option<i64> = None;
+        let mut reasoning_finished_at: Option<i64> = None;
+        let mut reasoning_in_progress = false;
 
         // ToolCallChunk accumulation buffer: indexed by tool_call sequential index
         let mut tool_call_args_buffer: HashMap<u64, String> = HashMap::new();
@@ -941,6 +947,11 @@ impl AgentLoop {
         while let Some(event) = stream.next().await {
             match event {
                 StreamEvent::Content(chunk) => {
+                    // Mark reasoning finished when content starts after reasoning
+                    if reasoning_in_progress {
+                        reasoning_finished_at = Some(Utc::now().timestamp_millis());
+                        reasoning_in_progress = false;
+                    }
                     accumulated_content.push_str(&chunk);
 
                     // Forward delta to on_chunk channel (like ZeroClaw's on_delta)
@@ -953,6 +964,11 @@ impl AgentLoop {
                     }
                 }
                 StreamEvent::ReasoningContent(chunk) => {
+                    // Record start of reasoning on first chunk
+                    if reasoning_started_at.is_none() {
+                        reasoning_started_at = Some(Utc::now().timestamp_millis());
+                    }
+                    reasoning_in_progress = true;
                     accumulated_reasoning_content.push_str(&chunk);
                     // Forward reasoning delta to on_chunk channel for real-time streaming
                     if let Some(ref tx) = self.core.on_chunk
@@ -962,6 +978,11 @@ impl AgentLoop {
                     }
                 }
                 StreamEvent::ToolCallStart(tc) => {
+                    // Mark reasoning finished when tool calls start after reasoning
+                    if reasoning_in_progress {
+                        reasoning_finished_at = Some(Utc::now().timestamp_millis());
+                        reasoning_in_progress = false;
+                    }
                     tracing::info!(tool_name = %tc.function.name, tool_id = %tc.id, initial_args = %tc.function.arguments, "ToolCallStart received");
                     tool_calls.get_or_insert_with(Vec::new).push(tc);
                 }
@@ -978,6 +999,10 @@ impl AgentLoop {
                     }
                 }
                 StreamEvent::Finished(resp) => {
+                    // Mark reasoning finished on stream end (edge case: no Content/ToolCall after reasoning)
+                    if reasoning_in_progress {
+                        reasoning_finished_at = Some(Utc::now().timestamp_millis());
+                    }
                     // Use final response data; prefer stream-accumulated content
                     if accumulated_content.is_empty() {
                         accumulated_content = resp.content;
@@ -1096,6 +1121,8 @@ impl AgentLoop {
             },
             tool_calls,
             usage,
+            reasoning_started_at,
+            reasoning_finished_at,
         })
     }
 
@@ -1288,6 +1315,18 @@ fn strip_think_block(content: &str) -> String {
         return format!("{}{}", before.trim(), after.trim()).trim().to_string();
     }
     content.to_string()
+}
+
+/// Build think message metadata with timing info from ChatResponse.
+fn build_think_metadata(response: &ChatResponse) -> Option<serde_json::Value> {
+    if response.reasoning_started_at.is_some() || response.reasoning_finished_at.is_some() {
+        Some(serde_json::json!({
+            "startTime": response.reasoning_started_at,
+            "endTime": response.reasoning_finished_at,
+        }))
+    } else {
+        None
+    }
 }
 
 /// Execute a single tool call against the tool registry.
