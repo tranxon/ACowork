@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { ChevronRight, ChevronDown, Clock } from "lucide-react";
+import { ChevronRight, ChevronDown, Zap } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -24,7 +24,7 @@ const LINE_HEIGHT_REM = 1.5; // text-sm line-height
  * Content is capped at 5 visible lines with auto-scroll to bottom,
  * so only the latest output is visible during long thinking phases.
  */
-export function ThinkBlock({ content, isStreaming: _isStreaming, startTime, endTime, defaultExpanded }: ThinkBlockProps) {
+export function ThinkBlock({ content, isStreaming, startTime, endTime, defaultExpanded }: ThinkBlockProps) {
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -46,19 +46,19 @@ export function ThinkBlock({ content, isStreaming: _isStreaming, startTime, endT
         onClick={() => setExpanded(!expanded)}
         className="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300 transition-colors"
       >
-        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        <Clock className="h-3 w-3" />
-        <span>Thinking</span>
+        <Zap className="h-3 w-3 shrink-0" />
+        <span>{(!isStreaming || endTime != null) ? "Thought" : "Thinking"}</span>
         {duration !== null && <span className="text-[10px]">({duration}s)</span>}
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
       </button>
 
       {expanded && (
         <div
           ref={contentRef}
-          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-sm text-zinc-600 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-y-auto"
+          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-y-auto"
           style={{ maxHeight: `${MAX_VISIBLE_LINES * LINE_HEIGHT_REM}rem` }}
         >
-          <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert">
+          <div className="prose prose-sm prose-zinc max-w-none dark:prose-invert [&_*]:!text-zinc-500 dark:[&_*]:!text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{content.trim() || "..."}</ReactMarkdown>
           </div>
         </div>

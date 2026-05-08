@@ -46,7 +46,7 @@ interface ChatStore {
   currentTurnId: string | null;
   /** Accumulated raw stream buffer for cross-chunk tag detection */
   streamBuffer: string;
-  /** Current thinking message ID (type: "think") during streaming */
+  /** Current thinking message ID (type: "thought") during streaming */
   thinkingMessageId: string | null;
   /** Whether the current stream is inside a <think> block */
   isInThinkPhase: boolean;
@@ -565,8 +565,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ? "user"
           : msg.role === "assistant"
             ? "assistant"
-            : msg.role === "think"
-              ? "think"
+            : msg.role === "think" || msg.role === "thought"
+              ? "thought"
               : "system") as ChatMessage["type"],
         content: msg.content,
         timestamp: msg.timestamp * 1000, // Convert seconds to milliseconds
@@ -780,7 +780,7 @@ function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: strin
 function convertConversationEntry(entry: ConversationEntry): ChatMessage {
   const base: ChatMessage = {
     id: entry.id,
-    type: entry.role as ChatMessage["type"],
+    type: (entry.role === "think" ? "thought" : entry.role) as ChatMessage["type"],
     content: entry.content,
     timestamp: new Date(entry.ts).getTime(),
   };
@@ -794,6 +794,11 @@ function convertConversationEntry(entry: ConversationEntry): ChatMessage {
     if (entry.role === "tool_result") {
       base.toolStatus = meta.success === false ? "error" : "success";
     }
+  }
+
+  if (entry.role === "think" || entry.role === "thought") {
+    base.startTime = (meta.startTime as number) ?? undefined;
+    base.endTime = (meta.endTime as number) ?? undefined;
   }
 
   return base;
@@ -839,7 +844,7 @@ function handleMessageEvent(
             const thinkMsgId = `msg-think-${Date.now()}`;
             const thinkMsg: ChatMessage = {
               id: thinkMsgId,
-              type: "think",
+              type: "thought",
               content: reasoningDelta,
               timestamp: Date.now(),
               startTime: Date.now(),
@@ -922,7 +927,7 @@ function handleMessageEvent(
           const thinkMsgId = `msg-think-${Date.now()}`;
           const thinkMsg: ChatMessage = {
             id: thinkMsgId,
-            type: "think",
+            type: "thought",
             content: newBuffer.substring(thinkStart + 7),
             timestamp: Date.now(),
             startTime: Date.now(),
@@ -1085,7 +1090,7 @@ function handleMessageEvent(
           const now = Date.now();
           const thinkMsg: ChatMessage = {
             id: thinkMsgId,
-            type: "think",
+            type: "thought",
             content: reasoningContent,
             timestamp: now,
             startTime: now,

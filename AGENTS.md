@@ -46,7 +46,7 @@ agent-study/
 |------|----------|-------|
 | Platform overview | `docs/01-overview.md` | Android analogy, core principles |
 | Package format | `docs/02-agent-package.md` | `.agent` structure, signing |
-| Runtime internals | `docs/03-agent-runtime.md` | Main loop, tool dispatch |
+| Runtime internals | `docs/03-agent-runtime.md` | Main loop, tool dispatch, Session Actor model |
 | Gateway design | `docs/04-gateway.md` + `docs/module-design/03-gateway.md` | Lifecycle, IntentRouter, Vault |
 | Memory architecture | `docs/05-memory.md` + `docs/module-design/04-grafeo.md` | Grafeo, layered memory, MemoryStore trait, lifecycle |
 | Security design | `docs/08-security.md` + `docs/module-design/05-vault-sign.md` | Isolation, signing, permissions |
@@ -54,6 +54,8 @@ agent-study/
 | Tool system | `docs/12-tool-system.md` | Built-in / WASM / Gateway tools |
 | Skill system | `docs/13-skill-system.md` | SKILL.md + Grafeo experience layer |
 | Desktop app | `docs/14-desktop-app.md` | Tauri layout, tray, Gateway HTTP API |
+| Conversation persistence | `docs/15-conversation-persistence.md` | Session Actor model, selectedSession, JSONL, Episode, Token budget, JSONL safety |
+| Communication protocol | `docs/06-communication.md` | IPC message format, gRPC session messages (v3.6), Socket API, Intent mechanism |
 | Module workspace plan | `docs/module-design/00-overview.md` | 7-crate workspace structure |
 | Implementation roadmap | `docs/09-roadmap-and-scenarios.md` | 7-phase plan |
 | Design review reports | `docs/review/` | Design doc reviews, numbered |

@@ -948,24 +948,7 @@ async fn run_gateway_loop(
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| current_session_id.clone());
 
-                        // Budget pre-check: skip processing if budget is exhausted
-                        if let Ok((remaining_tokens, _)) = grpc_client.query_budget(&budget_provider).await
-                            && remaining_tokens == 0
-                        {
-                            tracing::warn!(
-                                "Budget exhausted for provider={}, skipping message from {}",
-                                budget_provider, from
-                            );
-                            let error_params = serde_json::json!({
-                                "content": "Budget exhausted — cannot process this message",
-                                "message_id": params.get("message_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown"),
-                            });
-                            let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
-                            continue;
-                        }
-                        // If budget query fails (e.g. provider not tracked), proceed anyway
+                        // [Budget check moved after session management actions — see below]
 
                         // Handle model_switch: broadcast to all sessions
                         if action == "model_switch" {
@@ -1175,6 +1158,28 @@ async fn run_gateway_loop(
                             send_session_response(grpc_client, &request_id, data).await;
                             continue;
                         }
+
+                        // Budget pre-check: skip processing if budget is exhausted.
+                        // Only reachable for regular chat messages — session management
+                        // actions (list/get/create/activate/delete/update sessions) are
+                        // handled above and skip this check via `continue`.
+                        if let Ok((remaining_tokens, _)) = grpc_client.query_budget(&budget_provider).await
+                            && remaining_tokens == 0
+                        {
+                            tracing::warn!(
+                                "Budget exhausted for provider={}, skipping message from {}",
+                                budget_provider, from
+                            );
+                            let error_params = serde_json::json!({
+                                "content": "Budget exhausted — cannot process this message",
+                                "message_id": params.get("message_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown"),
+                            });
+                            let _ = grpc_client.send_intent(&from, "agent_error", error_params, false).await;
+                            continue;
+                        }
+                        // If budget query fails (e.g. provider not tracked), proceed anyway
 
                         // Extract message content from params
                         let mut content = params.get("content")

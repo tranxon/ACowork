@@ -21,6 +21,10 @@ import { SessionPanel } from "./SessionPanel";
 import { SkillsPanel } from "../skills/SkillsPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 
+// Module-level: persists across ChatPanel mount/unmount cycles
+// so nav-back (Settings→Chat) doesn't trigger full reinit
+let lastInitAgentId: string | null = null;
+
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
   const { messages, sending, wsMap, connectStream, sendMessage, stopCurrentMessage, streamingMessageId, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, iterationLimitPaused, continueExecution, contextUsage, isLoadingSession, loadError } = useChatStore();
@@ -34,7 +38,6 @@ export function ChatPanel() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef<number>(0);
   const isLoadingMoreRef = useRef<boolean>(false);
-  const lastInitAgentRef = useRef<string | null>(null);
   const isInitialLoadRef = useRef<boolean>(false);
   const initAbortedRef = useRef(false);
 
@@ -90,7 +93,7 @@ export function ChatPanel() {
             // Empty message (streaming)
             grouped.push(msg);
           }
-        } else if (msg.type === 'think') {
+        } else if (msg.type === 'thought') {
           grouped.push({ type: 'think_group', item: msg });
         } else {
           grouped.push(msg);
@@ -153,12 +156,12 @@ export function ChatPanel() {
     // Skip re-init if this agent was already initialized and is still running.
     // This prevents redundant clearMessages + reload when selectedAgent.running
     // is re-evaluated without actually changing (e.g. agent list refresh).
-    if (selectedAgentId && selectedAgentId === lastInitAgentRef.current && selectedAgent?.running) {
+    if (selectedAgentId && selectedAgentId === lastInitAgentId && selectedAgent?.running) {
       return;
     }
 
     // Remember the current session for the agent we're leaving (saved in store for remount survival)
-    const leavingAgentId = lastInitAgentRef.current;
+    const leavingAgentId = lastInitAgentId;
     const leavingSessionId = useSessionStore.getState().currentSessionId;
     if (leavingAgentId && leavingSessionId) {
       useSessionStore.getState().saveSessionForAgent(leavingAgentId, leavingSessionId);
@@ -179,7 +182,7 @@ export function ChatPanel() {
     });
 
     if (selectedAgentId && selectedAgent?.running) {
-      lastInitAgentRef.current = selectedAgentId;
+      lastInitAgentId = selectedAgentId;
       connectStream(selectedAgentId, getGatewayUrl());
       // Load model from Gateway API FIRST (reads per-agent .agent_model.json),
       // THEN reload the model list. This ensures currentModel is set before
@@ -231,7 +234,7 @@ export function ChatPanel() {
       };
       void initSession();
     } else {
-      lastInitAgentRef.current = null;
+      lastInitAgentId = null;
     }
     return () => {
       initAbortedRef.current = true;
@@ -775,10 +778,11 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
   // Determine primary tool and count
   const primaryTool = Object.entries(toolCounts)[0];
   if (!primaryTool) return null;
-  const [toolName, count] = primaryTool;
+  const [toolName] = primaryTool;
 
   // Generate summary
   const callItems = items.filter(m => m.type === "tool_call");
+  const totalCalls = callItems.length;
   const summaryItems = callItems.slice(0, 3).map(item => {
     const params = JSON.parse(item.content || "{}");
     if (toolName === "file_read" || toolName === "file_write" || toolName === "file_edit") {
@@ -792,9 +796,6 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
 
   const hasMore = callItems.length > 3;
   const summary = summaryItems.join(", ") + (hasMore ? ` + ${callItems.length - 3} more` : "");
-
-  // Icon based on tool type
-  const Icon = isShellTool(toolName) ? Terminal : FileText;
 
   // Pair tool_call with its corresponding tool_result
   const pairedItems: Array<{ call: ChatMessage; result?: ChatMessage }> = [];
@@ -822,9 +823,9 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
         onClick={() => setExpanded(!expanded)}
         className="flex w-fit max-w-[min(var(--content-max-width),900px)] items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
       >
-        <Icon className="h-4 w-4 shrink-0 text-zinc-400" />
+        <Wrench className="h-4 w-4 shrink-0 text-zinc-400" />
         <span className="font-medium">
-          工具调用 ({count} {count === 1 ? "call" : "calls"})
+          工具调用 ({totalCalls} {totalCalls === 1 ? "call" : "calls"})
         </span>
         <span className="truncate text-zinc-500 dark:text-zinc-500">
           {summary}
@@ -850,7 +851,6 @@ function ToolCallGroup({ items }: { items: ChatMessage[] }) {
                   onClick={() => setExpandedItem(isExpanded ? null : idx)}
                   className="flex w-fit max-w-[min(var(--content-max-width),900px)] items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800"
                 >
-                  <Wrench className="h-3 w-3 shrink-0" />
                   <span className="font-medium">{call.toolName}</span>
                   <span className="text-zinc-500 dark:text-zinc-500">
                     {(() => {
@@ -1039,11 +1039,11 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     );
   }
 
-  if (message.type === "think") {
+  if (message.type === "thought") {
     return (
       <MessageContentWrapper>
         <div className="flex justify-start">
-          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm dark:bg-zinc-800 dark:text-zinc-200 select-text break-words">
+          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
             <ThinkBlock
               content={message.content}
               isStreaming={isStreaming}
