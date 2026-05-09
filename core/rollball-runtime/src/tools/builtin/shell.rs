@@ -192,15 +192,44 @@ impl Tool for ShellTool {
             "shell: executing command"
         );
 
-        let output = tokio::process::Command::new(&self.shell_binary)
-            .arg(&self.shell_arg)
-            .arg(&command)
-            .current_dir(&self.work_dir)
-            .output()
-            .await;
+        // Spawn child process synchronously, then wait for completion in a
+        // blocking thread. We use std::process::Command instead of
+        // tokio::process::Command for cross-platform compatibility:
+        //
+        // - On Windows, tokio::process::Command uses async named-pipe I/O
+        //   which is incompatible with MinGW/MSYS2 programs like Git Bash
+        //   (bash.exe), causing the process to hang until timeout.
+        // - On Linux/macOS, std::process::Command is equally reliable and
+        //   avoids an unnecessary dependency on tokio's process layer.
+        //
+        // Timeout behavior: the outer tokio::time::timeout in AgentLoop
+        // cancels the .await on spawn_blocking's JoinHandle, which drops
+        // the handle but does NOT interrupt the blocking work. The child
+        // process continues until it exits naturally. This is acceptable
+        // because:
+        // 1. Shell commands are typically short-lived (seconds at most)
+        // 2. The LLM receives a proper timeout error and can retry/fallback
+        // 3. Tokio's blocking thread pool (default 512 threads) absorbs
+        //    occasional stragglers without resource exhaustion
+        //
+        // For future hardening: consider ProcessGuard with kill-on-drop
+        // using Arc<Mutex<Child>> to guarantee cleanup on timeout.
+        let shell_binary = self.shell_binary.clone();
+        let shell_arg = self.shell_arg.clone();
+        let command_owned = command.to_string();
+        let work_dir = self.work_dir.clone();
+
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(&shell_binary)
+                .arg(&shell_arg)
+                .arg(&command_owned)
+                .current_dir(&work_dir)
+                .output()
+        })
+        .await;
 
         match output {
-            Ok(output) => {
+            Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -224,7 +253,7 @@ impl Tool for ShellTool {
                     token_usage: None,
                 })
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     command = %command,
                     error = %e,
@@ -234,6 +263,21 @@ impl Tool for ShellTool {
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to execute command: {e}")),
+                    token_usage: None,
+                })
+            }
+            Err(join_err) => {
+                tracing::warn!(
+                    command = %command,
+                    error = %join_err,
+                    "shell: spawn_blocking task panicked"
+                );
+                Ok(ToolResult {
+                    ok: false,
+                    content: String::new(),
+                    error: Some(format!(
+                        "Internal error: shell task panicked: {join_err}"
+                    )),
                     token_usage: None,
                 })
             }
