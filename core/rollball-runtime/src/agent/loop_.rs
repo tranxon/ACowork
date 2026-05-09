@@ -1384,7 +1384,14 @@ async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> S
                     if result.ok {
                         result.content
                     } else {
-                        format!("Error: {}", result.error.unwrap_or_default())
+                        // Include both the error output (stdout/stderr) and the error code
+                        if result.content.is_empty() {
+                            format!("Error: {}", result.error.unwrap_or_default())
+                        } else {
+                            format!("{}\nError: {}",
+                                result.content,
+                                result.error.as_deref().unwrap_or("unknown error"))
+                        }
                     }
                 }
                 Err(e) => format!("Tool execution error: {e}"),
