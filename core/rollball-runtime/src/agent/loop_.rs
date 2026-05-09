@@ -705,6 +705,14 @@ impl AgentLoop {
                 }
             }
 
+            // Check for interrupt before executing tools
+            if self.poll_interrupt() {
+                tracing::info!("Interrupted before tool execution — saving partial response");
+                let content = response.content.clone();
+                self.session.history.append(ChatMessage::assistant(content.clone()));
+                return Ok(format!("[Interrupted] {}", content));
+            }
+
             let executed_results = self.execute_tools_parallel(&calls_to_execute).await;
 
             // Merge executed results with pre-blocked results, preserving original order
@@ -842,6 +850,16 @@ impl AgentLoop {
         }
     }
 
+    /// Non-blocking interrupt poll — returns true if the user requested stop.
+    fn poll_interrupt(&mut self) -> bool {
+        while let Ok(msg) = self.inbound_rx.try_recv() {
+            if let InboundMessage::Interrupt { .. } = msg {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Drain inbound message queue (non-blocking).
     ///
     /// Injects external messages (user, system, intent) into history
@@ -945,6 +963,19 @@ impl AgentLoop {
         let mut finished_tool_indices: HashSet<u64> = HashSet::new();
 
         while let Some(event) = stream.next().await {
+            // Check for user interrupt before processing each stream event
+            if self.poll_interrupt() {
+                tracing::info!("LLM stream interrupted by user — aborting");
+                // Return partial response with whatever content was accumulated
+                return Ok(ChatResponse {
+                    content: accumulated_content,
+                    reasoning_content: if accumulated_reasoning_content.is_empty() { None } else { Some(accumulated_reasoning_content) },
+                    tool_calls: None, // discard partial tool calls on interrupt
+                    usage: None,
+                    reasoning_started_at: None,
+                    reasoning_finished_at: None,
+                });
+            }
             match event {
                 StreamEvent::Content(chunk) => {
                     // Mark reasoning finished when content starts after reasoning

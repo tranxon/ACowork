@@ -64,18 +64,26 @@ impl ShellTool {
         let description = match self.tool_name.as_str() {
             "bash" => format!(
                 "Execute a command in Git Bash (Unix-style shell on Windows). \
-                 Supports standard Unix commands (ls, grep, find, cat, etc.) \
-                 and Unix path conventions (/c/Users/...). \
-                 {}",
-                self.fallback_hint()
+                 The working directory is already set to: {work_dir}. \
+                 Do NOT use 'cd' to navigate to the workspace — commands run there by default. \
+                 Use relative paths for files within the workspace. \
+                 For absolute paths outside the workspace, prefer Windows format (e.g. 'C:/Users/...'). \
+                 Supports standard Unix commands (ls, grep, find, cat, etc.). \
+                 {fallback}",
+                work_dir = self.work_dir,
+                fallback = self.fallback_hint()
             ),
             "powershell" => format!(
-                "Execute a command in {} ({}). \
+                "Execute a command in {shell_name} ({shell_binary}). \
+                 The working directory is already set to: {work_dir}. \
+                 Do NOT use 'cd' to navigate to the workspace — commands run there by default. \
                  Supports PowerShell cmdlets and Windows conventions. \
                  Use this if 'bash' is unavailable or for Windows-specific tasks. \
-                 {}",
-                self.shell_name, self.shell_binary,
-                self.fallback_hint()
+                 {fallback}",
+                shell_name = self.shell_name,
+                shell_binary = self.shell_binary,
+                work_dir = self.work_dir,
+                fallback = self.fallback_hint()
             ),
             _ => format!(
                 "Execute a command in {} ({}). Use with caution.",
@@ -218,13 +226,22 @@ impl Tool for ShellTool {
         let shell_arg = self.shell_arg.clone();
         let command_owned = command.to_string();
         let work_dir = self.work_dir.clone();
+        let tool_name = self.tool_name.clone();
 
         let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(&shell_binary)
-                .arg(&shell_arg)
+            let mut cmd = std::process::Command::new(&shell_binary);
+            cmd.arg(&shell_arg)
                 .arg(&command_owned)
-                .current_dir(&work_dir)
-                .output()
+                .current_dir(&work_dir);
+
+            // Ensure MSYS2 environment is properly initialized for Git Bash
+            // so drive letter mounts (/c/, /d/) and Unix paths work correctly.
+            if tool_name == "bash" {
+                cmd.env("MSYSTEM", "MINGW64");
+                cmd.env("CHERE_INVOKING", "1");
+            }
+
+            cmd.output()
         })
         .await;
 
