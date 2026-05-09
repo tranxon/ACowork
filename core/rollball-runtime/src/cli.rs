@@ -645,6 +645,25 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                                 tracing::error!("Error relay send failed — main connection may be closed");
                             }
                         }
+                        crate::agent::loop_::ChunkEvent::Interrupted { content } => {
+                            let params = serde_json::json!({
+                                "content": content,
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+                                    rollball_core::proto::IntentSendRequest {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_interrupted".to_string(),
+                                        params_json: params.to_string(),
+                                        r#async: false,
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("Interrupted relay send failed — main connection may be closed");
+                            }
+                        }
                     }
                 }
                 tracing::debug!("Chunk relay task ended");

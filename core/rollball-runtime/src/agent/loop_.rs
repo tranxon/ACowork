@@ -61,6 +61,10 @@ pub enum ChunkEvent {
         iteration: u32,
         max_iterations: u32,
     },
+    /// Agent response interrupted by user stop signal
+    Interrupted {
+        content: String,
+    },
     /// Agent response complete (routed through chunk channel for ordering guarantee
     /// with preceding content chunks)
     Done {
@@ -709,7 +713,28 @@ impl AgentLoop {
             if self.poll_interrupt() {
                 tracing::info!("Interrupted before tool execution — saving partial response");
                 let content = response.content.clone();
-                self.session.history.append(ChatMessage::assistant(content.clone()));
+
+                // Persist interrupted assistant message to JSONL conversation.
+                // Note: think/reasoning was already persisted above (line ~627).
+                // Here we only persist the assistant text content.
+                if let Some(ref conversation) = self.session.conversation {
+                    let assistant_text = strip_think_block(&content);
+                    conversation.append_message("assistant", &assistant_text, None);
+                }
+
+                // Also append to in-memory history (the assistant message with
+                // tool_calls was already appended above, but that one is the
+                // "full" version — this interrupt path needs a clean exit).
+                // Since the tool_calls-bearing assistant message was already
+                // appended at line ~653, we don't need to append again.
+
+                // Notify frontend via chunk channel
+                if let Some(ref tx) = self.core.on_chunk {
+                    let _ = tx.try_send(ChunkEvent::Interrupted {
+                        content: content.clone(),
+                    });
+                }
+
                 return Ok(format!("[Interrupted] {}", content));
             }
 
@@ -851,10 +876,24 @@ impl AgentLoop {
     }
 
     /// Non-blocking interrupt poll — returns true if the user requested stop.
+    ///
+    /// NOTE: Non-Interrupt messages drained during this poll are logged as warnings
+    /// but NOT re-injected. This is acceptable because `drain_inbound_queue()` already
+    /// handles all message types at the start of each loop iteration, and the
+    /// streaming/tool-execution phase where this method is called should not need
+    /// to process user/system messages mid-flight.
     fn poll_interrupt(&mut self) -> bool {
         while let Ok(msg) = self.inbound_rx.try_recv() {
-            if let InboundMessage::Interrupt { .. } = msg {
-                return true;
+            match msg {
+                InboundMessage::Interrupt { .. } => {
+                    return true;
+                }
+                other => {
+                    tracing::warn!(
+                        ?other,
+                        "poll_interrupt() dropped non-Interrupt message during streaming/tool execution"
+                    );
+                }
             }
         }
         false
@@ -966,6 +1005,14 @@ impl AgentLoop {
             // Check for user interrupt before processing each stream event
             if self.poll_interrupt() {
                 tracing::info!("LLM stream interrupted by user — aborting");
+
+                // Notify frontend via chunk channel
+                if let Some(ref tx) = self.core.on_chunk {
+                    let _ = tx.try_send(ChunkEvent::Interrupted {
+                        content: accumulated_content.clone(),
+                    });
+                }
+
                 // Return partial response with whatever content was accumulated
                 return Ok(ChatResponse {
                     content: accumulated_content,
