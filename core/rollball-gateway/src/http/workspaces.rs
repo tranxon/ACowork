@@ -491,24 +491,62 @@ pub fn compute_context_workspaces(workspaces: &[WorkspaceDir]) -> Vec<&Workspace
 
 /// Format workspace list as LLM-friendly Markdown text.
 ///
-/// `primary_workspace` is the agent's home directory (always shown first).
+/// Structure:
+/// 1. **Current Working Directory** — the user's active workspace (or install dir if none)
+/// 2. **Agent Home Directory** — the agent's installation directory (for reference)
+/// 3. **Available Workspaces** — user-configured workspace directories (if any)
+///
+/// `primary_workspace` is the agent's home directory.
+/// `workspaces` may be empty (no user-configured workspaces).
 pub fn format_workspace_context(workspaces: &[&WorkspaceDir], primary_workspace: &str) -> String {
-    if workspaces.is_empty() {
-        return format!(
-            "## Workspace Environment\n\nPrimary workspace (agent home): {}\n",
-            primary_workspace
-        );
-    }
-
     let mut buf = String::new();
     buf.push_str("## Workspace Environment\n\n");
+
+    if workspaces.is_empty() {
+        // No user workspaces — install dir IS the working directory
+        buf.push_str(&format!(
+            "Current Working Directory: {} (agent home)\n",
+            escape_markdown_cell(primary_workspace)
+        ));
+        buf.push_str("No additional workspaces have been configured. The agent's home directory is used as the working directory.\n");
+        return buf;
+    }
+
+    // Find the active workspace (is_current=true)
+    let active = workspaces.iter().find(|w| w.is_current);
+
+    // 1. Current Working Directory
+    if let Some(current) = active {
+        let alias = current.alias.as_deref().unwrap_or("-");
+        let access = match current.access {
+            AccessLevel::ReadOnly => "read-only",
+            AccessLevel::ReadWrite => "read-write",
+        };
+        buf.push_str(&format!(
+            "Current Working Directory: {} ({}, {})\n",
+            escape_markdown_cell(&current.path),
+            alias,
+            access,
+        ));
+        buf.push_str("This is your currently active workspace.\n\n");
+    } else {
+        buf.push_str(&format!(
+            "Current Working Directory: {} (agent home)\n",
+            escape_markdown_cell(primary_workspace)
+        ));
+        buf.push_str("No workspace is currently selected. The agent's home directory is the default working directory.\n\n");
+    }
+
+    // 2. Agent Home Directory (reference only)
     buf.push_str(&format!(
-        "Primary workspace (agent home): {}\n\n",
+        "Agent Home Directory: {} (installation directory)\n\n",
         escape_markdown_cell(primary_workspace)
     ));
-    buf.push_str("### User Project Directories\n");
-    buf.push_str("| # | Alias | Path | Access | Current |\n");
-    buf.push_str("|---|-------|------|--------|---------|\n");
+
+    // 3. Available Workspaces (table)
+    buf.push_str("### Available Workspaces\n");
+    buf.push_str("| # | Alias | Path | Access | Active |\n");
+    buf.push_str("|---|-------|------|--------|--------|\n");
 
     for (i, ws) in workspaces.iter().enumerate() {
         let alias = escape_markdown_cell(ws.alias.as_deref().unwrap_or("-"));
@@ -516,21 +554,21 @@ pub fn format_workspace_context(workspaces: &[&WorkspaceDir], primary_workspace:
             AccessLevel::ReadOnly => "read-only",
             AccessLevel::ReadWrite => "read-write",
         };
-        let current_marker = if ws.is_current { "*" } else { "" };
+        let active_marker = if ws.is_current { "*" } else { "" };
         buf.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             i + 1,
             alias,
             escape_markdown_cell(&ws.path),
             access,
-            current_marker
+            active_marker,
         ));
     }
 
-    buf.push_str("\nThe directory marked with `*` in the Current column is your currently active workspace.\n");
+    buf.push_str("\nThe directory marked with `*` in the Active column is your currently active workspace.\n");
     buf.push_str("When performing file operations, use the active workspace directory by default.\n");
     buf.push_str("All listed directories are authorized for access at the indicated permission level.\n");
-    buf.push_str("The 'Primary workspace (agent home)' is the agent's installation directory, not a user-configured workspace.\n");
+    buf.push_str("The Agent Home Directory is the agent's installation path — it is not a user-configured workspace.\n");
 
     buf
 }
