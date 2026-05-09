@@ -524,7 +524,8 @@ pub fn format_workspace_context(workspaces: &[&WorkspaceDir], primary_workspace:
             "Current Working Directory: {} (agent home)\n",
             escape_markdown_cell(primary_workspace)
         ));
-        buf.push_str("No additional workspaces have been configured. The agent's home directory is used as the working directory.\n");
+        buf.push_str("No additional workspaces have been configured. Use the Agent Home Directory above\n");
+        buf.push_str("as the default working directory for all file and shell operations.\n");
         return buf;
     }
 
@@ -581,10 +582,11 @@ pub fn format_workspace_context(workspaces: &[&WorkspaceDir], primary_workspace:
         ));
     }
 
-    buf.push_str("\nThe directory marked with `*` in the Active column is your currently active workspace.\n");
-    buf.push_str("When performing file operations, use the active workspace directory by default.\n");
+    buf.push_str("\nIMPORTANT: When performing file operations or running shell commands, ALWAYS use the\n");
+    buf.push_str("Current Working Directory path shown above as your starting directory.\n");
+    buf.push_str("Do NOT use the Agent Home Directory for project work — it contains the agent's own\n");
+    buf.push_str("configuration files, not your project code.\n");
     buf.push_str("All listed directories are authorized for access at the indicated permission level.\n");
-    buf.push_str("The Agent Home Directory is the agent's installation path — it is not a user-configured workspace.\n");
 
     buf
 }
