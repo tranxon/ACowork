@@ -1552,6 +1552,16 @@ fn handle_memory_nodes_query(
 
     let graph = store.db().graph_store();
 
+    // time_range filtering is not yet implemented (P1).
+    // Proto carries the field for future use; warn if a non-empty value
+    // was supplied so the caller doesn't silently expect filtering.
+    if !query.time_range.is_empty() {
+        tracing::warn!(
+            time_range = %query.time_range,
+            "MemoryNodesQuery: time_range filtering not yet implemented, ignoring"
+        );
+    }
+
     // Collect nodes from all memory labels
     let labels = ["Episodic", "Knowledge", "Procedural", "Autobiographical"];
 
@@ -1596,7 +1606,13 @@ fn handle_memory_nodes_query(
             if let Some(n) = store.db().get_node(id) {
                 let content = extract_node_content(label, &n);
 
-                // Keyword filter
+                // Keyword filter — case-insensitive substring match.
+                // NOTE: This is a naive O(n·m) scan; not BM25 semantic search.
+                // Adequate for the Desktop App manual-search UX where node
+                // counts are expected to stay under ~10K.  Upgrade path:
+                // either use Grafeo's built-in text index or delegate to
+                // a dedicated full-text engine (Tantivy / Meilisearch) once
+                // search latency becomes a bottleneck.
                 if !query.keyword.is_empty()
                     && !content.to_lowercase().contains(&query.keyword.to_lowercase())
                 {
@@ -1747,12 +1763,12 @@ fn handle_memory_stats_query(
             by_status.insert("dormant".to_string(), stats.dormant_count as u64);
             by_status.insert("purged".to_string(), stats.purged_count as u64);
 
-            let avg_decay_score = 0.0; // Not tracked in current stats
+            let avg_decay_score = 0.0; // TODO P3: track in StatsCollector (rollball-grafeo stats)
             let index_health = "healthy".to_string();
 
             ClientPayload::MemoryStatsResult(proto::MemoryStatsResult {
                 total_nodes,
-                storage_bytes: 0, // Not tracked in current stats
+                storage_bytes: 0, // TODO P3: track file size in StatsCollector
                 by_type,
                 by_status,
                 avg_decay_score,

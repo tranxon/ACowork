@@ -157,6 +157,12 @@ impl AgentCore {
     /// On failure, logs a warning and leaves `memory_store` as None —
     /// memory features degrade gracefully (no crash, no panic).
     pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
+        // Guard against double-init (called from both gRPC and standalone paths).
+        if self.memory_store.is_some() {
+            tracing::debug!("init_memory_store: already initialized, skipping");
+            return;
+        }
+
         let memory_dir = work_dir.join("memory");
         if let Err(e) = std::fs::create_dir_all(&memory_dir) {
             tracing::warn!(
