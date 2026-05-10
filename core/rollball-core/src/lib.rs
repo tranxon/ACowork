@@ -25,6 +25,7 @@ pub mod providers;
 pub mod memory;
 pub mod packaging;
 pub mod error;
+pub mod crlf;
 
 // Re-exports for convenience
 pub use manifest::{AgentManifest, CapabilityDef, LlmConfig, ProviderConfig, RoutingConfig, LlmBudget, RagToolConfig, ToolDeclaration, SkillMode, SkillsConfig};

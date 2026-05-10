@@ -15,6 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::grpc::SharedGrpcSessionMgr;
 use crate::http::routes::{ApiError, AppState};
 
 /// Build the memory management router
@@ -120,6 +121,40 @@ pub struct ConsolidateResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
+/// Send a memory request to the Runtime via gRPC and wait for the response.
+///
+/// Encapsulates the "lock → push → unlock → timeout → cleanup" pattern
+/// that was duplicated across all four memory HTTP handlers.
+///
+/// Returns `Some(ClientMessage)` on success, `None` if the agent is not
+/// connected, the response times out, or the sender is dropped.
+async fn grpc_memory_roundtrip(
+    grpc_mgr: &SharedGrpcSessionMgr,
+    agent_id: &str,
+    query: rollball_core::proto::server_message::Payload,
+) -> Option<rollball_core::proto::ClientMessage> {
+    let (request_id, rx) = {
+        let mut mgr = grpc_mgr.lock().await;
+        match mgr.send_memory_request(agent_id, query) {
+            Some(h) => h,
+            None => return None,
+        }
+    }; // Lock released here — do NOT hold across the timeout await
+
+    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        Ok(Ok(msg)) => Some(msg),
+        Ok(Err(_)) => {
+            tracing::warn!("Runtime dropped memory response sender");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(agent_id = %agent_id, request_id, "Memory request timed out");
+            grpc_mgr.lock().await.cleanup_pending(request_id);
+            None
+        }
+    }
+}
+
 /// `GET /api/agents/{id}/memory/nodes` — list memory nodes for an agent
 pub async fn list_memory_nodes(
     State(state): State<AppState>,
@@ -161,32 +196,7 @@ pub async fn list_memory_nodes(
             },
         );
 
-        let (request_id, rx) = {
-            let mut mgr = grpc_mgr.lock().await;
-            match mgr.send_memory_request(&agent_id, proto_query) {
-                Some(h) => h,
-                None => return Ok(Json(MemoryNodesListResponse {
-                    total: 0, page, size, nodes: vec![],
-                })),
-            }
-        }; // Lock released here — do NOT hold across the timeout await
-
-        // Wait for response without the lock (avoids deadlock with
-        // inbound handler that needs the lock for fulfill_pending).
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(Ok(msg)) => Some(msg),
-            Ok(Err(_)) => {
-                tracing::warn!("Runtime dropped memory response sender");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(agent_id = %agent_id, request_id, "Memory request timed out");
-                grpc_mgr.lock().await.cleanup_pending(request_id);
-                None
-            }
-        };
-
-        if let Some(response) = response {
+        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
             if let Some(rollball_core::proto::client_message::Payload::MemoryNodesResult(result)) = response.payload {
                 let node_count = result.nodes.len();
                 tracing::info!(
@@ -259,30 +269,7 @@ pub async fn get_memory_stats(
             rollball_core::proto::MemoryStatsQuery {},
         );
 
-        let (request_id, rx) = {
-            let mut mgr = grpc_mgr.lock().await;
-            match mgr.send_memory_request(&agent_id, proto_query) {
-                Some(h) => h,
-                None => return Ok(Json(MemoryStatsResponse {
-                    total_nodes: 0, storage_bytes: 0,
-                    by_type: std::collections::HashMap::new(),
-                    by_status: std::collections::HashMap::new(),
-                    avg_decay_score: 0.0, index_health: "not_connected".to_string(),
-                })),
-            }
-        }; // Lock released here
-
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(Ok(msg)) => Some(msg),
-            Ok(Err(_)) => { tracing::warn!("Runtime dropped memory response sender"); None }
-            Err(_) => {
-                tracing::warn!(agent_id = %agent_id, request_id, "Memory request timed out");
-                grpc_mgr.lock().await.cleanup_pending(request_id);
-                None
-            }
-        };
-
-        if let Some(response) = response {
+        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
             if let Some(rollball_core::proto::client_message::Payload::MemoryStatsResult(result)) = response.payload {
                 return Ok(Json(MemoryStatsResponse {
                     total_nodes: result.total_nodes,
@@ -328,25 +315,7 @@ pub async fn delete_memory_node(
             rollball_core::proto::MemoryDeleteQuery { node_id },
         );
 
-        let (request_id, rx) = {
-            let mut mgr = grpc_mgr.lock().await;
-            match mgr.send_memory_request(&agent_id, proto_query) {
-                Some(h) => h,
-                None => return Err(ApiError::service_unavailable("Agent not connected via gRPC")),
-            }
-        }; // Lock released here
-
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(Ok(msg)) => Some(msg),
-            Ok(Err(_)) => { tracing::warn!("Runtime dropped memory response sender"); None }
-            Err(_) => {
-                tracing::warn!(agent_id = %agent_id, request_id, "Memory request timed out");
-                grpc_mgr.lock().await.cleanup_pending(request_id);
-                None
-            }
-        };
-
-        if let Some(response) = response {
+        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
             if let Some(rollball_core::proto::client_message::Payload::MemoryDeleteResult(result)) = response.payload {
                 return Ok(Json(DeleteNodeResponse {
                     node_id: result.node_id,
@@ -386,25 +355,7 @@ pub async fn trigger_consolidate(
             },
         );
 
-        let (request_id, rx) = {
-            let mut mgr = grpc_mgr.lock().await;
-            match mgr.send_memory_request(&agent_id, proto_query) {
-                Some(h) => h,
-                None => return Err(ApiError::service_unavailable("Agent not connected via gRPC")),
-            }
-        }; // Lock released here
-
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(Ok(msg)) => Some(msg),
-            Ok(Err(_)) => { tracing::warn!("Runtime dropped memory response sender"); None }
-            Err(_) => {
-                tracing::warn!(agent_id = %agent_id, request_id, "Memory request timed out");
-                grpc_mgr.lock().await.cleanup_pending(request_id);
-                None
-            }
-        };
-
-        if let Some(response) = response {
+        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
             if let Some(rollball_core::proto::client_message::Payload::MemoryConsolidateResult(result)) = response.payload {
                 return Ok(Json(ConsolidateResponse {
                     started: result.started,

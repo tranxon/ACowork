@@ -176,58 +176,20 @@ impl Cli {
     }
 }
 
-/// A writer wrapper that converts LF (\n) to CRLF (\r\n) on Windows.
+/// Cross-platform CRLF conversion for terminal log output.
 ///
-/// Rust's `io::Stderr` and `File` do not perform newline conversion
-/// (unlike `println!` which uses `io::Stdout`'s OS-level handling).
-/// This causes log output to appear as a single line in Windows terminals
-/// and Notepad. On Unix (Linux/macOS), this wrapper is a transparent
-/// pass-through since \n is the native line ending.
-struct CrlfWriter<W: std::io::Write> {
-    inner: W,
-}
-
-impl<W: std::io::Write> std::io::Write for CrlfWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // On non-Windows platforms, pass through unchanged.
-        // \n is the native line ending on Unix (Linux/macOS).
-        if cfg!(not(windows)) {
-            return self.inner.write(buf);
-        }
-
-        // On Windows: scan for \n bytes and insert \r before each.
-        let mut start = 0;
-        for (i, &b) in buf.iter().enumerate() {
-            if b == b'\n' {
-                if i > start {
-                    self.inner.write_all(&buf[start..i])?;
-                }
-                self.inner.write_all(b"\r\n")?;
-                start = i + 1;
-            }
-        }
-        if start < buf.len() {
-            self.inner.write_all(&buf[start..])?;
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-/// `MakeWriter` implementation that produces `CrlfWriter<io::Stderr>`.
+/// On Windows, Rust's `io::Stderr` writes `\n` byte-for-byte, producing
+/// unix-style line endings.  This wrapper inserts `\r` before each `\n`.
+/// On Unix it is a transparent pass-through.
 ///
-/// This is used as the writer for the stderr tracing layer to ensure
-/// proper CRLF line endings on all platforms.
+/// Uses the shared [`rollball_core::crlf::CrlfWriter`] implementation.
 struct CrlfStderr;
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CrlfStderr {
-    type Writer = CrlfWriter<std::io::Stderr>;
+    type Writer = rollball_core::crlf::CrlfWriter<std::io::Stderr>;
 
     fn make_writer(&self) -> Self::Writer {
-        CrlfWriter {
+        rollball_core::crlf::CrlfWriter {
             inner: std::io::stderr(),
         }
     }
