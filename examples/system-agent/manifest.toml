@@ -5,6 +5,8 @@
 agent_id = "com.rollball.system"
 version = "1.0.0"
 name = "System Agent"
+display_name = "System"
+role = "System Services"
 description = "RollBall system agent: manages user identity, preferences, and system-level services"
 author = "Rollball Team"
 runtime_version = "0.1.0"

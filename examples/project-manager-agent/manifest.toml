@@ -4,6 +4,8 @@
 agent_id = "com.rollball.project-manager"
 version = "1.0.0"
 name = "Project Manager"
+display_name = "PM"
+role = "Project Manager"
 description = "A professional project manager skilled in requirements analysis, task decomposition, progress tracking, risk assessment, and team coordination."
 author = "RollBall Team"
 runtime_version = "0.1.0"

@@ -4,6 +4,8 @@
 agent_id = "com.rollball.senior-engineer"
 version = "1.0.0"
 name = "Senior Software Engineer"
+display_name = "Engineer"
+role = "Senior Engineer"
 description = "An experienced senior software engineer capable of code review, architecture design, debugging, refactoring, testing, and documentation."
 author = "RollBall Team"
 runtime_version = "0.1.0"
