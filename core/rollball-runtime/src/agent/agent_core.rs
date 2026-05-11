@@ -43,6 +43,15 @@ pub struct AgentCore {
     /// When a model's max_output_tokens exceeds this value, the value is capped.
     /// Default: 32768 (32K). Set to 0 to disable the limit.
     pub(crate) max_output_tokens_limit: u64,
+    /// Max concurrent tool calls per iteration (from Gateway config).
+    /// Default: 16. Set to 0 to disable the limit.
+    pub(crate) tools_limit: u32,
+    /// LLM temperature override (from Gateway config).
+    /// None = use model/provider default.
+    pub(crate) temperature_override: Option<f32>,
+    /// System prompt override (from Gateway config).
+    /// None = use manifest-compiled system prompt.
+    pub(crate) system_prompt_override: Option<String>,
     /// Optional streaming chunk sender (like ZeroClaw's on_delta).
     /// When set, each StreamEvent::Content delta is forwarded here
     /// so the caller can relay chunks to Gateway via StreamChunk.
@@ -70,6 +79,9 @@ impl AgentCore {
             tools,
             gateway_model_capabilities: HashMap::new(),
             max_output_tokens_limit: 32_768,
+            tools_limit: 16,
+            temperature_override: None,
+            system_prompt_override: None,
             on_chunk,
             memory_store: None,
         }
@@ -151,6 +163,36 @@ impl AgentCore {
         self.max_output_tokens_limit = limit;
     }
 
+    /// Apply runtime config overrides from Gateway.
+    /// Only updates fields that are Some — None means "keep current value".
+    pub fn apply_runtime_config(
+        &mut self,
+        max_output_tokens: Option<u64>,
+        tools_limit: Option<u32>,
+        temperature: Option<f32>,
+        system_prompt_override: Option<String>,
+    ) {
+        if let Some(limit) = max_output_tokens {
+            tracing::info!(old = self.max_output_tokens_limit, new = limit, "runtime config: max_output_tokens updated");
+            self.max_output_tokens_limit = limit;
+        }
+        if let Some(limit) = tools_limit {
+            tracing::info!(old = self.tools_limit, new = limit, "runtime config: tools_limit updated");
+            self.tools_limit = limit;
+        }
+        if let Some(temp) = temperature {
+            tracing::info!(old = ?self.temperature_override, new = temp, "runtime config: temperature updated");
+            self.temperature_override = Some(temp);
+        }
+        if system_prompt_override.is_some() {
+            tracing::info!(
+                has_override = system_prompt_override.as_ref().map(|s| !s.is_empty()).unwrap_or(false),
+                "runtime config: system_prompt_override updated"
+            );
+            self.system_prompt_override = system_prompt_override;
+        }
+    }
+
     /// Initialize the Grafeo memory store at the given workspace path.
     ///
     /// Opens or creates `{work_dir}/memory/private.grafeo`.
@@ -227,6 +269,9 @@ impl AgentCore {
             tools: self.tools.clone(),
             gateway_model_capabilities: self.gateway_model_capabilities.clone(),
             max_output_tokens_limit: self.max_output_tokens_limit,
+            tools_limit: self.tools_limit,
+            temperature_override: self.temperature_override,
+            system_prompt_override: self.system_prompt_override.clone(),
             on_chunk,
             memory_store: self.memory_store.clone(),
         }

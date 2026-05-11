@@ -65,6 +65,7 @@ message ServerMessage {
     WorkspaceContextUpdate  workspace_context_update = 23;
     IterationLimitPaused    iteration_limit_paused = 24;
     LogLevelUpdate          log_level_update     = 25;
+    RuntimeConfigUpdate     runtime_config_update = 31;
     MemoryNodesQuery        memory_nodes_query    = 27;
     MemoryStatsQuery        memory_stats_query    = 28;
     MemoryConsolidateQuery  memory_consolidate_query = 29;
@@ -119,6 +120,7 @@ message IdentityDelivery        { repeated IdentityEntry entries = 1; }
 message WorkspaceContextUpdate  { string context_text = 1; string current_workspace_id = 2; string current_workspace_path = 3; }
 message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
 message LogLevelUpdate           { string log_level = 1; }
+message RuntimeConfigUpdate      { uint64 max_output_tokens = 1; uint32 tools_limit = 2; float temperature = 3; string system_prompt_override = 4; }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }
 

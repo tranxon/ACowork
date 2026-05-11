@@ -18,7 +18,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
+use crate::http::agent_config::{self, AgentConfigOverride, AgentConfigResponse, UpdateAgentConfigRequest};
 use crate::http::routes::{ApiError, AppState};
+use rollball_core::protocol::GatewayResponse;
 
 /// Build the agent management router
 pub fn agent_routes() -> Router<AppState> {
@@ -29,6 +31,7 @@ pub fn agent_routes() -> Router<AppState> {
         .route("/api/agents/{id}/start", post(start_agent))
         .route("/api/agents/{id}/stop", post(stop_agent))
         .route("/api/agents/{id}/model", get(get_agent_model))
+        .route("/api/agents/{id}/config", get(get_agent_config).put(update_agent_config))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -38,6 +41,9 @@ pub fn agent_routes() -> Router<AppState> {
 pub struct AgentListResponse {
     pub agent_id: String,
     pub name: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+    pub avatar: Option<String>,
     pub version: String,
     pub running: bool,
     pub connected: bool,
@@ -48,6 +54,9 @@ pub struct AgentListResponse {
 pub struct AgentDetailResponse {
     pub agent_id: String,
     pub name: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+    pub avatar: Option<String>,
     pub version: String,
     pub description: String,
     pub author: String,
@@ -126,6 +135,9 @@ pub async fn list_agents(
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
+                display_name: info.manifest.display_name.clone(),
+                role: info.manifest.role.clone(),
+                avatar: info.manifest.avatar.clone(),
                 version: info.version.clone(),
                 running: actually_running,
                 connected,
@@ -153,6 +165,9 @@ pub async fn get_agent_detail(
     let resp = AgentDetailResponse {
         agent_id: info.agent_id.clone(),
         name: info.name.clone(),
+        display_name: info.manifest.display_name.clone(),
+        role: info.manifest.role.clone(),
+        avatar: info.manifest.avatar.clone(),
         version: info.version.clone(),
         description: info.manifest.description.clone(),
         author: info.manifest.author.clone(),
@@ -465,6 +480,187 @@ pub async fn get_agent_model(
     }))
 }
 
+// ── Agent config handlers ─────────────────────────────────────────────
+
+/// Read the system prompt from the agent's prompts directory.
+/// Concatenates all .md and .txt files sorted by filename.
+fn read_system_prompt(install_path: &str) -> Option<String> {
+    let prompts_dir = std::path::Path::new(install_path).join("prompts");
+    if !prompts_dir.exists() {
+        return None;
+    }
+    let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(&prompts_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .map_or(false, |ext| ext == "md" || ext == "txt")
+            })
+            .collect(),
+        Err(_) => return None,
+    };
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    let mut prompt = String::new();
+    for file in &files {
+        match std::fs::read_to_string(file) {
+            Ok(content) => {
+                if !prompt.is_empty() {
+                    prompt.push('\n');
+                }
+                prompt.push_str(&content);
+            }
+            Err(_) => continue,
+        }
+    }
+    if prompt.is_empty() {
+        None
+    } else {
+        Some(prompt)
+    }
+}
+
+/// `GET /api/agents/{id}/config` — get agent runtime config
+///
+/// Returns the effective config for an agent by merging per-agent overrides
+/// with global Gateway defaults.
+pub async fn get_agent_config(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentConfigResponse>, (StatusCode, Json<ApiError>)> {
+    let gw = state.gateway_state.read().await;
+
+    // Verify agent exists
+    let info = gw
+        .installed_agents
+        .get(&agent_id)
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+
+    // Get data_dir from Gateway config
+    let data_dir = gw
+        .config
+        .as_ref()
+        .map(|c| std::path::PathBuf::from(&c.data_dir))
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+
+    // Get global max_output_tokens from config
+    let global_max_output_tokens = gw
+        .config
+        .as_ref()
+        .map(|c| c.max_output_tokens_limit)
+        .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS);
+
+    // Load per-agent config override
+    let per_agent = agent_config::load_agent_config(&data_dir, &agent_id).unwrap_or(None);
+
+    // Read system prompt from install_path/prompts/
+    let system_prompt = read_system_prompt(&info.install_path);
+
+    // Merge into effective config
+    let effective = agent_config::get_effective_config(
+        &agent_id,
+        per_agent.as_ref(),
+        global_max_output_tokens,
+        system_prompt,
+    );
+
+    Ok(Json(effective))
+}
+
+/// `PUT /api/agents/{id}/config` — update agent runtime config
+///
+/// Accepts partial updates: only provided fields are modified.
+/// Saves the updated config to disk and pushes RuntimeConfigUpdate
+/// to the connected agent if available.
+pub async fn update_agent_config(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<UpdateAgentConfigRequest>,
+) -> Result<Json<AgentConfigResponse>, (StatusCode, Json<ApiError>)> {
+    // Extract data from gateway state first (release lock before async ops)
+    let (info_install_path, data_dir, global_max_output_tokens) = {
+        let gw = state.gateway_state.read().await;
+
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+
+        let data_dir = gw
+            .config
+            .as_ref()
+            .map(|c| std::path::PathBuf::from(&c.data_dir))
+            .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+
+        let global_max_output_tokens = gw
+            .config
+            .as_ref()
+            .map(|c| c.max_output_tokens_limit)
+            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS);
+
+        (info.install_path.clone(), data_dir, global_max_output_tokens)
+    };
+
+    // Load existing config or create default
+    let existing = agent_config::load_agent_config(&data_dir, &agent_id)
+        .unwrap_or(None)
+        .unwrap_or_default();
+
+    // Merge update: provided values override, None means keep existing
+    // Clone String fields before move so we can use them for push later
+    let req_system_prompt_override = req.system_prompt_override.clone();
+    let updated = AgentConfigOverride {
+        max_output_tokens: req.max_output_tokens.or(existing.max_output_tokens),
+        tools_limit: req.tools_limit.or(existing.tools_limit),
+        temperature: req.temperature.or(existing.temperature),
+        system_prompt_override: req
+            .system_prompt_override
+            .or(existing.system_prompt_override),
+    };
+
+    // Save to disk
+    agent_config::save_agent_config(&data_dir, &agent_id, &updated)
+        .map_err(|e| ApiError::internal(&format!("Failed to save config: {}", e)))?;
+
+    // Push RuntimeConfigUpdate to connected agent if available
+    if let Some(ref session_mgr) = state.session_mgr {
+        let mgr = session_mgr.lock().await;
+        if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+            let push_result = session
+                .push_message(GatewayResponse::RuntimeConfigUpdate {
+                    max_output_tokens: req.max_output_tokens,
+                    tools_limit: req.tools_limit,
+                    temperature: req.temperature,
+                    system_prompt_override: req_system_prompt_override,
+                })
+                .await;
+            if !push_result {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Failed to push RuntimeConfigUpdate to connected agent"
+                );
+            }
+        }
+    }
+
+    // Read system prompt for response
+    let system_prompt = read_system_prompt(&info_install_path);
+
+    // Return updated effective config
+    let effective = agent_config::get_effective_config(
+        &agent_id,
+        Some(&updated),
+        global_max_output_tokens,
+        system_prompt,
+    );
+
+    Ok(Json(effective))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +670,9 @@ mod tests {
         let resp = AgentListResponse {
             agent_id: "com.example.weather".to_string(),
             name: "Weather Agent".to_string(),
+            display_name: None,
+            role: None,
+            avatar: None,
             version: "1.0.0".to_string(),
             running: false,
             connected: false,

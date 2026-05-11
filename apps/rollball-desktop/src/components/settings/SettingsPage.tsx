@@ -9,17 +9,19 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
 import { Star } from "lucide-react";
 import { inputReadonly, inputBase, selectBase } from "../../lib/ui-styles";
+import { ProfileTab } from "./ProfileTab";
 
-type SettingsTab = "gateway" | "providers" | "appearance" | "general";
+type SettingsTab = "gateway" | "providers" | "appearance" | "general" | "profile";
 
-export function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("gateway");
+export function SettingsPage({ initialTab = "gateway" }: { initialTab?: SettingsTab }) {
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: "gateway", label: "Gateway" },
     { id: "providers", label: "Providers" },
     { id: "appearance", label: "Appearance" },
     { id: "general", label: "General" },
+    { id: "profile", label: "My Profile" },
   ];
 
   return (
@@ -53,6 +55,7 @@ export function SettingsPage() {
         {activeTab === "providers" && <ProvidersTab />}
         {activeTab === "appearance" && <AppearanceTab />}
         {activeTab === "general" && <GeneralTab />}
+        {activeTab === "profile" && <ProfileTab />}
       </div>
     </div>
   );

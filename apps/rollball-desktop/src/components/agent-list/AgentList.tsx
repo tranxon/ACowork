@@ -3,10 +3,12 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
+import { AgentAvatar } from "../common/AgentAvatar";
 import { cn } from "../../lib/utils";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Users } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSessionStore } from "../../stores/sessionStore";
+import { useAgentProfileStore } from "../../stores/agentProfileStore";
 
 interface AgentListProps {
   width?: number;
@@ -16,6 +18,7 @@ export function AgentList({ width }: AgentListProps) {
   const { agents, selectedAgentId, loading, fetchAgents, selectAgent, startAgent, stopAgent, uninstallAgent } =
     useAgentStore();
   const sessionTitles = useSessionStore((s) => s.sessionTitles);
+  const agentProfiles = useAgentProfileStore((s) => s.profiles);
   const fetchLatestSessionTitle = useSessionStore((s) => s.fetchLatestSessionTitle);
   const { addToast } = useToast();
   const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
@@ -250,21 +253,21 @@ export function AgentList({ width }: AgentListProps) {
               role="listitem"
             >
               {/* Avatar */}
-              <div className={cn(
-                "flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold mt-0.5",
-                isSystem 
-                  ? "bg-gradient-to-br from-blue-500 to-blue-600 text-white"
-                  : "bg-gradient-to-br from-zinc-400 to-zinc-500 text-white dark:from-zinc-500 dark:to-zinc-600"
-              )}>
-                {agent.name.charAt(0).toUpperCase()}
-              </div>
+              <AgentAvatar
+                agentId={agent.agent_id}
+                displayName={agent.display_name ?? agent.name}
+                avatarUrl={agent.avatar}
+                iconId={agentProfiles[agent.agent_id]?.avatarIconId}
+                size={40}
+                className="mt-0.5"
+              />
 
               {/* Content area */}
               <div className="min-w-0 flex-1">
                 {/* Top row: name + system badge */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="truncate font-medium text-zinc-900 dark:text-zinc-100" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.name}</span>
+                    <span className="truncate font-medium text-zinc-900 dark:text-zinc-100" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name}</span>
                     {isSystem && (
                       <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/50 dark:text-blue-300">System</span>
                     )}

@@ -1434,6 +1434,26 @@ async fn process_gateway_recv(
                         }
                         return LoopAction::Continue;
                     }
+                    GatewayResponse::RuntimeConfigUpdate {
+                        max_output_tokens,
+                        tools_limit,
+                        temperature,
+                        system_prompt_override,
+                    } => {
+                        tracing::info!(
+                            max_output_tokens = ?max_output_tokens,
+                            tools_limit = ?tools_limit,
+                            temperature = ?temperature,
+                            "Received RuntimeConfigUpdate from Gateway — broadcasting to all sessions"
+                        );
+                        session_manager.broadcast(SessionMessage::UpdateRuntimeConfig {
+                            max_output_tokens,
+                            tools_limit,
+                            temperature,
+                            system_prompt_override,
+                        });
+                        return LoopAction::Continue;
+                    }
                     _ => {
                         tracing::debug!("Ignoring non-IntentReceived Gateway message");
                         return LoopAction::Continue;

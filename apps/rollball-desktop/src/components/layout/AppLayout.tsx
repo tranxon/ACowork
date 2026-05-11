@@ -11,6 +11,9 @@ import { SettingsPage } from "../settings/SettingsPage";
 import { ToolApprovalModal } from "../tools/ToolApprovalModal";
 import { PanelRightClose } from "lucide-react";
 
+/** Settings tab type — keep in sync with SettingsPage */
+type SettingsTab = "gateway" | "providers" | "appearance" | "general" | "profile";
+
 const MIN_SIDEBAR_WIDTH = 160;
 const MAX_SIDEBAR_WIDTH = 400;
 const DEFAULT_SIDEBAR_WIDTH = 240;
@@ -18,6 +21,7 @@ const SIDEBAR_WIDTH_KEY = "rollball-sidebar-width";
 
 export function AppLayout() {
   const [currentView, setCurrentView] = useState<NavView>("chat");
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>("gateway");
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
@@ -43,6 +47,20 @@ export function AppLayout() {
 
   const toggleResults = useCallback(() => {
     setResultsCollapsed((prev) => !prev);
+  }, []);
+
+  // Navigate to settings with profile tab when avatar is clicked
+  const handleAvatarClick = useCallback(() => {
+    setSettingsInitialTab("profile");
+    setCurrentView("settings");
+  }, []);
+
+  // Navigate via nav bar — reset settings tab to default
+  const handleViewChange = useCallback((view: NavView) => {
+    if (view === "settings") {
+      setSettingsInitialTab("gateway");
+    }
+    setCurrentView(view);
   }, []);
 
   // Sidebar resize handlers
@@ -82,7 +100,7 @@ export function AppLayout() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
         {/* Navigation bar — 48px */}
-        <NavBar currentView={currentView} onViewChange={setCurrentView} />
+        <NavBar currentView={currentView} onViewChange={handleViewChange} onAvatarClick={handleAvatarClick} />
 
         {/* Content area based on current view */}
         {currentView === "chat" && (
@@ -120,7 +138,7 @@ export function AppLayout() {
           </div>
         )}
 
-        {currentView === "settings" && <SettingsPage />}
+        {currentView === "settings" && <SettingsPage initialTab={settingsInitialTab} />}
       </div>
 
       {/* Global tool approval modal */}

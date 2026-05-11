@@ -154,6 +154,17 @@ impl AgentLoop {
         self.core.update_max_output_tokens_limit(limit);
     }
 
+    /// Apply runtime config overrides from Gateway.
+    pub fn apply_runtime_config(
+        &mut self,
+        max_output_tokens: Option<u64>,
+        tools_limit: Option<u32>,
+        temperature: Option<f32>,
+        system_prompt_override: Option<String>,
+    ) {
+        self.core.apply_runtime_config(max_output_tokens, tools_limit, temperature, system_prompt_override);
+    }
+
     /// Get the current conversation session ID (S1.14)
     ///
     /// Returns the session ID of the active ConversationSession,

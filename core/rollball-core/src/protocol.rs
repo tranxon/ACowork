@@ -509,6 +509,28 @@ pub enum GatewayResponse {
         /// New log level string (e.g. "trace", "debug", "info", "warn", "error")
         log_level: String,
     },
+    /// Runtime configuration update (Gateway → Runtime, push)
+    ///
+    /// Gateway pushes per-agent config overrides to the Runtime.
+    /// Sent at two times:
+    ///   A) After AgentHello handshake (initial config delivery)
+    ///   B) When the user updates config via PUT /api/agents/{id}/config
+    ///
+    /// All fields are optional — None means "keep current value".
+    RuntimeConfigUpdate {
+        /// Max output tokens per request (0 = use global default)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_output_tokens: Option<u64>,
+        /// Max concurrent tool calls per iteration (0 = use global default)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools_limit: Option<u32>,
+        /// LLM temperature override
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        temperature: Option<f32>,
+        /// System prompt override
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt_override: Option<String>,
+    },
 }
 
 /// Session info DTO for IPC responses (S1.14)

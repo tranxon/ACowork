@@ -7,6 +7,7 @@ pub mod server;
 pub mod routes;
 pub mod auth;
 pub mod agents;
+pub mod agent_config;
 pub mod chat;
 pub mod vault_api;
 pub mod config_api;

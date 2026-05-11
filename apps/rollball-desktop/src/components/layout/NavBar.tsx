@@ -1,10 +1,14 @@
 import type { NavView } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { MessageSquare, Settings } from "lucide-react";
+import { UserAvatar } from "../common/UserAvatar";
+import { useUserProfileStore } from "../../stores/userProfileStore";
 
 interface NavBarProps {
   currentView: NavView;
   onViewChange: (view: NavView) => void;
+  /** Called when user clicks their avatar — navigate to profile settings */
+  onAvatarClick: () => void;
 }
 
 const navItems: { view: NavView; icon: typeof MessageSquare; label: string }[] = [
@@ -12,13 +16,33 @@ const navItems: { view: NavView; icon: typeof MessageSquare; label: string }[] =
   { view: "settings", icon: Settings, label: "Settings" },
 ];
 
-export function NavBar({ currentView, onViewChange }: NavBarProps) {
+export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps) {
+  const profile = useUserProfileStore((s) => s.profile);
+
   return (
     <nav
-      className="flex w-[48px] flex-col items-center gap-2.5 bg-[#E2E3E9] py-2 dark:bg-[#292A2C]"
+      className="flex w-[48px] flex-col items-center gap-0 bg-[#E2E3E9] py-2 dark:bg-[#292A2C]"
       role="navigation"
       aria-label="Main navigation"
     >
+      {/* User avatar — click to edit profile (WeChat-style top placement) */}
+      <button
+        onClick={onAvatarClick}
+        className="flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-zinc-400 dark:hover:ring-zinc-500"
+        title="Edit Profile"
+        aria-label="Edit Profile"
+      >
+        <UserAvatar
+          displayName={profile.displayName}
+          size={32}
+          className="shrink-0"
+        />
+      </button>
+
+      {/* Divider */}
+      <div className="my-2 h-px w-6 bg-zinc-300 dark:bg-zinc-600" />
+
+      {/* Navigation items */}
       {navItems.map(({ view, icon: Icon, label }) => (
         <button
           key={view}

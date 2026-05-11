@@ -1071,6 +1071,30 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 message: ilp.message,
             }
         }
+        Some(ServerPayload::RuntimeConfigUpdate(rcu)) => {
+            GatewayResponse::RuntimeConfigUpdate {
+                max_output_tokens: if rcu.max_output_tokens == 0 {
+                    None
+                } else {
+                    Some(rcu.max_output_tokens)
+                },
+                tools_limit: if rcu.tools_limit == 0 {
+                    None
+                } else {
+                    Some(rcu.tools_limit)
+                },
+                temperature: if rcu.temperature == 0.0 {
+                    None
+                } else {
+                    Some(rcu.temperature)
+                },
+                system_prompt_override: if rcu.system_prompt_override.is_empty() {
+                    None
+                } else {
+                    Some(rcu.system_prompt_override)
+                },
+            }
+        }
 
         // Response messages (request_id > 0) — included for robustness
         Some(ServerPayload::AgentHelloResult(r)) => GatewayResponse::AgentHelloResult {

@@ -17,6 +17,9 @@ export interface SystemStatusResponse {
 export interface AgentInfo {
   agent_id: string;
   name: string;
+  display_name?: string;
+  role?: string;
+  avatar?: string;
   version: string;
   running: boolean;
 }
@@ -25,6 +28,9 @@ export interface AgentInfo {
 export interface AgentDetail {
   agent_id: string;
   name: string;
+  display_name?: string;
+  role?: string;
+  avatar?: string;
   version: string;
   description: string;
   author: string;
@@ -135,6 +141,12 @@ export interface ChatMessage {
   type: MessageType;
   content: string;
   timestamp: number;
+  /** Sender display name for chat bubble (e.g. "PM", "我") */
+  senderDisplayName?: string;
+  /** Sender avatar URL or data URI */
+  senderAvatar?: string;
+  /** Sender role label (e.g. "Project Manager") */
+  senderRole?: string;
   /** For tool_call: tool name */
   toolName?: string;
   /** For tool_call/tool_result: parameters or result JSON */
@@ -375,4 +387,42 @@ export interface PaginatedMessages {
   messages: ConversationEntry[];
   cursor: string | null;
   has_more: boolean;
+}
+
+// ── User profile (persisted in localStorage) ──────────────────────────
+
+/** Avatar generation style from boring-avatars */
+export type BoringAvatarVariant = "beam" | "marble" | "pixel" | "sunset" | "ring" | "bauhaus";
+
+/** How the user's avatar is generated */
+export type AvatarType = "boring" | "icon" | "letter";
+
+/** Color palette preset ID */
+export type ColorPalette = "rainbow" | "ocean" | "forest" | "sunset" | "neon";
+
+/** Color palette definitions for boring-avatars */
+export const COLOR_PALETTES: Record<ColorPalette, string[]> = {
+  rainbow: ["#FF6900", "#FCB900", "#7BDCB5", "#00D084", "#8ED1FC", "#0693E3", "#ABB8C3", "#EB144C", "#F78DA7", "#9900EF"],
+  ocean: ["#0066CC", "#0088FF", "#00AAFF", "#44CCFF", "#88DDEE", "#6699CC", "#336699", "#003366"],
+  forest: ["#2D6A4F", "#40916C", "#52B788", "#74C69D", "#95D5B2", "#1B4332", "#081C15"],
+  sunset: ["#FF6B35", "#F7C59F", "#EFE9E7", "#2D82B7", "#1E5F74", "#FF4500", "#FFD700"],
+  neon: ["#FF006E", "#8338EC", "#3A86FF", "#06D6A0", "#FFBE0B", "#FB5607"],
+};
+
+/** User profile stored in localStorage */
+export interface UserProfile {
+  /** User's display name shown in chat */
+  displayName: string;
+  /** How the avatar is generated */
+  avatarType: AvatarType;
+  /** Boring Avatars variant (when avatarType = "boring") */
+  avatarVariant: BoringAvatarVariant;
+  /** Seed string for deterministic avatar (default = "user") */
+  avatarSeed: string;
+  /** Built-in icon ID (when avatarType = "icon") */
+  avatarIcon: string | null;
+  /** Color palette ID */
+  colorPalette: ColorPalette;
+  /** Custom colors override (when non-empty) */
+  avatarColors: string[];
 }

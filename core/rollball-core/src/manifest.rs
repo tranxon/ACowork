@@ -56,6 +56,15 @@ pub struct AgentManifest {
     pub version: String,
     /// Human-readable name
     pub name: String,
+    /// Short display name for chat UI (defaults to `name` if absent)
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Agent role / job title (e.g. "Project Manager")
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Path to avatar image within the .agent package (e.g. "assets/avatar.png")
+    #[serde(default)]
+    pub avatar: Option<String>,
     /// Short description
     pub description: String,
     /// Author identifier

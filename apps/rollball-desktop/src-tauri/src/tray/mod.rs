@@ -30,6 +30,7 @@ pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .tooltip("Rollball")
         .on_menu_event(events::on_menu_event)
+        .on_tray_icon_event(events::on_tray_icon_event)
         .build(app)?;
 
     Ok(())

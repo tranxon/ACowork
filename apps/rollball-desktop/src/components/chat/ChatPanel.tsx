@@ -6,6 +6,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
+import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
@@ -21,6 +22,8 @@ import { MemoryPanel } from "../memory/MemoryPanel";
 import { SessionPanel } from "./SessionPanel";
 import { SkillsPanel } from "../skills/SkillsPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
+import { UserAvatar } from "../common/UserAvatar";
+import { AgentAvatar } from "../common/AgentAvatar";
 
 // Module-level: persists across ChatPanel mount/unmount cycles
 // so nav-back (Settings→Chat) doesn't trigger full reinit
@@ -524,7 +527,7 @@ export function ChatPanel() {
 
                     {/* Regular message */}
                     {displayItem.type !== 'explore_group' && (
-                      <MessageBubble message={item as ChatMessage} isStreaming={(item as ChatMessage).id === streamingMessageId} />
+                      <MessageBubble message={item as ChatMessage} isStreaming={(item as ChatMessage).id === streamingMessageId} agentId={selectedAgentId ?? ""} />
                     )}
                   </div>
                 );
@@ -892,18 +895,30 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
 }
 
 /** Single message bubble */
-function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStreaming: boolean }) {
+function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage; isStreaming: boolean; agentId: string }) {
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
+  // Agent icon from profile settings
+  const agentIconId = useAgentProfileStore((s) => s.profiles[agentId]?.avatarIconId);
 
   if (message.type === "user") {
     return (
       <MessageContentWrapper>
-        <div className="flex justify-end">
-          <div className="max-w-[70%] rounded-lg rounded-br-sm bg-[#9DF29F] px-4 py-2.5 text-zinc-900 select-text" style={fontSizeStyle}>
-            {message.content}
+        <div className="flex items-start justify-end gap-2">
+          <div className="min-w-0 flex-1 flex flex-col items-end">
+            {message.senderDisplayName && (
+              <span className="mb-1 text-xs text-zinc-400 dark:text-zinc-500">{message.senderDisplayName}</span>
+            )}
+            <div className="max-w-[85%] rounded-lg rounded-br-sm bg-[#9DF29F] px-4 py-2.5 text-zinc-900 select-text" style={fontSizeStyle}>
+              {message.content}
+            </div>
           </div>
+          <UserAvatar
+            displayName={message.senderDisplayName}
+            size={28}
+            className="shrink-0 mt-1"
+          />
         </div>
       </MessageContentWrapper>
     );
@@ -914,17 +929,34 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
 
     return (
       <MessageContentWrapper>
-        <div className="flex justify-start">
-          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-            {message.content && (
-              <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text" style={fontSizeStyle}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-              </div>
-            )}
-            {showPlaceholder && (
-              <span className="text-zinc-400">Thinking...</span>
-            )}
-            {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
+        <div className="flex items-start gap-2">
+          <AgentAvatar
+            agentId={agentId}
+            displayName={message.senderDisplayName}
+            iconId={agentIconId}
+            size={28}
+            className="shrink-0 mt-1"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 mb-1">
+              {message.senderDisplayName && (
+                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{message.senderDisplayName}</span>
+              )}
+              {message.senderRole && (
+                <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
+              )}
+            </div>
+            <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+              {message.content && (
+                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text" style={fontSizeStyle}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                </div>
+              )}
+              {showPlaceholder && (
+                <span className="text-zinc-400">Thinking...</span>
+              )}
+              {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
+            </div>
           </div>
         </div>
       </MessageContentWrapper>
@@ -934,15 +966,32 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
   if (message.type === "thought") {
     return (
       <MessageContentWrapper>
-        <div className="flex justify-start">
-          <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-            <ThinkBlock
-              content={message.content}
-              isStreaming={isStreaming}
-              hasReplyStarted={!isStreaming}
-              startTime={message.startTime}
-              endTime={message.endTime}
-            />
+        <div className="flex items-start gap-2">
+          <AgentAvatar
+            agentId={agentId}
+            displayName={message.senderDisplayName}
+            iconId={agentIconId}
+            size={28}
+            className="shrink-0 mt-1"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 mb-1">
+              {message.senderDisplayName && (
+                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{message.senderDisplayName}</span>
+              )}
+              {message.senderRole && (
+                <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
+              )}
+            </div>
+            <div className="w-full max-w-[min(var(--content-max-width),900px)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+              <ThinkBlock
+                content={message.content}
+                isStreaming={isStreaming}
+                hasReplyStarted={!isStreaming}
+                startTime={message.startTime}
+                endTime={message.endTime}
+              />
+            </div>
           </div>
         </div>
       </MessageContentWrapper>

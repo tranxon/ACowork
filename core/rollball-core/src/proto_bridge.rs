@@ -731,6 +731,21 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     proto::LogLevelUpdate { log_level: log_level.clone() },
                 ))
             }
+            protocol::GatewayResponse::RuntimeConfigUpdate {
+                max_output_tokens,
+                tools_limit,
+                temperature,
+                system_prompt_override,
+            } => {
+                Some(proto::server_message::Payload::RuntimeConfigUpdate(
+                    proto::RuntimeConfigUpdate {
+                        max_output_tokens: max_output_tokens.unwrap_or(0),
+                        tools_limit: tools_limit.unwrap_or(0),
+                        temperature: temperature.unwrap_or(0.0),
+                        system_prompt_override: system_prompt_override.clone().unwrap_or_default(),
+                    },
+                ))
+            }
         };
 
         proto::ServerMessage {

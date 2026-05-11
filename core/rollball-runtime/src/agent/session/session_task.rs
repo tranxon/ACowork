@@ -40,6 +40,13 @@ pub enum SessionMessage {
     },
     /// Update max output tokens limit from Gateway config
     UpdateMaxOutputTokens { limit: u64 },
+    /// Apply runtime config overrides from Gateway
+    UpdateRuntimeConfig {
+        max_output_tokens: Option<u64>,
+        tools_limit: Option<u32>,
+        temperature: Option<f32>,
+        system_prompt_override: Option<String>,
+    },
     /// Update workspace context text
     UpdateWorkspaceContext { context_text: String },
     /// Update the title of the session's conversation
@@ -227,6 +234,26 @@ impl SessionTask {
                         "SessionTask: updating max output tokens limit"
                     );
                     agent_loop.update_max_output_tokens_limit(limit);
+                }
+                Some(SessionMessage::UpdateRuntimeConfig {
+                    max_output_tokens,
+                    tools_limit,
+                    temperature,
+                    system_prompt_override,
+                }) => {
+                    tracing::info!(
+                        session_id = %self.session_id,
+                        max_output_tokens = ?max_output_tokens,
+                        tools_limit = ?tools_limit,
+                        temperature = ?temperature,
+                        "SessionTask: applying runtime config overrides"
+                    );
+                    agent_loop.apply_runtime_config(
+                        max_output_tokens,
+                        tools_limit,
+                        temperature,
+                        system_prompt_override,
+                    );
                 }
                 Some(SessionMessage::UpdateWorkspaceContext { context_text }) => {
                     tracing::info!(

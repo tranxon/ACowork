@@ -10,6 +10,7 @@ use tokio::sync::{RwLock, Mutex};
 use rollball_core::protocol::GatewayResponse;
 use rollball_core::permission::{Permission, PermissionGrant, PermissionPolicy};
 use crate::gateway::state::GatewayState;
+use crate::http::agent_config;
 use crate::ipc::session::SessionManager;
 
 /// Shared state type: Arc<RwLock<GatewayState>> for concurrent read/write access.
@@ -988,6 +989,37 @@ pub async fn handle_agent_hello(
                     "No workspace config for agent={}, skipping WorkspaceContextUpdate push",
                     agent_id
                 );
+            }
+        }
+
+        // Push per-agent runtime config overrides (tools_limit, temperature, etc.)
+        // These are persisted via PUT /api/agents/{id}/config and pushed on connect.
+        {
+            let data_dir = state.read().await
+                .config.as_ref()
+                .map(|c| std::path::PathBuf::from(&c.data_dir))
+                .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+            if let Ok(Some(per_agent)) = agent_config::load_agent_config(&data_dir, agent_id) {
+                let has_override = per_agent.tools_limit.is_some()
+                    || per_agent.temperature.is_some()
+                    || per_agent.system_prompt_override.is_some()
+                    || per_agent.max_output_tokens.is_some();
+                if has_override {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        "Pushing RuntimeConfigUpdate: tools_limit={:?} temperature={:?}",
+                        per_agent.tools_limit, per_agent.temperature
+                    );
+                    let push_result = session.push_message(GatewayResponse::RuntimeConfigUpdate {
+                        max_output_tokens: per_agent.max_output_tokens,
+                        tools_limit: per_agent.tools_limit,
+                        temperature: per_agent.temperature,
+                        system_prompt_override: per_agent.system_prompt_override.clone(),
+                    }).await;
+                    if !push_result {
+                        tracing::warn!("Failed to push RuntimeConfigUpdate to {} (channel closed)", conn_id);
+                    }
+                }
             }
         }
         } // end if connection_role == "main"

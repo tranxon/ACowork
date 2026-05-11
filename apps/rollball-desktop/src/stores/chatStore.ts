@@ -3,7 +3,34 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry } from "../lib/types";
 import { usePermissionStore } from "./permissionStore";
 import { useSessionStore } from "./sessionStore";
+import { useAgentStore } from "./agentStore";
+import { useUserProfileStore } from "./userProfileStore";
+import { useAgentProfileStore } from "./agentProfileStore";
 import { getGatewayUrl } from "../lib/config";
+
+// ── Sender info helpers ────────────────────────────────────────────────
+
+/** Fill senderDisplayName / senderRole for messages from the agent */
+function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; senderRole?: string } {
+  // Priority: agentProfileStore custom name > agent display_name > agent name
+  const agentProfile = useAgentProfileStore.getState().getProfile(agentId);
+  const agents = useAgentStore.getState().agents;
+  const agent = agents.find((a) => a.agent_id === agentId);
+  return {
+    senderDisplayName: agentProfile?.displayName ?? agent?.display_name ?? agent?.name,
+    senderRole: agent?.role,
+  };
+}
+
+/** Fill senderDisplayName for user messages */
+function getUserSenderInfo(): { senderDisplayName?: string } {
+  try {
+    const profile = useUserProfileStore.getState().profile;
+    return { senderDisplayName: profile.displayName };
+  } catch {
+    return { senderDisplayName: "我" };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Per-agent chat state — each agent owns an independent instance
@@ -303,6 +330,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       type: "user",
       content,
       timestamp: Date.now(),
+      ...getUserSenderInfo(),
     };
     set((state) => ({
       sending: true,
@@ -688,7 +716,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       console.log(`[ChatStore] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}`);
 
-      const converted = (data.messages ?? []).map(convertConversationEntry);
+      const converted = (data.messages ?? []).map((e) => convertConversationEntry(e, agentId));
 
       set((state) => {
         // Discard if sequence changed while we were building state
@@ -820,13 +848,23 @@ function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: strin
 }
 
 /** Convert a ConversationEntry from Gateway to UI ChatMessage */
-function convertConversationEntry(entry: ConversationEntry): ChatMessage {
+function convertConversationEntry(entry: ConversationEntry, agentId: string): ChatMessage {
   const base: ChatMessage = {
     id: entry.id,
     type: (entry.role === "think" ? "thought" : entry.role) as ChatMessage["type"],
     content: entry.content,
     timestamp: new Date(entry.ts).getTime(),
   };
+
+  // Fill sender info based on role
+  if (entry.role === "user") {
+    const userInfo = getUserSenderInfo();
+    base.senderDisplayName = userInfo.senderDisplayName;
+  } else if (entry.role === "assistant" || entry.role === "think" || entry.role === "thought" || entry.role === "tool_call" || entry.role === "tool_result") {
+    const agentInfo = getAgentSenderInfo(agentId);
+    base.senderDisplayName = agentInfo.senderDisplayName;
+    base.senderRole = agentInfo.senderRole;
+  }
 
   const meta = entry.metadata;
   if (!meta) return base;
@@ -894,6 +932,7 @@ function handleMessageEvent(
               content: reasoningDelta,
               timestamp: Date.now(),
               startTime: Date.now(),
+              ...getAgentSenderInfo(agentId),
             };
             return updateAgentState(state, agentId, {
               messages: [...as.messages, thinkMsg],
@@ -940,6 +979,7 @@ function handleMessageEvent(
               type: "assistant",
               content: replyContent,
               timestamp: Date.now(),
+              ...getAgentSenderInfo(agentId),
             };
 
             return updateAgentState(state, agentId, {
@@ -977,6 +1017,7 @@ function handleMessageEvent(
             content: newBuffer.substring(thinkStart + 10),
             timestamp: Date.now(),
             startTime: Date.now(),
+            ...getAgentSenderInfo(agentId),
           };
           return updateAgentState(state, agentId, {
             messages: [...as.messages, thinkMsg],
