@@ -5,6 +5,7 @@ use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, 
 
 use crate::agent::agent_core::AgentCore;
 
+use crate::agent::inbound::InboundMessage;
 use crate::agent::session::{SessionManager, SessionManagerConfig, SessionMessage};
 use crate::config::RuntimeConfig;
 use crate::error::Result;
@@ -1108,15 +1109,27 @@ async fn process_gateway_recv(
                         return LoopAction::Continue;
                     }
 
-                    // Handle interrupt: route to target session
+                    // Handle interrupt: route directly to the target session's
+                    // AgentLoop inbound channel via SessionHandle::send_inbound,
+                    // BYPASSING SessionTask's SessionMessage loop — the latter
+                    // is blocked inside `agent_loop.run().await` whenever the
+                    // loop is active, so routing via SessionMessage would
+                    // deadlock until the current iteration finishes.
                     if action == "interrupt" {
                         let reason = params.get("reason")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string();
                         tracing::info!(reason = %reason, session_id = %target_session_id, "Routing interrupt to session");
-                        if let Err(e) = session_manager.send_to_session(&target_session_id, SessionMessage::Interrupt { reason }) {
-                            tracing::warn!("Failed to route interrupt: {}", e);
+                        match session_manager.get_session(&target_session_id) {
+                            Some(handle) => {
+                                if let Err(e) = handle.send_inbound(InboundMessage::Interrupt { reason }) {
+                                    tracing::warn!("Failed to deliver interrupt to AgentLoop: {}", e);
+                                }
+                            }
+                            None => {
+                                tracing::warn!(session_id = %target_session_id, "Interrupt target session not found");
+                            }
                         }
                         return LoopAction::Continue;
                     }
@@ -1127,8 +1140,19 @@ async fn process_gateway_recv(
                             .unwrap_or("user_requested")
                             .to_string();
                         tracing::info!(reason = %reason, session_id = %target_session_id, "Routing continue_execution to session");
-                        if let Err(e) = session_manager.send_to_session(&target_session_id, SessionMessage::ContinueExecution) {
-                            tracing::warn!("Failed to route continue signal: {}", e);
+                        // Same deadlock-avoidance as `interrupt`: go directly
+                        // into the AgentLoop's inbound channel so the pause
+                        // recv loop (awaiting ContinueExecution) is unblocked
+                        // immediately.
+                        match session_manager.get_session(&target_session_id) {
+                            Some(handle) => {
+                                if let Err(e) = handle.send_inbound(InboundMessage::ContinueExecution { reason }) {
+                                    tracing::warn!("Failed to deliver continue signal to AgentLoop: {}", e);
+                                }
+                            }
+                            None => {
+                                tracing::warn!(session_id = %target_session_id, "Continue target session not found");
+                            }
                         }
                         return LoopAction::Continue;
                     }
@@ -1436,22 +1460,28 @@ async fn process_gateway_recv(
                     }
                     GatewayResponse::RuntimeConfigUpdate {
                         max_output_tokens,
-                        tools_limit,
+                        max_iterations,
                         temperature,
                         system_prompt_override,
                     } => {
                         tracing::info!(
                             max_output_tokens = ?max_output_tokens,
-                            tools_limit = ?tools_limit,
+                            max_iterations = ?max_iterations,
                             temperature = ?temperature,
-                            "Received RuntimeConfigUpdate from Gateway — broadcasting to all sessions"
+                            "Received RuntimeConfigUpdate from Gateway — applying to current and future sessions"
                         );
-                        session_manager.broadcast(SessionMessage::UpdateRuntimeConfig {
+                        // Use `apply_runtime_config_override` (not raw `broadcast`)
+                        // so the override is also cached on the SessionManager
+                        // and replayed to sessions created *after* this push.
+                        // Otherwise the untouched `Arc<AgentCore>` template would
+                        // silently revert values like `max_iterations` back to
+                        // the default (50) for every brand-new session.
+                        session_manager.apply_runtime_config_override(
                             max_output_tokens,
-                            tools_limit,
+                            max_iterations,
                             temperature,
                             system_prompt_override,
-                        });
+                        );
                         return LoopAction::Continue;
                     }
                     _ => {

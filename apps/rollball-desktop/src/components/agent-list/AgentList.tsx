@@ -234,7 +234,6 @@ export function AgentList({ width }: AgentListProps) {
         )}
 
         {filteredAgents.map((agent, index) => {
-          const isSystem = agent.agent_id === "com.rollball.system";
           const sessionTitle = sessionTitles[agent.agent_id];
           
           return (
@@ -264,13 +263,10 @@ export function AgentList({ width }: AgentListProps) {
 
               {/* Content area */}
               <div className="min-w-0 flex-1">
-                {/* Top row: name + system badge */}
+                {/* Top row: name */}
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="min-w-0">
                     <span className="truncate font-medium text-zinc-900 dark:text-zinc-100" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name}</span>
-                    {isSystem && (
-                      <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/50 dark:text-blue-300">System</span>
-                    )}
                   </div>
                 </div>
                 {/* Bottom row: current session title */}

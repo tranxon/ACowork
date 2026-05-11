@@ -14,8 +14,8 @@ export interface AgentProfileSettings {
   providerId?: string;
   /** Max output tokens (0 = use global default) */
   maxTokens?: number;
-  /** Concurrent tools limit (0 = use global default) */
-  toolsLimit?: number;
+  /** Max LLM iterations per run (0 = use global default) */
+  maxIterations?: number;
   /** LLM temperature (0-2, step 0.1) */
   temperature?: number;
   /** System prompt override */
@@ -32,7 +32,7 @@ const DEFAULT_SETTINGS: AgentProfileSettings = {
   modelId: undefined,
   providerId: undefined,
   maxTokens: 0,
-  toolsLimit: 0,
+  maxIterations: 0,
   temperature: 0.7,
   systemPrompt: undefined,
 };
@@ -60,7 +60,14 @@ function loadProfiles(): Record<string, AgentProfileSettings> {
           modelId: settings.modelId,
           providerId: settings.providerId,
           maxTokens: typeof settings.maxTokens === "number" && settings.maxTokens > 0 ? settings.maxTokens : 0,
-          toolsLimit: typeof settings.toolsLimit === "number" && settings.toolsLimit > 0 ? settings.toolsLimit : 0,
+          maxIterations:
+            typeof settings.maxIterations === "number" && settings.maxIterations > 0
+              ? settings.maxIterations
+              // Back-compat: migrate legacy `toolsLimit` field from older localStorage snapshots.
+              : typeof (settings as { toolsLimit?: number }).toolsLimit === "number" &&
+                  (settings as { toolsLimit?: number }).toolsLimit! > 0
+                ? (settings as { toolsLimit?: number }).toolsLimit!
+                : 0,
           temperature: typeof settings.temperature === "number" ? settings.temperature : 0.7,
           systemPrompt: settings.systemPrompt,
         };

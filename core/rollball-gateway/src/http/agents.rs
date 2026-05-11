@@ -615,7 +615,7 @@ pub async fn update_agent_config(
     let req_system_prompt_override = req.system_prompt_override.clone();
     let updated = AgentConfigOverride {
         max_output_tokens: req.max_output_tokens.or(existing.max_output_tokens),
-        tools_limit: req.tools_limit.or(existing.tools_limit),
+        max_iterations: req.max_iterations.or(existing.max_iterations),
         temperature: req.temperature.or(existing.temperature),
         system_prompt_override: req
             .system_prompt_override
@@ -633,7 +633,7 @@ pub async fn update_agent_config(
             let push_result = session
                 .push_message(GatewayResponse::RuntimeConfigUpdate {
                     max_output_tokens: req.max_output_tokens,
-                    tools_limit: req.tools_limit,
+                    max_iterations: req.max_iterations,
                     temperature: req.temperature,
                     system_prompt_override: req_system_prompt_override,
                 })

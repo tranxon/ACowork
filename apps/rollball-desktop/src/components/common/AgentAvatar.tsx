@@ -120,18 +120,15 @@ export function AgentAvatar({
 
   // Built-in icon takes priority (from agent profile settings)
   if (iconId && BUILTIN_ICONS[iconId]) {
-    const svgStr = BUILTIN_ICONS[iconId];
+    const src = BUILTIN_ICONS[iconId];
     return (
-      <div
-        className={`rounded-full bg-[#4CAF50] flex items-center justify-center overflow-hidden ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
+      <img
+        src={src}
+        alt={iconId}
+        draggable={false}
+        className={`rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
         style={{ width: size, height: size }}
-      >
-        <div
-          className="flex items-center justify-center"
-          style={{ width: size * 0.80, height: size * 0.80 }}
-          dangerouslySetInnerHTML={{ __html: svgStr }}
-        />
-      </div>
+      />
     );
   }
 

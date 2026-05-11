@@ -4,31 +4,6 @@ import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { getGatewayUrl } from "../../lib/config";
 
-// ── Icon role labels ─────────────────────────────────────────────────────
-
-const ICON_LABELS: Record<string, string> = {
-  "icon-01": "Scholar",
-  "icon-02": "Business",
-  "icon-03": "Bus. Woman",
-  "icon-04": "Coder",
-  "icon-05": "Boy",
-  "icon-06": "Girl",
-  "icon-07": "Elder Man",
-  "icon-08": "Elder Lady",
-  "icon-09": "Artist",
-  "icon-10": "Chef",
-  "icon-11": "Doctor",
-  "icon-12": "Hijab",
-  "icon-13": "Beard Man",
-  "icon-14": "Scientist",
-  "icon-15": "Teen",
-  "icon-16": "Bow Girl",
-  "icon-17": "Officer",
-  "icon-18": "Glasses",
-  "icon-19": "Gamer",
-  "icon-20": "Default",
-};
-
 // ── Component ───────────────────────────────────────────────────────────
 
 export function AgentSetupTab() {
@@ -55,7 +30,7 @@ export function AgentSetupTab() {
         // Populate profile defaults from API response
         setProfile(selectedAgentId, {
           maxTokens: data.max_output_tokens,
-          toolsLimit: data.tools_limit,
+          maxIterations: data.max_iterations,
           temperature: data.temperature,
           systemPrompt: data.system_prompt_override,
         });
@@ -77,7 +52,7 @@ export function AgentSetupTab() {
     try {
       const body: Record<string, unknown> = {};
       if (profile.maxTokens && profile.maxTokens > 0) body.max_output_tokens = profile.maxTokens;
-      if (profile.toolsLimit && profile.toolsLimit > 0) body.tools_limit = profile.toolsLimit;
+      if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
       if (profile.temperature !== undefined) body.temperature = profile.temperature;
       body.system_prompt_override = profile.systemPrompt || null;
 
@@ -156,23 +131,17 @@ export function AgentSetupTab() {
             onClick={() => setIconOpen(!iconOpen)}
             className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
           >
-            <div className="h-5 w-5 flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#4CAF50]">
-              <div
-                className="flex items-center justify-center"
-                style={{ width: "80%", height: "80%" }}
-                dangerouslySetInnerHTML={{
-                  __html:
-                    BUILTIN_ICONS[profile.avatarIconId ?? "icon-20"] ??
-                    BUILTIN_ICONS["icon-20"] ??
-                    "",
-                }}
-              />
-            </div>
-            <span className="min-w-0 flex-1 truncate text-left">
-              {ICON_LABELS[profile.avatarIconId ?? ""] ??
-                profile.avatarIconId ??
-                "Default"}
-            </span>
+            <img
+              src={
+                BUILTIN_ICONS[profile.avatarIconId ?? "icon-20"] ??
+                BUILTIN_ICONS["icon-20"] ??
+                ""
+              }
+              alt={profile.avatarIconId ?? "icon-20"}
+              draggable={false}
+              className="h-5 w-5 shrink-0 rounded-full object-cover"
+            />
+            <span className="flex-1" />
             <span className="shrink-0 text-[10px] text-zinc-400">{iconOpen ? "\u25B2" : "\u25BC"}</span>
           </button>
           {iconOpen && (
@@ -185,25 +154,18 @@ export function AgentSetupTab() {
                       setProfile(selectedAgentId, { avatarIconId: iconId });
                       setIconOpen(false);
                     }}
-                    title={ICON_LABELS[iconId] ?? iconId}
-                    className={`flex flex-col items-center rounded-md p-1 text-[10px] transition-colors ${
+                    className={`flex items-center justify-center rounded-md p-1 transition-colors ${
                       profile.avatarIconId === iconId
                         ? "bg-zinc-200 dark:bg-zinc-600"
                         : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
                     }`}
                   >
-                    <div className="mb-0.5 flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-[#4CAF50]">
-                      <div
-                        className="flex items-center justify-center"
-                        style={{ width: "75%", height: "75%" }}
-                        dangerouslySetInnerHTML={{
-                          __html: BUILTIN_ICONS[iconId] ?? "",
-                        }}
-                      />
-                    </div>
-                    <span className="text-center leading-tight text-zinc-500 dark:text-zinc-400">
-                      {ICON_LABELS[iconId] ?? iconId}
-                    </span>
+                    <img
+                      src={BUILTIN_ICONS[iconId] ?? ""}
+                      alt={iconId}
+                      draggable={false}
+                      className="h-7 w-7 rounded-full object-cover"
+                    />
                   </button>
                 ))}
               </div>
@@ -237,23 +199,23 @@ export function AgentSetupTab() {
         </p>
       </div>
 
-      {/* Tools Limit */}
+      {/* Max Iterations */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          Tools Limit (per iteration)
+          Max Iterations (per run)
         </label>
         <input
           type="number"
           min={0}
-          max={64}
-          value={profile.toolsLimit && profile.toolsLimit > 0 ? profile.toolsLimit : ""}
+          max={200}
+          value={profile.maxIterations && profile.maxIterations > 0 ? profile.maxIterations : ""}
           onChange={(e) => {
             const v = e.target.value;
             setProfile(selectedAgentId, {
-              toolsLimit: v === "" ? 0 : Math.max(0, parseInt(v, 10) || 0),
+              maxIterations: v === "" ? 0 : Math.max(0, parseInt(v, 10) || 0),
             });
           }}
-          placeholder="16 (default)"
+          placeholder="50 (default)"
           className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">

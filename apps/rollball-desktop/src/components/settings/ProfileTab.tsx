@@ -4,31 +4,6 @@ import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvata
 import type { BoringAvatarVariant, ColorPalette } from "../../lib/types";
 import { COLOR_PALETTES } from "../../lib/types";
 
-// ── Icon role labels ─────────────────────────────────────────────────────
-
-const ICON_LABELS: Record<string, string> = {
-  "icon-01": "Scholar",
-  "icon-02": "Business",
-  "icon-03": "Bus. Woman",
-  "icon-04": "Coder",
-  "icon-05": "Boy",
-  "icon-06": "Girl",
-  "icon-07": "Elder Man",
-  "icon-08": "Elder Lady",
-  "icon-09": "Artist",
-  "icon-10": "Chef",
-  "icon-11": "Doctor",
-  "icon-12": "Hijab",
-  "icon-13": "Beard Man",
-  "icon-14": "Scientist",
-  "icon-15": "Teen",
-  "icon-16": "Bow Girl",
-  "icon-17": "Officer",
-  "icon-18": "Glasses",
-  "icon-19": "Gamer",
-  "icon-20": "Default",
-};
-
 // ── Constants ───────────────────────────────────────────────────────────
 
 const VARIANTS: { id: BoringAvatarVariant; label: string }[] = [
@@ -64,9 +39,6 @@ export function ProfileTab() {
         <div>
           <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
             {profile.displayName}
-          </p>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Avatar type: {profile.avatarType === "boring" ? "Generated" : profile.avatarType === "icon" ? "Icon" : "Letter"}
           </p>
         </div>
       </div>
@@ -184,29 +156,18 @@ export function ProfileTab() {
               <button
                 key={iconId}
                 onClick={() => setProfile({ avatarIcon: iconId })}
-                className={`rounded-lg border p-2 transition-colors ${
+                className={`flex items-center justify-center rounded-lg border p-2 transition-colors ${
                   profile.avatarIcon === iconId
                     ? "border-zinc-800 bg-zinc-100 dark:border-zinc-200 dark:bg-zinc-700"
                     : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:hover:bg-zinc-700"
                 }`}
-                title={ICON_LABELS[iconId] ?? iconId}
               >
-                <div className="flex flex-col items-center gap-1">
-                  <div
-                    className="h-9 w-9 flex items-center justify-center rounded-full bg-[#4CAF50] ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 overflow-hidden"
-                  >
-                    <div
-                      className="flex items-center justify-center"
-                      style={{ width: "80%", height: "80%" }}
-                      dangerouslySetInnerHTML={{
-                        __html: BUILTIN_ICONS[iconId] ?? "",
-                      }}
-                    />
-                  </div>
-                  <span className="text-[10px] leading-tight text-zinc-500 dark:text-zinc-400">
-                    {ICON_LABELS[iconId] ?? iconId}
-                  </span>
-                </div>
+                <img
+                  src={BUILTIN_ICONS[iconId] ?? ""}
+                  alt={iconId}
+                  draggable={false}
+                  className="h-9 w-9 rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
+                />
               </button>
             ))}
           </div>

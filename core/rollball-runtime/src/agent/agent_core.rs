@@ -43,9 +43,6 @@ pub struct AgentCore {
     /// When a model's max_output_tokens exceeds this value, the value is capped.
     /// Default: 32768 (32K). Set to 0 to disable the limit.
     pub(crate) max_output_tokens_limit: u64,
-    /// Max concurrent tool calls per iteration (from Gateway config).
-    /// Default: 16. Set to 0 to disable the limit.
-    pub(crate) tools_limit: u32,
     /// LLM temperature override (from Gateway config).
     /// None = use model/provider default.
     pub(crate) temperature_override: Option<f32>,
@@ -79,7 +76,6 @@ impl AgentCore {
             tools,
             gateway_model_capabilities: HashMap::new(),
             max_output_tokens_limit: 32_768,
-            tools_limit: 16,
             temperature_override: None,
             system_prompt_override: None,
             on_chunk,
@@ -168,7 +164,7 @@ impl AgentCore {
     pub fn apply_runtime_config(
         &mut self,
         max_output_tokens: Option<u64>,
-        tools_limit: Option<u32>,
+        max_iterations: Option<u32>,
         temperature: Option<f32>,
         system_prompt_override: Option<String>,
     ) {
@@ -176,9 +172,13 @@ impl AgentCore {
             tracing::info!(old = self.max_output_tokens_limit, new = limit, "runtime config: max_output_tokens updated");
             self.max_output_tokens_limit = limit;
         }
-        if let Some(limit) = tools_limit {
-            tracing::info!(old = self.tools_limit, new = limit, "runtime config: tools_limit updated");
-            self.tools_limit = limit;
+        if let Some(n) = max_iterations {
+            tracing::info!(
+                old = self.config.max_iterations,
+                new = n,
+                "runtime config: max_iterations updated"
+            );
+            self.config.max_iterations = n;
         }
         if let Some(temp) = temperature {
             tracing::info!(old = ?self.temperature_override, new = temp, "runtime config: temperature updated");
@@ -269,7 +269,6 @@ impl AgentCore {
             tools: self.tools.clone(),
             gateway_model_capabilities: self.gateway_model_capabilities.clone(),
             max_output_tokens_limit: self.max_output_tokens_limit,
-            tools_limit: self.tools_limit,
             temperature_override: self.temperature_override,
             system_prompt_override: self.system_prompt_override.clone(),
             on_chunk,

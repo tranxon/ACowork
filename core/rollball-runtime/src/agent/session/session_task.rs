@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::agent::agent_core::AgentCore;
 use crate::agent::context::ContextBuilder;
+use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session_state::SessionState;
 
@@ -43,7 +44,7 @@ pub enum SessionMessage {
     /// Apply runtime config overrides from Gateway
     UpdateRuntimeConfig {
         max_output_tokens: Option<u64>,
-        tools_limit: Option<u32>,
+        max_iterations: Option<u32>,
         temperature: Option<f32>,
         system_prompt_override: Option<String>,
     },
@@ -60,15 +61,20 @@ pub enum SessionMessage {
 /// Independent execution actor for a single session.
 ///
 /// Each `SessionTask` runs as a separate tokio task, processing
-/// `SessionMessage`s from its inbound channel. It creates an `AgentLoop`
-/// from a cloned `AgentCore` and its own `SessionState`, ensuring
-/// full per-session isolation.
+/// `SessionMessage`s from its inbound channel. It owns an `AgentLoop`
+/// built from a cloned `AgentCore` plus its own `SessionState`,
+/// ensuring full per-session isolation.
 pub(crate) struct SessionTask {
-    /// Shared agent core template (Arc-cloned for cheap reference counting)
-    core: Arc<AgentCore>,
-    /// Per-session state (history, budget, loop detector)
-    session: SessionState,
-    /// Inbound message receiver
+    /// The session's AgentLoop, pre-constructed so that external callers
+    /// can obtain its `InboundMessage` sender at session-creation time.
+    agent_loop: AgentLoop,
+    /// Clone of the AgentLoop's inbound sender, kept here purely as a
+    /// fallback so that legacy `SessionMessage::ContinueExecution` /
+    /// `SessionMessage::Interrupt` messages (if anyone still sends them)
+    /// can be forwarded. The primary, deadlock-safe path is via
+    /// `SessionHandle::send_inbound`.
+    agent_inbound_tx: mpsc::Sender<InboundMessage>,
+    /// Inbound message receiver (SessionMessage-level, not InboundMessage)
     inbound_rx: mpsc::Receiver<SessionMessage>,
     /// System prompt for context building
     system_prompt: String,
@@ -87,6 +93,13 @@ pub(crate) struct SessionTask {
 impl SessionTask {
     /// Create a new SessionTask with the given shared core, session state,
     /// message receiver, system prompt, and optional chunk channel.
+    ///
+    /// Returns the task together with the `AgentLoop`'s `InboundMessage`
+    /// sender. Callers (SessionManager) must stash that sender in
+    /// `SessionHandle` so that out-of-band signals (Continue/Interrupt)
+    /// can be delivered directly to the AgentLoop without going through
+    /// the SessionTask's main loop — which would otherwise deadlock
+    /// whenever the AgentLoop is awaiting a pause-resume signal.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         core: Arc<AgentCore>,
@@ -98,10 +111,16 @@ impl SessionTask {
         tool_definitions: Vec<serde_json::Value>,
         identity_context: Option<String>,
         override_model: Option<String>,
-    ) -> Self {
-        Self {
-            core,
-            session,
+    ) -> (Self, mpsc::Sender<InboundMessage>) {
+        // Build the AgentLoop eagerly so its inbound sender can be exposed.
+        // Heavy fields (provider, tools) are Arc-cloned (refcount only).
+        let core_for_session = core.clone_for_session(chunk_tx.clone());
+        let (agent_loop, agent_inbound_tx) =
+            AgentLoop::from_core_and_session(core_for_session, session);
+
+        let task = Self {
+            agent_loop,
+            agent_inbound_tx: agent_inbound_tx.clone(),
             inbound_rx,
             system_prompt,
             chunk_tx,
@@ -109,19 +128,14 @@ impl SessionTask {
             tool_definitions,
             identity_context,
             override_model,
-        }
+        };
+        (task, agent_inbound_tx)
     }
 
     /// Run the session task, processing messages until Stop or channel close.
-    ///
-    /// Creates an `AgentLoop` from the cloned core data and session state,
-    /// then processes incoming messages one at a time.
     pub async fn run(mut self) {
-        // Clone core data for this session's AgentLoop.
-        // Heavy fields (provider, tools) are Arc-cloned (refcount only).
-        let core = self.core.clone_for_session(self.chunk_tx.clone());
-        let (mut agent_loop, inbound_tx) =
-            AgentLoop::from_core_and_session(core, self.session);
+        let mut agent_loop = self.agent_loop;
+        let agent_inbound_tx = self.agent_inbound_tx;
 
         // Build ContextBuilder with complete tool definitions and identity
         // from SessionManagerConfig, instead of building simplified ones from manifest.
@@ -192,7 +206,7 @@ impl SessionTask {
                         session_id = %self.session_id,
                         "SessionTask: ContinueExecution received"
                     );
-                    let _ = inbound_tx.send(crate::agent::inbound::InboundMessage::ContinueExecution {
+                    let _ = agent_inbound_tx.send(crate::agent::inbound::InboundMessage::ContinueExecution {
                         reason: "user_requested".to_string(),
                     }).await;
                 }
@@ -237,20 +251,20 @@ impl SessionTask {
                 }
                 Some(SessionMessage::UpdateRuntimeConfig {
                     max_output_tokens,
-                    tools_limit,
+                    max_iterations,
                     temperature,
                     system_prompt_override,
                 }) => {
                     tracing::info!(
                         session_id = %self.session_id,
                         max_output_tokens = ?max_output_tokens,
-                        tools_limit = ?tools_limit,
+                        max_iterations = ?max_iterations,
                         temperature = ?temperature,
                         "SessionTask: applying runtime config overrides"
                     );
                     agent_loop.apply_runtime_config(
                         max_output_tokens,
-                        tools_limit,
+                        max_iterations,
                         temperature,
                         system_prompt_override,
                     );
@@ -276,7 +290,7 @@ impl SessionTask {
                         reason = %reason,
                         "SessionTask: forwarding interrupt signal"
                     );
-                    let _ = inbound_tx.send(crate::agent::inbound::InboundMessage::Interrupt { reason }).await;
+                    let _ = agent_inbound_tx.send(crate::agent::inbound::InboundMessage::Interrupt { reason }).await;
                 }
                 Some(SessionMessage::Stop) => {
                     tracing::info!(

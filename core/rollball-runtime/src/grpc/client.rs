@@ -1078,10 +1078,10 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 } else {
                     Some(rcu.max_output_tokens)
                 },
-                tools_limit: if rcu.tools_limit == 0 {
+                max_iterations: if rcu.max_iterations == 0 {
                     None
                 } else {
-                    Some(rcu.tools_limit)
+                    Some(rcu.max_iterations)
                 },
                 temperature: if rcu.temperature == 0.0 {
                     None

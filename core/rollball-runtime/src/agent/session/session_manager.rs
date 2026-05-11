@@ -67,6 +67,52 @@ impl Default for SessionManagerConfig {
     }
 }
 
+/// Accumulated runtime config overrides pushed by Gateway via
+/// `RuntimeConfigUpdate`. Applied on top of the shared `AgentCore` template
+/// each time a new session is spawned, so config changes remain effective
+/// for sessions created *after* the push (not only for sessions that were
+/// already alive when the push arrived).
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeConfigOverrides {
+    pub max_output_tokens: Option<u64>,
+    pub max_iterations: Option<u32>,
+    pub temperature: Option<f32>,
+    pub system_prompt_override: Option<String>,
+}
+
+impl RuntimeConfigOverrides {
+    /// Returns true when no override value has been set.
+    pub fn is_empty(&self) -> bool {
+        self.max_output_tokens.is_none()
+            && self.max_iterations.is_none()
+            && self.temperature.is_none()
+            && self.system_prompt_override.is_none()
+    }
+
+    /// Merge in a newer push. `Some` values replace; `None` preserves the
+    /// previously cached override.
+    pub fn merge(
+        &mut self,
+        max_output_tokens: Option<u64>,
+        max_iterations: Option<u32>,
+        temperature: Option<f32>,
+        system_prompt_override: Option<String>,
+    ) {
+        if max_output_tokens.is_some() {
+            self.max_output_tokens = max_output_tokens;
+        }
+        if max_iterations.is_some() {
+            self.max_iterations = max_iterations;
+        }
+        if temperature.is_some() {
+            self.temperature = temperature;
+        }
+        if system_prompt_override.is_some() {
+            self.system_prompt_override = system_prompt_override;
+        }
+    }
+}
+
 /// Lifecycle manager for multiple concurrent sessions.
 ///
 /// Owns a shared `Arc<AgentCore>` template and creates `SessionTask`s
@@ -79,6 +125,9 @@ pub struct SessionManager {
     sessions: HashMap<String, SessionHandle>,
     /// Configuration for session creation
     config: SessionManagerConfig,
+    /// Runtime config overrides (accumulated from Gateway pushes) that
+    /// must be re-applied to every newly created session.
+    runtime_overrides: RuntimeConfigOverrides,
 }
 
 impl SessionManager {
@@ -88,6 +137,7 @@ impl SessionManager {
             core,
             sessions: HashMap::new(),
             config,
+            runtime_overrides: RuntimeConfigOverrides::default(),
         }
     }
 
@@ -126,7 +176,7 @@ impl SessionManager {
             conversation,
         );
 
-        let task = SessionTask::new(
+        let (task, agent_inbound_tx) = SessionTask::new(
             self.core.clone(),
             session_state,
             inbound_rx,
@@ -146,11 +196,36 @@ impl SessionManager {
         let handle = SessionHandle {
             session_id: session_id.clone(),
             inbound_tx,
+            agent_inbound_tx,
             join_handle,
         };
 
         self.sessions.insert(session_id.clone(), handle);
         tracing::info!(session_id = %session_id, "SessionManager: created new session");
+
+        // Re-apply any runtime config overrides accumulated from prior
+        // Gateway pushes. Without this, a new session would start from the
+        // immutable `Arc<AgentCore>` template (e.g. default `max_iterations`
+        // of 50) and ignore values the user has already applied in the UI.
+        if !self.runtime_overrides.is_empty() {
+            let ov = self.runtime_overrides.clone();
+            tracing::info!(
+                session_id = %session_id,
+                max_output_tokens = ?ov.max_output_tokens,
+                max_iterations = ?ov.max_iterations,
+                temperature = ?ov.temperature,
+                "SessionManager: replaying RuntimeConfigOverrides to new session"
+            );
+            // Safe: the handle was just inserted above.
+            if let Some(handle) = self.sessions.get(&session_id) {
+                let _ = handle.send(SessionMessage::UpdateRuntimeConfig {
+                    max_output_tokens: ov.max_output_tokens,
+                    max_iterations: ov.max_iterations,
+                    temperature: ov.temperature,
+                    system_prompt_override: ov.system_prompt_override,
+                });
+            }
+        }
 
         Ok(session_id)
     }
@@ -206,6 +281,36 @@ impl SessionManager {
             );
         }
         failed
+    }
+
+    /// Apply a runtime config override pushed by Gateway.
+    ///
+    /// This performs two actions atomically from the caller's perspective:
+    ///   1. Merge the override into the `runtime_overrides` cache so any
+    ///      session created *after* this call also picks it up (fixing the
+    ///      bug where a fresh session would clone the untouched
+    ///      `Arc<AgentCore>` template and silently ignore user-applied
+    ///      values such as `max_iterations`).
+    ///   2. Broadcast the override to all currently active sessions.
+    pub fn apply_runtime_config_override(
+        &mut self,
+        max_output_tokens: Option<u64>,
+        max_iterations: Option<u32>,
+        temperature: Option<f32>,
+        system_prompt_override: Option<String>,
+    ) -> Vec<String> {
+        self.runtime_overrides.merge(
+            max_output_tokens,
+            max_iterations,
+            temperature,
+            system_prompt_override.clone(),
+        );
+        self.broadcast(SessionMessage::UpdateRuntimeConfig {
+            max_output_tokens,
+            max_iterations,
+            temperature,
+            system_prompt_override,
+        })
     }
 
     /// Get all active session IDs.
