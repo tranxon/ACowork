@@ -1,6 +1,6 @@
 //! Per-agent runtime configuration persistence.
 //!
-//! Stores per-agent config overrides (max_output_tokens, tools_limit,
+//! Stores per-agent config overrides (max_output_tokens, max_iterations,
 //! temperature, system_prompt_override) as JSON files under
 //! `{data_dir}/agent_configs/{agent_id}.json`.
 //!
@@ -19,9 +19,10 @@ pub struct AgentConfigOverride {
     /// Max output tokens per request (None = use global default)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
-    /// Max concurrent tool calls per iteration (None = use global default)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools_limit: Option<u32>,
+    /// Max LLM iterations per run (None = use global default).
+    /// Controls the total number of LLM turns in a single Agent loop.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "tools_limit")]
+    pub max_iterations: Option<u32>,
     /// LLM temperature override (None = use global default 0.7)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -36,8 +37,8 @@ pub struct AgentConfigResponse {
     pub agent_id: String,
     /// Effective max_output_tokens (per-agent override > global > hardcoded default)
     pub max_output_tokens: u64,
-    /// Effective tools_limit
-    pub tools_limit: u32,
+    /// Effective max_iterations
+    pub max_iterations: u32,
     /// Effective temperature
     pub temperature: f32,
     /// The manifest-compiled system prompt (read-only, loaded by caller)
@@ -53,8 +54,8 @@ pub struct AgentConfigResponse {
 pub struct UpdateAgentConfigRequest {
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
-    #[serde(default)]
-    pub tools_limit: Option<u32>,
+    #[serde(default, alias = "tools_limit")]
+    pub max_iterations: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -63,7 +64,7 @@ pub struct UpdateAgentConfigRequest {
 
 /// Default global values used as fallback when no override exists.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
-pub const DEFAULT_TOOLS_LIMIT: u32 = 16;
+pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;
 
 /// Build the path to the per-agent config file.
@@ -136,8 +137,8 @@ pub fn get_effective_config(
         max_output_tokens: over.and_then(|o| o.max_output_tokens)
             .unwrap_or(global_max_output_tokens)
             .max(1), // 0 means "use default", but for display we show the actual default
-        tools_limit: over.and_then(|o| o.tools_limit)
-            .unwrap_or(DEFAULT_TOOLS_LIMIT),
+        max_iterations: over.and_then(|o| o.max_iterations)
+            .unwrap_or(DEFAULT_MAX_ITERATIONS),
         temperature: over.and_then(|o| o.temperature)
             .unwrap_or(DEFAULT_TEMPERATURE),
         system_prompt,

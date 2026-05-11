@@ -7,6 +7,7 @@ import { useSessionStore } from "../../stores/sessionStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
+import { useUserProfileStore } from "../../stores/userProfileStore";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
@@ -309,14 +310,20 @@ export function ChatPanel() {
       });
   }, [currentSessionId, selectedAgentId]);
 
-  // Initial load / agent switch: scroll to bottom synchronously before paint
+  // Initial load / agent switch / session switch: scroll to bottom synchronously before paint
   const prevDisplayCountRef = useRef(0);
   const prevScrollAgentRef = useRef<string | null>(null);
+  const prevScrollSessionRef = useRef<string | null>(null);
   useLayoutEffect(() => {
-    // Reset count tracking when agent changes so we jump instead of smooth-scroll
-    if (prevScrollAgentRef.current !== selectedAgentId) {
+    // Reset count tracking when agent OR session changes, so we jump to bottom
+    // (instead of smooth-scrolling, or failing to scroll when new count <= old count)
+    if (
+      prevScrollAgentRef.current !== selectedAgentId ||
+      prevScrollSessionRef.current !== currentSessionId
+    ) {
       prevDisplayCountRef.current = 0;
       prevScrollAgentRef.current = selectedAgentId ?? null;
+      prevScrollSessionRef.current = currentSessionId ?? null;
     }
     const prevCount = prevDisplayCountRef.current;
 
@@ -343,7 +350,7 @@ export function ChatPanel() {
     }
 
     prevDisplayCountRef.current = displayMessages.length;
-  }, [messages, displayMessages.length, virtualizer, selectedAgentId]);
+  }, [messages, displayMessages.length, virtualizer, selectedAgentId, currentSessionId]);
 
   // Scroll handler: load more messages when scrolled to top
   const handleScroll = useCallback(() => {
@@ -534,11 +541,14 @@ export function ChatPanel() {
               })}
             </div>
           )}
-          {/* Iteration limit pause — Continue button */}
+          {/* Iteration limit pause — hint + Continue button */}
           {iterationLimitPaused && (
-            <div className="flex w-fit items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/20">
-              <span className="text-sm text-amber-700 dark:text-amber-300">
-                Iteration limit reached ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
+            <div className="flex flex-col items-start gap-1.5">
+              <span
+                className="text-amber-700 dark:text-amber-300/80"
+                style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
+              >
+                {iterationLimitPaused.message}
               </span>
               <button
                 onClick={() => {
@@ -546,10 +556,13 @@ export function ChatPanel() {
                     continueExecution(selectedAgentId);
                   }
                 }}
-                className="flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 transition-colors"
+                className="flex w-fit max-w-full items-center gap-2 rounded-md bg-amber-100 px-2.5 py-1.5 text-amber-800 transition-colors hover:bg-amber-200 dark:bg-amber-800/40 dark:text-amber-200 dark:hover:bg-amber-800/60"
+                style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
               >
                 <Play className="h-3.5 w-3.5" />
-                Continue
+                <span>
+                  Continue ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
+                </span>
               </button>
             </div>
           )}
@@ -901,21 +914,28 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
   // Agent icon from profile settings
   const agentIconId = useAgentProfileStore((s) => s.profiles[agentId]?.avatarIconId);
+  // Live names — subscribe to profile stores so name edits update all messages instantly
+  // (instead of relying on the senderDisplayName snapshot captured at message creation time)
+  const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
+  const agentProfileName = useAgentProfileStore((s) => s.profiles[agentId]?.displayName);
+  const agentInfo = useAgentStore((s) => s.agents.find((a) => a.agent_id === agentId));
+  const liveAgentName = agentProfileName ?? agentInfo?.display_name ?? agentInfo?.name ?? message.senderDisplayName;
+  const liveUserName = userDisplayName ?? message.senderDisplayName;
 
   if (message.type === "user") {
     return (
       <MessageContentWrapper>
         <div className="flex items-start justify-end gap-2">
           <div className="min-w-0 flex-1 flex flex-col items-end">
-            {message.senderDisplayName && (
-              <span className="mb-1 text-xs text-zinc-400 dark:text-zinc-500">{message.senderDisplayName}</span>
+            {liveUserName && (
+              <span className="mb-1 text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
             )}
             <div className="max-w-[85%] rounded-lg rounded-br-sm bg-[#9DF29F] px-4 py-2.5 text-zinc-900 select-text" style={fontSizeStyle}>
               {message.content}
             </div>
           </div>
           <UserAvatar
-            displayName={message.senderDisplayName}
+            displayName={liveUserName}
             size={28}
             className="shrink-0 mt-1"
           />
@@ -932,15 +952,15 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
         <div className="flex items-start gap-2">
           <AgentAvatar
             agentId={agentId}
-            displayName={message.senderDisplayName}
+            displayName={liveAgentName}
             iconId={agentIconId}
             size={28}
             className="shrink-0 mt-1"
           />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 mb-1">
-              {message.senderDisplayName && (
-                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{message.senderDisplayName}</span>
+              {liveAgentName && (
+                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
               )}
               {message.senderRole && (
                 <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
@@ -969,15 +989,15 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
         <div className="flex items-start gap-2">
           <AgentAvatar
             agentId={agentId}
-            displayName={message.senderDisplayName}
+            displayName={liveAgentName}
             iconId={agentIconId}
             size={28}
             className="shrink-0 mt-1"
           />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 mb-1">
-              {message.senderDisplayName && (
-                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{message.senderDisplayName}</span>
+              {liveAgentName && (
+                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
               )}
               {message.senderRole && (
                 <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>

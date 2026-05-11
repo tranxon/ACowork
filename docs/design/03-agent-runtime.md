@@ -477,7 +477,7 @@ let tool_results: Vec<ToolResult> = (0..total)
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `max_iterations` | 20 | 单次对话最大迭代次数 |
+| `max_iterations` | 50 | 单次对话最大迭代次数（可通过 Gateway `RuntimeConfigUpdate` 运行时覆盖） |
 | `iteration_timeout_ms` | 30000 | 单轮迭代超时（含 LLM 调用 + 工具执行） |
 | `history_max_tokens` | 128000 | 对话历史上限（超过后触发 trim/compress） |
 | `loop_detection.exact_repeat_threshold` | 3 | Exact Repeat 检测阈值 |

@@ -521,9 +521,11 @@ pub enum GatewayResponse {
         /// Max output tokens per request (0 = use global default)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_output_tokens: Option<u64>,
-        /// Max concurrent tool calls per iteration (0 = use global default)
+        /// Max LLM iterations per run (0 = use global default).
+        /// Controls the total number of LLM turns in a single Agent loop.
+        /// When exceeded, the Runtime pushes `IterationLimitPaused`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        tools_limit: Option<u32>,
+        max_iterations: Option<u32>,
         /// LLM temperature override
         #[serde(default, skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
