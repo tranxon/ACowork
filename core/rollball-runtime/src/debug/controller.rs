@@ -154,10 +154,10 @@ pub struct DebugController {
 }
 
 impl DebugController {
-    /// Create a new DebugController in the Running state.
+    /// Create a new DebugController in Stepping state (auto-pause after first iteration).
     pub fn new() -> Self {
         Self {
-            state: DebugState::Running,
+            state: DebugState::Stepping,
             phase: DebugPhase::Idle,
             iteration: 0,
             breakpoints: Vec::new(),
@@ -291,7 +291,7 @@ impl DebugController {
 
     /// Clear all stored state (for restarting).
     pub fn reset(&mut self) {
-        self.state = DebugState::Running;
+        self.state = DebugState::Stepping;
         self.phase = DebugPhase::Idle;
         self.iteration = 0;
         self.breakpoints.clear();

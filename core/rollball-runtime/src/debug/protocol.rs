@@ -151,6 +151,8 @@ pub struct GetStateResult {
     pub snapshot_ids: Vec<String>,
     pub breakpoints: Vec<Breakpoint>,
     pub usage: DebugUsage,
+    /// Whether the debug controller is currently paused
+    pub paused: bool,
 }
 
 /// Token usage summary.

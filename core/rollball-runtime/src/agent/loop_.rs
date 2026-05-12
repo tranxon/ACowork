@@ -732,10 +732,13 @@ impl AgentLoop {
         retrieved_memory_ids: &[String],
     ) -> Result<IterationResult> {
             // ── Debug mode hooks ──
-            // Update iteration counter in debug controller
+            // Increment session-level iteration counter (cumulative across
+            // all chat messages).  The local loop counter resets per message
+            // (see run() line 614), but the debug snapshot iteration must be
+            // globally unique within the session.
             if let Some(ctrl) = self.core.debug_ctrl() {
                 let mut ctrl = ctrl.lock().await;
-                ctrl.iteration = iteration;
+                ctrl.iteration += 1;
             }
 
             // Await resume if paused (DevMode only)
@@ -798,7 +801,7 @@ impl AgentLoop {
             .await;
 
             // Debug: create context snapshot and push onContextBuilt event
-            self.capture_context_snapshot(context_builder);
+            self.capture_context_snapshot(context_builder).await;
 
             // ③ Call LLM with streaming (S1.5)
             let response = self.call_llm_streaming(&chat_request, context_builder).await?;
@@ -1234,13 +1237,29 @@ impl AgentLoop {
     /// Await debug resume: blocks if the debug controller is in Paused state.
     ///
     /// Polls every 100ms and returns when Running/Stepping or no controller.
+    /// Also checks the inbound channel for Chat Panel STOP signals
+    /// (InboundMessage::Interrupt), which arrive via the Gateway gRPC push
+    /// path rather than the debug WebSocket.
     /// Returns `true` if execution should continue, `false` if stopped.
-    async fn await_debug_resume(&self) -> bool {
-        let Some(ctrl) = self.core.debug_ctrl() else {
+    async fn await_debug_resume(&mut self) -> bool {
+        let Some(ctrl) = self.core.debug_ctrl().cloned() else {
             return true; // Production mode, no debug controller
         };
 
         loop {
+            // Check for Chat Panel STOP (arrives via inbound channel).
+            // The Debug Panel STOP sets ctrl.state directly; the Chat Panel
+            // STOP sends InboundMessage::Interrupt through the Gateway gRPC
+            // push path.  Without this check, the interrupt sits unread in
+            // the channel while await_debug_resume only polls ctrl.state.
+            if self.poll_interrupt() {
+                tracing::info!("Debug: agent loop interrupted via inbound channel");
+                // Synchronize debug controller state so the frontend sees Stopped
+                let mut ctrl_guard = ctrl.lock().await;
+                ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
+                return false;
+            }
+
             let state = {
                 let ctrl = ctrl.lock().await;
                 ctrl.state.clone()
@@ -1265,7 +1284,7 @@ impl AgentLoop {
     /// Pushes `onStateChange` events and checks if any breakpoint matches.
     /// If a breakpoint hits, the controller is set to Paused and an
     /// `onBreakpoint` event is pushed.
-    async fn update_debug_phase(&self, phase: crate::debug::protocol::DebugPhase) {
+    async fn update_debug_phase(&mut self, phase: crate::debug::protocol::DebugPhase) {
         let Some(ctrl) = self.core.debug_ctrl() else {
             return;
         };
@@ -1347,7 +1366,7 @@ impl AgentLoop {
     /// when DevMode is active. Captures the 5 control-plane sections with
     /// metadata (size, token estimate, SHA-256 hash) for the debug panel's
     /// context tree view.
-    fn capture_context_snapshot(&self, context_builder: &ContextBuilder) {
+    async fn capture_context_snapshot(&self, context_builder: &ContextBuilder) {
         let (Some(ctrl), Some(event_tx)) =
             (self.core.debug_ctrl(), self.core.debug_event_tx())
         else {
@@ -1398,7 +1417,7 @@ impl AgentLoop {
         let snapshot = ContextSnapshot {
             iteration: {
                 // Read iteration from controller without holding lock across event send
-                let ctrl_guard = ctrl.blocking_lock();
+                let ctrl_guard = ctrl.lock().await;
                 ctrl_guard.iteration
             },
             built_at: chrono::Utc::now(),
@@ -1408,23 +1427,24 @@ impl AgentLoop {
 
         // Store in controller
         {
-            let mut ctrl_guard = ctrl.blocking_lock();
+            let mut ctrl_guard = ctrl.lock().await;
             ctrl_guard.store_context_snapshot(snapshot.clone());
         }
 
         // Push onContextBuilt event to WebSocket client
         let context_sections =
             crate::debug::protocol::ContextSections::from(&snapshot.sections);
-        let _ = event_tx.send(crate::debug::server::DebugEvent::ContextBuilt {
+        let sent = event_tx.send(crate::debug::server::DebugEvent::ContextBuilt {
             iteration: snapshot.iteration,
             sections: context_sections,
             total_token_estimate: snapshot.total_token_estimate,
         });
 
-        tracing::debug!(
+        tracing::info!(
             iteration = snapshot.iteration,
             total_token_estimate,
-            "Debug: context snapshot captured"
+            event_sent = sent,
+            "Debug: context snapshot captured and event pushed"
         );
     }
 

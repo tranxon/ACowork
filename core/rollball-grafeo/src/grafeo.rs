@@ -97,9 +97,9 @@ impl GrafeoStore {
 
     /// Initialize schema: create HNSW vector indexes and BM25 text indexes.
     ///
-    /// Vector indexes are only created for labels that store embeddings
-    /// (Episodic, Knowledge, Procedural, Autobiographical).
-    /// Text indexes are created for searchable text fields defined in
+    /// Vector indexes are created for all four memory labels.
+    /// Text indexes are created on the "content" property for all labels,
+    /// plus any label-specific text fields defined in
     /// [`EPISODIC_TEXT_FIELDS`] and [`KNOWLEDGE_TEXT_FIELDS`].
     fn init_schema(&self) -> Result<()> {
         let cfg = &self.hnsw_config;
@@ -131,6 +131,15 @@ impl GrafeoStore {
         for field in KNOWLEDGE_TEXT_FIELDS {
             self.db.create_text_index(labels::KNOWLEDGE, field)?;
         }
+
+        // BM25 text indexes for Procedural content (computed from name/trigger/action).
+        self.db.create_text_index(labels::PROCEDURAL, "content")?;
+
+        // BM25 text indexes for Autobiographical content (computed from key/value).
+        self.db.create_text_index(labels::AUTOBIOGRAPHICAL, "content")?;
+
+        // Also add content text index for Knowledge (computed from subject/predicate/object).
+        self.db.create_text_index(labels::KNOWLEDGE, "content")?;
 
         Ok(())
     }

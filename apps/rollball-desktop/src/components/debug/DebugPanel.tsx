@@ -95,19 +95,22 @@ export function DebugPanel() {
   // Determine if the selected agent is in debug mode
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
 
-  // Auto-connect when a debug-mode agent is selected
+  // Auto-connect when a debug-mode agent is selected or becomes active
   useEffect(() => {
     if (!selectedAgentId) return;
 
-    // Only auto-connect once per agent selection
-    if (selectedAgentId === prevAgentId.current) return;
-    prevAgentId.current = selectedAgentId;
+    const agentChanged = selectedAgentId !== prevAgentId.current;
 
     if (selectedAgent?.dev_mode && selectedAgent.running) {
-      if (!connected || debugAgentId !== selectedAgentId) {
+      // Connect when: agent switched, or agent just entered debug mode, or not yet connected
+      if (agentChanged || !connected || debugAgentId !== selectedAgentId) {
         connect(selectedAgentId);
       }
       autoConnectAttempted.current = true;
+    }
+
+    if (agentChanged) {
+      prevAgentId.current = selectedAgentId;
     }
   }, [selectedAgentId, selectedAgent?.dev_mode, selectedAgent?.running, connected, debugAgentId, connect]);
 
@@ -122,7 +125,7 @@ export function DebugPanel() {
   useEffect(() => {
     if (!connected) return;
     const interval = setInterval(() => {
-      getState();
+      getState().catch(() => {});
     }, 1000);
     return () => clearInterval(interval);
   }, [connected, getState]);
@@ -183,7 +186,7 @@ export function DebugPanel() {
           <span>Debug</span>
           <Wifi className="h-3 w-3 text-emerald-500" />
         </div>
-        <span className="text-xs text-zinc-400">:19877</span>
+        <span className="text-xs text-zinc-400">:19878</span>
       </div>
 
       {/* Control bar */}

@@ -78,7 +78,11 @@ interface JsonRpcEvent {
 // This allows the debug store to remain static when switching agents.
 // We multiplex the single WebSocket but keep state scoped.
 
-const DEFAULT_DEBUG_PORT = 19877;
+const DEFAULT_DEBUG_PORT = 19878;
+
+/** Retry timer handle for WebSocket connection retries. Module-level so
+ *  it persists across connect() calls and can be cleared on disconnect. */
+let connectRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ── Store interface ────────────────────────────────────────────────────
 
@@ -157,54 +161,108 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       state.socket.close();
     }
 
-    set({ connecting: true, debugAgentId: agentId });
+    // Clear any pending retry timer
+    if (connectRetryTimer) {
+      clearTimeout(connectRetryTimer);
+      connectRetryTimer = null;
+    }
 
-    const url = `ws://127.0.0.1:${DEFAULT_DEBUG_PORT}`;
-    const socket = new WebSocket(url);
+    // Retry state: attempts start at 0, max 10 retries with 1s delay each
+    let retries = 0;
+    const maxRetries = 10;
+    const retryDelayMs = 1000;
 
-    socket.onopen = () => {
-      set({ connected: true, connecting: false });
-      // Fetch initial state
-      get().getState().catch(() => {});
-    };
+    const tryConnect = () => {
+      // If already connected, stop retrying
+      if (get().connected && get().debugAgentId === agentId) return;
 
-    socket.onmessage = (event: MessageEvent) => {
-      try {
-        const msg = JSON.parse(event.data) as JsonRpcResponse | JsonRpcEvent;
-        const store = get();
+      set({ connecting: true, debugAgentId: agentId });
 
-        if ("id" in msg && msg.id !== undefined) {
-          // Response to a request
-          const pending = store.pendingRequests.get(msg.id);
-          if (pending) {
-            store.pendingRequests.delete(msg.id);
-            if (msg.error) {
-              pending.reject(new Error(msg.error.message));
-            } else {
-              pending.resolve(msg.result);
-            }
-          }
-        } else if ("method" in msg) {
-          // Server-pushed event
-          store._handleEvent(msg as JsonRpcEvent);
+      const url = `ws://127.0.0.1:${DEFAULT_DEBUG_PORT}`;
+      const socket = new WebSocket(url);
+
+      socket.onopen = () => {
+        // Guard: only update state if this socket is still the current one.
+        // React Strict Mode double-mount + retry logic can create multiple
+        // sockets whose callbacks race against each other.
+        if (get().socket !== socket) {
+          console.log("[debugStore] onopen: socket is not current, ignoring");
+          return;
         }
-      } catch {
-        // Ignore non-JSON messages
-      }
+        set({ connected: true, connecting: false });
+        // Tauri webview WebSocket quirk: onopen fires before the internal
+        // send buffer is ready.  Defer the initial requests by one microtask
+        // to let the WebSocket fully stabilize.
+        setTimeout(() => {
+          get().getState().catch(() => {});
+          console.log("[debugStore] WebSocket connected, sending initial step");
+          // Send step to enter stepping mode so first iteration auto-pauses
+          get().sendRequest("debugger.step").catch((e) => console.warn("[debugStore] initial step failed:", e));
+        }, 0);
+      };
+
+      socket.onmessage = (event: MessageEvent) => {
+        // Guard: ignore messages from a socket that is no longer current.
+        if (get().socket !== socket) return;
+        try {
+          const msg = JSON.parse(event.data) as JsonRpcResponse | JsonRpcEvent;
+          const store = get();
+
+          if ("id" in msg && msg.id !== undefined) {
+            // Response to a request
+            const pending = store.pendingRequests.get(msg.id);
+            if (pending) {
+              store.pendingRequests.delete(msg.id);
+              if (msg.error) {
+                pending.reject(new Error(msg.error.message));
+              } else {
+                pending.resolve(msg.result);
+              }
+            }
+          } else if ("method" in msg) {
+            // Server-pushed event
+            console.log("[debugStore] received event:", msg.method, msg.params);
+            store._handleEvent(msg as JsonRpcEvent);
+          } else {
+            console.warn("[debugStore] unexpected message format:", msg);
+          }
+        } catch (e) {
+          console.warn("[debugStore] failed to parse message:", e);
+        }
+      };
+
+      socket.onclose = () => {
+        // Guard: only clear state if THIS socket is still the current one.
+        // Stale socket onclose from a previous connect() cycle must not
+        // overwrite the state of the current socket.
+        const isCurrent = get().socket === socket;
+        if (isCurrent) {
+          set({ connected: false, connecting: false, socket: null });
+        }
+        // Retry only when this is the current socket that just closed,
+        // and we aren't already connected through a newer socket.
+        if (isCurrent && !get().connected && retries < maxRetries) {
+          retries++;
+          connectRetryTimer = setTimeout(tryConnect, retryDelayMs);
+        }
+      };
+
+      socket.onerror = () => {
+        // onclose will fire after onerror, handle retry there
+      };
+
+      set({ socket });
     };
 
-    socket.onclose = () => {
-      set({ connected: false, connecting: false, socket: null });
-    };
-
-    socket.onerror = () => {
-      set({ connecting: false });
-    };
-
-    set({ socket });
+    tryConnect();
   },
 
   disconnect: () => {
+    // Clear any pending retry timer
+    if (connectRetryTimer) {
+      clearTimeout(connectRetryTimer);
+      connectRetryTimer = null;
+    }
     const { socket } = get();
     if (socket) {
       socket.close();
@@ -242,7 +300,17 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       };
 
       state.pendingRequests.set(id, { resolve, reject });
-      state.socket.send(JSON.stringify(request));
+
+      // socket.send() may throw synchronously even when readyState reports
+      // OPEN — this is a known quirk in some WebSocket implementations
+      // (including Tauri's webview).  Catch the exception and convert it
+      // to a proper rejection so callers can handle the error gracefully.
+      try {
+        state.socket.send(JSON.stringify(request));
+      } catch (sendErr) {
+        state.pendingRequests.delete(id);
+        reject(new Error(`WebSocket send failed: ${sendErr}`));
+      }
     });
   },
 
@@ -264,11 +332,23 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         break;
       case "debugger.onContextBuilt": {
         const params = event.params as Record<string, unknown>;
-        const snapshot = params.snapshot as ContextSnapshotMeta | undefined;
-        if (snapshot) {
+        // Server sends flat fields: { iteration, sections, total_token_estimate }
+        const iteration = (params.iteration as number) ?? 0;
+        const sections = params.sections as ContextSnapshotMeta["sections"] | undefined;
+        const total_token_estimate = (params.total_token_estimate as number) ?? 0;
+        console.log("[debugStore] onContextBuilt: iteration=", iteration, "sections=", !!sections, "sectionsKeys=", sections ? Object.keys(sections) : null);
+        if (sections) {
+          const snapshot: ContextSnapshotMeta = {
+            iteration,
+            built_at: new Date().toISOString(),
+            sections,
+            total_token_estimate,
+            phase: get().phase, // current phase from last state update
+          };
           set((s) => ({
             snapshots: [...s.snapshots, snapshot],
           }));
+          console.log("[debugStore] snapshot added, total snapshots:", get().snapshots.length);
         }
         break;
       }

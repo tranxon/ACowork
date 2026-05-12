@@ -1,6 +1,6 @@
 //! Debug Protocol WebSocket server.
 //!
-//! Listens on `ws://127.0.0.1:19877` when Agent Runtime starts in DevMode.
+//! Listens on `ws://127.0.0.1:19878` when Agent Runtime starts in DevMode.
 //! Provides a JSON-RPC 2.0 endpoint for the Desktop App's debug panel.
 //!
 //! ## Architecture
@@ -111,7 +111,7 @@ impl DebugProtocolServer {
 
     /// Start the debug protocol server in a background task.
     ///
-    /// Binds to `ws://127.0.0.1:19877` and spawns a tokio task
+    /// Binds to `ws://127.0.0.1:19878` and spawns a tokio task
     /// to accept and handle WebSocket connections.
     ///
     /// Returns the `DebugEventSender` (for AgentLoop integration) and
@@ -137,7 +137,7 @@ impl DebugProtocolServer {
 
     /// Main server loop: listen, accept, handle, repeat.
     async fn run(mut self) {
-        let addr = SocketAddr::from(([127, 0, 0, 1], 19877));
+        let addr = SocketAddr::from(([127, 0, 0, 1], 19878));
 
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
@@ -205,6 +205,10 @@ impl DebugProtocolServer {
                                 .handle_json_rpc(&text)
                                 .await;
                             if let Some(resp_text) = response {
+                                tracing::info!(
+                                    response = %resp_text,
+                                    "DebugProtocolServer: sending JSON-RPC response"
+                                );
                                 if let Err(e) = ws_sender
                                     .send(Message::Text(resp_text.into()))
                                     .await
@@ -246,9 +250,11 @@ impl DebugProtocolServer {
                 event = self.event_rx.recv() => {
                     match event {
                         Some(debug_event) => {
+                            let method = event_method_name(&debug_event);
                             let notification = event_to_notification(debug_event);
                             match serde_json::to_string(&notification) {
                                 Ok(json) => {
+                                    tracing::info!(method = %method, "DebugProtocolServer: forwarding event to client");
                                     if let Err(e) = ws_sender
                                         .send(Message::Text(json.into()))
                                         .await
@@ -306,7 +312,13 @@ impl DebugProtocolServer {
             }
         };
 
-        let result = self.route_method(&request.method, &request.params).await;
+        tracing::info!(
+            method = %request.method,
+            id = %request.id,
+            "DebugProtocolServer: received JSON-RPC request"
+        );
+
+        let result = self.route_method(&request.method, &request.params, request.id.clone()).await;
         let response = result.unwrap_or_else(|e| {
             JsonRpcResponse::error(
                 request.id.clone(),
@@ -324,6 +336,7 @@ impl DebugProtocolServer {
         &mut self,
         method: &str,
         params: &serde_json::Value,
+        id: serde_json::Value,
     ) -> Result<JsonRpcResponse, MethodError> {
         let mut ctrl = self.controller.lock().await;
 
@@ -333,7 +346,7 @@ impl DebugProtocolServer {
                 ctrl.state = super::controller::DebugState::Running;
                 tracing::info!("Debug: resume — agent loop will continue");
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("resume".into()),
+                    id.clone(),
                     serde_json::json!({}),
                 ))
             }
@@ -342,7 +355,7 @@ impl DebugProtocolServer {
                 ctrl.state = super::controller::DebugState::Paused;
                 tracing::info!("Debug: pause — agent loop will pause at next check");
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("pause".into()),
+                    id.clone(),
                     serde_json::json!({}),
                 ))
             }
@@ -351,7 +364,7 @@ impl DebugProtocolServer {
                 ctrl.state = super::controller::DebugState::Stepping;
                 tracing::info!("Debug: step — agent loop will execute one step");
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("step".into()),
+                    id.clone(),
                     serde_json::json!({}),
                 ))
             }
@@ -360,7 +373,7 @@ impl DebugProtocolServer {
                 ctrl.state = super::controller::DebugState::Stopped;
                 tracing::info!("Debug: stop — agent loop terminated");
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("stop".into()),
+                    id.clone(),
                     serde_json::json!({}),
                 ))
             }
@@ -382,11 +395,12 @@ impl DebugProtocolServer {
                         completion_tokens: 0,
                         total_tokens: 0,
                     },
+                    paused: ctrl.state == super::controller::DebugState::Paused,
                 };
                 let result = serde_json::to_value(state)
                     .map_err(|e| MethodError::internal(e.to_string()))?;
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("getState".into()),
+                    id.clone(),
                     result,
                 ))
             }
@@ -399,7 +413,7 @@ impl DebugProtocolServer {
                 let result = serde_json::json!({ "breakpoint_id": bp_id });
                 tracing::info!(breakpoint_id = %bp_id, "Debug: breakpoint set");
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("setBreakpoint".into()),
+                    id.clone(),
                     result,
                 ))
             }
@@ -415,7 +429,7 @@ impl DebugProtocolServer {
                     );
                 }
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("removeBreakpoint".into()),
+                    id.clone(),
                     serde_json::json!({ "removed": removed }),
                 ))
             }
@@ -427,7 +441,7 @@ impl DebugProtocolServer {
                 let json = serde_json::to_value(result)
                     .map_err(|e| MethodError::internal(e.to_string()))?;
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("listBreakpoints".into()),
+                    id.clone(),
                     json,
                 ))
             }
@@ -449,7 +463,7 @@ impl DebugProtocolServer {
                         let json = serde_json::to_value(result)
                             .map_err(|e| MethodError::internal(e.to_string()))?;
                         Ok(JsonRpcResponse::success(
-                            serde_json::Value::String("getContextSnapshot".into()),
+                            id.clone(),
                             json,
                         ))
                     }
@@ -466,6 +480,11 @@ impl DebugProtocolServer {
             "debugger.getSection" => {
                 let sec_params: protocol::GetSectionParams = serde_json::from_value(params.clone())
                     .map_err(|e| MethodError::invalid_params(e.to_string()))?;
+                tracing::info!(
+                    iteration = sec_params.iteration,
+                    section = %sec_params.section,
+                    "Debug: getSection request"
+                );
                 match ctrl.get_context_snapshot(sec_params.iteration) {
                     Some(snap) => {
                         let section_content = match sec_params.section.as_str() {
@@ -488,18 +507,30 @@ impl DebugProtocolServer {
                         };
                         let json = serde_json::to_value(result)
                             .map_err(|e| MethodError::internal(e.to_string()))?;
+                        tracing::info!(
+                            iteration = sec_params.iteration,
+                            section = %sec_params.section,
+                            content_len = section_content.content.len(),
+                            "Debug: getSection returning result"
+                        );
                         Ok(JsonRpcResponse::success(
-                            serde_json::Value::String("getSection".into()),
+                            id.clone(),
                             json,
                         ))
                     }
-                    None => Err(MethodError::new(
-                        -32002,
-                        format!(
-                            "No context snapshot for iteration {}",
-                            sec_params.iteration
-                        ),
-                    )),
+                    None => {
+                        tracing::warn!(
+                            iteration = sec_params.iteration,
+                            "Debug: getSection — no context snapshot found"
+                        );
+                        Err(MethodError::new(
+                            -32002,
+                            format!(
+                                "No context snapshot for iteration {}",
+                                sec_params.iteration
+                            ),
+                        ))
+                    }
                 }
             }
 
@@ -537,7 +568,7 @@ impl DebugProtocolServer {
                 .map_err(|e| MethodError::internal(e.to_string()))?;
 
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("rewind".into()),
+                    id.clone(),
                     result,
                 ))
             }
@@ -548,7 +579,7 @@ impl DebugProtocolServer {
                 ctrl.pending_patches = Some(pc_params.patches);
                 tracing::info!("Debug: context patches stored for next reExecute");
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("patchContext".into()),
+                    id.clone(),
                     serde_json::json!({}),
                 ))
             }
@@ -560,7 +591,7 @@ impl DebugProtocolServer {
                 ctrl.state = super::controller::DebugState::Running;
                 tracing::info!("Debug: reExecute — pending flag set, execution will proceed with patches (if any)");
                 Ok(JsonRpcResponse::success(
-                    serde_json::Value::String("reExecute".into()),
+                    id.clone(),
                     serde_json::json!({ "has_patches": ctrl.pending_patches.is_some() }),
                 ))
             }
@@ -576,6 +607,16 @@ impl DebugProtocolServer {
 impl Default for DebugProtocolServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Get the event method name for logging.
+fn event_method_name(event: &DebugEvent) -> &'static str {
+    match event {
+        DebugEvent::StateChanged { .. } => "debugger.onStateChange",
+        DebugEvent::Step { .. } => "debugger.onStep",
+        DebugEvent::BreakpointHit { .. } => "debugger.onBreakpoint",
+        DebugEvent::ContextBuilt { .. } => "debugger.onContextBuilt",
     }
 }
 

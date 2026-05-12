@@ -460,7 +460,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 
         // Start debug protocol server if running in dev mode (--dev-mode flag)
         if config.dev_mode {
-            tracing::info!("DevMode enabled, starting debug protocol server on ws://127.0.0.1:19877");
+            tracing::info!("DevMode enabled, starting debug protocol server on ws://127.0.0.1:19878");
             let debug_server = crate::debug::server::DebugProtocolServer::new();
             let (debug_event_tx, debug_ctrl) = debug_server.start().await;
             if let Some(c) = Arc::get_mut(&mut core) {

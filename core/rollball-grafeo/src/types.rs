@@ -554,7 +554,9 @@ impl Episode {
 impl KnowledgeNode {
     /// Convert to Grafeo node properties for storage.
     pub fn to_properties(&self) -> Vec<(String, Value)> {
+        let content = format!("{} {} {}", self.subject, self.predicate, self.object);
         let mut props = vec![
+            ("content".to_string(), Value::from(content.as_str())),
             ("subject".to_string(), Value::from(self.subject.as_str())),
             ("predicate".to_string(), Value::from(self.predicate.as_str())),
             ("object".to_string(), Value::from(self.object.as_str())),
@@ -609,7 +611,9 @@ impl KnowledgeNode {
 impl ProceduralNode {
     /// Convert to Grafeo node properties for storage.
     pub fn to_properties(&self) -> Vec<(String, Value)> {
+        let content = format!("{} {} {}", self.name, self.trigger_condition, self.action_pattern);
         let mut props = vec![
+            ("content".to_string(), Value::from(content.as_str())),
             ("name".to_string(), Value::from(self.name.as_str())),
             ("trigger_condition".to_string(), Value::from(self.trigger_condition.as_str())),
             ("action_pattern".to_string(), Value::from(self.action_pattern.as_str())),
@@ -662,7 +666,9 @@ impl ProceduralNode {
 impl AutobiographicalNode {
     /// Convert to Grafeo node properties for storage.
     pub fn to_properties(&self) -> Vec<(String, Value)> {
+        let content = format!("{}: {}", self.key, self.value);
         let mut props = vec![
+            ("content".to_string(), Value::from(content.as_str())),
             ("category".to_string(), Value::from(self.category.as_str())),
             ("key".to_string(), Value::from(self.key.as_str())),
             ("value".to_string(), Value::from(self.value.as_str())),
