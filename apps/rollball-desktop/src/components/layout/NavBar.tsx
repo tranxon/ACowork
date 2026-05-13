@@ -3,6 +3,7 @@ import { cn } from "../../lib/utils";
 import { MessageSquare, Settings } from "lucide-react";
 import { UserAvatar } from "../common/UserAvatar";
 import { useUserProfileStore } from "../../stores/userProfileStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 
 interface NavBarProps {
   currentView: NavView;
@@ -18,12 +19,19 @@ const navItems: { view: NavView; icon: typeof MessageSquare; label: string }[] =
 
 export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps) {
   const profile = useUserProfileStore((s) => s.profile);
+  const { opacity, theme } = useSettingsStore();
+  const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  // Original gray: #E2E3E9 (light) / #292A2C (dark), modulated by opacity
+  const bgColor = isDark ? `rgba(41,42,44,${opacity})` : `rgba(226,227,233,${opacity})`;
 
   return (
     <nav
-      className="flex w-[48px] flex-col items-center gap-0 bg-[#E2E3E9] py-2 dark:bg-[#292A2C]"
+      className="flex w-[48px] flex-col items-center gap-0 py-2"
       role="navigation"
       aria-label="Main navigation"
+      style={{
+        backgroundColor: bgColor,
+      } as React.CSSProperties}
     >
       {/* User avatar — click to edit profile (WeChat-style top placement) */}
       <button

@@ -50,7 +50,7 @@ function formatBytes(bytes: number): string {
 
 // ── Component ──────────────────────────────────────────────────────────
 
-export function DebugPanel() {
+export function DebugPanel({ width = 320 }: { width?: number }) {
   const { agents, selectedAgentId } = useAgentStore();
   const {
     connected,
@@ -155,7 +155,7 @@ export function DebugPanel() {
 
   if (!connected) {
     return (
-      <div className="flex w-[320px] flex-col items-center justify-center gap-3 border-l border-zinc-200 bg-zinc-50 p-6 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+      <div className="flex flex-col items-center justify-center gap-3 border-l border-zinc-200 bg-zinc-50 p-6 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400" style={{ width }}>
         {connecting ? (
           <>
             <Loader className="h-5 w-5 animate-spin" />
@@ -178,7 +178,7 @@ export function DebugPanel() {
   }
 
   return (
-    <div className="flex w-[320px] flex-col border-l border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="flex flex-col border-l border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <div className="flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -186,7 +186,7 @@ export function DebugPanel() {
           <span>Debug</span>
           <Wifi className="h-3 w-3 text-emerald-500" />
         </div>
-        <span className="text-xs text-zinc-400">:19878</span>
+
       </div>
 
       {/* Control bar */}

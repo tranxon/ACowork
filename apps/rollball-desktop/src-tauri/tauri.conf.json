@@ -22,8 +22,13 @@
         "minWidth": 1024,
         "minHeight": 600,
         "decorations": false,
+        "transparent": true,
         "center": true,
-        "visible": true
+        "visible": true,
+        "windowEffects": {
+          "effects": ["acrylic", "blur", "mica"],
+          "radius": 12
+        }
       }
     ]
   },

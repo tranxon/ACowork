@@ -433,7 +433,9 @@ export function ChatPanel() {
   const inputDisabled = sending || gatewayStatus !== "connected";
 
   return (
-    <div className="flex flex-1 flex-col bg-[#FAFAFA] dark:bg-zinc-900">
+    <div
+      className="flex flex-1 flex-col bg-[#FAFAFA] dark:bg-zinc-900"
+    >
       {/* LLM config warning */}
       {hasLlmConfig === false && (
         <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 dark:border-amber-900 dark:bg-amber-950">

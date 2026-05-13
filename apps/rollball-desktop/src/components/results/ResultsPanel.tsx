@@ -15,7 +15,7 @@ type PanelTab = "results" | "setup";
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-export function ResultsPanel({ onCollapse }: ResultsPanelProps) {
+export function ResultsPanel({ width, onCollapse }: ResultsPanelProps & { width: number }) {
   const { agents, selectedAgentId } = useAgentStore();
   const tokenUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.tokenUsage ?? null) : null);
   const messages = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.messages ?? EMPTY_MESSAGES) : EMPTY_MESSAGES);
@@ -28,7 +28,7 @@ export function ResultsPanel({ onCollapse }: ResultsPanelProps) {
   const iterations = messages.filter((m) => m.type === "assistant").length;
 
   return (
-    <div className="flex w-[320px] flex-col border-l border-zinc-200 bg-zinc-50 transition-[width] duration-250 ease-in-out dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="flex flex-col border-l border-zinc-200 bg-zinc-50 transition-[width] duration-250 ease-in-out dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
       {/* Header with tabs */}
       <div className="border-b border-zinc-200 dark:border-zinc-800">
         <div className="flex items-center justify-between px-3 pt-2">

@@ -25,7 +25,9 @@ export function SettingsPage({ initialTab = "gateway" }: { initialTab?: Settings
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-white dark:bg-zinc-900">
+    <div
+      className="flex flex-1 flex-col bg-white dark:bg-zinc-900"
+    >
       {/* Header */}
       <div className="border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
         <h1 className="text-xl font-semibold">Settings</h1>
@@ -1164,7 +1166,7 @@ function ProvidersTab() {
 
 /** Appearance settings */
 function AppearanceTab() {
-  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth } = useSettingsStore();
+  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity } = useSettingsStore();
 
   // Content width options: 40-100%, step 10
   const contentWidths = [
@@ -1248,8 +1250,27 @@ function AppearanceTab() {
         </div>
       </div>
 
+      <div>
+        <h2 className="mb-3 text-sm font-medium">Opacity</h2>
+        <p className="mb-2 text-xs text-zinc-500">窗口透明度（需配合窗口毛玻璃效果使用）</p>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min="0"
+            max="1.0"
+            step="0.01"
+            value={opacity}
+            onChange={(e) => setOpacity(parseFloat(e.target.value))}
+            className="flex-1 accent-zinc-800 dark:accent-zinc-200"
+          />
+          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400">
+            {Math.round(opacity * 100)}%
+          </span>
+        </div>
+      </div>
+
       <button
-        onClick={() => { setTheme("system"); setFontSize(1.0); setContentWidth(90); }}
+        onClick={() => { setTheme("system"); setFontSize(1.0); setContentWidth(90); setOpacity(1.0); }}
         className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
       >
         Reset to defaults

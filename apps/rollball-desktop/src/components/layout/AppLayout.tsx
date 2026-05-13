@@ -21,6 +21,11 @@ const MAX_SIDEBAR_WIDTH = 400;
 const DEFAULT_SIDEBAR_WIDTH = 240;
 const SIDEBAR_WIDTH_KEY = "rollball-sidebar-width";
 
+const MIN_RIGHT_WIDTH = 200;
+const MAX_RIGHT_WIDTH = 600;
+const DEFAULT_RIGHT_WIDTH = 320;
+const RIGHT_WIDTH_KEY = "rollball-right-width";
+
 export function AppLayout() {
   const [currentView, setCurrentView] = useState<NavView>("chat");
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>("gateway");
@@ -28,6 +33,10 @@ export function AppLayout() {
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     return stored ? Math.min(Math.max(parseInt(stored, 10), MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH) : DEFAULT_SIDEBAR_WIDTH;
+  });
+  const [rightWidth, setRightWidth] = useState(() => {
+    const stored = localStorage.getItem(RIGHT_WIDTH_KEY);
+    return stored ? Math.min(Math.max(parseInt(stored, 10), MIN_RIGHT_WIDTH), MAX_RIGHT_WIDTH) : DEFAULT_RIGHT_WIDTH;
   });
   const gatewayStatus = useGatewayStore((s) => s.status);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
@@ -40,6 +49,10 @@ export function AppLayout() {
   const startX = useRef(0);
   const startWidth = useRef(DEFAULT_SIDEBAR_WIDTH);
   const currentWidthRef = useRef(DEFAULT_SIDEBAR_WIDTH);
+  const isResizingRight = useRef(false);
+  const startXRight = useRef(0);
+  const startWidthRight = useRef(DEFAULT_RIGHT_WIDTH);
+  const currentWidthRefRight = useRef(DEFAULT_RIGHT_WIDTH);
 
   // Check Gateway health on mount and periodically
   useEffect(() => {
@@ -96,8 +109,34 @@ export function AppLayout() {
     document.addEventListener("mouseup", handleMouseUp);
   }, [handleMouseMove, handleMouseUp, sidebarWidth]);
 
+  // Right panel resize handlers
+  const handleMouseMoveRight = useCallback((e: MouseEvent) => {
+    if (!isResizingRight.current) return;
+    const delta = e.clientX - startXRight.current;
+    const newWidth = Math.min(Math.max(startWidthRight.current - delta, MIN_RIGHT_WIDTH), MAX_RIGHT_WIDTH);
+    currentWidthRefRight.current = newWidth;
+    setRightWidth(newWidth);
+  }, []);
+
+  const handleMouseUpRight = useCallback(() => {
+    if (!isResizingRight.current) return;
+    isResizingRight.current = false;
+    document.removeEventListener("mousemove", handleMouseMoveRight);
+    document.removeEventListener("mouseup", handleMouseUpRight);
+    localStorage.setItem(RIGHT_WIDTH_KEY, String(currentWidthRefRight.current));
+  }, [handleMouseMoveRight]);
+
+  const handleMouseDownRight = useCallback((e: React.MouseEvent) => {
+    isResizingRight.current = true;
+    startXRight.current = e.clientX;
+    startWidthRight.current = rightWidth;
+    currentWidthRefRight.current = rightWidth;
+    document.addEventListener("mousemove", handleMouseMoveRight);
+    document.addEventListener("mouseup", handleMouseUpRight);
+  }, [handleMouseMoveRight, handleMouseUpRight, rightWidth]);
+
   return (
-    <div className="flex h-full w-full flex-col bg-[#E2E3E9] dark:bg-[#292A2C]">
+    <div className="flex h-full w-full flex-col">
       {/* Custom title bar */}
       <TitleBar />
 
@@ -131,11 +170,24 @@ export function AppLayout() {
             {/* Chat panel — elastic */}
             <ChatPanel />
 
-            {/* Results panel / Debug panel — 320px, collapsible */}
+            {/* Right panel resize handle */}
+            <div
+              className="group relative w-px shrink-0 cursor-col-resize select-none"
+              onMouseDown={handleMouseDownRight}
+              role="separator"
+              aria-label="Resize right panel"
+            >
+              {/* Visible divider line */}
+              <div className="absolute inset-y-0 left-0 w-px bg-zinc-200 dark:bg-zinc-800" />
+              {/* Hover/active area for resize */}
+              <div className="absolute inset-y-0 -right-2 w-[7px] group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
+            </div>
+
+            {/* Results panel / Debug panel — collapsible, resizable */}
             {isDebugMode ? (
-              <DebugPanel />
+              <DebugPanel width={rightWidth} />
             ) : !resultsCollapsed ? (
-              <ResultsPanel onCollapse={toggleResults} />
+              <ResultsPanel width={rightWidth} onCollapse={toggleResults} />
             ) : null}
             {resultsCollapsed && !isDebugMode && (
               <button
