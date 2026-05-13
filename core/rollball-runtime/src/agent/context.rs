@@ -17,6 +17,10 @@ pub struct ContextBuilder {
     identity_context: Option<String>,
     /// Workspace context (from Gateway WorkspaceContextUpdate push)
     workspace_context: Option<String>,
+    /// Environment info override (for debug patching).
+    /// When set, takes precedence over auto-detected platform info.
+    /// Stored as the full formatted string (e.g. "## Environment\n- OS: ...\n- Shell: ...")
+    environment_override: Option<String>,
     /// Tool definitions as JSON
     tool_definitions: Option<Vec<serde_json::Value>>,
     /// Model override from Gateway LLMConfigDelivery (takes precedence over manifest suggested_model)
@@ -36,6 +40,7 @@ impl ContextBuilder {
             system_prompt,
             identity_context: None,
             workspace_context: None,
+            environment_override: None,
             tool_definitions: None,
             override_model: None,
             retrieved_memory: None,
@@ -101,6 +106,25 @@ impl ContextBuilder {
             "ContextBuilder workspace context updated via WorkspaceContextUpdate"
         );
         self.workspace_context = Some(context_text);
+    }
+
+    /// Set environment override (for debug patching).
+    /// Takes precedence over auto-detected platform info in build().
+    pub fn set_environment_override(&mut self, env_text: String) {
+        tracing::info!(
+            len = env_text.len(),
+            "ContextBuilder environment override set via debug patch"
+        );
+        if env_text.is_empty() {
+            self.environment_override = None;
+        } else {
+            self.environment_override = Some(env_text);
+        }
+    }
+
+    /// Clear the environment override, reverting to auto-detection.
+    pub fn clear_environment_override(&mut self) {
+        self.environment_override = None;
     }
 
     /// Set retrieved memory context for injection into the system prompt.
@@ -179,6 +203,12 @@ impl ContextBuilder {
         if let Some(ref prompt) = patches.system_prompt {
             self.set_system_prompt(prompt.clone());
         }
+        if let Some(ref workspace) = patches.workspace_context {
+            self.set_workspace_context(workspace.clone());
+        }
+        if let Some(ref env) = patches.environment {
+            self.set_environment_override(env.clone());
+        }
         if let Some(ref tools) = patches.tool_definitions {
             self.set_tool_definitions(tools.clone());
         }
@@ -227,6 +257,16 @@ impl ContextBuilder {
         self.retrieved_memory.as_deref()
     }
 
+    /// Get the workspace context text, if set.
+    pub fn workspace_context(&self) -> Option<&str> {
+        self.workspace_context.as_deref()
+    }
+
+    /// Get the environment override text, if set.
+    pub fn environment_override(&self) -> Option<&str> {
+        self.environment_override.as_deref()
+    }
+
     /// Build the complete ChatRequest for the LLM
     pub fn build(
         &self,
@@ -260,23 +300,15 @@ impl ContextBuilder {
             system_content.push_str(&format!("\n\n## Skill Instructions\n{skills}"));
         }
 
-        // 3. Environment platform info (runtime detection)
-        let shell_info = crate::platform::detected_shell();
-        let available_shells = crate::platform::detected_shells();
-        let shell_tools_desc: Vec<String> = available_shells
-            .iter()
-            .map(|s| {
-                let primary = if s.is_primary { " (primary)" } else { " (fallback)" };
-                format!("{}{}", s.tool_name, primary)
-            })
-            .collect();
-        system_content.push_str(&format!(
-            "\n\n## Environment\n- Operating System: {}\n- Architecture: {}\n- Shell: {}\n- Available Shell Tools: {}",
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            shell_info.display_name,
-            shell_tools_desc.join(", ")
-        ));
+        // 3. Environment platform info
+        // Debug override takes precedence over auto-detected platform info,
+        // allowing the debugger to modify environment context without changing
+        // the actual runtime environment.
+        if let Some(ref env_override) = self.environment_override {
+            system_content.push_str(&format!("\n\n{env_override}"));
+        } else {
+            system_content.push_str(&format!("\n\n{}", detect_environment_text()));
+        }
 
         // 3.5 Tool definitions are passed separately in ChatRequest
 
@@ -419,6 +451,27 @@ impl ContextBuilder {
             tools: self.tool_definitions.clone(),
         }
     }
+}
+
+/// Detect and format the environment info text that gets injected into
+/// the system prompt. Used by debug snapshot capture and ContextBuilder::build().
+pub fn detect_environment_text() -> String {
+    let shell_info = crate::platform::detected_shell();
+    let available_shells = crate::platform::detected_shells();
+    let shell_tools_desc: Vec<String> = available_shells
+        .iter()
+        .map(|s| {
+            let primary = if s.is_primary { " (primary)" } else { " (fallback)" };
+            format!("{}{}", s.tool_name, primary)
+        })
+        .collect();
+    format!(
+        "## Environment\n- Operating System: {}\n- Architecture: {}\n- Shell: {}\n- Available Shell Tools: {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        shell_info.display_name,
+        shell_tools_desc.join(", ")
+    )
 }
 
 /// Build tool definitions from manifest tool declarations.

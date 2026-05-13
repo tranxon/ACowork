@@ -27,23 +27,29 @@ interface SectionContentType {
   token_count: number;
 }
 
-const SECTION_LABELS: Record<string, string> = {
+export type { SectionContentType };
+
+export const SECTION_LABELS: Record<string, string> = {
   system_prompt: "System Prompt",
+  workspace_context: "Workspace Context",
+  environment: "Environment",
   tool_definitions: "Tool Definitions",
   skill_instructions: "Skill Instructions",
   retrieved_memory: "Retrieved Memory",
   identity_context: "Identity Context",
 };
 
-const SECTION_ORDER = [
+export const SECTION_ORDER = [
   "system_prompt",
+  "workspace_context",
+  "environment",
   "tool_definitions",
   "skill_instructions",
   "retrieved_memory",
   "identity_context",
 ];
 
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${bytes} B`;
 }
@@ -279,7 +285,7 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
 
 // ── Sub-components ─────────────────────────────────────────────────────
 
-function ControlButton({
+export function ControlButton({
   children,
   onClick,
   title,
@@ -306,7 +312,7 @@ function ControlButton({
   );
 }
 
-function StateLabel({
+export function StateLabel({
   label,
   value,
   highlight,
@@ -330,7 +336,7 @@ function StateLabel({
   );
 }
 
-function SnapshotNode({
+export function SnapshotNode({
   snapshot,
   expandedSections,
   sectionCache,

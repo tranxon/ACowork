@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useChatStore } from "./chatStore";
 
 // ── Debug Protocol types ──────────────────────────────────────────────
 
@@ -36,6 +37,8 @@ interface ContextSnapshotMeta {
   built_at: string;
   sections: {
     system_prompt: SectionMeta;
+    workspace_context: SectionMeta;
+    environment: SectionMeta;
     tool_definitions: SectionMeta;
     skill_instructions: SectionMeta;
     retrieved_memory: SectionMeta;
@@ -338,6 +341,24 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         const total_token_estimate = (params.total_token_estimate as number) ?? 0;
         console.log("[debugStore] onContextBuilt: iteration=", iteration, "sections=", !!sections, "sectionsKeys=", sections ? Object.keys(sections) : null);
         if (sections) {
+          // After a rewind, stale onContextBuilt events for iterations
+          // beyond the rewind point may still arrive via WebSocket.
+          // Discard any event whose iteration is more than one step
+          // ahead of the last known snapshot — such events are from
+          // before the rewind and must not be re-added.
+          const currentSnapshots = get().snapshots;
+          const maxExisting = currentSnapshots.length > 0
+            ? Math.max(...currentSnapshots.map((sn) => sn.iteration))
+            : 0;
+          if (iteration > maxExisting + 1) {
+            console.log("[debugStore] onContextBuilt: discarding stale event iteration=", iteration, "maxExisting=", maxExisting);
+            break;
+          }
+          // Also skip duplicates (same iteration already in snapshots)
+          if (currentSnapshots.some((sn) => sn.iteration === iteration)) {
+            console.log("[debugStore] onContextBuilt: skipping duplicate iteration=", iteration);
+            break;
+          }
           const snapshot: ContextSnapshotMeta = {
             iteration,
             built_at: new Date().toISOString(),
@@ -484,6 +505,12 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         iteration: toIteration,
       };
     });
+    // Trim chat messages to the rewind point so the chat UI reflects
+    // the truncated conversation history.
+    const agentId = get().debugAgentId;
+    if (agentId && result.messages_trimmed_to > 0) {
+      useChatStore.getState().trimMessagesTo(agentId, result.messages_trimmed_to);
+    }
     return result;
   },
 

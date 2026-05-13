@@ -61,10 +61,12 @@ pub struct ContextSnapshot {
     pub total_token_estimate: usize,
 }
 
-/// The five control-plane sections with their content.
+/// The seven control-plane sections with their content.
 #[derive(Debug, Clone)]
 pub struct ContextSnapshotSections {
     pub system_prompt: SectionContent,
+    pub workspace_context: SectionContent,
+    pub environment: SectionContent,
     pub tool_definitions: SectionContent,
     pub skill_instructions: SectionContent,
     pub retrieved_memory: SectionContent,
@@ -119,6 +121,8 @@ impl From<&ContextSnapshotSections> for ContextSections {
     fn from(s: &ContextSnapshotSections) -> Self {
         Self {
             system_prompt: s.system_prompt.to_meta(),
+            workspace_context: s.workspace_context.to_meta(),
+            environment: s.environment.to_meta(),
             tool_definitions: s.tool_definitions.to_meta(),
             skill_instructions: s.skill_instructions.to_meta(),
             retrieved_memory: s.retrieved_memory.to_meta(),

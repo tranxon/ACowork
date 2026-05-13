@@ -5,7 +5,6 @@ import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { ChatPanel } from "../chat/ChatPanel";
 import { ResultsPanel } from "../results/ResultsPanel";
-import { DebugPanel } from "../debug/DebugPanel";
 import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -183,17 +182,14 @@ export function AppLayout() {
               <div className="absolute inset-y-0 -right-2 w-[7px] group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
             </div>
 
-            {/* Results panel / Debug panel — collapsible, resizable */}
-            {isDebugMode ? (
-              <DebugPanel width={rightWidth} />
-            ) : !resultsCollapsed ? (
-              <ResultsPanel width={rightWidth} onCollapse={toggleResults} />
-            ) : null}
-            {resultsCollapsed && !isDebugMode && (
+            {/* Results panel / Debug panel — unified tabs, collapsible, resizable */}
+            {!resultsCollapsed ? (
+              <ResultsPanel width={rightWidth} onCollapse={toggleResults} isDebugMode={isDebugMode} />
+            ) : (
               <button
                 onClick={toggleResults}
                 className="flex w-8 items-center justify-center border-l border-zinc-200 bg-zinc-50 text-zinc-400 hover:text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 dark:hover:text-zinc-300"
-                aria-label="Expand results panel"
+                aria-label="Expand right panel"
               >
                 <PanelRightClose className="h-4 w-4" />
               </button>

@@ -124,6 +124,9 @@ interface ChatStore {
   disconnectStream: (agentId?: string) => void;
   /** Clear messages and streaming state for a specific agent (or currentAgentId) */
   clearMessages: (agentId?: string) => void;
+  /** Trim messages to the specified count (for debug rewind).
+   *  Keeps the first `count` messages, discards the rest. */
+  trimMessagesTo: (agentId: string, count: number) => void;
   setCurrentModel: (model: string, provider: string, agentId: string) => void;
   setAvailableModels: (models: { name: string; provider: string }[]) => void;
   /** Get the WebSocket for a specific agent */
@@ -544,6 +547,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Only clear global sending if this is the active agent
       ...(state.currentAgentId === targetId ? { sending: false } : {}),
     }));
+  },
+
+  trimMessagesTo: (agentId: string, count: number) => {
+    set((state) => {
+      const agentState = getAgentState(state, agentId);
+      if (agentState.messages.length <= count) return {}; // nothing to trim
+      return updateAgentState(state, agentId, {
+        messages: agentState.messages.slice(0, count),
+      });
+    });
   },
 
   setCurrentModel: (model: string, provider: string, agentId: string) => {

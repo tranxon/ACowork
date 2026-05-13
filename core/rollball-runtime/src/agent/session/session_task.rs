@@ -170,9 +170,18 @@ impl SessionTask {
         }
 
         loop {
-            let msg = inbound_rx.recv().await;
+            // Use a 500ms timeout so that debug rewind operations can be
+            // consumed even when the SessionTask is idle (no new ChatMessage).
+            // Without this, rewind_target set via debugger.rewind would sit
+            // in the controller forever after agent_loop.run() finishes.
+            let msg = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                inbound_rx.recv(),
+            )
+            .await;
+
             match msg {
-                Some(SessionMessage::ChatMessage { content, message_id }) => {
+                Ok(Some(SessionMessage::ChatMessage { content, message_id })) => {
                     if content.trim().is_empty() {
                         tracing::warn!(
                             session_id = %session_id,
@@ -231,7 +240,7 @@ impl SessionTask {
                         }
                     }
                 }
-                Some(SessionMessage::ContinueExecution) => {
+                Ok(Some(SessionMessage::ContinueExecution)) => {
                     tracing::debug!(
                         session_id = %session_id,
                         "SessionTask: ContinueExecution received"
@@ -240,7 +249,7 @@ impl SessionTask {
                         reason: "user_requested".to_string(),
                     }).await;
                 }
-                Some(SessionMessage::ModelSwitch { model }) => {
+                Ok(Some(SessionMessage::ModelSwitch { model })) => {
                     tracing::info!(
                         session_id = %session_id,
                         model = %model,
@@ -248,7 +257,7 @@ impl SessionTask {
                     );
                     context_builder.set_override_model(model);
                 }
-                Some(SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model }) => {
+                Ok(Some(SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model })) => {
                     tracing::info!(
                         session_id = %session_id,
                         provider = %provider_name,
@@ -263,7 +272,7 @@ impl SessionTask {
                     );
                     agent_loop.update_provider(new_provider, model);
                 }
-                Some(SessionMessage::UpdateCapabilities { caps }) => {
+                Ok(Some(SessionMessage::UpdateCapabilities { caps })) => {
                     tracing::info!(
                         session_id = %session_id,
                         model = ?caps.name,
@@ -271,7 +280,7 @@ impl SessionTask {
                     );
                     agent_loop.update_gateway_model_capabilities(caps);
                 }
-                Some(SessionMessage::UpdateMaxOutputTokens { limit }) => {
+                Ok(Some(SessionMessage::UpdateMaxOutputTokens { limit })) => {
                     tracing::info!(
                         session_id = %session_id,
                         limit = %limit,
@@ -279,12 +288,12 @@ impl SessionTask {
                     );
                     agent_loop.update_max_output_tokens_limit(limit);
                 }
-                Some(SessionMessage::UpdateRuntimeConfig {
+                Ok(Some(SessionMessage::UpdateRuntimeConfig {
                     max_output_tokens,
                     max_iterations,
                     temperature,
                     system_prompt_override,
-                }) => {
+                })) => {
                     tracing::info!(
                         session_id = %session_id,
                         max_output_tokens = ?max_output_tokens,
@@ -299,14 +308,14 @@ impl SessionTask {
                         system_prompt_override,
                     );
                 }
-                Some(SessionMessage::UpdateWorkspaceContext { context_text }) => {
+                Ok(Some(SessionMessage::UpdateWorkspaceContext { context_text })) => {
                     tracing::info!(
                         session_id = %session_id,
                         "SessionTask: updating workspace context"
                     );
                     context_builder.set_workspace_context(context_text);
                 }
-                Some(SessionMessage::UpdateSessionTitle { title }) => {
+                Ok(Some(SessionMessage::UpdateSessionTitle { title })) => {
                     tracing::info!(
                         session_id = %session_id,
                         title = %title,
@@ -314,7 +323,7 @@ impl SessionTask {
                     );
                     let _ = agent_loop.update_session_title(&title);
                 }
-                Some(SessionMessage::Interrupt { reason }) => {
+                Ok(Some(SessionMessage::Interrupt { reason })) => {
                     tracing::info!(
                         session_id = %session_id,
                         reason = %reason,
@@ -322,19 +331,30 @@ impl SessionTask {
                     );
                     let _ = agent_inbound_tx.send(crate::agent::inbound::InboundMessage::Interrupt { reason }).await;
                 }
-                Some(SessionMessage::Stop) => {
+                Ok(Some(SessionMessage::Stop)) => {
                     tracing::info!(
                         session_id = %session_id,
                         "SessionTask: Stop received, shutting down"
                     );
                     break;
                 }
-                None => {
+                Ok(None) => {
                     tracing::info!(
                         session_id = %session_id,
                         "SessionTask: inbound channel closed, shutting down"
                     );
                     break;
+                }
+                Err(_elapsed) => {
+                    // Timeout — check for pending debug rewind operations.
+                    // This ensures rewinds are consumed even when the
+                    // SessionTask is idle (no new ChatMessage).
+                    check_and_apply_debug_rewind(
+                        &debug_ctrl,
+                        &session_id,
+                        &mut agent_loop,
+                    )
+                    .await;
                 }
             }
         }
@@ -398,14 +418,20 @@ async fn apply_debug_rewind_and_patches(
         // Reset iteration counter to the target so the agent loop
         // resumes from the correct point
         ctrl.iteration = target_iter;
-    }
-
-    // ── Apply pending patches ──
-    if let Some(ref patches) = ctrl.pending_patches {
-        context_builder.apply_patches(patches);
         tracing::info!(
             session_id = %session_id,
-            "Debug: pending patches applied to context builder"
+            target_iteration = target_iter,
+            ctrl_iteration_now = ctrl.iteration,
+            "Debug: apply_debug_rewind_and_patches reset ctrl.iteration"
+        );
+    }
+
+    // ── Apply pending patches (consume them) ──
+    if let Some(patches) = ctrl.pending_patches.take() {
+        context_builder.apply_patches(&patches);
+        tracing::info!(
+            session_id = %session_id,
+            "Debug: pending patches applied to context builder and consumed"
         );
     }
 
@@ -415,5 +441,52 @@ async fn apply_debug_rewind_and_patches(
             session_id = %session_id,
             "Debug: re-execute flag consumed, agent will process next message with updated context"
         );
+    }
+}
+
+/// Check for and apply pending debug rewind operations.
+///
+/// Called periodically (via timeout) from `SessionTask::run()` when the
+/// session is idle, so that rewind_target set by `debugger.rewind` is
+/// consumed even without a new ChatMessage arriving. This function only
+/// handles history truncation — patches and re-execute are handled by
+/// `apply_debug_rewind_and_patches` before the next `agent_loop.run()`.
+async fn check_and_apply_debug_rewind(
+    debug_ctrl: &Option<Arc<tokio::sync::Mutex<DebugController>>>,
+    session_id: &str,
+    agent_loop: &mut AgentLoop,
+) {
+    let Some(debug_ctrl) = debug_ctrl else {
+        return;
+    };
+
+    let mut ctrl = debug_ctrl.lock().await;
+
+    if let Some(target_iter) = ctrl.take_rewind_target() {
+        let msg_count = ctrl
+            .conversation_snapshots
+            .iter()
+            .find(|s| s.iteration == target_iter)
+            .map(|s| s.message_count);
+
+        if let Some(count) = msg_count {
+            agent_loop.session.history.truncate_to(count);
+            tracing::info!(
+                session_id = %session_id,
+                target_iteration = target_iter,
+                messages_trimmed_to = count,
+                "Debug rewind: history truncated (idle polling)"
+            );
+        } else {
+            tracing::warn!(
+                session_id = %session_id,
+                target_iteration = target_iter,
+                "Debug rewind: no snapshot found for target iteration, history unchanged"
+            );
+        }
+
+        // Reset iteration counter to the target so the frontend
+        // reflects the correct state after the rewind.
+        ctrl.iteration = target_iter;
     }
 }

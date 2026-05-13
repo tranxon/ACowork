@@ -44,7 +44,7 @@ export function ExploreBlock({ items, isStreaming }: ExploreBlockProps) {
     if (isStreaming) setExpanded(true);
   }, [isStreaming]);
 
-  const stepCount = items.length;
+  const stepCount = buildPairedItems(items).length;
 
   return (
     <div className="my-1 max-w-[var(--content-max-width)]">

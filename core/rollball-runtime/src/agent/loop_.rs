@@ -736,16 +736,73 @@ impl AgentLoop {
             // all chat messages).  The local loop counter resets per message
             // (see run() line 614), but the debug snapshot iteration must be
             // globally unique within the session.
-            if let Some(ctrl) = self.core.debug_ctrl() {
+            //
+            // Capture the incremented value into a local so that subsequent
+            // rewind operations (which reset ctrl.iteration mid-flight) do
+            // not cause capture_context_snapshot to read a wrong value.
+            let debug_iter = if let Some(ctrl) = self.core.debug_ctrl() {
                 let mut ctrl = ctrl.lock().await;
+                let prev_iter = ctrl.iteration;
                 ctrl.iteration += 1;
-            }
+                let current_iter = ctrl.iteration;
+                tracing::info!(
+                    prev_iter,
+                    new_iter = current_iter,
+                    "Debug: iteration counter incremented in execute_single_iteration"
+                );
+                // Create conversation snapshot for rewind support.
+                // Records the current message count and usage at this
+                // iteration so that rewinding can truncate history
+                // back to this point.
+                let msg_count = self.session.history.len();
+                let usage = crate::debug::protocol::DebugUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                };
+                let conv_snap = ctrl.create_conversation_snapshot(msg_count, usage);
+                tracing::info!(
+                    conv_iter = conv_snap.iteration,
+                    msg_count,
+                    snapshot_count = ctrl.conversation_snapshots.len(),
+                    "Debug: conversation snapshot created"
+                );
+                Some(current_iter)
+            } else {
+                None
+            };
 
             // Await resume if paused (DevMode only)
             if !self.await_debug_resume().await {
                 return Ok(IterationResult::Interrupted(
                     "[Debug] Agent loop stopped by debugger".to_string(),
                 ));
+            }
+
+            // ── Apply pending patches to context_builder (DevMode only) ──
+            // When the agent is paused via debugger, SessionTask is blocked
+            // inside agent_loop.run() and cannot apply patches through its
+            // normal apply_debug_rewind_and_patches path.  Patches stored
+            // by patchContext in ctrl.pending_patches must be applied HERE,
+            // after resume, so that the LLM receives the patched context.
+            if let Some(ctrl) = self.core.debug_ctrl() {
+                let mut ctrl_guard = ctrl.lock().await;
+                if let Some(patches) = ctrl_guard.pending_patches.take() {
+                    context_builder.apply_patches(&patches);
+                    tracing::info!(
+                        iteration,
+                        "Debug: pending patches applied to context builder after resume"
+                    );
+                }
+                // Also consume the re_execute_pending flag so that
+                // apply_debug_rewind_and_patches at SessionTask level
+                // does not see a stale flag after agent_loop.run() finishes.
+                if ctrl_guard.take_re_execute_pending() {
+                    tracing::info!(
+                        iteration,
+                        "Debug: re_execute_pending consumed inside agent loop after resume"
+                    );
+                }
             }
 
             // Enter BudgetCheck phase
@@ -801,7 +858,7 @@ impl AgentLoop {
             .await;
 
             // Debug: create context snapshot and push onContextBuilt event
-            self.capture_context_snapshot(context_builder).await;
+            self.capture_context_snapshot(context_builder, debug_iter).await;
 
             // ③ Call LLM with streaming (S1.5)
             let response = self.call_llm_streaming(&chat_request, context_builder).await?;
@@ -1366,11 +1423,24 @@ impl AgentLoop {
     /// when DevMode is active. Captures the 5 control-plane sections with
     /// metadata (size, token estimate, SHA-256 hash) for the debug panel's
     /// context tree view.
-    async fn capture_context_snapshot(&self, context_builder: &ContextBuilder) {
-        let (Some(ctrl), Some(event_tx)) =
-            (self.core.debug_ctrl(), self.core.debug_event_tx())
-        else {
+    ///
+    /// `debug_iter` is the iteration number captured *before* any yield
+    /// points in [`execute_single_iteration`].  Because rewind operations
+    /// can modify `ctrl.iteration` mid-flight (between the increment and
+    /// this snapshot), we must use the captured value rather than reading
+    /// the controller field again.
+    async fn capture_context_snapshot(
+        &self,
+        context_builder: &ContextBuilder,
+        debug_iter: Option<u32>,
+    ) {
+        let Some(iter) = debug_iter else {
             return; // Not in DevMode
+        };
+        let Some(event_tx) =
+            self.core.debug_event_tx()
+        else {
+            return;
         };
 
         use crate::debug::controller::{ContextSnapshot, ContextSnapshotSections, SectionContent};
@@ -1398,6 +1468,15 @@ impl AgentLoop {
 
         let sections = ContextSnapshotSections {
             system_prompt: SectionContent::new(context_builder.system_prompt().to_string()),
+            workspace_context: SectionContent::new(
+                context_builder.workspace_context().unwrap_or_default().to_string(),
+            ),
+            environment: SectionContent::new(
+                context_builder
+                    .environment_override()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| crate::agent::context::detect_environment_text()),
+            ),
             tool_definitions: SectionContent::new(tool_defs_str),
             skill_instructions: SectionContent::new(skill_str),
             retrieved_memory: SectionContent::new(
@@ -1409,24 +1488,22 @@ impl AgentLoop {
         };
 
         let total_token_estimate = sections.system_prompt.token_estimate
+            + sections.workspace_context.token_estimate
+            + sections.environment.token_estimate
             + sections.tool_definitions.token_estimate
             + sections.skill_instructions.token_estimate
             + sections.retrieved_memory.token_estimate
             + sections.identity_context.token_estimate;
 
         let snapshot = ContextSnapshot {
-            iteration: {
-                // Read iteration from controller without holding lock across event send
-                let ctrl_guard = ctrl.lock().await;
-                ctrl_guard.iteration
-            },
+            iteration: iter,
             built_at: chrono::Utc::now(),
             sections,
             total_token_estimate,
         };
 
         // Store in controller
-        {
+        if let Some(ctrl) = self.core.debug_ctrl() {
             let mut ctrl_guard = ctrl.lock().await;
             ctrl_guard.store_context_snapshot(snapshot.clone());
         }

@@ -183,10 +183,13 @@ pub struct GetContextSnapshotResult {
     pub phase: DebugPhase,
 }
 
-/// Five control-plane sections of context.
+/// Seven control-plane sections of context (all content injected into the
+/// LLM request that is NOT user input or LLM output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSections {
     pub system_prompt: SectionMeta,
+    pub workspace_context: SectionMeta,
+    pub environment: SectionMeta,
     pub tool_definitions: SectionMeta,
     pub skill_instructions: SectionMeta,
     pub retrieved_memory: SectionMeta,
@@ -203,8 +206,9 @@ pub struct GetContextSnapshotParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetSectionParams {
     pub iteration: u32,
-    /// One of: system_prompt, tool_definitions, skill_instructions,
-    /// retrieved_memory, identity_context
+    /// One of: system_prompt, workspace_context, environment,
+    /// tool_definitions, skill_instructions, retrieved_memory,
+    /// identity_context
     pub section: String,
 }
 
@@ -238,10 +242,18 @@ pub struct PatchContextParams {
 }
 
 /// Set of patches to apply to context sections.
+///
+/// Multiple `patchContext` calls are merged incrementally: each call
+/// overwrites only the sections it specifies, leaving previously patched
+/// sections intact.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PatchSet {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_definitions: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -250,6 +262,35 @@ pub struct PatchSet {
     pub retrieved_memory: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_context: Option<serde_json::Value>,
+}
+
+impl PatchSet {
+    /// Merge another PatchSet into this one, overwriting only the sections
+    /// that the other PatchSet specifies. Sections that are None in the
+    /// other set are left unchanged in this one.
+    pub fn merge(&mut self, other: PatchSet) {
+        if other.system_prompt.is_some() {
+            self.system_prompt = other.system_prompt;
+        }
+        if other.workspace_context.is_some() {
+            self.workspace_context = other.workspace_context;
+        }
+        if other.environment.is_some() {
+            self.environment = other.environment;
+        }
+        if other.tool_definitions.is_some() {
+            self.tool_definitions = other.tool_definitions;
+        }
+        if other.skill_instructions.is_some() {
+            self.skill_instructions = other.skill_instructions;
+        }
+        if other.retrieved_memory.is_some() {
+            self.retrieved_memory = other.retrieved_memory;
+        }
+        if other.identity_context.is_some() {
+            self.identity_context = other.identity_context;
+        }
+    }
 }
 
 /// Parameters for `debugger.editMessage`.

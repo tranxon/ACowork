@@ -1,25 +1,78 @@
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useDebugStore } from "../../stores/debugStore";
 import type { ChatMessage } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { PanelRight } from "lucide-react";
+import {
+  PanelRight,
+  Bug,
+  WifiOff,
+  Loader,
+  Play,
+  Pause,
+  StepForward,
+  Square,
+  RefreshCw,
+  RotateCcw,
+} from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
+import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
+  isDebugMode?: boolean;
 }
 
-type PanelTab = "results" | "setup";
+type PanelTab = "debug" | "results" | "setup";
 
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-export function ResultsPanel({ width, onCollapse }: ResultsPanelProps & { width: number }) {
+export function ResultsPanel({ width, onCollapse, isDebugMode = false }: ResultsPanelProps & { width: number }) {
   const { agents, selectedAgentId } = useAgentStore();
   const tokenUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.tokenUsage ?? null) : null);
   const messages = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.messages ?? EMPTY_MESSAGES) : EMPTY_MESSAGES);
-  const [activeTab, setActiveTab] = useState<PanelTab>("results");
+  const [activeTab, setActiveTab] = useState<PanelTab>(isDebugMode ? "debug" : "results");
+
+  // ── Debug store (always called, conditionally used) ──────────────
+  const {
+    connected,
+    connecting,
+    debugAgentId,
+    iteration,
+    phase,
+    paused,
+    promptTokens,
+    completionTokens,
+    snapshots,
+    sectionCache,
+    hasPendingPatches,
+    connect,
+    disconnect,
+    resume,
+    pause: pauseDebug,
+    step,
+    stop,
+    restart,
+    getState,
+    getSection,
+    rewind,
+    reExecute,
+    patchContext,
+  } = useDebugStore();
+  const autoConnectAttempted = useRef(false);
+  const prevAgentId = useRef<string | null>(null);
+
+  // Debug section expansion / editing state
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [loadedSections, setLoadedSections] = useState<Set<string>>(new Set());
+  const [editingSection, setEditingSection] = useState<{
+    iteration: number;
+    section: string;
+    original: string;
+    current: string;
+  } | null>(null);
 
   // Selected agent info
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
@@ -27,12 +80,98 @@ export function ResultsPanel({ width, onCollapse }: ResultsPanelProps & { width:
   // Count iterations (number of assistant messages)
   const iterations = messages.filter((m) => m.type === "assistant").length;
 
+  // ── Debug auto-connect effect ────────────────────────────────────
+  useEffect(() => {
+    if (!isDebugMode || !selectedAgentId) return;
+
+    const agentChanged = selectedAgentId !== prevAgentId.current;
+
+    if (selectedAgent?.dev_mode && selectedAgent.running) {
+      if (agentChanged || !connected || debugAgentId !== selectedAgentId) {
+        connect(selectedAgentId);
+      }
+      autoConnectAttempted.current = true;
+    }
+
+    if (agentChanged) {
+      prevAgentId.current = selectedAgentId;
+    }
+  }, [isDebugMode, selectedAgentId, selectedAgent?.dev_mode, selectedAgent?.running, connected, debugAgentId, connect]);
+
+  // ── Debug disconnect effect ──────────────────────────────────────
+  useEffect(() => {
+    if (!isDebugMode) return;
+    if (connected && selectedAgent && (!selectedAgent.dev_mode || !selectedAgent.running)) {
+      disconnect();
+    }
+  }, [isDebugMode, selectedAgent?.dev_mode, selectedAgent?.running, connected, disconnect]);
+
+  // ── Debug poll state effect ──────────────────────────────────────
+  useEffect(() => {
+    if (!isDebugMode || !connected) return;
+    const interval = setInterval(() => {
+      getState().catch(() => {});
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isDebugMode, connected, getState]);
+
+  // ── Debug toggle section callback ────────────────────────────────
+  const toggleSection = useCallback(
+    async (iteration: number, section: string) => {
+      const key = `${iteration}:${section}`;
+      setExpandedSections((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) {
+          next.delete(key);
+        } else {
+          next.add(key);
+          if (!loadedSections.has(key)) {
+            getSection(iteration, section);
+            setLoadedSections((l) => new Set(l).add(key));
+          }
+        }
+        return next;
+      });
+    },
+    [getSection, loadedSections]
+  );
+
+  // ── Switch to debug tab when entering debug mode ─────────────────
+  useEffect(() => {
+    if (isDebugMode && activeTab === "results") {
+      // Only auto-switch once when entering debug mode, not on re-renders
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDebugMode]);
+
   return (
     <div className="flex flex-col border-l border-zinc-200 bg-zinc-50 transition-[width] duration-250 ease-in-out dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
       {/* Header with tabs */}
       <div className="border-b border-zinc-200 dark:border-zinc-800">
         <div className="flex items-center justify-between px-3 pt-2">
           <div className="flex gap-0">
+            {isDebugMode && (
+              <TabButton
+                active={activeTab === "debug"}
+                onClick={() => setActiveTab("debug")}
+              >
+                {connected ? (
+                  <span className="flex items-center gap-1.5">
+                    <Bug className="h-3.5 w-3.5 text-amber-600" />
+                    Debug
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5">
+                    {connecting ? (
+                      <Loader className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <WifiOff className="h-3.5 w-3.5" />
+                    )}
+                    Debug
+                  </span>
+                )}
+              </TabButton>
+            )}
             <TabButton
               active={activeTab === "results"}
               onClick={() => setActiveTab("results")}
@@ -49,14 +188,128 @@ export function ResultsPanel({ width, onCollapse }: ResultsPanelProps & { width:
           <button
             onClick={onCollapse}
             className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-            aria-label="Collapse results panel"
+            aria-label="Collapse right panel"
           >
             <PanelRight className="h-4 w-4" />
           </button>
         </div>
       </div>
 
-      {/* Tab content */}
+      {/* ── Debug tab content ─────────────────────────────────────── */}
+      {activeTab === "debug" && isDebugMode && (
+        <>
+          {!connected ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+              {connecting ? (
+                <>
+                  <Loader className="h-5 w-5 animate-spin" />
+                  <span>Connecting to debug server...</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="h-5 w-5" />
+                  <span className="text-center">
+                    {selectedAgent?.running && selectedAgent?.dev_mode
+                      ? "Debug connection lost"
+                      : selectedAgent?.running
+                        ? "Agent is not in debug mode.\nUse Start in Debug to enable."
+                        : "No agent in debug mode"}
+                  </span>
+                </>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Control bar */}
+              <div className="flex items-center gap-1 border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-800">
+                <ControlButton
+                  onClick={paused ? resume : pauseDebug}
+                  title={paused ? "Resume (F5)" : "Pause (F6)"}
+                  active={paused}
+                >
+                  {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+                </ControlButton>
+                <ControlButton onClick={() => step("iteration")} title="Step (F10)">
+                  <StepForward className="h-3.5 w-3.5" />
+                </ControlButton>
+                <ControlButton onClick={stop} title="Stop">
+                  <Square className="h-3.5 w-3.5" />
+                </ControlButton>
+                <ControlButton onClick={restart} title="Restart">
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </ControlButton>
+                {hasPendingPatches && (
+                  <>
+                    <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
+                    <ControlButton
+                      onClick={() => reExecute().catch(console.error)}
+                      title="Re-execute with patches"
+                      active
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    </ControlButton>
+                  </>
+                )}
+              </div>
+
+              {/* State display */}
+              <div className="border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                  <StateLabel label="Iteration" value={`#${iteration}`} />
+                  <StateLabel label="Phase" value={phase} highlight />
+                  <StateLabel label="Tokens" value={`${promptTokens + completionTokens}`} />
+                  <StateLabel
+                    label="Paused"
+                    value={paused ? "Yes" : "No"}
+                    highlight={paused}
+                  />
+                </div>
+              </div>
+
+              {/* Context snapshot tree */}
+              <div className="flex-1 overflow-y-auto">
+                <div className="px-2 py-1 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  Context Snapshots ({snapshots.length})
+                </div>
+                {snapshots.length === 0 && (
+                  <div className="px-3 py-4 text-center text-xs text-zinc-400">
+                    No context snapshots yet.
+                    <br />
+                    Send a message to the agent to generate snapshots.
+                  </div>
+                )}
+                {snapshots.map((snap) => (
+                  <SnapshotNode
+                    key={snap.iteration}
+                    snapshot={snap}
+                    expandedSections={expandedSections}
+                    sectionCache={sectionCache}
+                    editingSection={editingSection}
+                    onToggleSection={(section) => toggleSection(snap.iteration, section)}
+                    onStartEdit={(section, original) =>
+                      setEditingSection({ iteration: snap.iteration, section, original, current: original })
+                    }
+                    onCancelEdit={() => setEditingSection(null)}
+                    onSaveEdit={(section, content) => {
+                      const patches: Record<string, unknown> = {};
+                      patches[section] = content;
+                      patchContext(patches).catch(console.error);
+                      setEditingSection(null);
+                    }}
+                    onEditChange={(content) =>
+                      setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
+                    }
+                    onRewind={(iter) => rewind(iter).catch(console.error)}
+                    getSection={getSection}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {/* ── Results tab content ───────────────────────────────────── */}
       {activeTab === "results" && (
         <div className="flex-1 overflow-y-auto p-3">
           {/* Token statistics */}
@@ -111,6 +364,7 @@ export function ResultsPanel({ width, onCollapse }: ResultsPanelProps & { width:
         </div>
       )}
 
+      {/* ── Setup tab content ─────────────────────────────────────── */}
       {activeTab === "setup" && <AgentSetupTab />}
     </div>
   );

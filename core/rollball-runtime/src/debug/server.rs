@@ -489,6 +489,8 @@ impl DebugProtocolServer {
                     Some(snap) => {
                         let section_content = match sec_params.section.as_str() {
                             "system_prompt" => &snap.sections.system_prompt,
+                            "workspace_context" => &snap.sections.workspace_context,
+                            "environment" => &snap.sections.environment,
                             "tool_definitions" => &snap.sections.tool_definitions,
                             "skill_instructions" => &snap.sections.skill_instructions,
                             "retrieved_memory" => &snap.sections.retrieved_memory,
@@ -540,6 +542,11 @@ impl DebugProtocolServer {
                     .map_err(|e| MethodError::invalid_params(e.to_string()))?;
                 let target = rw_params.to_iteration;
 
+                // Reset iteration counter immediately so that getState
+                // and any other consumers see the correct value without
+                // waiting for the SessionTask to consume rewind_target.
+                ctrl.iteration = target;
+
                 // Store rewind target for SessionTask to consume
                 ctrl.rewind_target = Some(target);
                 // Clear any pending patches — rewind supersedes patches
@@ -576,8 +583,75 @@ impl DebugProtocolServer {
             "debugger.patchContext" => {
                 let pc_params: protocol::PatchContextParams = serde_json::from_value(params.clone())
                     .map_err(|e| MethodError::invalid_params(e.to_string()))?;
-                ctrl.pending_patches = Some(pc_params.patches);
-                tracing::info!("Debug: context patches stored for next reExecute");
+
+                // Bug 2 fix: merge incrementally instead of replacing
+                let merged_patches = match ctrl.pending_patches.take() {
+                    Some(existing) => {
+                        let mut merged = existing;
+                        merged.merge(pc_params.patches);
+                        merged
+                    }
+                    None => pc_params.patches,
+                };
+
+                // Bug 3 fix: reflect patches in the context snapshot so
+                // getSection returns the patched content, not the original.
+                // merged_patches is owned (not borrowed from ctrl), so no borrow conflict.
+                let current_iter = ctrl.iteration;
+                if let Some(snap) = ctrl.context_snapshots.get_mut(&current_iter) {
+                    if let Some(ref prompt) = merged_patches.system_prompt {
+                        snap.sections.system_prompt =
+                            super::controller::SectionContent::new(prompt.clone());
+                    }
+                    if let Some(ref tools) = merged_patches.tool_definitions {
+                        let content = serde_json::to_string_pretty(tools)
+                            .unwrap_or_else(|_| serde_json::to_string(tools).unwrap_or_default());
+                        snap.sections.tool_definitions =
+                            super::controller::SectionContent::new(content);
+                    }
+                    if let Some(ref skills) = merged_patches.skill_instructions {
+                        snap.sections.skill_instructions =
+                            super::controller::SectionContent::new(skills.clone());
+                    }
+                    if let Some(ref memory) = merged_patches.retrieved_memory {
+                        let content = memory.to_string();
+                        snap.sections.retrieved_memory =
+                            super::controller::SectionContent::new(content);
+                    }
+                    if let Some(ref identity) = merged_patches.identity_context {
+                        let content = identity.to_string();
+                        snap.sections.identity_context =
+                            super::controller::SectionContent::new(content);
+                    }
+                    if let Some(ref workspace) = merged_patches.workspace_context {
+                        snap.sections.workspace_context =
+                            super::controller::SectionContent::new(workspace.clone());
+                    }
+                    if let Some(ref env) = merged_patches.environment {
+                        // Empty string clears the override — build() falls back
+                        // to auto-detect.  The snapshot must match this behavior.
+                        let content = if env.is_empty() {
+                            crate::agent::context::detect_environment_text()
+                        } else {
+                            env.clone()
+                        };
+                        snap.sections.environment =
+                            super::controller::SectionContent::new(content);
+                    }
+                    tracing::info!(
+                        iteration = current_iter,
+                        "Debug: context snapshot updated with patched content"
+                    );
+                } else {
+                    tracing::warn!(
+                        iteration = current_iter,
+                        "Debug: patchContext — no context snapshot to update"
+                    );
+                }
+
+                ctrl.pending_patches = Some(merged_patches);
+
+                tracing::info!("Debug: context patches merged and stored for next reExecute");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
                     serde_json::json!({}),
