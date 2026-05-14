@@ -65,6 +65,12 @@ impl AgentLoop {
             messages_count = chat_request.messages.len(),
             "Sending LLM request"
         );
+        // Notify frontend that the LLM request has been dispatched and we are
+        // waiting for the first token. The frontend shows a pulsing "..."
+        // indicator until the first content / reasoning / tool_call chunk arrives.
+        if let Some(ref tx) = self.core.on_chunk {
+            let _ = tx.try_send(ChunkEvent::ReasoningStarted);
+        }
         let stream = self.core.provider.chat_stream(chat_request.clone()).await?;
         let mut stream = Box::into_pin(stream);
         let mut accumulated_content = String::new();

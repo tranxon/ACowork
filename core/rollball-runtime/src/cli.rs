@@ -334,7 +334,31 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     );
 
     // Step 6: Build context builder (with identity injection from Gateway)
-    let identity_context = load_identity_delivery(&config.work_dir);
+    let identity_entries = load_identity_entries(&config.work_dir);
+    let user_display_name = identity_entries.as_ref()
+        .and_then(|entries| entries.iter()
+            .find(|e| e.field == "display_name")
+            .and_then(|e| if e.value.is_empty() { None } else { Some(e.value.clone()) }));
+    let identity_context = identity_entries.as_ref().map(|entries| {
+        if entries.is_empty() {
+            return "".to_string();
+        }
+        let mut formatted = String::from("User identity information:\n");
+        for entry in entries {
+            if !entry.value.is_empty() {
+                formatted.push_str(&format!(
+                    "- {}: {} (confidence: {}%%)\n",
+                    entry.field, entry.value, (entry.confidence * 100.0) as u32
+                ));
+            } else {
+                formatted.push_str(&format!(
+                    "- {}: (not yet provided)\n",
+                    entry.field
+                ));
+            }
+        }
+        formatted
+    });
 
     // Clone tool_definitions and identity_context for SessionManagerConfig
     // (Gateway mode) before they are moved into the standalone ContextBuilder.
@@ -473,6 +497,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                 c.update_gateway_model_capabilities(caps);
             }
             c.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
+            c.user_display_name = user_display_name.clone();
             // Initialize Grafeo memory store at agent workspace
             c.init_memory_store(work_dir_path);
         }
@@ -567,6 +592,22 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 
                 while let Some(event) = chunk_rx.recv().await {
                     match event {
+                        crate::agent::loop_::ChunkEvent::ReasoningStarted => {
+                            let params = serde_json::json!({});
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::StreamChunk(
+                                    rollball_core::proto::StreamChunk {
+                                        target: "http-ws".to_string(),
+                                        action: "agent_reasoning_started".to_string(),
+                                        params_json: params.to_string(),
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("ReasoningStarted relay send failed — main connection may be closed");
+                            }
+                        }
                         crate::agent::loop_::ChunkEvent::Delta(delta) => {
                             let params = serde_json::json!({
                                 "content": delta,
@@ -792,6 +833,9 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         // Initialize Grafeo memory store at agent workspace
         agent_loop.init_memory_store(work_dir_path);
 
+        // Inject user display name from identity delivery
+        agent_loop.core.user_display_name = user_display_name.clone();
+
         if let Some(caps) = gateway_model_capabilities {
             agent_loop.update_gateway_model_capabilities(caps);
         }
@@ -808,7 +852,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 /// based on the agent's `identity_deps` manifest declaration.
 /// The Runtime reads this file during cold start and formats it for
 /// System Prompt injection.
-fn load_identity_delivery(work_dir: &str) -> Option<String> {
+fn load_identity_entries(work_dir: &str) -> Option<Vec<rollball_core::identity::IdentityEntry>> {
     let identity_path = std::path::Path::new(work_dir).join(".identity_delivery.json");
     if !identity_path.exists() {
         return None;
@@ -821,26 +865,11 @@ fn load_identity_delivery(work_dir: &str) -> Option<String> {
                     if entries.is_empty() {
                         return None;
                     }
-                    // Format identity entries as readable text for System Prompt
-                    let mut formatted = String::from("User identity information:\n");
-                    for entry in &entries {
-                        if !entry.value.is_empty() {
-                            formatted.push_str(&format!(
-                                "- {}: {} (confidence: {}%%)\n",
-                                entry.field, entry.value, (entry.confidence * 100.0) as u32
-                            ));
-                        } else {
-                            formatted.push_str(&format!(
-                                "- {}: (not yet provided)\n",
-                                entry.field
-                            ));
-                        }
-                    }
                     tracing::info!(
                         entries = entries.len(),
                         "Identity delivery loaded from workspace"
                     );
-                    Some(formatted)
+                    Some(entries)
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse identity delivery: {}", e);

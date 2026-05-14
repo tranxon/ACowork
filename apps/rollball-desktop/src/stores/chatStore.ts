@@ -51,6 +51,8 @@ interface AgentChatState {
   isLoadingSession: boolean;
   /** Error message when session message loading fails (null = no error) */
   loadError: string | null;
+  /** LLM reasoning in progress — frontend shows pulsing "..." indicator */
+  isReasoning: boolean;
 }
 
 const DEFAULT_AGENT_STATE: AgentChatState = {
@@ -67,6 +69,7 @@ const DEFAULT_AGENT_STATE: AgentChatState = {
   iterationLimitPaused: null,
   isLoadingSession: false,
   loadError: null,
+  isReasoning: false,
 };
 
 /** Get the chat state for a specific agent (returns default if not yet initialized) */
@@ -120,6 +123,10 @@ interface ChatStore {
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string, command?: string) => Promise<void>;
   stopCurrentMessage: () => Promise<void>;
+  /** Send interrupt without changing `sending` — keeps UI as Stop button.
+   *  Used when the user queues a message then hits Stop — the loop is
+   *  interrupted but the agent continues processing in the next turn. */
+  sendInterrupt: () => void;
   /** Disconnect a specific agent's WebSocket, or all if no agentId provided */
   disconnectStream: (agentId?: string) => void;
   /** Clear messages and streaming state for a specific agent (or currentAgentId) */
@@ -291,6 +298,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             streamBuffer: "",
             thinkingMessageId: null,
             isInThinkPhase: false,
+            isReasoning: false,
           }),
           // Only clear global sending if this was the active agent
           ...(state.currentAgentId === agentId ? { sending: false } : {}),
@@ -318,6 +326,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         streamBuffer: "",
         thinkingMessageId: null,
         isInThinkPhase: false,
+        isReasoning: false,
         tokenUsage: null,
         contextUsage: null,
       }),
@@ -356,6 +365,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         streamingMessageId: null,
         thinkingMessageId: null,
         isInThinkPhase: false,
+        isReasoning: false,
       }));
     };
 
@@ -439,12 +449,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return;
     }
 
-    const agentState = getAgentState(get(), currentAgentId);
-    if (!agentState.streamingMessageId) {
-      console.warn("[ChatStore] No active streaming message to stop");
-      return;
-    }
-
     console.log("[ChatStore] Stopping current message for agent:", currentAgentId);
 
     // Send stop command via WebSocket if available.
@@ -467,6 +471,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         isInThinkPhase: false,
       }),
     }));
+  },
+
+  // Lightweight interrupt — only sends WebSocket stop without touching `sending`.
+  // The `done` event from WebSocket will set `sending: false` naturally.
+  sendInterrupt: () => {
+    const { currentAgentId } = get();
+    if (!currentAgentId) return;
+    const ws = get().wsMap[currentAgentId];
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "stop", agentId: currentAgentId }));
+    }
   },
 
   disconnectStream: (agentId?: string) => {
@@ -916,8 +931,16 @@ function handleMessageEvent(
       // Message received acknowledgment
       break;
 
+    case "reasoning_started":
+      // LLM reasoning phase started — show pulsing "..." indicator.
+      // Cleared on first chunk / tool_call / done / error.
+      set((state) => updateAgentState(state, agentId, { isReasoning: true }));
+      break;
+
     case "chunk": {
       // Streaming text chunk — split think/reply at store level
+      // Clear reasoning indicator on first token arrival
+      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
       // Fallback to `content` field for backward compatibility with older Gateway versions
       const delta = (data.delta ?? data.content) as string;
       const reasoningDelta = data.reasoning_content as string | undefined;
@@ -1084,6 +1107,8 @@ function handleMessageEvent(
     }
 
     case "tool_call": {
+      // Clear reasoning indicator
+      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
       const toolName = data.name as string;
       const params = data.params as Record<string, unknown>;
 
@@ -1159,6 +1184,7 @@ function handleMessageEvent(
 
     case "done": {
       // Streaming complete — or non-streaming response with full content
+      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
       const usage = data.usage as TokenUsage | undefined;
       const content = data.content as string | undefined;
       const reasoningContent = data.reasoning_content as string | undefined;
@@ -1257,6 +1283,7 @@ function handleMessageEvent(
     }
 
     case "error": {
+      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
       const errorMsg = data.message as string;
       console.error("[ChatStore] Server error:", errorMsg);
       // If model_switch failed, revert the optimistic currentModel update

@@ -32,9 +32,13 @@ use crate::error::{Result, RuntimeError};
 ///
 /// Adapted from ZeroClaw's DraftEvent, simplified for RollBall's IPC architecture.
 /// Each delta is forwarded to the Gateway via `StreamChunk` gRPC message,
-/// which maps to a BridgeEventType::Chunk for the Desktop App WebSocket.
+/// which maps to a BridgeEventType for the Desktop App WebSocket.
 #[derive(Debug, Clone)]
 pub enum ChunkEvent {
+    /// LLM reasoning phase started — the provider.stream() call has been
+    /// initiated and tokens will arrive shortly. The frontend should show
+    /// a pulsing "..." indicator until the first content delta arrives.
+    ReasoningStarted,
     /// Content delta to append to the streaming message
     Delta(String),
     /// Reasoning/thinking content delta (e.g. DeepSeek thinking mode)
@@ -656,7 +660,8 @@ impl AgentLoop {
                         }
                         Some(InboundMessage::Interrupt { reason }) => {
                             tracing::info!(reason = %reason, "User chose to stop during iteration limit pause");
-                            return Ok("Agent stopped by user request after reaching iteration limit.".to_string());
+                            let name = self.core.user_display_name.as_deref().unwrap_or("user");
+                            return Ok(format!("Agent stopped by {} after reaching iteration limit.", name));
                         }
                         Some(other) => {
                             // Other messages (UserMessage, etc.) — inject into history
@@ -692,8 +697,9 @@ impl AgentLoop {
 
             // ⓪ Drain inbound queue (non-blocking)
             if self.drain_inbound_queue() {
+                let name = self.core.user_display_name.as_deref().unwrap_or("user");
                 tracing::info!("Agent loop interrupted by inbound interrupt signal");
-                return Ok("Agent stopped by user request.".to_string());
+                return Ok(format!("Agent stopped by {}.", name));
             }
 
             // ①-⑧ Execute single iteration (shared with debug mode)
@@ -1220,11 +1226,9 @@ impl AgentLoop {
 
     /// Non-blocking interrupt poll — returns true if the user requested stop.
     ///
-    /// NOTE: Non-Interrupt messages drained during this poll are logged as warnings
-    /// but NOT re-injected. This is acceptable because `drain_inbound_queue()` already
-    /// handles all message types at the start of each loop iteration, and the
-    /// streaming/tool-execution phase where this method is called should not need
-    /// to process user/system messages mid-flight.
+    /// Non-Interrupt messages drained during this poll are buffered in
+    /// `session.deferred_inbound` and re-injected by `drain_inbound_queue()`
+    /// at the start of the next loop iteration. No message is silently lost.
     pub(crate) fn poll_interrupt(&mut self) -> bool {
         while let Ok(msg) = self.inbound_rx.try_recv() {
             match msg {
@@ -1232,16 +1236,15 @@ impl AgentLoop {
                     return true;
                 }
                 other => {
-                    // CRITICAL: non-Interrupt messages consumed here are LOST.
-                    // They are NOT re-injected into history. This includes
-                    // UserMessage, SystemNotification, and IntentMessage.
-                    // If a user message arrives during a debug pause, it will
-                    // be swallowed here with only this warning.
-                    tracing::warn!(
+                    // Buffer non-Interrupt messages for re-injection at the
+                    // next drain_inbound_queue() call. This guarantees that
+                    // queued user messages (sent via the "Stop to queue" UX)
+                    // survive if they happen to arrive in this channel.
+                    tracing::info!(
                         msg_type = ?std::mem::discriminant(&other),
-                        payload = %format!("{:?}", other).chars().take(80).collect::<String>(),
-                        "poll_interrupt() DROPPED non-Interrupt message — this message is LOST and will NOT enter the context"
+                        "poll_interrupt(): buffering non-Interrupt message for re-injection by drain_inbound_queue()"
                     );
+                    self.session.deferred_inbound.push(other);
                 }
             }
         }
@@ -1250,10 +1253,49 @@ impl AgentLoop {
 
     /// Drain inbound message queue (non-blocking).
     ///
+    /// First processes any messages buffered by `poll_interrupt()` from
+    /// the `deferred_inbound` stash, then drains the live channel.
     /// Injects external messages (user, system, intent) into history
     /// before each loop iteration. Applies size limits to prevent
     /// token explosion from oversized payloads.
     fn drain_inbound_queue(&mut self) -> bool {
+        // ── Step 1: process messages deferred from poll_interrupt() ──
+        for msg in self.session.deferred_inbound.drain(..) {
+            let (msg, _truncated) = msg.enforce_size_limit();
+            match msg {
+                InboundMessage::UserMessage(text) => {
+                    tracing::info!(
+                        text_preview = %text.chars().take(80).collect::<String>(),
+                        "drain_inbound_queue: injecting deferred UserMessage into history"
+                    );
+                    self.session.history.append(ChatMessage::user(text));
+                }
+                InboundMessage::SystemNotification { notification_type, data } => {
+                    tracing::info!("drain_inbound_queue: injecting deferred system notification: {} = {:?}", notification_type, data);
+                    self.session.history.append(ChatMessage {
+                        role: MessageRole::User,
+                        content: format!("[system:{}] {}", notification_type, data),
+                        name: Some("system".to_string()),
+                        ..Default::default()
+                    });
+                }
+                InboundMessage::IntentMessage { from, action, params } => {
+                    tracing::info!("drain_inbound_queue: injecting deferred intent from {}: {} params={:?}", from, action, params);
+                    self.session.history.append(ChatMessage::user(
+                        format!("[intent:{}:{}] {}", from, action, params),
+                    ));
+                }
+                InboundMessage::Interrupt { reason } => {
+                    tracing::info!(reason = %reason, "Received deferred interrupt signal");
+                    return true;
+                }
+                InboundMessage::ContinueExecution { .. } => {
+                    tracing::debug!("Ignoring deferred ContinueExecution");
+                }
+            }
+        }
+
+        // ── Step 2: drain the live channel ──
         while let Ok(msg) = self.inbound_rx.try_recv() {
             // Enforce size limits before injecting
             let (msg, _truncated) = msg.enforce_size_limit();

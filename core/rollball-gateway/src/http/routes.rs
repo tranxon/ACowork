@@ -51,6 +51,8 @@ pub enum BridgeEventType {
     IterationLimitPaused,
     /// Context usage report (from Runtime, forwarded to Desktop App)
     ContextUsage,
+    /// LLM reasoning phase started — frontend shows pulsing "..." indicator
+    ReasoningStarted,
 }
 
 impl BridgeEventType {
@@ -68,6 +70,7 @@ impl BridgeEventType {
             "skill_executed" => Some(Self::SkillExecuted),
             "iteration_limit_paused" => Some(Self::IterationLimitPaused),
             "context_usage" => Some(Self::ContextUsage),
+            "agent_reasoning_started" => Some(Self::ReasoningStarted),
             _ => None,
         }
     }
@@ -90,6 +93,7 @@ impl BridgeEventType {
             Self::SkillExecuted => "skill_executed",
             Self::IterationLimitPaused => "iteration_limit_paused",
             Self::ContextUsage => "context_usage",
+            Self::ReasoningStarted => "reasoning_started",
         }
     }
 }

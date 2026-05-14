@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useSessionStore } from "../../stores/sessionStore";
-import { useDebugStore } from "../../stores/debugStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
@@ -44,19 +43,17 @@ export function ChatPanel() {
   const thinkingMessageId = agentState?.thinkingMessageId ?? null;
   const contextUsage = agentState?.contextUsage ?? null;
   const iterationLimitPaused = agentState?.iterationLimitPaused ?? null;
+  const isReasoning = agentState?.isReasoning ?? false;
 
   // Global state and actions
-  const { sending, wsMap, connectStream, sendMessage, stopCurrentMessage, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution } = useChatStore();
-  const debugState = useDebugStore((s) => s.debugState);
-  const isDebugPaused = debugState === "Paused";
-  // During debug pause, the agent is NOT actively generating — allow input.
-  const effectiveSending = sending && !isDebugPaused;
+  const { sending, wsMap, connectStream, sendMessage, sendInterrupt, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution } = useChatStore();
   const isLoadingSession = agentState?.isLoadingSession ?? false;
   const loadError = agentState?.loadError ?? null;
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
   const [inputValue, setInputValue] = useState("");
+  const [queuedMessage, setQueuedMessage] = useState<string | null>(null);
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
   const [activeDrawer, setActiveDrawer] = useState<"memory" | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -381,17 +378,38 @@ export function ChatPanel() {
 
   const handleSend = () => {
     const content = inputValue.trim();
-    // During debug pause, allow sending even though `sending` is still true
-    // from the paused cycle. The paused state means the agent is waiting,
-    // not actively generating.
-    const isPaused = useDebugStore.getState().debugState === "Paused";
-    if (!content || (sending && !isPaused) || !selectedAgentId) return;
+    if (!content || sending || !selectedAgentId) return;
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
     void sendMessage(content, selectedAgentId, activeSkill?.name).then(() => {
       clearActiveSkill();
     });
     setInputValue("");
+  };
+
+  // Stop button dual-action:
+  //   input has content → send to queue (no interrupt, message waits for next loop)
+  //   input empty       → interrupt current loop
+  const handleStop = () => {
+    const content = inputValue.trim();
+    if (content && selectedAgentId) {
+      // First click: queue the message — do NOT send yet.
+      // The message waits in a banner above the input area.
+      setQueuedMessage(content);
+      setInputValue("");
+    } else if (queuedMessage && selectedAgentId) {
+      // Second click: commit queued message + interrupt current loop.
+      // The message enters the backend inbound channel, then interrupt
+      // stops the current loop so the queued message is picked up next.
+      void sendMessage(queuedMessage, selectedAgentId, activeSkill?.name).then(() => {
+        clearActiveSkill();
+      });
+      setQueuedMessage(null);
+      sendInterrupt();
+    } else {
+      // No queued message: just interrupt
+      sendInterrupt();
+    }
   };
 
   // ── Empty state: no agents at all ──
@@ -439,7 +457,7 @@ export function ChatPanel() {
   }
 
   // ── Chat view ──
-  const inputDisabled = effectiveSending || gatewayStatus !== "connected";
+  const inputDisabled = gatewayStatus !== "connected";
 
   return (
     <div
@@ -552,6 +570,12 @@ export function ChatPanel() {
               })}
             </div>
           )}
+          {/* LLM reasoning indicator — pulsing "..." shown while waiting for first token */}
+          {isReasoning && !streamingMessageId && !thinkingMessageId && (
+            <div className="flex items-center gap-2.5 px-4 py-1.5">
+              <span className="animate-pulse text-base font-bold tracking-widest text-zinc-400 dark:text-zinc-500">. . .</span>
+            </div>
+          )}
           {/* Iteration limit pause — hint + Continue button */}
           {iterationLimitPaused && (
             <div className="flex flex-col items-start gap-1.5">
@@ -623,6 +647,25 @@ export function ChatPanel() {
             </span>
           </div>
         )}
+        {/* Queued message banner — shown when user clicked Stop with input content */}
+        {queuedMessage && sending && (
+          <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="shrink-0 text-[10px] text-blue-500 dark:text-blue-400">⏳</span>
+              <span className="truncate text-xs text-blue-600 dark:text-blue-400">
+                Queued: {queuedMessage}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setQueuedMessage(null)}
+              className="shrink-0 rounded-sm p-0.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:text-zinc-300 dark:hover:bg-zinc-700"
+              aria-label="Dismiss queued message"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
         {/* Textarea area — borderless, transparent background */}
         <textarea
           value={inputValue}
@@ -675,19 +718,33 @@ export function ChatPanel() {
             {/* Context usage tooltip */}
             {contextUsage && <ContextUsageTooltip usage={contextUsage} />}
 
-            {/* Send/Stop button */}
-            <button
-              className={`rounded-lg p-1.5 transition-colors ${
-                effectiveSending
-                  ? "text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900/30 hover:text-blue-600 dark:hover:text-blue-400"
-                  : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
-              }`}
-              onClick={effectiveSending ? () => stopCurrentMessage() : handleSend}
-              disabled={!effectiveSending && (inputDisabled || !inputValue.trim())}
-              aria-label={effectiveSending ? "Stop generation" : "Send message"}
-            >
-              {effectiveSending ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
-            </button>
+            {/* Send/Stop button with tooltip above */}
+            <div className="group relative">
+              <button
+                className={`rounded-lg p-1.5 transition-colors ${
+                  sending
+                    ? "text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900/30 hover:text-blue-600 dark:hover:text-blue-400"
+                    : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
+                }`}
+                onClick={sending ? handleStop : handleSend}
+                disabled={!sending && (inputDisabled || !inputValue.trim())}
+                aria-label={sending ? (inputValue.trim() || queuedMessage ? "Send to queue" : "Stop generation") : "Send message"}
+              >
+                {sending ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
+              </button>
+              {/* Tooltip — shown above the button on hover */}
+              <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
+                <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
+                  {sending
+                    ? (inputValue.trim()
+                        ? "Send to queue"
+                        : queuedMessage
+                          ? "Stop & send queued"
+                          : "Stop")
+                    : "Send message"}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

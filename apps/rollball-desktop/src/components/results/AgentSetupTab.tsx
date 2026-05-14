@@ -14,7 +14,6 @@ export function AgentSetupTab() {
   const profile = selectedAgentId ? getProfile(selectedAgentId) : null;
 
   // Fetch agent runtime config from Gateway API on mount
-  const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [iconOpen, setIconOpen] = useState(false);
@@ -32,9 +31,7 @@ export function AgentSetupTab() {
           maxTokens: data.max_output_tokens,
           maxIterations: data.max_iterations,
           temperature: data.temperature,
-          systemPrompt: data.system_prompt_override,
         });
-        setSystemPrompt(data.system_prompt ?? null);
       })
       .catch(() => {})
       .finally(() => {
@@ -54,7 +51,6 @@ export function AgentSetupTab() {
       if (profile.maxTokens && profile.maxTokens > 0) body.max_output_tokens = profile.maxTokens;
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
       if (profile.temperature !== undefined) body.temperature = profile.temperature;
-      body.system_prompt_override = profile.systemPrompt || null;
 
       const res = await fetch(
         `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
@@ -64,9 +60,8 @@ export function AgentSetupTab() {
           body: JSON.stringify(body),
         },
       );
-      if (res.ok) {
-        const data = await res.json();
-        setSystemPrompt(data.system_prompt ?? null);
+      if (!res.ok) {
+        console.warn("[AgentSetup] Config update failed:", res.status);
       }
     } catch {
       // silently ignore network errors
@@ -227,39 +222,6 @@ export function AgentSetupTab() {
           <span>0 (deterministic)</span>
           <span>2 (creative)</span>
         </div>
-      </div>
-
-      {/* System Prompt */}
-      <div className="mb-3 space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          System Prompt
-        </label>
-        {/* Current system prompt (read-only preview) */}
-        <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 dark:border-zinc-700 dark:bg-zinc-800/50">
-          <p className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 mb-1">
-            Current system prompt
-          </p>
-          <p className="text-[10px] text-zinc-500 dark:text-zinc-400 leading-relaxed max-h-24 overflow-y-auto whitespace-pre-wrap">
-            {configLoading
-              ? "Loading..."
-              : systemPrompt ?? "(No system prompt available)"}
-          </p>
-        </div>
-        {/* Override */}
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400 mt-2">
-          Override
-        </label>
-        <textarea
-          value={profile.systemPrompt ?? ""}
-          onChange={(e) =>
-            setProfile(selectedAgentId, {
-              systemPrompt: e.target.value || undefined,
-            })
-          }
-          placeholder="Leave empty to use default system prompt"
-          rows={4}
-          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 resize-y"
-        />
       </div>
 
       {/* Action buttons */}

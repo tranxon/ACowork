@@ -66,6 +66,9 @@ pub struct AgentCore {
     /// Debug event sender (clone for each session to push events to WebSocket).
     /// None in production mode.
     pub(crate) debug_event_tx: Option<DebugEventSender>,
+    /// User display name delivered by Gateway via identity delivery.
+    /// Used for user-facing messages like stop confirmation.
+    pub(crate) user_display_name: Option<String>,
 }
 
 impl AgentCore {
@@ -91,6 +94,7 @@ impl AgentCore {
             memory_store: None,
             debug_ctrl: None,
             debug_event_tx: None,
+            user_display_name: None,
         }
     }
 
@@ -286,6 +290,7 @@ impl AgentCore {
             memory_store: self.memory_store.clone(),
             debug_ctrl: self.debug_ctrl.clone(),
             debug_event_tx: self.debug_event_tx.clone(),
+            user_display_name: self.user_display_name.clone(),
         }
     }
 

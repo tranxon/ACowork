@@ -170,17 +170,24 @@ impl LifecycleManager {
         );
 
         // Build entries from well-known field definitions.
-        // When System Agent IPC is connected, this will be replaced with:
-        // 1. Send IdentityQuery { fields: deps } to System Agent
-        // 2. Receive IdentityQueryResult with values + confidence
-        // 3. Convert to IdentityEntry list
+        //
+        // Value resolution (in priority order):
+        // 1. Gateway data dir `.user_profile.json` `displayName` field (for display_name)
+        // 2. Future: System Agent IdentityStore query
         let now = chrono::Utc::now().to_rfc3339();
+        let data_dir = state.config.as_ref().map(|c| std::path::Path::new(&c.data_dir));
+        let user_display_name = load_user_display_name(data_dir);
         let entries: Vec<IdentityEntry> = deps.iter().filter_map(|field| {
             find_field_def(field).map(|def| {
+                let value = if field == "display_name" {
+                    user_display_name.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 IdentityEntry {
                     field: field.clone(),
-                    value: String::new(), // Will be populated from System Agent query
-                    confidence: 0.0,
+                    value,
+                    confidence: if field == "display_name" && user_display_name.is_some() { 1.0 } else { 0.0 },
                     category: def.category,
                     privacy: def.privacy,
                     source: "cold_start_delivery".to_string(),
@@ -193,7 +200,7 @@ impl LifecycleManager {
             tracing::info!(
                 agent_id,
                 entries = entries.len(),
-                "Identity delivery built (values pending System Agent query)"
+                "Identity delivery built"
             );
         }
 
@@ -243,6 +250,18 @@ impl LifecycleManager {
         // Phase 2: implement with actual idle tracking
         Vec::new()
     }
+}
+
+/// Load the user's display name from Gateway's data directory.
+///
+/// Reads `{data_dir}/.user_profile.json` and extracts the `displayName` field.
+/// Returns `None` if the file doesn't exist or can't be parsed.
+fn load_user_display_name(data_dir: Option<&std::path::Path>) -> Option<String> {
+    let data_dir = data_dir?;
+    let path = data_dir.join(".user_profile.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parsed.get("displayName")?.as_str().map(|s| s.to_string())
 }
 
 #[cfg(test)]
