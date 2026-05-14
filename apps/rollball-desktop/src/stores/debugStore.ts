@@ -12,6 +12,9 @@ type Phase =
   | "AppendHistory"
   | "Idle";
 
+/** Mirrors backend DebugState — the single source of truth for execution state. */
+type DebugState = "Running" | "Paused" | "Stepping" | "Stopped";
+
 interface BreakpointCondition {
   type: "on_phase" | "on_tool_call" | "on_iteration" | "on_tool_result";
   phase?: string;
@@ -101,6 +104,8 @@ interface DebugStore {
   // Execution state (agent-scoped)
   iteration: number;
   phase: Phase;
+  /** Execution state mirroring backend DebugState — single source of truth. */
+  debugState: DebugState;
   paused: boolean;
   promptTokens: number;
   completionTokens: number;
@@ -146,6 +151,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   debugAgentId: null,
   iteration: 0,
   phase: "Idle" as Phase,
+  debugState: "Stepping" as DebugState,
   paused: false,
   promptTokens: 0,
   completionTokens: 0,
@@ -169,6 +175,20 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       clearTimeout(connectRetryTimer);
       connectRetryTimer = null;
     }
+
+    // Reset debug state when starting a new connection.
+    // Always clear — reconnect retries go through tryConnect() directly,
+    // not through connect().
+    set({
+      iteration: 0,
+      phase: "Idle" as Phase,
+      debugState: "Stepping" as DebugState,
+      paused: false,
+      snapshots: [],
+      sectionCache: new Map(),
+      breakpoints: [],
+      hasPendingPatches: false,
+    });
 
     const port = debugPort ?? DEFAULT_DEBUG_PORT;
 
@@ -241,12 +261,15 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         // Stale socket onclose from a previous connect() cycle must not
         // overwrite the state of the current socket.
         const isCurrent = get().socket === socket;
+        const willRetry = isCurrent && retries < maxRetries;
         if (isCurrent) {
-          set({ connected: false, connecting: false, socket: null });
+          // Keep connecting=true if we're about to retry, so the UI
+          // shows the spinner instead of a disconnected state flash.
+          set({ connected: false, connecting: willRetry, socket: null });
         }
         // Retry only when this is the current socket that just closed,
         // and we aren't already connected through a newer socket.
-        if (isCurrent && !get().connected && retries < maxRetries) {
+        if (willRetry && !get().connected) {
           retries++;
           connectRetryTimer = setTimeout(tryConnect, retryDelayMs);
         }
@@ -279,6 +302,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       debugAgentId: null,
       iteration: 0,
       phase: "Idle" as Phase,
+      debugState: "Stepping" as DebugState,
       paused: false,
       snapshots: [],
       sectionCache: new Map(),
@@ -326,14 +350,15 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         set({
           iteration: (event.params.iteration as number) ?? 0,
           phase: (event.params.phase as Phase) ?? "Idle",
+          debugState: "Stepping",
           paused: true,
         });
         break;
       case "debugger.onPaused":
-        set({ paused: true });
+        set({ debugState: "Paused", paused: true });
         break;
       case "debugger.onResumed":
-        set({ paused: false });
+        set({ debugState: "Running", paused: false });
         break;
       case "debugger.onContextBuilt": {
         const params = event.params as Record<string, unknown>;
@@ -376,7 +401,17 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         break;
       }
       case "debugger.onBreakpoint": {
-        set({ paused: true });
+        set({ debugState: "Paused", paused: true });
+        break;
+      }
+      case "debugger.onExecutionStateChange": {
+        const newState = event.params.new_state as DebugState;
+        if (newState) {
+          set({
+            debugState: newState,
+            paused: newState === "Paused",
+          });
+        }
         break;
       }
     }
@@ -386,20 +421,26 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   resume: async () => {
     await get().sendRequest("debugger.resume");
-    set({ paused: false });
+    set({ debugState: "Running", paused: false });
   },
 
   pause: async () => {
     await get().sendRequest("debugger.pause");
-    // Runtime sends onPaused event later
+    set({ debugState: "Paused" });
+    // Runtime sends onExecutionStateChange event later confirming the state
   },
 
   step: async (granularity = "iteration") => {
     await get().sendRequest("debugger.step", { granularity });
+    set({ debugState: "Stepping" });
+    // Runtime sends onExecutionStateChange(Paused) after auto-pause
   },
 
   stop: async () => {
     await get().sendRequest("debugger.stop");
+    // Set both debugState and paused — the backend pushes an
+    // onExecutionStateChange(Stopped) event which will confirm.
+    set({ debugState: "Stopped", paused: true });
   },
 
   restart: async () => {
@@ -407,6 +448,8 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     set({
       iteration: 0,
       phase: "Idle" as Phase,
+      debugState: "Stepping" as DebugState,
+      paused: false,
       snapshots: [],
       sectionCache: new Map(),
     });
@@ -418,18 +461,21 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     const result = (await get().sendRequest("debugger.getState")) as {
       iteration: number;
       phase: Phase;
+      state: DebugState;
       breakpoints: Breakpoint[];
       usage: { prompt_tokens: number; completion_tokens: number };
       paused?: boolean;
     };
     if (result) {
+      const debugState = result.state ?? "Running";
       set({
         iteration: result.iteration ?? 0,
         phase: result.phase ?? "Idle",
+        debugState,
         breakpoints: result.breakpoints ?? [],
         promptTokens: result.usage?.prompt_tokens ?? 0,
         completionTokens: result.usage?.completion_tokens ?? 0,
-        paused: result.paused ?? false,
+        paused: debugState === "Paused",
       });
     }
   },
@@ -521,7 +567,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       has_patches: boolean;
     };
     // Re-execute consumed the flag — clear local tracking
-    set({ hasPendingPatches: false, paused: false });
+    set({ hasPendingPatches: false, debugState: "Running", paused: false });
     return result;
   },
 }));

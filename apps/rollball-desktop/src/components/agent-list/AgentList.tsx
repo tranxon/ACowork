@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useAgentStore } from "../../stores/agentStore";
+import { useChatStore } from "../../stores/chatStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
@@ -127,6 +128,13 @@ export function AgentList({ width }: AgentListProps) {
 
   const handleDebugStart = async (agentId: string) => {
     try {
+      // Clean up any stale chat store state before starting debug mode.
+      // Without this, a stopped agent may leave behind a stale wsMap entry
+      // that prevents connectStream from creating a new WebSocket.
+      const chatStore = useChatStore.getState();
+      if (chatStore.wsMap[agentId]) {
+        chatStore.disconnectStream(agentId);
+      }
       await startAgent(agentId, true);
       addToast({ type: "success", message: "Agent started in debug mode" });
     } catch (e) {
@@ -137,6 +145,14 @@ export function AgentList({ width }: AgentListProps) {
 
   const handleRestartDebug = async (agentId: string) => {
     try {
+      // Synchronously disconnect the WebSocket and clear chat store state
+      // BEFORE stopping the agent.  This prevents a lingering sending=true
+      // (set by a previous sendMessage) from surviving the restart when
+      // the new connectStream WebSocket creation fails because the Gateway
+      // is not yet ready.
+      const chatStore = useChatStore.getState();
+      chatStore.disconnectStream(agentId);
+
       await stopAgent(agentId);
       await startAgent(agentId, true);
       addToast({ type: "success", message: "Agent restarted in debug mode" });

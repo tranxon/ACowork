@@ -1,8 +1,8 @@
 //! End-to-end integration test for skill manual injection
 //!
 //! Verifies that when a message carries a `command` field, the Runtime
-//! correctly injects the corresponding skill's instructions into the user
-//! message, and (optionally) that a real LLM responds accordingly.
+//! correctly resolves the skill instructions and injects them into the
+//! ContextBuilder (system prompt), making them visible in the debug panel.
 //!
 //! Test tiers:
 //!   1. Pure logic — SkillRegistry loading + injection format (no network)
@@ -42,10 +42,12 @@ fn project_manager_skills_dir() -> std::path::PathBuf {
     candidates[2].clone()
 }
 
-/// The injection format used by cli.rs when a command is specified.
-/// Mirrors: `format!("{}\n\n{}", skill.instructions, content)`
-fn inject_skill_instructions(skill: &SkillDefinition, user_content: &str) -> String {
-    format!("{}\n\n{}", skill.instructions, user_content)
+/// Build skill instructions for injection into the system prompt.
+/// Mirrors the cli.rs logic: skill instructions are passed via
+/// ContextBuilder.set_skill_instructions() and injected under
+/// "## Skill Instructions" in the system prompt.
+fn build_skill_instructions(skill: &SkillDefinition) -> String {
+    skill.instructions.clone()
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -104,48 +106,39 @@ fn test_skill_registry_contains_meeting_notes() {
 }
 
 #[test]
-fn test_skill_injection_format_matches_cli_logic() {
-    // Verify that the injection format mirrors the cli.rs logic:
-    //   content = format!("{}\n\n{}", skill.instructions, content);
+fn test_skill_instructions_preserved_for_context_builder() {
+    // Verify that skill instructions are passed as-is for ContextBuilder injection.
+    // The cli.rs now passes instructions via SessionMessage::ChatMessage.skill_instructions
+    // and they are injected into the system prompt via ContextBuilder.set_skill_instructions().
     let skills_dir = project_manager_skills_dir();
     let registry = SkillRegistry::load_from_dir(&skills_dir)
         .expect("load_from_dir should succeed");
 
     let skill = registry.get("meeting-notes").unwrap();
-    let user_content = "Please take notes for our standup meeting.";
 
-    let injected = inject_skill_instructions(skill, user_content);
+    let instructions = build_skill_instructions(skill);
 
-    // The injected message should start with skill instructions
-    assert!(
-        injected.starts_with(&skill.instructions),
-        "Injected message should start with skill instructions"
-    );
-    // Followed by double newline and user content
-    assert!(
-        injected.ends_with(user_content),
-        "Injected message should end with user content"
-    );
-    // The separator must be exactly "\n\n"
-    let separator_start = skill.instructions.len();
+    // Instructions should match the skill definition exactly (no concatenation)
     assert_eq!(
-        &injected[separator_start..separator_start + 2],
-        "\n\n",
-        "Instructions and user content must be separated by double newline"
+        instructions, skill.instructions,
+        "Skill instructions should be passed as-is for ContextBuilder"
+    );
+    assert!(
+        !instructions.is_empty(),
+        "Skill instructions should not be empty"
     );
 }
 
 #[test]
-fn test_injected_content_contains_skill_keywords() {
+fn test_skill_instructions_contain_expected_keywords() {
     let skills_dir = project_manager_skills_dir();
     let registry = SkillRegistry::load_from_dir(&skills_dir)
         .expect("load_from_dir should succeed");
 
     let skill = registry.get("meeting-notes").unwrap();
-    let user_content = "Let's discuss the sprint review.";
-    let injected = inject_skill_instructions(skill, user_content);
+    let instructions = build_skill_instructions(skill);
 
-    // Verify the full injected message contains skill-specific keywords
+    // Verify the skill instructions contain expected keywords
     // that the LLM should recognize and follow
     let expected_keywords = [
         "Execution Steps",
@@ -159,16 +152,15 @@ fn test_injected_content_contains_skill_keywords() {
 
     for keyword in &expected_keywords {
         assert!(
-            injected.contains(keyword),
-            "Injected message should contain keyword '{}'",
+            instructions.contains(keyword),
+            "Skill instructions should contain keyword '{}'",
             keyword
         );
     }
 
-    // And the original user content must also be present
     assert!(
-        injected.contains(user_content),
-        "Injected message should preserve original user content"
+        !instructions.is_empty(),
+        "Skill instructions should not be empty"
     );
 }
 
@@ -186,13 +178,13 @@ fn test_skill_not_found_does_not_inject() {
         "Non-existent skill should return None"
     );
 
-    // Simulating the cli.rs logic: if skill not found, content stays as-is
-    let user_content = "Hello world";
-    let content = match registry.get("non-existent-skill") {
-        Some(skill) => inject_skill_instructions(skill, user_content),
-        None => user_content.to_string(),
-    };
-    assert_eq!(content, user_content, "Content should be unchanged when skill not found");
+    // Simulating the cli.rs logic: if skill not found, skill_instructions is None
+    let instructions: Option<String> = registry.get("non-existent-skill")
+        .map(|s| s.instructions.clone());
+    assert!(
+        instructions.is_none(),
+        "skill_instructions should be None when skill not found"
+    );
 }
 
 #[test]
@@ -221,13 +213,12 @@ Always prefix your response with [TEST-SKILL].
     let skill = parse_skill_md(skill_content).expect("Should parse test skill");
     assert_eq!(skill.name, "test-skill");
 
-    let user_content = "Do something useful";
-    let injected = inject_skill_instructions(&skill, user_content);
+    let instructions = build_skill_instructions(&skill);
 
-    assert!(injected.contains("Step one: recall context"));
-    assert!(injected.contains("[TEST-SKILL]"));
-    assert!(injected.contains(user_content));
-    assert!(injected.starts_with(&skill.instructions));
+    assert!(instructions.contains("Step one: recall context"));
+    assert!(instructions.contains("[TEST-SKILL]"));
+    assert_eq!(instructions, skill.instructions);
+    assert!(!instructions.is_empty());
 }
 
 #[test]
@@ -239,8 +230,8 @@ fn test_multiple_skills_injection_does_not_overlap() {
         .expect("load_from_dir should succeed");
 
     let meeting_skill = registry.get("meeting-notes").unwrap();
-    let user_content = "Sprint planning time";
-    let injected = inject_skill_instructions(meeting_skill, user_content);
+    let _user_content = "Sprint planning time";
+    let injected = build_skill_instructions(meeting_skill);
 
     // meeting-notes specific keywords should be present
     assert!(injected.contains("meeting-notes") || injected.contains("Meeting Notes"));
@@ -307,7 +298,7 @@ const MINIMAX_MODEL: &str = "MiniMax-M2.5";
 
 /// Build the system prompt for the project-manager-agent.
 fn project_manager_system_prompt() -> String {
-    "You are a project manager AI assistant. Follow the skill instructions provided in the user message carefully. Output structured content as specified by the active skill.".to_string()
+    "You are a project manager AI assistant. Follow the skill instructions provided in the system prompt. Output structured content as specified by the active skill.".to_string()
 }
 
 #[tokio::test]
@@ -329,16 +320,17 @@ async fn test_skill_injection_e2e_with_llm() {
         .get("meeting-notes")
         .expect("'meeting-notes' skill should exist");
 
-    // 2. Build injected user message (same format as cli.rs)
+    // 2. Build system prompt with skill instructions (new behavior: injected via ContextBuilder)
     let user_content = "We had a 30-minute sprint review meeting. Alice presented the API design, Bob raised performance concerns, and we decided to add caching before the next release. Action: Alice will implement the cache by Friday.";
-    let injected_content = inject_skill_instructions(skill, user_content);
+    let skill_instructions = build_skill_instructions(skill);
+    let system_prompt = format!("{}\n\n## Skill Instructions\n{}", project_manager_system_prompt(), skill_instructions);
 
-    // 3. Build the chat request with injected content
+    // 3. Build the chat request with skill in system prompt
     let request = rollball_core::providers::traits::ChatRequest {
         model: MINIMAX_MODEL.to_string(),
         messages: vec![
-            rollball_core::providers::traits::ChatMessage::system(project_manager_system_prompt()),
-            rollball_core::providers::traits::ChatMessage::user(injected_content),
+            rollball_core::providers::traits::ChatMessage::system(system_prompt),
+            rollball_core::providers::traits::ChatMessage::user(user_content.to_string()),
         ],
         temperature: Some(0.3),
         max_tokens: Some(1024),

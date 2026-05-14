@@ -1131,7 +1131,7 @@ pub async fn resolve_llm_config_for_agent(
         Ok(entry) => {
             // Model resolution: per-agent preference > config default > Vault default > None
             // 1. Check per-agent model preference from workspace .agent_model.json
-            let per_agent_model = state_guard.installed_agents.get(agent_id)
+            let (per_agent_model, per_agent_provider) = state_guard.installed_agents.get(agent_id)
                 .and_then(|info| {
                     let workspace = std::path::Path::new(&info.install_path).join("workspace");
                     let model_path = workspace.join(".agent_model.json");
@@ -1139,29 +1139,80 @@ pub async fn resolve_llm_config_for_agent(
                         std::fs::read_to_string(&model_path).ok()
                             .and_then(|content| {
                                 serde_json::from_str::<serde_json::Value>(&content).ok()
-                                    .and_then(|obj| obj.get("model").and_then(|v| v.as_str()).map(|m| m.to_string()))
+                                    .map(|obj| {
+                                        let model = obj.get("model")
+                                            .and_then(|v| v.as_str())
+                                            .map(|m| m.to_string());
+                                        let provider = obj.get("provider")
+                                            .and_then(|v| v.as_str())
+                                            .map(|p| p.to_string());
+                                        (model, provider)
+                                    })
                             })
                     } else {
                         None
                     }
-                });
+                })
+                .unwrap_or((None, None));
 
-            // Only use per-agent preference if the model is in the available list
-            let per_agent_model = per_agent_model.filter(|m| entry.models.contains(m));
+            // 2. Cross-provider resolution: if the per-agent preference
+            //    specifies a DIFFERENT provider than the default, look up
+            //    THAT provider's vault entry so we can validate the model
+            //    against the correct model list and deliver the correct
+            //    api_key/base_url to the Agent Runtime.
+            //
+            //    Pre-clone default entry data so the if-else branches
+            //    don't fight over `entry` borrows.
+            let default_entry = entry.clone();
+            let default_provider_name = provider_name.clone();
+            let (effective_entry, effective_models, effective_provider_name) =
+                if let Some(ref ap) = per_agent_provider {
+                    if ap != &default_provider_name {
+                        // Per-agent model is from a different provider
+                        match state_guard.vault.get_provider(ap) {
+                            Ok(alt_entry) => {
+                                tracing::info!(
+                                    agent = %agent_id,
+                                    default_provider = %default_provider_name,
+                                    per_agent_provider = %ap,
+                                    "Using per-agent provider for model resolution"
+                                );
+                                let models = alt_entry.models.clone();
+                                (alt_entry, models, ap.clone())
+                            }
+                            Err(_) => {
+                                // Per-agent provider no longer in vault, fall back to default
+                                tracing::warn!(
+                                    agent = %agent_id,
+                                    per_agent_provider = %ap,
+                                    "Per-agent provider not found in Vault, falling back to default"
+                                );
+                                (default_entry.clone(), default_entry.models.clone(), default_provider_name)
+                            }
+                        }
+                    } else {
+                        (default_entry.clone(), default_entry.models.clone(), default_provider_name)
+                    }
+                } else {
+                    (default_entry.clone(), default_entry.models.clone(), default_provider_name)
+                };
+
+            // 3. Validate per-agent model against effective provider's models
+            let per_agent_model = per_agent_model.filter(|m| effective_models.contains(m));
 
             let model = per_agent_model
                 .or(config_default_model.map(|m| m.to_string()))
-                .or(entry.default_model.clone());
+                .or(effective_entry.default_model.clone());
             // model is None when neither config nor Vault has a preference —
             // Agent Runtime will fall back to its manifest's suggested_model
 
             Some(ResolvedLlmConfig {
-                provider: provider_name.clone(),
+                provider: effective_provider_name,
                 model,
-                api_key: entry.api_key,
-                base_url: entry.base_url,
-                models: entry.models,
-                stored_capabilities: entry.model_capabilities.map(rollball_core::protocol::ModelCapabilitiesInfo::from),
+                api_key: effective_entry.api_key,
+                base_url: effective_entry.base_url,
+                models: effective_models,
+                stored_capabilities: effective_entry.model_capabilities.map(rollball_core::protocol::ModelCapabilitiesInfo::from),
             })
         }
         Err(e) => {

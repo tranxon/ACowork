@@ -10,6 +10,7 @@
 
 use crate::agent::budget_guard::BudgetGuard;
 use crate::agent::history::HistoryManager;
+use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_detector::LoopDetector;
 use crate::conversation::ConversationSession;
 
@@ -31,6 +32,12 @@ pub struct SessionState {
     /// Monotonically increasing per session; used as `turn_index` in
     /// ConversationRecord to preserve chronological order.
     pub(crate) turn_counter: u32,
+    /// Messages deferred from `poll_interrupt()` during active execution.
+    /// These are non-Interrupt messages that arrived in the AgentLoop's
+    /// inbound channel while it was polling mid-iteration. They are
+    /// re-injected at the next `drain_inbound_queue()` call so no
+    /// message is silently lost.
+    pub(crate) deferred_inbound: Vec<InboundMessage>,
 }
 
 impl SessionState {
@@ -47,6 +54,7 @@ impl SessionState {
             loop_detector: LoopDetector::with_defaults(),
             budget_guard: BudgetGuard::new(budget),
             turn_counter: 0,
+            deferred_inbound: Vec::new(),
         }
     }
 

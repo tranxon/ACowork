@@ -64,7 +64,7 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
     debugAgentId,
     iteration,
     phase,
-    paused,
+    debugState,
     promptTokens,
     completionTokens,
     snapshots,
@@ -198,16 +198,33 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
       {/* Control bar */}
       <div className="flex items-center gap-1 border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-800">
         <ControlButton
-          onClick={paused ? resume : pauseDebug}
-          title={paused ? "Resume (F5)" : "Pause (F6)"}
-          active={paused}
+          onClick={debugState === "Paused" ? resume : debugState === "Stopped" ? restart : pauseDebug}
+          title={
+            debugState === "Paused"
+              ? "Resume (F5)"
+              : debugState === "Stopped"
+                ? "Restart"
+                : "Pause (F6)"
+          }
+          active={debugState === "Paused"}
         >
-          {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+          {debugState === "Paused"
+            ? <Play className="h-3.5 w-3.5" />
+            : <Pause className="h-3.5 w-3.5" />
+          }
         </ControlButton>
-        <ControlButton onClick={() => step("iteration")} title="Step (F10)">
+        <ControlButton
+          onClick={() => step("iteration")}
+          title="Step (F10)"
+          disabled={debugState === "Stopped"}
+        >
           <StepForward className="h-3.5 w-3.5" />
         </ControlButton>
-        <ControlButton onClick={stop} title="Stop">
+        <ControlButton
+          onClick={stop}
+          title="Stop"
+          disabled={debugState === "Stopped"}
+        >
           <Square className="h-3.5 w-3.5" />
         </ControlButton>
         <ControlButton onClick={restart} title="Restart">
@@ -234,9 +251,9 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
           <StateLabel label="Phase" value={phase} highlight />
           <StateLabel label="Tokens" value={`${promptTokens + completionTokens}`} />
           <StateLabel
-            label="Paused"
-            value={paused ? "Yes" : "No"}
-            highlight={paused}
+            label="State"
+            value={debugState}
+            highlight={debugState !== "Running" && debugState !== "Stepping"}
           />
         </div>
       </div>
@@ -290,21 +307,26 @@ export function ControlButton({
   onClick,
   title,
   active,
+  disabled,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   title: string;
   active?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
+      disabled={disabled}
       className={cn(
         "rounded p-1.5 transition-colors",
-        active
-          ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-          : "text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+        disabled
+          ? "cursor-not-allowed text-zinc-300 dark:text-zinc-600"
+          : active
+            ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+            : "text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
       )}
     >
       {children}

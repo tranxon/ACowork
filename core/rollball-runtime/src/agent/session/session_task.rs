@@ -23,6 +23,9 @@ pub enum SessionMessage {
     ChatMessage {
         content: String,
         message_id: String,
+        /// Skill instructions to inject into the system prompt (from command-based skill selection).
+        /// When set, the instructions are injected via ContextBuilder rather than prepended to user content.
+        skill_instructions: Option<String>,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -181,13 +184,29 @@ impl SessionTask {
             .await;
 
             match msg {
-                Ok(Some(SessionMessage::ChatMessage { content, message_id })) => {
+                Ok(Some(SessionMessage::ChatMessage { content, message_id, skill_instructions })) => {
                     if content.trim().is_empty() {
                         tracing::warn!(
                             session_id = %session_id,
                             "SessionTask received empty chat message, ignoring"
                         );
                         continue;
+                    }
+
+                    // Apply skill instructions to ContextBuilder (system prompt injection).
+                    // This replaces the old behavior of prepending skill text to the user message,
+                    // making skill instructions visible in the debug panel's system prompt section.
+                    // When skill_instructions is None (no command specified), clear any
+                    // previously set skill to prevent stale instructions leaking across turns.
+                    if let Some(ref instructions) = skill_instructions {
+                        tracing::info!(
+                            session_id = %session_id,
+                            skill_len = instructions.len(),
+                            "Applying skill instructions to ContextBuilder"
+                        );
+                        context_builder.set_skill_instructions(instructions.clone());
+                    } else {
+                        context_builder.clear_skill_instructions();
                     }
 
                     // ── Debug mode: apply rewind/patches before running agent loop ──

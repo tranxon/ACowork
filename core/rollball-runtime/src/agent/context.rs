@@ -170,13 +170,29 @@ impl ContextBuilder {
         self.identity_context = Some(identity);
     }
 
-    /// Set skill instructions (for debug patching).
+    /// Set skill instructions (for debug patching and runtime skill injection).
+    /// Empty instructions are treated as a clear signal, consistent with
+    /// `set_environment_override()` and `set_retrieved_memory_patch()`.
     pub fn set_skill_instructions(&mut self, instructions: String) {
-        tracing::info!(
-            len = instructions.len(),
-            "ContextBuilder skill instructions updated via debug patch"
-        );
-        self.skill_instructions = Some(instructions);
+        if instructions.is_empty() {
+            self.clear_skill_instructions();
+        } else {
+            tracing::info!(
+                len = instructions.len(),
+                "ContextBuilder skill instructions updated"
+            );
+            self.skill_instructions = Some(instructions);
+        }
+    }
+
+    /// Clear skill instructions, removing them from the system prompt.
+    /// Called when a ChatMessage arrives without a skill command, preventing
+    /// stale skill instructions from leaking across conversation turns.
+    pub fn clear_skill_instructions(&mut self) {
+        if self.skill_instructions.is_some() {
+            tracing::debug!("ContextBuilder skill instructions cleared");
+            self.skill_instructions = None;
+        }
     }
 
     /// Set retrieved memory text in-place (for debug patching).
@@ -265,6 +281,13 @@ impl ContextBuilder {
     /// Get the environment override text, if set.
     pub fn environment_override(&self) -> Option<&str> {
         self.environment_override.as_deref()
+    }
+
+    /// Get the skill instructions text, if set.
+    /// Returns the full skill instructions that will be injected into the
+    /// system prompt under the "## Skill Instructions" section.
+    pub fn skill_instructions(&self) -> Option<&str> {
+        self.skill_instructions.as_deref()
     }
 
     /// Build the complete ChatRequest for the LLM

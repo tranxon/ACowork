@@ -123,7 +123,7 @@ export function SkillsPanel() {
           )}
         >
           <Wrench size={14} />
-          <span className="max-w-[80px] truncate font-medium">
+          <span className="max-w-[80px] truncate">
             {skillCount > 0 ? `${skillCount} Skills` : "Skills"}
           </span>
           <ChevronDown className="h-3 w-3 text-zinc-400" />

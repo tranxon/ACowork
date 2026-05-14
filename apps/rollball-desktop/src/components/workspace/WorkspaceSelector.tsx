@@ -176,7 +176,7 @@ export function WorkspaceSelector() {
                         >
                           <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
                           <div className="min-w-0 flex-1">
-                            <div className={cn("truncate text-xs", isCurrent ? "font-medium text-blue-600 dark:text-blue-400" : "font-medium text-zinc-800 dark:text-zinc-200")}>
+                            <div className={cn("truncate text-xs", isCurrent ? "font-semibold text-blue-600 dark:text-blue-400" : "text-zinc-800 dark:text-zinc-200")}>
                               {displayName}
                             </div>
                             <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400" title={dir.path}>

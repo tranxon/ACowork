@@ -165,18 +165,21 @@ async fn e2e_01_three_session_concurrent_conversation() {
         .send_to_session(&session_a, SessionMessage::ChatMessage {
             content: "What is 1+1?".to_string(),
             message_id: "msg-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     manager_b
         .send_to_session(&session_b, SessionMessage::ChatMessage {
             content: "What is 2+2?".to_string(),
             message_id: "msg-2".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     manager_c
         .send_to_session(&session_c, SessionMessage::ChatMessage {
             content: "What is 3+3?".to_string(),
             message_id: "msg-3".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -260,18 +263,21 @@ async fn e2e_01_real_three_session_concurrent_with_minimax() {
         .send_to_session(&session_a, SessionMessage::ChatMessage {
             content: "What is 1+1? Reply with just the number.".to_string(),
             message_id: "msg-real-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     manager
         .send_to_session(&session_b, SessionMessage::ChatMessage {
             content: "What is 2+2? Reply with just the number.".to_string(),
             message_id: "msg-real-2".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     manager
         .send_to_session(&session_c, SessionMessage::ChatMessage {
             content: "What is 3+3? Reply with just the number.".to_string(),
             message_id: "msg-real-3".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -327,6 +333,7 @@ async fn e2e_02_long_conversation_trim_chain() {
             .send_to_session(&session_id, SessionMessage::ChatMessage {
                 content: msg,
                 message_id: format!("msg-trim-{}", i),
+                skill_instructions: None,
             })
             .unwrap();
         // Small delay to allow processing
@@ -370,6 +377,7 @@ async fn e2e_03_session_switch_no_interrupt() {
         .send_to_session(&session_a, SessionMessage::ChatMessage {
             content: "Hello A".to_string(),
             message_id: "msg-a-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -378,6 +386,7 @@ async fn e2e_03_session_switch_no_interrupt() {
         .send_to_session(&session_b, SessionMessage::ChatMessage {
             content: "Hello B".to_string(),
             message_id: "msg-b-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -441,6 +450,7 @@ async fn e2e_04_complete_lifecycle() {
         .send_to_session(&session_id, SessionMessage::ChatMessage {
             content: "Hello lifecycle test".to_string(),
             message_id: "msg-lifecycle-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -469,6 +479,7 @@ async fn e2e_04_complete_lifecycle() {
     let result = manager.send_to_session(&session_id, SessionMessage::ChatMessage {
         content: "Should fail".to_string(),
         message_id: "msg-should-fail".to_string(),
+    skill_instructions: None,
     });
     assert!(
         result.is_err(),
@@ -511,6 +522,7 @@ async fn e2e_04_complete_lifecycle_with_jsonl() {
         .send_to_session(&session_id, SessionMessage::ChatMessage {
             content: "Hello JSONL test".to_string(),
             message_id: "msg-jsonl-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -570,12 +582,14 @@ async fn lifecycle_02_streaming_no_cross_contamination() {
         .send_to_session(&session_a, SessionMessage::ChatMessage {
             content: "Hello A".to_string(),
             message_id: "msg-a-lc02".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     manager_b
         .send_to_session(&session_b, SessionMessage::ChatMessage {
             content: "Hello B".to_string(),
             message_id: "msg-b-lc02".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -672,6 +686,7 @@ async fn edge_03_extra_long_message() {
     let result = manager.send_to_session(&session_id, SessionMessage::ChatMessage {
         content: large_content.clone(),
         message_id: "msg-large".to_string(),
+    skill_instructions: None,
     });
 
     // Sending itself should succeed (channel accepts the message)
@@ -725,6 +740,7 @@ async fn edge_03_extra_long_message_jsonl() {
         .send_to_session(&session_id, SessionMessage::ChatMessage {
             content: large_content.clone(),
             message_id: "msg-large-jsonl".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -849,6 +865,7 @@ async fn e2e_concurrent_sessions_with_tool_calls() {
         .send_to_session(&session_a, SessionMessage::ChatMessage {
             content: "Call echo from A".to_string(),
             message_id: "msg-tool-a".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -857,6 +874,7 @@ async fn e2e_concurrent_sessions_with_tool_calls() {
         .send_to_session(&session_b, SessionMessage::ChatMessage {
             content: "Hello B".to_string(),
             message_id: "msg-tool-b".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -920,6 +938,7 @@ async fn e2e_multi_turn_conversation_jsonl() {
             .send_to_session(&session_id, SessionMessage::ChatMessage {
                 content: format!("Turn {}", i + 1),
                 message_id: format!("msg-turn-{}", i),
+                skill_instructions: None,
             })
             .unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -994,6 +1013,7 @@ async fn e2e_session_title_set_from_first_message() {
         .send_to_session(&session_id, SessionMessage::ChatMessage {
             content: "This is my first message about Rust programming".to_string(),
             message_id: "msg-title-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -1054,6 +1074,7 @@ async fn e2e_destroy_session_file_persists() {
         .send_to_session(&session_id, SessionMessage::ChatMessage {
             content: "Before destroy".to_string(),
             message_id: "msg-persist-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1072,6 +1093,7 @@ async fn e2e_destroy_session_file_persists() {
     let result = manager.send_to_session(&session_id, SessionMessage::ChatMessage {
         content: "After destroy".to_string(),
         message_id: "msg-persist-2".to_string(),
+    skill_instructions: None,
     });
     assert!(result.is_err(), "Sending to destroyed session should fail");
 }
@@ -1108,6 +1130,7 @@ async fn e2e_conversation_resume() {
         .send_to_session(session_id, SessionMessage::ChatMessage {
             content: "First conversation message".to_string(),
             message_id: "msg-resume-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1132,6 +1155,7 @@ async fn e2e_conversation_resume() {
         .send_to_session(session_id, SessionMessage::ChatMessage {
             content: "Resumed conversation message".to_string(),
             message_id: "msg-resume-2".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;

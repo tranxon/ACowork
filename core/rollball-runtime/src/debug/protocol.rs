@@ -153,6 +153,8 @@ pub struct GetStateResult {
     pub usage: DebugUsage,
     /// Whether the debug controller is currently paused
     pub paused: bool,
+    /// Current execution state: "Running", "Paused", "Stepping", or "Stopped"
+    pub state: String,
 }
 
 /// Token usage summary.

@@ -247,7 +247,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     // In Standalone mode: use manifest suggested_provider + env vars (development only).
     let mut gateway_model_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo> = None;
     let mut gateway_max_output_tokens_limit: u64 = 32_768;
-    let (provider, resolved_model, available_models) = if let Some(ref cfg) = hello_config {
+    let (provider, mut resolved_model, available_models) = if let Some(ref cfg) = hello_config {
         // Gateway mode: config was bundled in AgentHelloResult
         if let Some(ref provider_name) = cfg.provider {
             tracing::info!(
@@ -371,6 +371,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                     "Restoring per-agent model preference from workspace"
                 );
                 context_builder.set_override_model(saved_model.clone());
+                resolved_model = saved_model;
             }
         } else {
             tracing::warn!(
@@ -381,6 +382,13 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             remove_agent_model(&config.work_dir);
         }
     }
+
+    tracing::info!(
+        provider = %provider.name(),
+        model = %resolved_model,
+        available_count = available_models.len(),
+        "Final model selection after per-agent preference resolution"
+    );
 
     // Step 7: Create budget (unlimited for standalone mode)
     let budget = rollball_core::Budget {
@@ -526,9 +534,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                     workspace_path = ?cfg.current_workspace_path,
                     "Applying workspace context from AgentHelloResult"
                 );
-                session_manager.broadcast(SessionMessage::UpdateWorkspaceContext {
-                    context_text: ctx.clone(),
-                });
+                session_manager.set_workspace_context(ctx.clone());
             }
             if cfg.runtime_max_output_tokens.is_some()
                 || cfg.runtime_max_iterations.is_some()
@@ -1156,14 +1162,15 @@ async fn process_gateway_recv(
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| current_session_id.clone());
 
-                    // Handle model_switch: broadcast to all sessions
+                    // Handle model_switch: broadcast to all sessions AND
+                    // update SessionManagerConfig so new sessions inherit the model.
+                    // Without the config update, a session created after model switch
+                    // would fall back to the stale override_model from AgentHelloResult.
                     if action == "model_switch" {
                         if let Some(model) = params.get("model").and_then(|v| v.as_str()) {
                             let provider = params.get("provider").and_then(|v| v.as_str());
                             save_agent_model(work_dir, model, provider);
-                            session_manager.broadcast(SessionMessage::ModelSwitch {
-                                model: model.to_string(),
-                            });
+                            session_manager.update_model_override(model.to_string());
                             tracing::info!(
                                 model = %model,
                                 provider = ?provider,
@@ -1407,26 +1414,32 @@ async fn process_gateway_recv(
                     }
 
                     // Extract message content from params
-                    let mut content = params.get("content")
+                    let content = params.get("content")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
 
-                    // If a command is specified, inject the skill instructions into the user message.
-                    if let Some(skill_name) = command {
+                    // If a command is specified, resolve skill instructions.
+                    // Instructions are passed separately (via ContextBuilder / system prompt)
+                    // instead of being prepended to the user message, making them
+                    // visible in the debug panel's context snapshot.
+                    let skill_instructions = if let Some(skill_name) = command {
                         if let Some(skill) = skill_registry.get(&skill_name) {
                             tracing::info!(
                                 skill = %skill_name,
-                                "Injecting skill instructions into user message"
+                                "Resolved skill instructions for ContextBuilder injection"
                             );
-                            content = format!("{}\n\n{}", skill.instructions, content);
+                            Some(skill.instructions.clone())
                         } else {
                             tracing::warn!(
                                 skill = %skill_name,
                                 "Command skill not found in registry"
                             );
+                            None
                         }
-                    }
+                    } else {
+                        None
+                    };
 
                     let message_id = params.get("message_id")
                         .and_then(|v| v.as_str())
@@ -1437,6 +1450,7 @@ async fn process_gateway_recv(
                     if let Err(e) = session_manager.send_to_session(&target_session_id, SessionMessage::ChatMessage {
                         content,
                         message_id: message_id.clone(),
+                        skill_instructions,
                     }) {
                         tracing::error!("Failed to route message to session {}: {}", target_session_id, e);
                         let error_params = serde_json::json!({
@@ -1452,7 +1466,7 @@ async fn process_gateway_recv(
                             provider = %provider,
                             model = ?model,
                             max_output_tokens_limit = max_output_tokens_limit,
-                            "Received LLMConfigDelivery at runtime — broadcasting to all sessions"
+                            "Received LLMConfigDelivery at runtime — caching and broadcasting to all sessions"
                         );
 
                         // Model resolution: prefer explicit model > first from user-selected models
@@ -1467,24 +1481,18 @@ async fn process_gateway_recv(
                                 format!("NO_MODEL_FOR_{}", provider.to_uppercase())
                             });
 
-                        // Broadcast provider update to all active sessions
-                        for sid in session_manager.active_sessions() {
-                            let _ = session_manager.send_to_session(&sid, SessionMessage::UpdateProvider {
-                                provider_name: provider.clone(),
-                                protocol_type: protocol_type.clone(),
-                                api_key: Some(api_key.clone()),
-                                base_url: base_url.clone(),
-                                model: resolved_model.clone(),
-                            });
-                            if let Some(ref caps) = model_capabilities {
-                                let _ = session_manager.send_to_session(&sid, SessionMessage::UpdateCapabilities {
-                                    caps: caps.clone(),
-                                });
-                            }
-                            let _ = session_manager.send_to_session(&sid, SessionMessage::UpdateMaxOutputTokens {
-                                limit: max_output_tokens_limit,
-                            });
-                        }
+                        // Delegate to SessionManager: it caches the config for new sessions
+                        // AND broadcasts to all existing sessions. Follows the same
+                        // cache+broadcast pattern as RuntimeConfigOverrides.
+                        session_manager.update_llm_config(
+                            provider,
+                            protocol_type,
+                            api_key,
+                            base_url,
+                            resolved_model,
+                            model_capabilities,
+                            max_output_tokens_limit,
+                        );
                         return LoopAction::Continue;
                     }
                     GatewayResponse::WorkspaceContextUpdate {
@@ -1497,7 +1505,7 @@ async fn process_gateway_recv(
                             current_path = ?current_workspace_path,
                             "Received WorkspaceContextUpdate from Gateway — broadcasting to all sessions"
                         );
-                        session_manager.broadcast(SessionMessage::UpdateWorkspaceContext { context_text });
+                        session_manager.set_workspace_context(context_text);
                         return LoopAction::Continue;
                     }
                     GatewayResponse::LogLevelUpdate { log_level } => {

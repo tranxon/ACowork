@@ -42,7 +42,7 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
     debugAgentId,
     iteration,
     phase,
-    paused,
+    debugState,
     promptTokens,
     completionTokens,
     snapshots,
@@ -137,10 +137,12 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
   );
 
   // ── Switch to debug tab when entering debug mode ─────────────────
+  const prevIsDebugMode = useRef(isDebugMode);
   useEffect(() => {
-    if (isDebugMode && activeTab === "results") {
-      // Only auto-switch once when entering debug mode, not on re-renders
+    if (isDebugMode && !prevIsDebugMode.current) {
+      setActiveTab("debug");
     }
+    prevIsDebugMode.current = isDebugMode;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDebugMode]);
 
@@ -219,60 +221,79 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
               )}
             </div>
           ) : (
-            <>
-              {/* Control bar */}
-              <div className="flex items-center gap-1 border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-800">
-                <ControlButton
-                  onClick={paused ? resume : pauseDebug}
-                  title={paused ? "Resume (F5)" : "Pause (F6)"}
-                  active={paused}
-                >
-                  {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-                </ControlButton>
-                <ControlButton onClick={() => step("iteration")} title="Step (F10)">
-                  <StepForward className="h-3.5 w-3.5" />
-                </ControlButton>
-                <ControlButton onClick={stop} title="Stop">
-                  <Square className="h-3.5 w-3.5" />
-                </ControlButton>
-                <ControlButton onClick={restart} title="Restart">
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </ControlButton>
-                {hasPendingPatches && (
-                  <>
-                    <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
-                    <ControlButton
-                      onClick={() => reExecute().catch(console.error)}
-                      title="Re-execute with patches"
-                      active
-                    >
-                      <RotateCcw className="h-3.5 w-3.5" />
-                    </ControlButton>
-                  </>
-                )}
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              {/* ── Controls card ──────────────────────────────────── */}
+              <div className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+                <div className="flex items-center gap-1">
+                  <ControlButton
+                    onClick={debugState === "Paused" ? resume : debugState === "Stopped" ? restart : pauseDebug}
+                    title={
+                      debugState === "Paused"
+                        ? "Resume (F5)"
+                        : debugState === "Stopped"
+                          ? "Restart"
+                          : "Pause (F6)"
+                    }
+                    active={debugState === "Paused"}
+                  >
+                    {debugState === "Paused"
+                      ? <Play className="h-3.5 w-3.5" />
+                      : <Pause className="h-3.5 w-3.5" />
+                    }
+                  </ControlButton>
+                  <ControlButton
+                    onClick={() => step("iteration")}
+                    title="Step (F10)"
+                    disabled={debugState === "Stopped"}
+                  >
+                    <StepForward className="h-3.5 w-3.5" />
+                  </ControlButton>
+                  <ControlButton
+                    onClick={stop}
+                    title="Stop"
+                    disabled={debugState === "Stopped"}
+                  >
+                    <Square className="h-3.5 w-3.5" />
+                  </ControlButton>
+                  <ControlButton onClick={restart} title="Restart">
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </ControlButton>
+                  {hasPendingPatches && (
+                    <>
+                      <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
+                      <ControlButton
+                        onClick={() => reExecute().catch(console.error)}
+                        title="Re-execute with patches"
+                        active
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </ControlButton>
+                    </>
+                  )}
+                </div>
               </div>
 
-              {/* State display */}
-              <div className="border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+              {/* ── State card ─────────────────────────────────────── */}
+              <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                   <StateLabel label="Iteration" value={`#${iteration}`} />
                   <StateLabel label="Phase" value={phase} highlight />
                   <StateLabel label="Tokens" value={`${promptTokens + completionTokens}`} />
                   <StateLabel
-                    label="Paused"
-                    value={paused ? "Yes" : "No"}
-                    highlight={paused}
+                    label="Status"
+                    value={debugState}
+                    highlight={debugState !== "Running" && debugState !== "Stepping"}
                   />
                 </div>
               </div>
 
-              {/* Context snapshot tree */}
-              <div className="flex-1 overflow-y-auto">
-                <div className="px-2 py-1 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+              {/* ── Context snapshots card ─────────────────────────── */}
+              <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
+                <div className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
                   Context Snapshots ({snapshots.length})
                 </div>
                 {snapshots.length === 0 && (
-                  <div className="px-3 py-4 text-center text-xs text-zinc-400">
+                  <div className="py-3 text-center text-xs text-zinc-400">
                     No context snapshots yet.
                     <br />
                     Send a message to the agent to generate snapshots.
@@ -304,7 +325,7 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
                   />
                 ))}
               </div>
-            </>
+            </div>
           )}
         </>
       )}

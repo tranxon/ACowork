@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use super::controller::DebugController;
+use super::controller::DebugState;
 use super::protocol::{
     self, DebugPhase, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
 };
@@ -62,6 +63,11 @@ pub enum DebugEvent {
         iteration: u32,
         sections: protocol::ContextSections,
         total_token_estimate: usize,
+    },
+    /// Execution state changed (Running/Paused/Stepping/Stopped)
+    ExecutionStateChanged {
+        new_state: DebugState,
+        iteration: u32,
     },
 }
 
@@ -309,10 +315,14 @@ impl DebugProtocolServer {
             }
         }
 
-        // Reset controller state on disconnect
+        // Reset controller state on disconnect — but preserve Stopped.
+        // If the user explicitly stopped debugging, we must not auto-resume
+        // the agent loop when the WebSocket closes.
         let mut ctrl = self.controller.lock().await;
-        ctrl.state = super::controller::DebugState::Running;
-        ctrl.phase = DebugPhase::Idle;
+        if ctrl.state != super::controller::DebugState::Stopped {
+            ctrl.state = super::controller::DebugState::Running;
+            ctrl.phase = DebugPhase::Idle;
+        }
     }
 
     /// Handle an incoming JSON-RPC request.
@@ -369,7 +379,15 @@ impl DebugProtocolServer {
         match method {
             // ── Execution Control ──
             "debugger.resume" => {
-                ctrl.state = super::controller::DebugState::Running;
+                ctrl.state = DebugState::Running;
+                let iteration = ctrl.iteration;
+                // event_tx.send() is non-blocking (unbounded channel) —
+                // safe to call while holding the controller lock at RPC
+                // route level (agent loop acquires the lock separately).
+                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
+                    new_state: DebugState::Running,
+                    iteration,
+                });
                 tracing::info!("Debug: resume — agent loop will continue");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -378,7 +396,12 @@ impl DebugProtocolServer {
             }
 
             "debugger.pause" => {
-                ctrl.state = super::controller::DebugState::Paused;
+                ctrl.state = DebugState::Paused;
+                let iteration = ctrl.iteration;
+                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
+                    new_state: DebugState::Paused,
+                    iteration,
+                });
                 tracing::info!("Debug: pause — agent loop will pause at next check");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -387,7 +410,12 @@ impl DebugProtocolServer {
             }
 
             "debugger.step" => {
-                ctrl.state = super::controller::DebugState::Stepping;
+                ctrl.state = DebugState::Stepping;
+                let iteration = ctrl.iteration;
+                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
+                    new_state: DebugState::Stepping,
+                    iteration,
+                });
                 tracing::info!("Debug: step — agent loop will execute one step");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -396,7 +424,12 @@ impl DebugProtocolServer {
             }
 
             "debugger.stop" => {
-                ctrl.state = super::controller::DebugState::Stopped;
+                ctrl.state = DebugState::Stopped;
+                let iteration = ctrl.iteration;
+                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
+                    new_state: DebugState::Stopped,
+                    iteration,
+                });
                 tracing::info!("Debug: stop — agent loop terminated");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -406,6 +439,7 @@ impl DebugProtocolServer {
 
             // ── State Query ──
             "debugger.getState" => {
+                let current_state = ctrl.state;
                 let state = protocol::GetStateResult {
                     iteration: ctrl.iteration,
                     phase: ctrl.phase,
@@ -421,7 +455,11 @@ impl DebugProtocolServer {
                         completion_tokens: 0,
                         total_tokens: 0,
                     },
-                    paused: ctrl.state == super::controller::DebugState::Paused,
+                    paused: current_state == DebugState::Paused,
+                    state: serde_json::to_string(&current_state)
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                        .to_string(),
                 };
                 let result = serde_json::to_value(state)
                     .map_err(|e| MethodError::internal(e.to_string()))?;
@@ -717,6 +755,7 @@ fn event_method_name(event: &DebugEvent) -> &'static str {
         DebugEvent::Step { .. } => "debugger.onStep",
         DebugEvent::BreakpointHit { .. } => "debugger.onBreakpoint",
         DebugEvent::ContextBuilt { .. } => "debugger.onContextBuilt",
+        DebugEvent::ExecutionStateChanged { .. } => "debugger.onExecutionStateChange",
     }
 }
 
@@ -776,6 +815,16 @@ fn event_to_notification(event: DebugEvent) -> JsonRpcNotification {
                 "total_token_estimate": total_token_estimate,
             });
             JsonRpcNotification::new("debugger.onContextBuilt", params)
+        }
+        DebugEvent::ExecutionStateChanged {
+            new_state,
+            iteration,
+        } => {
+            let params = serde_json::json!({
+                "new_state": new_state,
+                "iteration": iteration,
+            });
+            JsonRpcNotification::new("debugger.onExecutionStateChange", params)
         }
     }
 }

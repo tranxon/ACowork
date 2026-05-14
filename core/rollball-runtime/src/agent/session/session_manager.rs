@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rollball_core::protocol::ModelCapabilitiesInfo;
+use rollball_core::protocol::ProtocolType;
 use rollball_core::Budget;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -113,6 +115,22 @@ impl RuntimeConfigOverrides {
     }
 }
 
+/// Cached LLM configuration from the latest Gateway LLMConfigDelivery push.
+///
+/// Stored so that sessions created *after* a model/provider switch inherit
+/// the correct provider (via `UpdateProvider`) and capabilities, rather
+/// than falling back to the stale values in the `AgentCore` template.
+#[derive(Debug, Clone)]
+struct CachedLLMConfig {
+    provider_name: String,
+    protocol_type: ProtocolType,
+    api_key: String,
+    base_url: Option<String>,
+    model: String,
+    capabilities: Option<ModelCapabilitiesInfo>,
+    max_output_tokens_limit: u64,
+}
+
 /// Lifecycle manager for multiple concurrent sessions.
 ///
 /// Owns a shared `Arc<AgentCore>` template and creates `SessionTask`s
@@ -128,6 +146,12 @@ pub struct SessionManager {
     /// Runtime config overrides (accumulated from Gateway pushes) that
     /// must be re-applied to every newly created session.
     runtime_overrides: RuntimeConfigOverrides,
+    /// Cached workspace context (from AgentHello or Gateway push) that
+    /// must be re-applied to every newly created session.
+    workspace_context: Option<String>,
+    /// Cached LLM config from LLMConfigDelivery (provider params, caps, limit)
+    /// that must be re-applied to every newly created session.
+    cached_llm: Option<CachedLLMConfig>,
 }
 
 impl SessionManager {
@@ -138,6 +162,8 @@ impl SessionManager {
             sessions: HashMap::new(),
             config,
             runtime_overrides: RuntimeConfigOverrides::default(),
+            workspace_context: None,
+            cached_llm: None,
         }
     }
 
@@ -227,6 +253,52 @@ impl SessionManager {
             }
         }
 
+        // Re-apply the cached workspace context to the new session.
+        // This is separate from `runtime_overrides` because workspace
+        // context is a large string (not a config override) and follows
+        // the same cache-and-replay pattern.
+        if let Some(ref ctx) = self.workspace_context {
+            tracing::info!(
+                session_id = %session_id,
+                ctx_len = ctx.len(),
+                "SessionManager: replaying workspace context to new session"
+            );
+            if let Some(handle) = self.sessions.get(&session_id) {
+                let _ = handle.send(SessionMessage::UpdateWorkspaceContext {
+                    context_text: ctx.clone(),
+                });
+            }
+        }
+
+        // Re-apply the cached LLM config (provider params, capabilities,
+        // max_output_tokens) to the new session. This mirrors the
+        // RuntimeConfigOverrides replay pattern for consistency.
+        if let Some(ref cached) = self.cached_llm {
+            tracing::info!(
+                session_id = %session_id,
+                provider = %cached.provider_name,
+                model = %cached.model,
+                "SessionManager: replaying LLM config to new session"
+            );
+            if let Some(handle) = self.sessions.get(&session_id) {
+                let _ = handle.send(SessionMessage::UpdateProvider {
+                    provider_name: cached.provider_name.clone(),
+                    protocol_type: cached.protocol_type.clone(),
+                    api_key: Some(cached.api_key.clone()),
+                    base_url: cached.base_url.clone(),
+                    model: cached.model.clone(),
+                });
+                if let Some(ref caps) = cached.capabilities {
+                    let _ = handle.send(SessionMessage::UpdateCapabilities {
+                        caps: caps.clone(),
+                    });
+                }
+                let _ = handle.send(SessionMessage::UpdateMaxOutputTokens {
+                    limit: cached.max_output_tokens_limit,
+                });
+            }
+        }
+
         Ok(session_id)
     }
 
@@ -310,6 +382,107 @@ impl SessionManager {
             max_iterations,
             temperature,
             system_prompt_override,
+        })
+    }
+
+    /// Cache LLM config (provider, capabilities, limit) from LLMConfigDelivery
+    /// and broadcast to all active sessions.
+    ///
+    /// Follows the same cache+broadcast pattern: the config is cached so
+    /// sessions created *after* a model switch inherit the correct provider,
+    /// capabilities, and token limits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_llm_config(
+        &mut self,
+        provider_name: String,
+        protocol_type: ProtocolType,
+        api_key: String,
+        base_url: Option<String>,
+        model: String,
+        capabilities: Option<ModelCapabilitiesInfo>,
+        max_output_tokens_limit: u64,
+    ) -> Vec<String> {
+        tracing::info!(
+            provider = %provider_name,
+            model = %model,
+            max_output_tokens_limit = max_output_tokens_limit,
+            "SessionManager: caching LLM config"
+        );
+        self.cached_llm = Some(CachedLLMConfig {
+            provider_name: provider_name.clone(),
+            protocol_type: protocol_type.clone(),
+            api_key: api_key.clone(),
+            base_url: base_url.clone(),
+            model: model.clone(),
+            capabilities: capabilities.clone(),
+            max_output_tokens_limit,
+        });
+
+        // Broadcast to existing sessions (matching broadcast() pattern:
+        // iterate &self.sessions directly to avoid active_sessions() allocation
+        // and send_to_session() double-lookup).
+        let mut failed = Vec::new();
+        for (sid, handle) in &self.sessions {
+            if handle.send(SessionMessage::UpdateProvider {
+                provider_name: provider_name.clone(),
+                protocol_type: protocol_type.clone(),
+                api_key: Some(api_key.clone()),
+                base_url: base_url.clone(),
+                model: model.clone(),
+            }).is_err() {
+                failed.push(sid.clone());
+            }
+            if let Some(ref caps) = capabilities {
+                if handle.send(SessionMessage::UpdateCapabilities {
+                    caps: caps.clone(),
+                }).is_err() {
+                    if !failed.contains(sid) {
+                        failed.push(sid.clone());
+                    }
+                }
+            }
+            if handle.send(SessionMessage::UpdateMaxOutputTokens {
+                limit: max_output_tokens_limit,
+            }).is_err() {
+                if !failed.contains(sid) {
+                    failed.push(sid.clone());
+                }
+            }
+        }
+        failed
+    }
+
+    /// Cache workspace context and broadcast to all active sessions.
+    ///
+    /// This mirrors `apply_runtime_config_override`: the context is
+    /// cached so any session created *after* this call also receives
+    /// it (fixing the bug where a fresh session after deletion would
+    /// lose its workspace context).
+    pub fn set_workspace_context(&mut self, context_text: String) -> Vec<String> {
+        tracing::info!(
+            ctx_len = context_text.len(),
+            "SessionManager: caching workspace context"
+        );
+        self.workspace_context = Some(context_text.clone());
+        self.broadcast(SessionMessage::UpdateWorkspaceContext {
+            context_text,
+        })
+    }
+
+    /// Update model override and broadcast to all active sessions.
+    ///
+    /// Follows the same cache+broadcast pattern as other ambient state:
+    /// the model is stored in `SessionManagerConfig.override_model` so that
+    /// sessions created *after* this call inherit the latest model, while
+    /// existing sessions receive the update via broadcast.
+    pub fn update_model_override(&mut self, model: String) -> Vec<String> {
+        tracing::info!(
+            model = %model,
+            "SessionManager: caching model override"
+        );
+        self.config.override_model = Some(model.clone());
+        self.broadcast(SessionMessage::ModelSwitch {
+            model,
         })
     }
 

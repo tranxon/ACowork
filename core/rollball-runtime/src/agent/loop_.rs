@@ -1232,9 +1232,15 @@ impl AgentLoop {
                     return true;
                 }
                 other => {
+                    // CRITICAL: non-Interrupt messages consumed here are LOST.
+                    // They are NOT re-injected into history. This includes
+                    // UserMessage, SystemNotification, and IntentMessage.
+                    // If a user message arrives during a debug pause, it will
+                    // be swallowed here with only this warning.
                     tracing::warn!(
-                        ?other,
-                        "poll_interrupt() dropped non-Interrupt message during streaming/tool execution"
+                        msg_type = ?std::mem::discriminant(&other),
+                        payload = %format!("{:?}", other).chars().take(80).collect::<String>(),
+                        "poll_interrupt() DROPPED non-Interrupt message — this message is LOST and will NOT enter the context"
                     );
                 }
             }
@@ -1253,6 +1259,10 @@ impl AgentLoop {
             let (msg, _truncated) = msg.enforce_size_limit();
             match msg {
                 InboundMessage::UserMessage(text) => {
+                    tracing::info!(
+                        text_preview = %text.chars().take(80).collect::<String>(),
+                        "drain_inbound_queue: injecting UserMessage into history"
+                    );
                     self.session.history.append(ChatMessage::user(text));
                 }
                 InboundMessage::SystemNotification { notification_type, data } => {
@@ -1313,7 +1323,18 @@ impl AgentLoop {
                 tracing::info!("Debug: agent loop interrupted via inbound channel");
                 // Synchronize debug controller state so the frontend sees Stopped
                 let mut ctrl_guard = ctrl.lock().await;
+                let iteration = ctrl_guard.iteration;
                 ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
+                drop(ctrl_guard);
+                // Push execution state change event for frontend sync
+                if let Some(event_tx) = self.core.debug_event_tx() {
+                    let _ = event_tx.send(
+                        crate::debug::server::DebugEvent::ExecutionStateChanged {
+                            new_state: crate::debug::controller::DebugState::Stopped,
+                            iteration,
+                        },
+                    );
+                }
                 return false;
             }
 
@@ -1373,6 +1394,17 @@ impl AgentLoop {
                 }
             }
             ctrl_guard.state = crate::debug::controller::DebugState::Paused;
+            {
+                // Push execution state change event for frontend sync
+                if let Some(event_tx) = self.core.debug_event_tx() {
+                    let _ = event_tx.send(
+                        crate::debug::server::DebugEvent::ExecutionStateChanged {
+                            new_state: crate::debug::controller::DebugState::Paused,
+                            iteration: ctrl_guard.iteration,
+                        },
+                    );
+                }
+            }
             drop(ctrl_guard); // Release lock before blocking
             self.await_debug_resume().await;
         }
@@ -1411,6 +1443,17 @@ impl AgentLoop {
             let mut ctrl_guard = ctrl.lock().await;
             if ctrl_guard.state == crate::debug::controller::DebugState::Stepping {
                 ctrl_guard.state = crate::debug::controller::DebugState::Paused;
+                let iteration = ctrl_guard.iteration;
+                drop(ctrl_guard);
+                // Push execution state change event for frontend sync
+                if let Some(event_tx) = self.core.debug_event_tx() {
+                    let _ = event_tx.send(
+                        crate::debug::server::DebugEvent::ExecutionStateChanged {
+                            new_state: crate::debug::controller::DebugState::Paused,
+                            iteration,
+                        },
+                    );
+                }
                 tracing::info!("Debug: stepping complete, auto-pausing");
             }
         }
@@ -1453,18 +1496,23 @@ impl AgentLoop {
             })
             .unwrap_or_default();
 
-        // Build skill_instructions from the manifest's skill config.
-        // Full skill content integration will be added when the skill
-        // registry is wired into the agent loop.
-        let skill_str = {
-            let mode = self.core.manifest.skill_mode();
-            match mode {
-                rollball_core::manifest::SkillMode::Progressive => {
-                    "[Skills: progressive injection mode — see skill registry for full list]".to_string()
-                }
-                rollball_core::manifest::SkillMode::Manual => String::new(),
-            }
-        };
+        // Build skill_instructions from the ContextBuilder.
+        // Skill instructions are injected via ContextBuilder.set_skill_instructions()
+        // (from command-based skill selection in cli.rs), making them visible
+        // in the debug panel's context snapshot.
+        let skill_str = context_builder
+            .skill_instructions()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        // ── Diagnostic: log workspace_context status for debugging zero-byte issue ──
+        tracing::info!(
+            iter = iter,
+            ws_has = context_builder.workspace_context().is_some(),
+            ws_len = context_builder.workspace_context().map(|s| s.len()).unwrap_or(0),
+            ws_preview = ?context_builder.workspace_context().map(|s| &s[..s.len().min(80)]),
+            "capture_context_snapshot: workspace_context status"
+        );
 
         let sections = ContextSnapshotSections {
             system_prompt: SectionContent::new(context_builder.system_prompt().to_string()),

@@ -192,6 +192,7 @@ async fn sa_04_gateway_routing_never_blocks() {
         .send_to_session(&session_a, SessionMessage::ChatMessage {
             content: "Hello A".to_string(),
             message_id: "msg-sa04-a".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -201,6 +202,7 @@ async fn sa_04_gateway_routing_never_blocks() {
         .send_to_session(&session_b, SessionMessage::ChatMessage {
             content: "Hello B".to_string(),
             message_id: "msg-sa04-b".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
     let route_elapsed = b_route_time.elapsed();
@@ -271,6 +273,7 @@ async fn ipc_01_gateway_disconnect_recovery() {
         .send_to_session(&session_a, SessionMessage::ChatMessage {
             content: "Before disconnect".to_string(),
             message_id: "msg-ipc01-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -295,6 +298,7 @@ async fn ipc_01_gateway_disconnect_recovery() {
     let route_result = manager.send_to_session(&session_a, SessionMessage::ChatMessage {
         content: "After disconnect".to_string(),
         message_id: "msg-ipc01-2".to_string(),
+    skill_instructions: None,
     });
     assert!(
         route_result.is_ok(),
@@ -315,6 +319,7 @@ async fn ipc_01_gateway_disconnect_recovery() {
         .send_to_session(&session_c, SessionMessage::ChatMessage {
             content: "After reconnect".to_string(),
             message_id: "msg-ipc01-3".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -465,6 +470,7 @@ async fn ipc_03_message_to_nonexistent_session() {
         SessionMessage::ChatMessage {
             content: "This should fail".to_string(),
             message_id: "msg-ipc03-1".to_string(),
+            skill_instructions: None,
         },
     );
     assert!(
@@ -490,6 +496,7 @@ async fn ipc_03_message_to_nonexistent_session() {
     let real_send_result = manager.send_to_session(&session_real, SessionMessage::ChatMessage {
         content: "Still works".to_string(),
         message_id: "msg-ipc03-2".to_string(),
+    skill_instructions: None,
     });
     assert!(
         real_send_result.is_ok(),
@@ -513,6 +520,7 @@ async fn ipc_03_message_to_nonexistent_session() {
             SessionMessage::ChatMessage {
                 content: "test".to_string(),
                 message_id: format!("msg-fake-{}", i),
+                skill_instructions: None,
             },
         );
         assert!(result.is_err(), "Send {} to nonexistent session should fail", i);
@@ -567,6 +575,7 @@ async fn lifecycle_01_create_session_while_receiving_messages() {
         .send_to_session(&session_id, SessionMessage::ChatMessage {
             content: "First message".to_string(),
             message_id: "msg-lifecycle-1".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 
@@ -574,6 +583,7 @@ async fn lifecycle_01_create_session_while_receiving_messages() {
         .send_to_session(&session_id, SessionMessage::ChatMessage {
             content: "Second message".to_string(),
             message_id: "msg-lifecycle-2".to_string(),
+            skill_instructions: None,
         })
         .unwrap();
 

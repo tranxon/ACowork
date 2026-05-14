@@ -515,7 +515,8 @@ async fn handle_ws_text(
 
     if client_msg.msg_type == "model_switch" {
         // Handle model switch: push to running agent via IPC
-        // Only running agents can switch models — persistence is handled by Agent Runtime
+        // Only running agents can switch models — persistence is handled here
+        // because the Agent Runtime's in-memory override is lost on restart.
         let model = match client_msg.model {
             Some(ref m) if !m.is_empty() => m.clone(),
             _ => {
@@ -553,7 +554,48 @@ async fn handle_ws_text(
             }
         }
 
+        // ── Persist model preference to workspace .agent_model.json ──
+        // Always write, even if the agent isn't currently running.
+        // The Agent Runtime only keeps an in-memory override; if the
+        // agent is restarted, the preference is lost.  Writing to disk
+        // here ensures the Gateway delivers the correct model on next
+        // startup (resolve_llm_config_for_agent) and the frontend's
+        // loadAgentModel reads it via GET /api/agents/:id/model.
+        {
+            let gw = state.gateway_state.read().await;
+            if let Some(info) = gw.installed_agents.get(agent_id) {
+                let workspace = std::path::Path::new(&info.install_path).join("workspace");
+                // Ensure workspace directory exists
+                let _ = std::fs::create_dir_all(&workspace);
+                let model_path = workspace.join(".agent_model.json");
+                let now = chrono::Utc::now().to_rfc3339();
+                let mut entry = serde_json::json!({
+                    "model": model,
+                    "updated_at": now,
+                });
+                if let Some(ref p) = provider {
+                    entry["provider"] = serde_json::json!(p);
+                }
+                if let Ok(json_str) = serde_json::to_string_pretty(&entry) {
+                    if let Err(e) = std::fs::write(&model_path, &json_str) {
+                        tracing::warn!(
+                            path = %model_path.display(),
+                            error = %e,
+                            "Failed to persist model preference to .agent_model.json"
+                        );
+                    } else {
+                        tracing::info!(
+                            path = %model_path.display(),
+                            model = %model,
+                            "Persisted model preference to .agent_model.json"
+                        );
+                    }
+                }
+            }
+        }
+
         if pushed_ok {
+
             // Push LLMConfigDelivery so that Runtime rebuilds the Provider instance
             // when the provider changes (e.g. deepseek → minimax-cn which needs Anthropic protocol).
             // Always push when the provider field is present — Runtime decides whether

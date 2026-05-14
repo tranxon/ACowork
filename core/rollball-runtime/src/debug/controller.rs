@@ -15,7 +15,8 @@ use super::protocol::{
 // ── Debug Execution State ─────────────────────────────────────────────
 
 /// Current execution state of the debug session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum DebugState {
     /// Running — agent loop is executing freely
     Running,
