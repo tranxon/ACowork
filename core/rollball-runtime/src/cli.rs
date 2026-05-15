@@ -2522,11 +2522,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_gateway_client_connection_failure_graceful() {
-        // Use a non-existent socket path to force connection failure
-        let client = connect_gateway_client("unix:///nonexistent/socket/path.sock", "com.test", "1.0.0").await;
+        // Use a non-existent socket path to force connection failure.
+        // Use connect_with_timeout directly to avoid the default 300s
+        // gRPC connect retry budget.
+        let result = crate::grpc::client::GatewayGrpcClient::connect_with_timeout(
+            "unix:///nonexistent/socket/path.sock",
+            2, // 2-second max elapsed time — enough to try a few times
+        )
+        .await;
         assert!(
-            client.is_none(),
-            "Should gracefully fallback to None on connection failure"
+            result.is_err(),
+            "Should gracefully return error on connection failure"
         );
     }
 }

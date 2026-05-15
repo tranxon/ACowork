@@ -490,7 +490,6 @@ fn test_t43_full_pipeline_create_write_read_verify() {
     session.append_message("user", "I need help with Rust.", None);
     session.append_message("assistant", "Sure, I'm happy to help with Rust!", None);
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 
@@ -528,7 +527,6 @@ fn test_t44_long_conversation_paginated_read() {
         session.append_message(role, &format!("Message {i}"), None);
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 
@@ -572,13 +570,11 @@ fn test_t45_multi_agent_isolation() {
     // Agent 1
     let session1 = ConversationSession::new(work_dir1, "com.agent.one", "com.agent.one").unwrap();
     session1.append_message("user", "Message for agent 1", None);
-    std::thread::sleep(std::time::Duration::from_millis(100));
     rt.block_on(async { session1.close().await.unwrap(); });
 
     // Agent 2
     let session2 = ConversationSession::new(work_dir2, "com.agent.two", "com.agent.two").unwrap();
     session2.append_message("user", "Message for agent 2", None);
-    std::thread::sleep(std::time::Duration::from_millis(100));
     rt.block_on(async { session2.close().await.unwrap(); });
 
     // Verify agent 1's data
@@ -625,7 +621,6 @@ fn test_t46_auto_creates_conversations_dir() {
         "conversations dir should be auto-created"
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 }
@@ -644,7 +639,6 @@ fn test_t47_readonly_jsonl_error_handling() {
 
     let session = ConversationSession::new(work_dir, "readonly-test", "com.test.agent").unwrap();
     session.append_message("user", "Before readonly", None);
-    std::thread::sleep(std::time::Duration::from_millis(100));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 
@@ -683,7 +677,6 @@ fn test_t48_extremely_long_session_id() {
     let result = ConversationSession::new(work_dir, &long_id, "com.test.agent");
     if let Ok(session) = result {
         session.append_message("user", "Long ID test", None);
-        std::thread::sleep(std::time::Duration::from_millis(100));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async { session.close().await.unwrap(); });
     }
@@ -757,7 +750,6 @@ fn test_t50_concurrent_session_creation() {
             let session_id = generate_session_id();
             let session = ConversationSession::new(&wd, &session_id, &agent_id).unwrap();
             session.append_message("user", &format!("Concurrent message {i}"), None);
-            std::thread::sleep(std::time::Duration::from_millis(100));
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async { session.close().await.unwrap(); });
             session_id
@@ -792,7 +784,6 @@ fn test_t51_large_file_backward_pagination() {
         session.append_message(role, &format!("Large file message {:03}", i), None);
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 

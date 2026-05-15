@@ -1025,7 +1025,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             size={40}
             className="shrink-0 mt-1"
           />
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 flex flex-col items-start">
             <div className="flex items-center gap-1.5 mt-[5px]">
               {liveAgentName && (
                 <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
@@ -1034,7 +1034,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
                 <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
               )}
             </div>
-            <div className="mt-[6px] w-full max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               {message.content && (
                 <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text" style={fontSizeStyle}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
@@ -1062,7 +1062,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             size={40}
             className="shrink-0 mt-1"
           />
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 flex flex-col items-start">
             <div className="flex items-center gap-1.5 mt-[5px]">
               {liveAgentName && (
                 <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
@@ -1071,7 +1071,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
                 <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
               )}
             </div>
-            <div className="mt-[6px] w-full max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               <ThinkBlock
                 content={message.content}
                 isStreaming={isStreaming}
@@ -1102,7 +1102,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
     return (
       <div className="flex justify-start">
         <button
-          className="flex w-full items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="flex w-full items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
           onClick={() => setExpanded(!expanded)}
         >
           <Wrench className="mt-0.5 h-3 w-3 shrink-0" />
@@ -1119,7 +1119,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
       <MessageContentWrapper>
         <div className="flex justify-start">
           <button
-            className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
             onClick={() => setExpanded(!expanded)}
           >
             <Wrench className="h-3 w-3 shrink-0" />
