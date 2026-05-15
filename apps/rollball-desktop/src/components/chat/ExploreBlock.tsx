@@ -55,7 +55,7 @@ export function ExploreBlock({ items, isStreaming }: ExploreBlockProps) {
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Brain className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-        <span className="font-medium text-zinc-600 dark:text-zinc-400">
+        <span className="font-medium text-zinc-400 dark:text-zinc-500">
           {isStreaming ? "Exploring..." : "Explored"}
         </span>
         <span className="text-zinc-400 dark:text-zinc-500">
