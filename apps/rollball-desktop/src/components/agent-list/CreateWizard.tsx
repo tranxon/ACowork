@@ -184,7 +184,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   className={cn(
                     "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
                     active &&
-                      "bg-zinc-800 text-white dark:bg-zinc-300 dark:text-zinc-900",
+                      "bg-zinc-200 text-zinc-800 dark:bg-zinc-300 dark:text-zinc-900",
                     passed &&
                       "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
                     !active && !passed && "text-zinc-400 dark:text-zinc-500",
@@ -448,7 +448,7 @@ ${form.permissions.map((p) => `${p} = ["*"]`).join("\n")}
           <button
             onClick={handleNext}
             disabled={!canProceed}
-            className="flex items-center gap-2 rounded-md bg-zinc-800 px-4 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="flex items-center gap-2 rounded-md btn-solid px-4 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? (
               <>

@@ -11,7 +11,10 @@ pub enum RuntimeError {
     Core(#[from] rollball_core::RollballError),
 
     #[error("Provider error: {0}")]
-    Provider(String),
+    Provider(rollball_core::providers::ProviderError),
+
+    #[error("Stream error: {0}")]
+    StreamError(rollball_core::providers::StreamError),
 
     #[error("Tool error: {0}")]
     Tool(String),

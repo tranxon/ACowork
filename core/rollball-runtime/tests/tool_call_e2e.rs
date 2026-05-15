@@ -195,7 +195,7 @@ async fn test_all_builtin_tools_count() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
     let tools = builtin::all_builtin_tools(&work_dir, "com.test.e2e");
-    assert_eq!(tools.len(), 15, "Should have 15 builtin tools");
+    assert_eq!(tools.len(), 16, "Should have 16 builtin tools (14 fixed + 2 shell on Windows)");
 }
 
 // ═══════════════════════════════════════════════════════════════════════

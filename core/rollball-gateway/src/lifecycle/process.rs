@@ -65,9 +65,12 @@ pub async fn spawn_agent_process(
         .arg("--work-dir")
         .arg(workspace)
         .arg("--gateway-socket")
-        .arg(gateway_grpc_endpoint)
-        .arg("--log-level")
-        .arg("info")
+        .arg(gateway_grpc_endpoint);
+
+    // Developer mode: lower log level to DEBUG for detailed diagnostics
+    let log_level = if dev_mode { "debug" } else { "info" };
+    cmd.arg("--log-level")
+        .arg(log_level)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
 

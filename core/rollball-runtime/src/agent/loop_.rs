@@ -722,7 +722,31 @@ impl AgentLoop {
             }
 
             // ①-⑧ Execute single iteration (shared with debug mode)
-            match self.execute_single_iteration(iteration, context_builder, user_message, &retrieved_memory_ids).await? {
+            // With iteration-level retry for retryable stream errors.
+            const MAX_ITERATION_RETRIES: u32 = 2;
+            let mut iteration_retries = 0u32;
+            let iteration_result = loop {
+                match self.execute_single_iteration(iteration, context_builder, user_message, &retrieved_memory_ids).await {
+                    Ok(result) => break result,
+                    Err(RuntimeError::StreamError(ref err)) if err.retryable && iteration_retries < MAX_ITERATION_RETRIES => {
+                        iteration_retries += 1;
+                        let backoff = std::time::Duration::from_millis(1000 * 2u64.pow(iteration_retries - 1));
+                        let backoff = backoff.min(std::time::Duration::from_secs(10));
+                        tracing::warn!(
+                            iteration,
+                            retry = iteration_retries,
+                            max_retries = MAX_ITERATION_RETRIES,
+                            error = %err.message,
+                            backoff_ms = backoff.as_millis(),
+                            "Retryable stream error, retrying iteration"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            match iteration_result {
                 IterationResult::TextResponse(content) => return Ok(content),
                 IterationResult::Interrupted(content) => return Ok(content),
                 IterationResult::ToolCallsExecuted => {
@@ -865,7 +889,7 @@ impl AgentLoop {
             self.trim_history_to_budget();
 
             // ②.5 Build context (now with trimmed history)
-            let chat_request = context_builder.build(&self.core.manifest, &self.session.history, self.get_model_capabilities(None), self.core.max_output_tokens_limit);
+            let mut chat_request = context_builder.build(&self.core.manifest, &self.session.history, self.get_model_capabilities(None), self.core.max_output_tokens_limit);
 
             tracing::info!(
                 request_messages_count = chat_request.messages.len(),
@@ -875,6 +899,42 @@ impl AgentLoop {
                 history_tokens = self.session.history.token_count(),
                 "Built chat request for LLM (after preemptive trim)"
             );
+
+            // ②.6 Request size warning / circuit-breaking
+            // Prevents sending requests that are too large for most models.
+            const REQUEST_SIZE_WARN: usize = 200_000;  // 200KB
+            const REQUEST_SIZE_HARD: usize = 280_000;   // 280KB
+            let request_size = serde_json::to_vec(&chat_request)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if request_size > REQUEST_SIZE_HARD {
+                tracing::error!(
+                    request_size,
+                    hard_limit = REQUEST_SIZE_HARD,
+                    "Request body exceeds hard limit, emergency trimming"
+                );
+                let removed = self.session.history.emergency_trim();
+                tracing::info!(removed, "Emergency trimmed messages for oversized request");
+                if removed > 0 {
+                    // Rebuild request with trimmed history.
+                    chat_request = context_builder.build(
+                        &self.core.manifest,
+                        &self.session.history,
+                        self.get_model_capabilities(None),
+                        self.core.max_output_tokens_limit,
+                    );
+                    tracing::info!(
+                        request_size = serde_json::to_vec(&chat_request).map(|v| v.len()).unwrap_or(0),
+                        "Request size after emergency trim"
+                    );
+                }
+            } else if request_size > REQUEST_SIZE_WARN {
+                tracing::warn!(
+                    request_size,
+                    warn_limit = REQUEST_SIZE_WARN,
+                    "Request body approaching size limit"
+                );
+            }
 
             // Debug: enter BuildContext phase
             self.update_debug_phase(
@@ -2331,8 +2391,10 @@ mod tests {
                 }
             }
             async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
-                // Sleep for a very long time — should be cut short by timeout
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                // Sleep for a long time — should be cut short by timeout.
+                // 5s is more than enough to verify timeout works (100ms threshold),
+                // while avoiding a 60s hang if timeout logic breaks.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Should not reach".to_string(),
@@ -2587,8 +2649,9 @@ mod tests {
                 }
             }
             async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
-                // Sleep longer than the iteration timeout
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                // Sleep longer than the iteration timeout (200ms).
+                // 5s is plenty to verify timeout works without risking a 60s hang.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Should not reach".to_string(),
@@ -2702,8 +2765,8 @@ mod tests {
                 }
             }
             async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
-                // Sleep longer than tool_timeout but shorter than iteration_timeout
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // Sleep longer than tool_timeout (100ms) but shorter than iteration_timeout (30s)
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Should not reach".to_string(),

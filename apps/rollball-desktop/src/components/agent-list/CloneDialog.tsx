@@ -153,7 +153,7 @@ export function CloneDialog({
                   className={cn(
                     "flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors",
                     mode === m
-                      ? "border-zinc-800 bg-zinc-800 text-white dark:border-zinc-300 dark:bg-zinc-300 dark:text-zinc-900"
+                      ? "border-zinc-200 bg-zinc-200 text-zinc-800 dark:border-zinc-300 dark:bg-zinc-300 dark:text-zinc-900"
                       : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700",
                   )}
                 >
@@ -186,7 +186,7 @@ export function CloneDialog({
           <button
             onClick={handleClone}
             disabled={cloning || !newAgentId.trim()}
-            className="flex items-center gap-2 rounded-md bg-zinc-800 px-4 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="flex items-center gap-2 rounded-md btn-solid px-4 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
           >
             {cloning ? (
               <>

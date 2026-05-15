@@ -138,7 +138,7 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
                   >
                     <div className="flex items-center gap-2">
                       <MessageCircle className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-                      <span className={cn("min-w-0 flex-1 truncate text-xs", isActive && "font-semibold text-blue-600 dark:text-blue-400", !isActive && "text-zinc-700 dark:text-zinc-300")}>
+                      <span className={cn("min-w-0 flex-1 truncate text-xs", isActive && "font-semibold text-accent-green", !isActive && "text-zinc-700 dark:text-zinc-300")}>
                         {session.title || "Untitled session"}
                       </span>
                     </div>

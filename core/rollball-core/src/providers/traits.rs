@@ -20,6 +20,15 @@ pub enum ProviderErrorType {
     ClientError,
     /// Network-level failure (timeout, DNS, connection reset, etc.).
     NetworkError,
+    /// Context window / token limit exceeded.
+    /// Not directly retryable — requires history trimming before retry.
+    ContextOverflow,
+    /// Stream decode error (mid-stream data corruption, h2 frame error, etc.).
+    /// Retryable — re-issuing the same request may succeed.
+    StreamDecodeError,
+    /// Stream silence — no data received within per-chunk read timeout.
+    /// Retryable — the provider may have been temporarily overloaded.
+    StreamTimeout,
     /// Unclassified error.
     Unknown,
 }
@@ -117,6 +126,42 @@ impl ProviderError {
             retryable: false,
         }
     }
+
+    /// Convenience constructor for context window / token limit overflow errors.
+    /// Not directly retryable — requires history trimming before retry.
+    pub fn context_overflow(message: String) -> Self {
+        Self {
+            message,
+            status_code: None,
+            error_type: ProviderErrorType::ContextOverflow,
+            retryable: false,
+        }
+    }
+
+    /// Convenience constructor for stream decode errors (mid-stream data corruption).
+    /// These are retryable — re-issuing the same request may succeed.
+    pub fn stream_decode(message: String) -> Self {
+        Self {
+            message,
+            status_code: None,
+            error_type: ProviderErrorType::StreamDecodeError,
+            retryable: true,
+        }
+    }
+
+    /// Convenience constructor for stream silence / read timeout errors.
+    /// These are retryable — the provider may have been temporarily overloaded.
+    pub fn stream_timeout(timeout_secs: u64) -> Self {
+        Self {
+            message: format!(
+                "Stream timeout: no data received for {}s",
+                timeout_secs
+            ),
+            status_code: None,
+            error_type: ProviderErrorType::StreamTimeout,
+            retryable: true,
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderError {
@@ -130,6 +175,93 @@ impl std::fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+/// Structured error for stream events.
+///
+/// Unlike `ProviderError` (which represents call-level failures before a stream
+/// is established), `StreamError` represents failures that occur *during* an
+/// active SSE stream. It carries the same classification metadata so that
+/// upstream consumers (ReliableProvider, AgentLoop) can make informed retry
+/// decisions without string matching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamError {
+    /// Human-readable error message.
+    pub message: String,
+    /// Classified error type.
+    pub error_type: ProviderErrorType,
+    /// Whether re-issuing the same request may succeed.
+    pub retryable: bool,
+    /// HTTP status code, if the error originated from an HTTP response.
+    pub status_code: Option<u16>,
+}
+
+impl StreamError {
+    /// Create a `StreamError` from a `ProviderError`, preserving all metadata.
+    pub fn from_provider_error(err: &ProviderError) -> Self {
+        Self {
+            message: err.message.clone(),
+            error_type: err.error_type.clone(),
+            retryable: err.retryable,
+            status_code: err.status_code,
+        }
+    }
+
+    /// Convenience constructor for stream decode errors (mid-stream data corruption).
+    /// These are retryable — re-issuing the same request may succeed.
+    pub fn stream_decode(message: String) -> Self {
+        Self {
+            message,
+            error_type: ProviderErrorType::StreamDecodeError,
+            retryable: true,
+            status_code: None,
+        }
+    }
+
+    /// Convenience constructor for stream silence / read timeout errors.
+    /// These are retryable — the provider may have been temporarily overloaded.
+    pub fn stream_timeout(timeout_secs: u64) -> Self {
+        Self {
+            message: format!(
+                "Stream timeout: no data received for {}s",
+                timeout_secs
+            ),
+            error_type: ProviderErrorType::StreamTimeout,
+            retryable: true,
+            status_code: None,
+        }
+    }
+
+    /// Convenience constructor for context window / token limit overflow errors.
+    /// Not directly retryable — requires history trimming before retry.
+    pub fn context_overflow(message: String) -> Self {
+        Self {
+            message,
+            error_type: ProviderErrorType::ContextOverflow,
+            retryable: false,
+            status_code: None,
+        }
+    }
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(code) = self.status_code {
+            write!(
+                f,
+                "[{}] {} (type={:?}, retryable={})",
+                code, self.message, self.error_type, self.retryable
+            )
+        } else {
+            write!(
+                f,
+                "{} (type={:?}, retryable={})",
+                self.message, self.error_type, self.retryable
+            )
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
 
 
 /// Chat message role
@@ -278,8 +410,10 @@ pub enum StreamEvent {
     ToolCallChunk { index: u64, arguments: String },
     /// Stream finished
     Finished(ChatResponse),
-    /// Error occurred
-    Error(String),
+    /// Error occurred during streaming. Carries structured metadata so that
+    /// upstream consumers (ReliableProvider, AgentLoop) can make informed retry
+    /// decisions without string matching.
+    Error(StreamError),
 }
 
 /// Provider trait for LLM providers

@@ -77,7 +77,7 @@ export function MemoryPanel() {
           <button
             onClick={handleConsolidate}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
           >
             <Zap className="h-3.5 w-3.5" />
             Consolidate

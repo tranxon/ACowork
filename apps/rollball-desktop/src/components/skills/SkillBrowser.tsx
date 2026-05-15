@@ -217,7 +217,7 @@ export function SkillBrowser() {
                           {skill.triggers.slice(0, 3).map((t) => (
                             <span
                               key={t}
-                              className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                              className="rounded bg-accent-green/10 px-1.5 py-0.5 text-[10px] font-medium text-accent-green"
                             >
                               {t}
                             </span>
@@ -307,7 +307,7 @@ export function SkillBrowser() {
               />
               {selectedFile ? (
                 <div className="text-xs">
-                  <div className="mb-1 font-medium text-blue-700 dark:text-blue-300">
+                  <div className="mb-1 font-medium text-accent-green">
                     {selectedFile.name}
                   </div>
                   <div className="text-zinc-500 dark:text-zinc-400">

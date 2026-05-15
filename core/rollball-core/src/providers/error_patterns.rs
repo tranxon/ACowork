@@ -136,8 +136,15 @@ pub fn classify_stream_error(msg: &str) -> StreamError {
             status_code: None,
         }
     } else {
-        // Default: treat as a transient network-like error, retryable.
-        StreamError::stream_decode(msg.to_string())
+        // Default: unknown errors are NOT retryable.
+        // Treat conservatively — unknown errors could be permanent failures
+        // (e.g. server-side rejection) and retrying would waste budget.
+        StreamError {
+            message: msg.to_string(),
+            error_type: ProviderErrorType::Unknown,
+            retryable: false,
+            status_code: None,
+        }
     }
 }
 
@@ -198,9 +205,9 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_stream_error_unknown_retryable() {
+    fn test_classify_stream_error_unknown_non_retryable() {
         let err = classify_stream_error("some unknown transient error");
-        assert_eq!(err.error_type, ProviderErrorType::StreamDecodeError);
-        assert!(err.retryable);
+        assert_eq!(err.error_type, ProviderErrorType::Unknown);
+        assert!(!err.retryable);
     }
 }

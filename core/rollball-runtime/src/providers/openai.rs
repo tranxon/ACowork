@@ -1,4 +1,4 @@
-//! OpenAI Compatible Provider
+﻿//! OpenAI Compatible Provider
 //!
 //! Supports OpenAI API and compatible endpoints (e.g., Azure OpenAI,
 //! Together AI, Groq, DeepSeek, etc.) via configurable base_url.
@@ -13,7 +13,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Per-chunk read timeout: if no data arrives within this duration,
+/// the stream is considered stalled and we emit a StreamTimeout error.
+const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
 
 use rollball_core::providers::traits::{
     ChatMessage, ChatRequest, ChatResponse, FunctionCall,
@@ -572,9 +577,9 @@ impl OpenAIProvider {
             let mut buffer = String::new();
 
             use futures_util::StreamExt;
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(bytes) => {
+            loop {
+                match tokio::time::timeout(STREAM_READ_TIMEOUT, stream.next()).await {
+                    Ok(Some(Ok(bytes))) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
                         while let Some(newline_pos) = buffer.find('\n') {
                             let line = buffer[..newline_pos].to_string();
@@ -592,8 +597,28 @@ impl OpenAIProvider {
                             }
                         }
                     }
-                    Err(e) => {
-                        let _ = tx.send(Some(StreamEvent::Error(format!("Stream error: {e}")))).await;
+                    Ok(Some(Err(e))) => {
+                        let stream_err = rollball_core::providers::classify_stream_error(
+                            &format!("Stream error: {e}"),
+                        );
+                        let _ = tx.send(Some(StreamEvent::Error(stream_err))).await;
+                        return;
+                    }
+                    Ok(None) => {
+                        // Stream ended normally
+                        break;
+                    }
+                    Err(_) => {
+                        // Stream silence — no data received within read timeout
+                        tracing::warn!(
+                            timeout_secs = STREAM_READ_TIMEOUT.as_secs(),
+                            "Stream silence detected, no data received within timeout"
+                        );
+                        let _ = tx.send(Some(StreamEvent::Error(
+                            rollball_core::providers::StreamError::stream_timeout(
+                                STREAM_READ_TIMEOUT.as_secs(),
+                            ),
+                        ))).await;
                         return;
                     }
                 }

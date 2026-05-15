@@ -42,7 +42,7 @@ export function SettingsPage({ initialTab = "gateway" }: { initialTab?: Settings
             className={cn(
               "border-b-2 px-3 py-2 text-sm font-medium transition-colors",
               activeTab === tab.id
-                ? "border-zinc-800 text-zinc-900 dark:border-zinc-200 dark:text-zinc-100"
+                ? "border-accent-green text-accent-green dark:border-accent-green dark:text-accent-green"
                 : "border-transparent text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
             )}
           >
@@ -118,7 +118,7 @@ function GatewayTab() {
         <button
           onClick={handleTest}
           disabled={testing}
-          className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
         >
           {testing ? "Testing..." : "Test Connection"}
         </button>
@@ -531,9 +531,9 @@ function ProvidersTab() {
                         <div className="flex items-center flex-nowrap gap-2">
                           <span className="shrink-0 text-sm font-medium">{providerName}</span>
                           {keyEntry.models?.length ? (
-                            <span className="shrink-0 text-xs text-blue-500 dark:text-blue-400">{keyEntry.models.join(", ")}</span>
+                            <span className="shrink-0 text-xs text-accent-green">{keyEntry.models.join(", ")}</span>
                           ) : keyEntry.default_model ? (
-                            <span className="shrink-0 text-xs text-blue-500 dark:text-blue-400">{keyEntry.default_model}</span>
+                            <span className="shrink-0 text-xs text-accent-green">{keyEntry.default_model}</span>
                           ) : (
                             <span className="shrink-0 text-xs text-zinc-400">—</span>
                           )}
@@ -555,7 +555,7 @@ function ProvidersTab() {
                           <span className="text-xs text-zinc-400">Key: {keyEntry.key_preview}</span>
                           <button
                             onClick={() => handleEdit(keyEntry.provider)}
-                            className="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                            className="text-xs text-accent-green hover:text-accent-green/70"
                           >
                             Edit
                           </button>
@@ -712,7 +712,7 @@ function ProvidersTab() {
               {/* Model selection (multi-select) */}
               <div>
                 <label className="mb-1 block text-xs text-zinc-500">
-                  Default Model {newModels.length > 0 && <span className="text-blue-500">({newModels.length} selected)</span>}
+                  Default Model {newModels.length > 0 && <span className="text-accent-green">({newModels.length} selected)</span>}
                 </label>
                 
                 {/* Capability filters */}
@@ -726,7 +726,7 @@ function ProvidersTab() {
                     className={cn(
                       "rounded px-2 py-0.5 text-[10px] font-medium",
                       modelCapabilityFilter.includes('tool_call')
-                        ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+                        ? "bg-accent-green/10 text-accent-green"
                         : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
                     )}
                   >
@@ -753,9 +753,9 @@ function ProvidersTab() {
                 {newModels.length > 0 && (
                   <div className="mb-1 flex flex-wrap gap-1">
                     {newModels.map((m) => (
-                      <span key={m} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                      <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
                         {m}
-                        <button onClick={() => setNewModels(newModels.filter((x) => x !== m))} className="text-blue-400 hover:text-blue-600">×</button>
+                        <button onClick={() => setNewModels(newModels.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
                       </span>
                     ))}
                   </div>
@@ -798,7 +798,7 @@ function ProvidersTab() {
                             type="checkbox"
                             checked={newModels.includes(m.id)}
                             onChange={() => toggleModel(m.id, newModels, setNewModels)}
-                            className="accent-blue-600"
+                            className="accent-accent-green"
                           />
                           <div className="flex flex-1 flex-col gap-0.5">
                             <span className="truncate">{m.name || m.id}</span>
@@ -901,7 +901,7 @@ function ProvidersTab() {
                           checked={displaySupportsToolCalling}
                           onChange={(e) => setNewSupportsToolCalling(e.target.checked)}
                           disabled={hasModelsDevData}
-                          className="accent-blue-600"
+                          className="accent-accent-green"
                         />
                         Supports Tool Calling
                       </label>
@@ -954,7 +954,7 @@ function ProvidersTab() {
                 <button
                   onClick={handleAdd}
                   disabled={(needsApiKey(newProvider) ? !newKey.trim() : false) || testing}
-                  className="w-20 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                  className="w-20 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-center text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
                 >
                   {testing ? "Saving..." : "Save"}
                 </button>
@@ -998,14 +998,14 @@ function ProvidersTab() {
               {/* Model selection */}
               <div>
                 <label className="mb-1 block text-xs text-zinc-500">
-                  Default Model {editModels.length > 0 && <span className="text-blue-500">({editModels.length} selected)</span>}
+                  Default Model {editModels.length > 0 && <span className="text-accent-green">({editModels.length} selected)</span>}
                 </label>
                 {editModels.length > 0 && (
                   <div className="mb-1 flex flex-wrap gap-1">
                     {editModels.map((m) => (
-                      <span key={m} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                      <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
                         {m}
-                        <button onClick={() => setEditModels(editModels.filter((x) => x !== m))} className="text-blue-400 hover:text-blue-600">×</button>
+                        <button onClick={() => setEditModels(editModels.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
                       </span>
                     ))}
                   </div>
@@ -1036,7 +1036,7 @@ function ProvidersTab() {
                             type="checkbox"
                             checked={editModels.includes(m.id)}
                             onChange={() => toggleModel(m.id, editModels, setEditModels)}
-                            className="accent-blue-600"
+                            className="accent-accent-green"
                           />
                           <div className="flex flex-1 flex-col gap-0.5">
                             <span className="truncate">{m.name || m.id}</span>
@@ -1132,7 +1132,7 @@ function ProvidersTab() {
                           checked={displaySupportsToolCalling}
                           onChange={(e) => setEditSupportsToolCalling(e.target.checked)}
                           disabled={hasModelsDevData}
-                          className="accent-blue-600"
+                          className="accent-accent-green"
                         />
                         Supports Tool Calling
                       </label>
@@ -1152,7 +1152,7 @@ function ProvidersTab() {
               </button>
               <button
                 onClick={handleEditSave}
-                className="w-20 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="w-20 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-center text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 Save
               </button>
@@ -1166,7 +1166,7 @@ function ProvidersTab() {
 
 /** Appearance settings */
 function AppearanceTab() {
-  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity } = useSettingsStore();
+  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, setAccentColor } = useSettingsStore();
 
   // Content width options: 40-100%, step 10
   const contentWidths = [
@@ -1201,10 +1201,40 @@ function AppearanceTab() {
                 value={t}
                 checked={theme === t}
                 onChange={() => setTheme(t)}
-                className="accent-zinc-800"
+                className="accent-accent-green"
               />
               {t.charAt(0).toUpperCase() + t.slice(1)}
             </label>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <h2 className="mb-3 text-sm font-medium">Accent Color</h2>
+        <p className="mb-2 text-xs text-zinc-500">全局高亮色</p>
+        <div className="flex gap-2">
+          {[
+            { label: "Green", value: "#00C375" },
+            { label: "Blue", value: "#3b82f6" },
+            { label: "Violet", value: "#8b5cf6" },
+            { label: "Cyan", value: "#06b6d4" },
+            { label: "Rose", value: "#f43f5e" },
+          ].map((c) => (
+            <button
+              key={c.value}
+              onClick={() => setAccentColor(c.value)}
+              className={cn(
+                "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
+                accentColor === c.value
+                  ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
+                  : "hover:scale-105",
+              )}
+              style={{
+                backgroundColor: c.value,
+                "--tw-ring-color": c.value,
+              } as React.CSSProperties}
+              title={c.label}
+            />
           ))}
         </div>
       </div>
@@ -1220,7 +1250,7 @@ function AppearanceTab() {
               className={cn(
                 "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
                 contentWidth === cw.value
-                  ? "border-zinc-800 bg-zinc-800 text-white dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-900"
+                  ? "border-accent-green bg-accent-green/10 text-accent-green dark:border-accent-green dark:bg-accent-green/20 dark:text-accent-green"
                   : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800",
               )}
             >
@@ -1240,7 +1270,7 @@ function AppearanceTab() {
               className={cn(
                 "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
                 fontSize === fs.value
-                  ? "border-zinc-800 bg-zinc-800 text-white dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-900"
+                  ? "border-accent-green bg-accent-green/10 text-accent-green dark:border-accent-green dark:bg-accent-green/20 dark:text-accent-green"
                   : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800",
               )}
             >
@@ -1261,7 +1291,8 @@ function AppearanceTab() {
             step="0.01"
             value={opacity}
             onChange={(e) => setOpacity(parseFloat(e.target.value))}
-            className="flex-1 accent-zinc-800 dark:accent-zinc-200"
+            className="flex-1"
+            style={{ "--progress": `${opacity * 100}%` } as React.CSSProperties}
           />
           <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400">
             {Math.round(opacity * 100)}%
@@ -1270,8 +1301,8 @@ function AppearanceTab() {
       </div>
 
       <button
-        onClick={() => { setTheme("system"); setFontSize(1.0); setContentWidth(90); setOpacity(1.0); }}
-        className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+        onClick={() => { setTheme("system"); setFontSize(0.875); setContentWidth(90); setOpacity(1.0); setAccentColor("#00C375"); }}
+        className="rounded-lg btn-solid px-3 py-1.5 text-xs"
       >
         Reset to defaults
       </button>

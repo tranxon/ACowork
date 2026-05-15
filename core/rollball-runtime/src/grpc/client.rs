@@ -199,12 +199,20 @@ impl GatewayGrpcClient {
 
     /// Connect to Gateway gRPC with exponential backoff retry.
     ///
-    /// Initial delay 100 ms, max delay 30 s, total timeout 300 s.
+    /// Initial delay 100 ms, max delay 30 s, total timeout controlled by
+    /// `max_elapsed_secs` (defaults to 300 s for production).
     /// This is the primary connection method for production use.
     pub async fn connect(endpoint: &str) -> Result<Self, RollballError> {
+        Self::connect_with_timeout(endpoint, 300).await
+    }
+
+    /// Connect with a custom max elapsed time (useful for tests).
+    pub async fn connect_with_timeout(
+        endpoint: &str,
+        max_elapsed_secs: u64,
+    ) -> Result<Self, RollballError> {
         const INITIAL_DELAY_MS: u64 = 100;
         const MAX_DELAY_MS: u64 = 30_000;
-        const MAX_ELAPSED_SECS: u64 = 300;
 
         let start = std::time::Instant::now();
         let mut delay_ms = INITIAL_DELAY_MS;
@@ -220,10 +228,10 @@ impl GatewayGrpcClient {
                 }
                 Err(e) => {
                     let elapsed = start.elapsed().as_secs();
-                    if elapsed >= MAX_ELAPSED_SECS {
+                    if elapsed >= max_elapsed_secs {
                         return Err(RollballError::Ipc(format!(
                             "Failed to connect to Gateway gRPC after {}s: {}",
-                            MAX_ELAPSED_SECS, e
+                            max_elapsed_secs, e
                         )));
                     }
                     tracing::warn!(

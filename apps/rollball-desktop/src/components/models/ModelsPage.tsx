@@ -159,7 +159,7 @@ export function ModelsPage() {
         <h1 className="text-xl font-semibold">Models</h1>
         <button
           onClick={() => setShowAddDialog(true)}
-          className="inline-flex items-center gap-1.5 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium"
         >
           <Plus className="h-3.5 w-3.5" /> Add Key
         </button>
@@ -196,7 +196,7 @@ export function ModelsPage() {
                               Not configured
                             </span>
                           ) : (
-                            <span className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                            <span className="rounded bg-accent-green/10 px-1.5 py-0.5 text-xs text-accent-green">
                               Available
                             </span>
                           )}
@@ -338,7 +338,7 @@ export function ModelsPage() {
               <button
                 onClick={handleAdd}
                 disabled={needsApiKey(newProvider) ? !newKey.trim() : false}
-                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
               >
                 Save
               </button>

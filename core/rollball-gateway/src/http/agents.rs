@@ -466,6 +466,29 @@ pub async fn start_agent(
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, gateway_grpc_endpoint);
     lifecycle.start_agent(&agent_id, &mut gw, req.dev_mode).await
         .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
+    drop(gw);
+
+    // When starting in debug mode, bump Gateway's log level to DEBUG
+    // so the Settings UI reflects the effective log level.
+    if req.dev_mode {
+        let level = "debug";
+        // 1. Update stored config
+        {
+            let mut gw = state.gateway_state.write().await;
+            if let Some(config) = &mut gw.config {
+                config.log_level = level.to_string();
+            }
+        }
+        // 2. Apply to Gateway's own tracing subscriber
+        if let Some(handle) = &state.log_reload_handle {
+            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            if let Err(e) = handle.reload(new_filter) {
+                tracing::warn!("Failed to reload Gateway tracing filter for debug mode: {}", e);
+            } else {
+                tracing::info!("Gateway log level set to {} (debug mode agent start)", level);
+            }
+        }
+    }
 
     let mode_label = if req.dev_mode { " (dev mode)" } else { "" };
     Ok(Json(MessageResponse {

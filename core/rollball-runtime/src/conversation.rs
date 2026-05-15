@@ -894,7 +894,7 @@ mod tests {
         session.append_message("tool_call", r#"{"path": "test.txt"}"#, None);
 
         // Give writer thread time to process
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         // Close session
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1062,7 +1062,7 @@ mod tests {
         // Create initial session
         let session = ConversationSession::new(work_dir, session_id, agent_id).unwrap();
         session.append_message("user", "First message", None);
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1075,7 +1075,7 @@ mod tests {
         assert_eq!(resumed.agent_id(), agent_id);
 
         resumed.append_message("assistant", "Resumed response", None);
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         rt.block_on(async {
             resumed.close().await.unwrap();

@@ -104,7 +104,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
             {detail.triggers.map((t) => (
               <span
                 key={t}
-                className="rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                className="rounded-full bg-accent-green/10 px-2.5 py-0.5 text-xs font-medium text-accent-green"
               >
                 {t}
               </span>

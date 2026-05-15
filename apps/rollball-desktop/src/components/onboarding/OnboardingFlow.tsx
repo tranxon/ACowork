@@ -102,7 +102,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
       <div className="mt-8 space-y-3">
         <button
           onClick={onNext}
-          className="w-full rounded-md bg-zinc-800 py-2.5 text-sm font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="w-full rounded-md btn-solid py-2.5 text-sm font-medium"
         >
           Start Setup
         </button>
@@ -185,7 +185,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
         <button
           onClick={onNext}
           disabled={status !== "connected"}
-          className="rounded-md bg-zinc-800 px-4 py-2 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded-md btn-solid px-4 py-2 text-xs font-medium disabled:opacity-50"
         >
           Next
         </button>
@@ -321,15 +321,15 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
           {/* Model selection (multi-select) */}
           <div className="mt-2">
             <label className="mb-1 block text-xs text-zinc-500">
-              Default Model {selectedModels.length > 0 && <span className="text-blue-500">({selectedModels.length} selected)</span>}
+              Default Model {selectedModels.length > 0 && <span className="text-accent-green">({selectedModels.length} selected)</span>}
             </label>
             {/* Selected model tags */}
             {selectedModels.length > 0 && (
               <div className="mb-1 flex flex-wrap gap-1">
                 {selectedModels.map((m) => (
-                  <span key={m} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                  <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
                     {m}
-                    <button onClick={() => setSelectedModels(selectedModels.filter((x) => x !== m))} className="text-blue-400 hover:text-blue-600">×</button>
+                    <button onClick={() => setSelectedModels(selectedModels.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
                   </span>
                 ))}
               </div>
@@ -361,7 +361,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
                         type="checkbox"
                         checked={selectedModels.includes(m.id)}
                         onChange={() => toggleModel(m.id)}
-                        className="accent-blue-600"
+                        className="accent-accent-green"
                       />
                       <span className="flex-1 truncate">{m.name || m.id}</span>
                     </label>
@@ -390,7 +390,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
           <button
             onClick={handleSave}
             disabled={!canSave || saving}
-            className="mt-2 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="mt-2 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
           >
             {saving ? "Saving..." : saved ? "Saved \u2713" : "Save"}
           </button>
@@ -414,7 +414,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
         </button>
         <button
           onClick={onNext}
-          className="rounded-md bg-zinc-800 px-4 py-2 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded-md btn-solid px-4 py-2 text-xs font-medium"
         >
           Next
         </button>
@@ -506,7 +506,7 @@ function IdentityStep({
         <button
           onClick={onNext}
           disabled={!requiredFilled}
-          className="rounded-md bg-zinc-800 px-4 py-2 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
         >
           Next
         </button>
@@ -560,7 +560,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         </button>
         <button
           onClick={onComplete}
-          className="rounded-md bg-zinc-800 px-4 py-2 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-300 dark:bg-zinc-700 dark:hover:bg-zinc-600"
         >
           Complete →
         </button>

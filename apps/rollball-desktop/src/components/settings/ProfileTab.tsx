@@ -114,7 +114,7 @@ export function ProfileTab() {
               onClick={() => setProfile({ avatarType: type })}
               className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                 profile.avatarType === type
-                  ? "border-zinc-800 bg-zinc-800 text-white dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-900"
+                  ? "border-zinc-200 bg-zinc-200 text-zinc-800 dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-800"
                   : "border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
               }`}
             >
@@ -137,7 +137,7 @@ export function ProfileTab() {
                   onClick={() => setProfile({ avatarVariant: v.id })}
                   className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                     profile.avatarVariant === v.id
-                      ? "border-zinc-800 bg-zinc-800 text-white dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-900"
+                      ? "border-zinc-200 bg-zinc-200 text-zinc-800 dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-800"
                       : "border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
                   }`}
                 >
@@ -158,7 +158,7 @@ export function ProfileTab() {
                   onClick={() => setProfile({ colorPalette: p.id, avatarColors: [] })}
                   className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                     profile.colorPalette === p.id && profile.avatarColors.length === 0
-                      ? "border-zinc-800 bg-zinc-800 text-white dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-900"
+                      ? "border-zinc-200 bg-zinc-200 text-zinc-800 dark:border-zinc-200 dark:bg-zinc-200 dark:text-zinc-800"
                       : "border-zinc-300 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
                   }`}
                 >
@@ -188,7 +188,7 @@ export function ProfileTab() {
             resetProfile();
             setNameValue("我");
           }}
-          className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-500 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="rounded-lg btn-solid px-3 py-1.5 text-xs"
         >
           Reset to defaults
         </button>

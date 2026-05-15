@@ -38,4 +38,4 @@ Thumbs.db
 ref-repo/
 
 # Legacy (before repo restructure)
-/cargo-check-output.txt
+/cargo-check-output.txtnul

@@ -31,7 +31,7 @@ thiserror = "2.0"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "ansi", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "ansi", "env-filter", "local-time"] }
 tracing-appender = "0.2"
 
 # Async trait

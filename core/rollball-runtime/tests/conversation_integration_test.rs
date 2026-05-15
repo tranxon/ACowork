@@ -490,7 +490,7 @@ fn test_t43_full_pipeline_create_write_read_verify() {
     session.append_message("user", "I need help with Rust.", None);
     session.append_message("assistant", "Sure, I'm happy to help with Rust!", None);
 
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(std::time::Duration::from_millis(50));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 
@@ -528,7 +528,7 @@ fn test_t44_long_conversation_paginated_read() {
         session.append_message(role, &format!("Message {i}"), None);
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(100));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 
@@ -792,7 +792,7 @@ fn test_t51_large_file_backward_pagination() {
         session.append_message(role, &format!("Large file message {:03}", i), None);
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(100));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { session.close().await.unwrap(); });
 

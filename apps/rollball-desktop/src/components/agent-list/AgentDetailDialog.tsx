@@ -113,7 +113,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
                 label="Current Model"
                 value={
                   <span className="flex items-center gap-1.5">
-                    <span className="font-mono text-xs text-blue-600 dark:text-blue-400">{modelInfo.model}</span>
+                    <span className="font-mono text-xs text-accent-green">{modelInfo.model}</span>
                     <span className="text-[10px] text-zinc-400">({modelInfo.provider})</span>
                   </span>
                 }

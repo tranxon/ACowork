@@ -58,9 +58,10 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           className={cn(
             "flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
             currentView === view
-              ? "bg-zinc-200 text-zinc-900 dark:bg-zinc-700 dark:text-zinc-100"
-              : "text-zinc-700 hover:bg-zinc-300 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-700 dark:hover:text-zinc-100",
+              ? ""
+              : "text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200/50 dark:text-zinc-500 dark:hover:text-zinc-300 dark:hover:bg-zinc-700/50",
           )}
+          style={currentView === view ? { color: "var(--color-accent-green)" } : undefined}
           title={label}
           aria-label={label}
           aria-current={currentView === view ? "page" : undefined}

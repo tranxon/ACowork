@@ -325,7 +325,7 @@ async fn test_s5_streaming_events_structure() {
         },
     });
     let tool_chunk_event = StreamEvent::ToolCallChunk { index: 0, arguments: r#"{"city":"Shanghai"}"#.to_string() };
-    let error_event = StreamEvent::Error("test error".to_string());
+    let error_event = StreamEvent::Error(rollball_core::providers::StreamError::stream_decode("test error".to_string()));
 
     // Verify all stream event types are constructible
     // (compilation itself is the validation — these types must exist and be usable)

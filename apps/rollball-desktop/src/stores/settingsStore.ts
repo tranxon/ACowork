@@ -7,6 +7,9 @@ const STORAGE_KEY_FONT_SIZE = "rollball-font-size";
 const STORAGE_KEY_LOG_LEVEL = "rollball-log-level";
 const STORAGE_KEY_CONTENT_WIDTH = "rollball-content-width";
 const STORAGE_KEY_OPACITY = "rollball-opacity";
+const STORAGE_KEY_ACCENT_COLOR = "rollball-accent-color";
+
+const DEFAULT_ACCENT_COLOR = "#00C375";
 
 /** Apply theme to DOM by toggling .dark class on <html> */
 function applyTheme(theme: Theme) {
@@ -36,6 +39,11 @@ function applyOpacity(opacity: number) {
   document.documentElement.style.setProperty("--app-opacity", String(opacity));
 }
 
+/** Apply accent color to CSS custom property on root */
+function applyAccentColor(color: string) {
+  document.documentElement.style.setProperty("--color-accent-green", color);
+}
+
 /** Read persisted theme from localStorage, fallback to "system" */
 function getPersistedTheme(): Theme {
   try {
@@ -47,7 +55,7 @@ function getPersistedTheme(): Theme {
   return "system";
 }
 
-/** Read persisted font size from localStorage, fallback to 1.0 */
+/** Read persisted font size from localStorage, fallback to 0.875 (M) */
 function getPersistedFontSize(): number {
   try {
     const stored = localStorage.getItem(STORAGE_KEY_FONT_SIZE);
@@ -56,7 +64,7 @@ function getPersistedFontSize(): number {
       if (!isNaN(val) && val > 0) return val;
     }
   } catch {}
-  return 1.0;
+  return 0.875;
 }
 
 /** Read persisted log level from localStorage, fallback to "info" */
@@ -80,6 +88,15 @@ function getPersistedContentWidth(): number {
   return 90;
 }
 
+/** Read persisted accent color from localStorage, fallback to #00C375 */
+function getPersistedAccentColor(): string {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_ACCENT_COLOR);
+    if (stored && /^#[0-9a-fA-F]{6}$/.test(stored)) return stored;
+  } catch {}
+  return DEFAULT_ACCENT_COLOR;
+}
+
 /** Read persisted opacity from localStorage, fallback to 1.0 (opaque) */
 function getPersistedOpacity(): number {
   try {
@@ -97,12 +114,14 @@ interface SettingsStore {
   fontSize: number;
   contentWidth: number;
   opacity: number;
+  accentColor: string;
   gatewayUrl: string;
   logLevel: string;
   setTheme: (theme: Theme) => void;
   setFontSize: (size: number) => void;
   setContentWidth: (width: number) => void;
   setOpacity: (opacity: number) => void;
+  setAccentColor: (color: string) => void;
   setGatewayUrl: (url: string) => void;
   setLogLevel: (level: string) => void;
 }
@@ -114,16 +133,19 @@ export const useSettingsStore = create<SettingsStore>((set) => {
   const initialLogLevel = getPersistedLogLevel();
   const initialOpacity = getPersistedOpacity();
   const initialContentWidth = getPersistedContentWidth();
+  const initialAccentColor = getPersistedAccentColor();
   applyTheme(initialTheme);
   applyFontSize(initialFontSize);
   applyOpacity(initialOpacity);
   applyContentWidth(initialContentWidth);
+  applyAccentColor(initialAccentColor);
 
   return {
     theme: initialTheme,
     fontSize: initialFontSize,
     contentWidth: initialContentWidth,
     opacity: initialOpacity,
+    accentColor: initialAccentColor,
     gatewayUrl: DEFAULT_GATEWAY_URL,
     logLevel: initialLogLevel,
 
@@ -149,6 +171,12 @@ export const useSettingsStore = create<SettingsStore>((set) => {
       applyOpacity(opacity);
       try { localStorage.setItem(STORAGE_KEY_OPACITY, String(opacity)); } catch {}
       set({ opacity });
+    },
+
+    setAccentColor: (accentColor) => {
+      applyAccentColor(accentColor);
+      try { localStorage.setItem(STORAGE_KEY_ACCENT_COLOR, accentColor); } catch {}
+      set({ accentColor });
     },
 
     setGatewayUrl: (gatewayUrl) => set({ gatewayUrl }),

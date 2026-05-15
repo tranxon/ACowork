@@ -183,8 +183,8 @@ async fn e2e_01_three_session_concurrent_conversation() {
         })
         .unwrap();
 
-    // Wait for all sessions to process
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for all sessions to process (MockProvider is near-instant)
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // All sessions should still be alive
     assert!(
@@ -341,7 +341,7 @@ async fn e2e_02_long_conversation_trim_chain() {
     }
 
     // Session should still be alive after trimming
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
         manager.get_session(&session_id).unwrap().is_alive(),
         "Session should survive history trimming"
@@ -455,7 +455,7 @@ async fn e2e_04_complete_lifecycle() {
         .unwrap();
 
     // Wait for processing
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Session should still be alive
     assert!(
@@ -467,7 +467,7 @@ async fn e2e_04_complete_lifecycle() {
     manager.destroy_session(&session_id).await.unwrap();
 
     // Wait for task to finish
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Step 4: Verify session is removed
     assert!(
@@ -527,11 +527,11 @@ async fn e2e_04_complete_lifecycle_with_jsonl() {
         .unwrap();
 
     // Wait for processing
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Destroy session (triggers close + distillation)
     manager.destroy_session(&session_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Verify JSONL file still exists after session destruction (persistence)
     let jsonl_path = work_dir.join("conversations").join(format!("{}.jsonl", session_id));
@@ -695,8 +695,8 @@ async fn edge_03_extra_long_message() {
         "Sending large message to channel should succeed"
     );
 
-    // Wait for processing
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for processing (MockProvider is near-instant)
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Session should still be alive (no panic)
     assert!(
@@ -744,12 +744,12 @@ async fn edge_03_extra_long_message_jsonl() {
         })
         .unwrap();
 
-    // Wait for processing
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for processing (MockProvider is near-instant)
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Destroy session to flush JSONL
     manager.destroy_session(&session_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Verify JSONL file exists and content is not truncated
     let jsonl_path = work_dir.join("conversations").join(format!("{}.jsonl", session_id));
@@ -878,8 +878,8 @@ async fn e2e_concurrent_sessions_with_tool_calls() {
         })
         .unwrap();
 
-    // Wait for both to process
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for both to process (MockProvider is near-instant)
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Both should be alive
     assert!(
@@ -941,12 +941,12 @@ async fn e2e_multi_turn_conversation_jsonl() {
                 skill_instructions: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
     // Destroy to flush
     manager.destroy_session(&session_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Verify JSONL has metadata + 6 messages (3 user + 3 assistant)
     let jsonl_path = work_dir
@@ -1017,11 +1017,11 @@ async fn e2e_session_title_set_from_first_message() {
         })
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Destroy to flush
     manager.destroy_session(&session_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Read JSONL metadata to verify title
     let jsonl_path = work_dir
@@ -1077,11 +1077,11 @@ async fn e2e_destroy_session_file_persists() {
             skill_instructions: None,
         })
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Destroy
     manager.destroy_session(&session_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // File should still exist
     let jsonl_path = work_dir
@@ -1133,10 +1133,10 @@ async fn e2e_conversation_resume() {
             skill_instructions: None,
         })
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     manager1.destroy_session(session_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Phase 2: Resume session
     let conversation2 =
@@ -1158,10 +1158,10 @@ async fn e2e_conversation_resume() {
             skill_instructions: None,
         })
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     manager2.destroy_session(session_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Verify JSONL has messages from both phases
     let jsonl_path = work_dir

@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+@theme {
+  --color-accent-green: #00C375;
+}
+
 /* Enable class-based dark mode for Tailwind v4 */
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -20,6 +24,9 @@
   /* Background & text tokens for body */
   --color-bg: white;
   --color-text: hsl(240 10% 3.9%);
+
+  /* Accent highlight (WeChat-style green) */
+  --color-accent-green: #00C375;
 
   /* Semantic colors */
   --color-agent-running: hsl(142 76% 36%);
@@ -52,6 +59,11 @@
   --duration-fast: 150ms;
   --duration-normal: 250ms;
   --duration-slow: 400ms;
+
+  /* Shimmer gradient stops */
+  --shimmer-from: hsl(240 5% 64%);
+  --shimmer-mid: hsl(240 5% 80%);
+  --shimmer-to:  hsl(240 5% 26%);
 }
 
 /* Dark mode overrides */
@@ -65,6 +77,11 @@
 
   --color-bg: hsl(240 10% 3.9%);
   --color-text: hsl(0 0% 98%);
+
+  /* Shimmer gradient stops (dark) */
+  --shimmer-from: hsl(240 5% 40%);
+  --shimmer-mid: hsl(240 5% 52%);
+  --shimmer-to:  hsl(240 5% 82%);
 }
 
 /* Base styles */
@@ -364,4 +381,120 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 input[type="number"] {
   -moz-appearance: textfield;
+}
+
+/* ── Range input — fully custom track & thumb ── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+/* Track */
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: linear-gradient(to right, var(--color-accent-green) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
+  border-radius: 2px;
+}
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: linear-gradient(to right, var(--color-accent-green) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
+  border-radius: 2px;
+}
+/* Thumb */
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 14px;
+  width: 14px;
+  border-radius: 50%;
+  background: var(--color-accent-green);
+  margin-top: -5px;
+}
+input[type="range"]::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border-radius: 50%;
+  background: var(--color-accent-green);
+  border: none;
+}
+/* Dark mode */
+.dark input[type="range"]::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, var(--color-accent-green) var(--progress, 0%), #52525b var(--progress, 0%));
+}
+.dark input[type="range"]::-moz-range-track {
+  background: linear-gradient(to right, var(--color-accent-green) var(--progress, 0%), #52525b var(--progress, 0%));
+}
+
+/* ── Radio — fully custom, no browser dark-outline artifact ── */
+input[type="radio"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 2px solid #a1a1aa;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+  background-color: transparent;
+}
+input[type="radio"]:checked {
+  border-color: var(--color-accent-green);
+  background-color: var(--color-accent-green);
+}
+
+/* ── Button surface variants — replaces raw bg-zinc-200 / border-zinc-300 patterns ── */
+.btn-solid {
+  background: #e4e4e7;
+  color: #27272a;
+}
+.btn-solid:hover {
+  background: #d4d4d8;
+}
+.dark .btn-solid {
+  background: #3f3f46;
+  color: #e4e4e7;
+}
+.dark .btn-solid:hover {
+  background: #52525b;
+}
+
+.btn-outline {
+  border: 1px solid #d4d4d8;
+  color: #71717a;
+  background: transparent;
+}
+.btn-outline:hover {
+  background: #fafafa;
+}
+.dark .btn-outline {
+  border-color: #52525b;
+  color: #a1a1aa;
+}
+.dark .btn-outline:hover {
+  background: #27272a;
+}
+
+/* ── Thinking shimmer animation ── */
+@keyframes shimmer {
+  from { background-position: 200% center; }
+  to   { background-position: -200% center; }
+}
+
+.thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--shimmer-from) 0%,
+    var(--shimmer-mid) 35%,
+    var(--shimmer-to) 50%,
+    var(--shimmer-mid) 65%,
+    var(--shimmer-from) 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 3.5s ease-in-out infinite;
+  font-weight: 400;
+  letter-spacing: 0.04em;
 }

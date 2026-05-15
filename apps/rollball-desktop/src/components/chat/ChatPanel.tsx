@@ -447,7 +447,7 @@ export function ChatPanel() {
           <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">{selectedAgent.name} is stopped</p>
           <button
             onClick={() => startAgent(selectedAgent.agent_id)}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="mt-3 inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium"
           >
             <Play className="h-3.5 w-3.5" /> Start Agent
           </button>
@@ -634,7 +634,7 @@ export function ChatPanel() {
         {/* Active skill badge */}
         {activeSkill && (
           <div className="flex items-center gap-1 px-3 pt-2">
-            <span className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs font-medium text-blue-700 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800">
+            <span className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-1.5 py-0.5 text-xs font-medium text-accent-green border border-accent-green/20">
               /{activeSkill.name}
               <button
                 type="button"
@@ -651,8 +651,8 @@ export function ChatPanel() {
         {queuedMessage && sending && (
           <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-0">
             <div className="flex items-center gap-1.5 min-w-0">
-              <span className="shrink-0 text-[10px] text-blue-500 dark:text-blue-400">⏳</span>
-              <span className="truncate text-xs text-blue-600 dark:text-blue-400">
+              <span className="shrink-0 text-[10px] text-accent-green">⏳</span>
+              <span className="truncate text-xs text-accent-green">
                 Queued: {queuedMessage}
               </span>
             </div>
@@ -998,7 +998,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             {liveUserName && (
               <span className="mb-1 text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
             )}
-            <div className="max-w-[85%] rounded-lg rounded-br-sm bg-[#9DF29F] px-4 py-2.5 text-zinc-900 select-text" style={fontSizeStyle}>
+            <div className="max-w-[85%] rounded-lg rounded-br-sm bg-accent-green/15 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text" style={fontSizeStyle}>
               {message.content}
             </div>
           </div>
@@ -1406,7 +1406,7 @@ function AddModelDialog({
           {/* Model selection */}
           <div>
             <label className="mb-1 block text-xs text-zinc-500">
-              Model {models.length > 0 && <span className="text-blue-500">({models.length} selected)</span>}
+              Model {models.length > 0 && <span className="text-accent-green">({models.length} selected)</span>}
             </label>
             
             {/* Capability filters */}
@@ -1420,7 +1420,7 @@ function AddModelDialog({
                 className={cn(
                   "rounded px-2 py-0.5 text-[10px] font-medium",
                   modelCapabilityFilter.includes('tool_call')
-                    ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+                    ? "bg-accent-green/10 text-accent-green"
                     : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
                 )}
               >
@@ -1447,9 +1447,9 @@ function AddModelDialog({
             {models.length > 0 && (
               <div className="mb-1 flex flex-wrap gap-1">
                 {models.map((m) => (
-                  <span key={m} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                  <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
                     {m}
-                    <button onClick={() => setModels(models.filter((x) => x !== m))} className="text-blue-400 hover:text-blue-600">×</button>
+                    <button onClick={() => setModels(models.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
                   </span>
                 ))}
               </div>
@@ -1494,7 +1494,7 @@ function AddModelDialog({
                         checked={models.includes(m.id)}
                         disabled={keys.some(k => k.provider === provider && k.models?.includes(m.id))}
                         onChange={() => toggleModel(m.id, models, setModels)}
-                        className="accent-blue-600 disabled:opacity-50"
+                        className="accent-accent-green disabled:opacity-50"
                       />
                       <div className="flex flex-1 flex-col gap-0.5">
                         <span className="truncate">{m.name || m.id}</span>
@@ -1598,7 +1598,7 @@ function AddModelDialog({
                       checked={displaySupportsToolCalling}
                       onChange={(e) => setSupportsToolCalling(e.target.checked)}
                       disabled={hasModelsDevData}
-                      className="accent-blue-600"
+                      className="accent-accent-green"
                     />
                     Supports Tool Calling
                   </label>
@@ -1652,7 +1652,7 @@ function AddModelDialog({
             <button
               onClick={handleSave}
               disabled={(needsApiKey(provider) ? !key.trim() : false) || saving}
-              className="w-20 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+              className="w-20 rounded-md btn-solid px-3 py-1.5 text-xs font-medium text-center disabled:opacity-50"
             >
               {saving ? "Saving..." : "Save"}
             </button>
@@ -1762,7 +1762,7 @@ function ModelMenu({
                     : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
                 )}
               >
-                <span className={cn("font-medium", isActive && "text-blue-600 dark:text-blue-400")}>
+                <span className={cn("font-medium")} style={isActive ? { color: "var(--color-accent-green)" } : undefined}>
                   {/* Strip provider prefix from model name if format is provider/model and model is longer */}
                   {(() => {
                     if (!m.name.includes('/')) return m.name;

@@ -220,6 +220,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CrlfStderr {
 fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
     use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::fmt::time::LocalTime;
     use crate::config::GatewayConfig;
 
     let env_filter = EnvFilter::try_from_default_env()
@@ -241,6 +242,7 @@ fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
                 tracing_subscriber::fmt::layer()
                     .with_writer(CrlfStderr)
                     .with_target(false)
+                    .with_timer(LocalTime::rfc_3339())
                     .compact()
             )
             .init();
@@ -258,6 +260,7 @@ fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
         .with_thread_ids(false)
         .with_file(false)
         .with_ansi(false)
+        .with_timer(LocalTime::rfc_3339())
         .compact();
 
     // File layer (file_appender implements MakeWriter, writes \n line endings
@@ -267,7 +270,8 @@ fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
         .with_target(true)
         .with_thread_ids(true)
         .with_file(true)
-        .with_ansi(false);
+        .with_ansi(false)
+        .with_timer(LocalTime::rfc_3339());
 
     tracing_subscriber::registry()
         .with(filter)

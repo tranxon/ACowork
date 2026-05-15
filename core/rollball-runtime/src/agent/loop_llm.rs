@@ -238,16 +238,13 @@ impl AgentLoop {
                     break;
                 }
                 StreamEvent::Error(e) => {
-                    // Check for context overflow and attempt recovery
-                    // MiniMax returns "context window exceeds limit (20xx)"
+                    // Check for context overflow and attempt recovery.
+                    // Use structured error_type instead of string matching.
                     if retry_on_overflow
-                        && (e.contains("context_length_exceeded")
-                            || e.contains("context window exceeds limit")
-                            || e.contains("context window") && e.contains("exceeds")
-                            || e.contains("max_tokens")
-                            || e.contains("token limit"))
+                        && e.error_type == rollball_core::providers::traits::ProviderErrorType::ContextOverflow
                     {
                         tracing::warn!(
+                            error = %e.message,
                             "Context overflow detected in stream, attempting emergency trim"
                         );
                         let removed = self.session.history.emergency_trim();
@@ -266,10 +263,10 @@ impl AgentLoop {
                                 .call_llm_streaming_no_retry(&chat_request)
                                 .await;
                         } else {
-                            return Err(RuntimeError::Provider(e));
+                            return Err(RuntimeError::StreamError(e));
                         }
                     }
-                    return Err(RuntimeError::Provider(e));
+                    return Err(RuntimeError::StreamError(e));
                 }
             }
         }

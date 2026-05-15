@@ -86,8 +86,13 @@ impl ReliableProvider {
     fn is_retryable(error: &rollball_core::RollballError) -> bool {
         match error {
             rollball_core::RollballError::Provider(provider_err) => {
-                // Use structured retryable flag; rate-limited errors are retryable.
-                provider_err.retryable || provider_err.error_type == ProviderErrorType::RateLimited
+                // Use structured retryable flag; rate-limited, stream-decode,
+                // and stream-timeout errors are retryable.
+                // ContextOverflow is NOT directly retryable (needs trim first).
+                provider_err.retryable
+                    || provider_err.error_type == ProviderErrorType::RateLimited
+                    || provider_err.error_type == ProviderErrorType::StreamDecodeError
+                    || provider_err.error_type == ProviderErrorType::StreamTimeout
             }
             rollball_core::RollballError::RateLimited(_) => true,
             rollball_core::RollballError::Io(_) => true,
@@ -167,21 +172,52 @@ impl Provider for ReliableProvider {
         &self,
         request: ChatRequest,
     ) -> rollball_core::error::Result<Box<dyn Stream<Item = StreamEvent> + Send>> {
-        // For streaming, try primary first, then fallback
-        match self.primary.chat_stream(request.clone()).await {
-            Ok(stream) => Ok(stream),
-            Err(_) => {
-                // Try fallbacks
-                for fallback in &self.fallbacks {
-                    if let Ok(stream) = fallback.chat_stream(request.clone()).await {
-                        return Ok(stream);
+        // Collect all candidate providers: primary + fallbacks
+        let candidates: Vec<&Arc<dyn Provider>> = std::iter::once(&self.primary)
+            .chain(self.fallbacks.iter())
+            .collect();
+
+        for provider in candidates {
+            for attempt in 0..self.retry_config.max_attempts {
+                match provider.chat_stream(request.clone()).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(e) if !Self::is_retryable(&e) || Self::is_balance_exhausted(&e) => {
+                        tracing::warn!(
+                            provider = %provider.name(),
+                            error = %e,
+                            "Non-retryable stream error, trying next provider"
+                        );
+                        break; // Move to next provider
+                    }
+                    Err(e) if attempt + 1 < self.retry_config.max_attempts => {
+                        let wait = self.retry_config.backoff.wait_duration(attempt);
+                        let wait = wait.min(Duration::from_millis(self.retry_config.max_wait_ms));
+                        tracing::warn!(
+                            provider = %provider.name(),
+                            attempt = attempt + 1,
+                            max = self.retry_config.max_attempts,
+                            wait_ms = wait.as_millis(),
+                            error = %e,
+                            "Retrying stream establishment"
+                        );
+                        sleep(wait).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            provider = %provider.name(),
+                            attempts = self.retry_config.max_attempts,
+                            error = %e,
+                            "Stream retries exhausted for provider"
+                        );
+                        break; // Try next provider
                     }
                 }
-                Err(rollball_core::RollballError::Provider(
-                    ProviderError::unknown("All providers failed for streaming".to_string()),
-                ))
             }
         }
+
+        Err(rollball_core::RollballError::Provider(
+            ProviderError::network("All providers failed for streaming".to_string()),
+        ))
     }
 
     async fn chat_token_count(

@@ -216,7 +216,8 @@ export function AgentSetupTab() {
               temperature: parseFloat(e.target.value),
             })
           }
-          className="w-full accent-zinc-600 dark:accent-zinc-400"
+          className="w-full"
+          style={{ "--progress": `${((profile.temperature ?? 0.7) / 2) * 100}%` } as React.CSSProperties}
         />
         <div className="flex justify-between text-[9px] text-zinc-400 dark:text-zinc-500">
           <span>0 (deterministic)</span>
@@ -229,7 +230,7 @@ export function AgentSetupTab() {
         <button
           onClick={handleApply}
           disabled={configSaving}
-          className="w-full rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-200 dark:text-zinc-800 dark:hover:bg-zinc-300"
+          className="w-full rounded-lg bg-zinc-200 px-3 py-1.5 text-xs text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-200 dark:text-zinc-800 dark:hover:bg-zinc-300"
         >
           {configSaving ? "Applying..." : "Apply to Runtime"}
         </button>

@@ -265,7 +265,7 @@ async fn distill_with_llm(
     };
 
     let response = provider.chat(request).await.map_err(|e| {
-        RuntimeError::Provider(format!("Episode distillation LLM call failed: {}", e))
+        RuntimeError::Core(e)
     })?;
 
     parse_distillation_response(response.content, session_id, source_session_id)
