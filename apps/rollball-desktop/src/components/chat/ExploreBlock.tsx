@@ -190,7 +190,7 @@ function ToolCallItem({ call, result }: { call: ChatMessage; result?: ChatMessag
     <div className="min-w-0">
       <button
         onClick={() => setShowDetails(!showDetails)}
-        className="flex min-w-0 w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700"
+        className="flex min-w-0 w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
