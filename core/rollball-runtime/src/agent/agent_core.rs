@@ -315,16 +315,22 @@ impl AgentCore {
         }
     }
 
-    /// Look up model capabilities by model name.
-    /// Falls back to the first entry if the model name is not found.
-    pub fn get_model_capabilities(&self, model_name: Option<&str>) -> Option<&ModelCapabilitiesInfo> {
-        if let Some(name) = model_name
-            && let Some(caps) = self.gateway_model_capabilities.get(name)
-        {
-            return Some(caps);
-        }
-        // Fallback: return any available capabilities
-        self.gateway_model_capabilities.values().next()
+    /// Look up model capabilities by exact model name.
+    /// Falls back to any available capabilities with a warning when the
+    /// requested model is not found (e.g. model_switch raced with capability
+    /// delivery). The fallback prevents silent degradation of trim/token
+    /// planning but may use inaccurate values — callers should log a warn.
+    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<&ModelCapabilitiesInfo> {
+        self.gateway_model_capabilities.get(model_name).or_else(|| {
+            let fallback = self.gateway_model_capabilities.values().next();
+            if fallback.is_some() {
+                tracing::warn!(
+                    model = %model_name,
+                    "Model not found in gateway capabilities, using fallback — values may be inaccurate"
+                );
+            }
+            fallback
+        })
     }
 
     /// Set the debug controller, notify handles, and event sender (DevMode only).
@@ -362,14 +368,16 @@ impl AgentCore {
     }
 
     /// Get the context window budget for history trimming.
-    /// Uses Gateway model capabilities (context_window) if available,
+    /// Uses Gateway model capabilities (context_window) if available for the given model,
     /// otherwise falls back to config.history_max_tokens.
-    pub fn context_trim_budget(&self) -> u64 {
-        self.get_model_capabilities(None)
+    pub fn context_trim_budget(&self, model_name: &str) -> u64 {
+        self.get_model_capabilities(model_name)
             .map(|caps| caps.context_window)
             .unwrap_or_else(|| {
                 tracing::debug!(
-                    "No model capabilities received from Gateway, using config.history_max_tokens as fallback."
+                    model = %model_name,
+                    "No model capabilities for '{}', using config.history_max_tokens as fallback.",
+                    model_name
                 );
                 self.config.history_max_tokens
             })

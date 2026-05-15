@@ -253,10 +253,11 @@ impl AgentLoop {
                                 "Emergency trim removed {} messages, retrying",
                                 removed
                             );
+                            let model_name = self.resolve_current_model(context_builder);
                             let chat_request = context_builder.unwrap().build(
                                 &self.core.manifest,
                                 &self.session.history,
-                                self.get_model_capabilities(None),
+                                self.get_model_capabilities(&model_name),
                                 self.core.max_output_tokens_limit,
                             );
                             return self

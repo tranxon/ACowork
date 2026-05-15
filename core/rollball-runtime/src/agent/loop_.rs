@@ -318,17 +318,25 @@ impl AgentLoop {
         self.session.conversation.as_ref().map(|conv| conv.update_title_force(title))
     }
 
-    /// Look up model capabilities by model name.
-    /// Falls back to the first entry if the model name is not found.
-    pub(crate) fn get_model_capabilities(&self, model_name: Option<&str>) -> Option<&ModelCapabilitiesInfo> {
+    /// Look up model capabilities by exact model name (delegates to AgentCore).
+    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<&ModelCapabilitiesInfo> {
         self.core.get_model_capabilities(model_name)
+    }
+
+    /// Resolve the current model name for capability lookups.
+    /// Uses override_model (set by model_switch) if present,
+    /// otherwise falls back to manifest suggested_model (guaranteed non-empty).
+    pub(crate) fn resolve_current_model(&self, ctx: Option<&ContextBuilder>) -> String {
+        ctx.and_then(|cb| cb.override_model())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.core.manifest.llm.suggested_model.clone())
     }
 
     /// Get the context window budget for history trimming.
     /// Uses Gateway model capabilities (context_window) if available,
     /// otherwise falls back to config.history_max_tokens.
-    fn context_trim_budget(&self) -> u64 {
-        self.core.context_trim_budget()
+    fn context_trim_budget(&self, model_name: &str) -> u64 {
+        self.core.context_trim_budget(model_name)
     }
 
     /// Write a distilled episode to the Grafeo memory store (best-effort).
@@ -361,8 +369,8 @@ impl AgentLoop {
     /// distilled into a `DistilledEpisode` via `EpisodeDistiller`, so that
     /// the semantic content is preserved in Grafeo even after the messages
     /// are removed from the context window.
-    fn trim_history_to_budget(&mut self) {
-        let budget = self.context_trim_budget();
+    fn trim_history_to_budget(&mut self, model_name: &str) {
+        let budget = self.context_trim_budget(model_name);
         // Reserve 20% of context window for new response + overhead
         let trim_budget = (budget as f64 * 0.8) as u64;
         let trimmed_messages = self.session.history.preemptive_trim_drain(trim_budget);
@@ -638,6 +646,9 @@ impl AgentLoop {
 
         loop {
             iteration += 1;
+            // Resolve current model name for this iteration — model_switch
+            // may update override_model mid-session, so compute it fresh each loop.
+            let current_model = self.resolve_current_model(Some(context_builder));
             tracing::info!(
                 iteration,
                 history_token_count = self.session.history.token_count(),
@@ -673,7 +684,7 @@ impl AgentLoop {
                             iteration = 0; // Reset counter
                             
                             // Trim history before resuming to avoid context window overflow
-                            self.trim_history_to_budget();
+                            self.trim_history_to_budget(&current_model);
                             
                             break; // Resume main loop
                         }
@@ -726,7 +737,7 @@ impl AgentLoop {
             const MAX_ITERATION_RETRIES: u32 = 2;
             let mut iteration_retries = 0u32;
             let iteration_result = loop {
-                match self.execute_single_iteration(iteration, context_builder, user_message, &retrieved_memory_ids).await {
+                match self.execute_single_iteration(iteration, context_builder, user_message, &retrieved_memory_ids, &current_model).await {
                     Ok(result) => break result,
                     Err(RuntimeError::StreamError(ref err)) if err.retryable && iteration_retries < MAX_ITERATION_RETRIES => {
                         iteration_retries += 1;
@@ -779,6 +790,7 @@ impl AgentLoop {
         context_builder: &mut ContextBuilder,
         user_message: &str,
         retrieved_memory_ids: &[String],
+        current_model: &str,
     ) -> Result<IterationResult> {
             // ── Debug mode hooks ──
             // Increment session-level iteration counter (cumulative across
@@ -886,10 +898,10 @@ impl AgentLoop {
 
             // ② Preemptive trim — MUST happen BEFORE build() so the request
             // is constructed with already-trimmed history.
-            self.trim_history_to_budget();
+            self.trim_history_to_budget(&current_model);
 
             // ②.5 Build context (now with trimmed history)
-            let mut chat_request = context_builder.build(&self.core.manifest, &self.session.history, self.get_model_capabilities(None), self.core.max_output_tokens_limit);
+            let mut chat_request = context_builder.build(&self.core.manifest, &self.session.history, self.get_model_capabilities(&current_model), self.core.max_output_tokens_limit);
 
             tracing::info!(
                 request_messages_count = chat_request.messages.len(),
@@ -920,7 +932,7 @@ impl AgentLoop {
                     chat_request = context_builder.build(
                         &self.core.manifest,
                         &self.session.history,
-                        self.get_model_capabilities(None),
+                        self.get_model_capabilities(&current_model),
                         self.core.max_output_tokens_limit,
                     );
                     tracing::info!(
@@ -965,8 +977,9 @@ impl AgentLoop {
             if let Some(usage) = &response.usage {
                 self.session.budget_guard.update_usage(usage.total_tokens, 0.0);
 
-                // Compute and emit context usage report
-                let model_caps = self.core.gateway_model_capabilities.values().next();
+                // Compute and emit context usage report — use exact model lookup
+                // to avoid capability confusion in multi-model scenarios.
+                let model_caps = self.get_model_capabilities(&current_model);
                 tracing::debug!(
                     has_chunk_tx = self.core.on_chunk.is_some(),
                     has_model_caps = model_caps.is_some(),
