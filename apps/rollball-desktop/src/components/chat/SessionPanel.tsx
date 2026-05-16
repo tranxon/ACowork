@@ -39,6 +39,7 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Fetch sessions when panel opens or agent changes
   useEffect(() => {
@@ -58,6 +59,17 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
+
+  // Force scrollbar recalculation when sessions change (fixes stale scrollbar after agent switch)
+  useEffect(() => {
+    if (listRef.current) {
+      // Trigger reflow to recalculate scrollbar dimensions
+      const el = listRef.current;
+      el.style.overflow = 'hidden';
+      void el.offsetHeight; // force reflow
+      el.style.overflow = '';
+    }
+  }, [sessions]);
 
   const handleSwitchSession = async (sessionId: string) => {
     await switchSession(sessionId, agentId);
@@ -109,7 +121,7 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
           </div>
 
           {/* Session list */}
-          <div className="max-h-80 overflow-y-auto py-1">
+          <div ref={listRef} className="max-h-80 overflow-y-auto py-1">
             {isLoading && sessions.length === 0 && (
               <div className="flex items-center justify-center gap-2 px-3 py-6 text-xs text-zinc-400 dark:text-zinc-500">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
