@@ -723,7 +723,7 @@ export function ChatPanel() {
               <button
                 className={`rounded-lg p-1.5 transition-colors ${
                   sending
-                    ? "text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900/30 hover:text-blue-600 dark:hover:text-blue-400"
+                    ? "text-[var(--color-accent-green)] hover:bg-green-50 dark:hover:bg-green-900/20"
                     : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
                 }`}
                 onClick={sending ? handleStop : handleSend}
@@ -769,19 +769,9 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
   const [hovered, setHovered] = useState(false);
 
   // Color coding for tooltip internals -- urgency-based
-  const urgencyColor =
-    percent >= 90
-      ? "text-red-500 dark:text-red-400"
-      : percent >= 70
-        ? "text-amber-500 dark:text-amber-400"
-        : "text-emerald-500 dark:text-emerald-400";
+  const urgencyColor = "var(--color-accent-green)";
 
-  const barColor =
-    percent >= 90
-      ? "bg-red-500"
-      : percent >= 70
-        ? "bg-amber-500"
-        : "bg-emerald-500";
+  const barColor = "var(--color-accent-green)";
 
   return (
     <div className="group relative">
@@ -802,7 +792,7 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">Context Usage</span>
-          <span className={`text-xs font-medium ${urgencyColor}`}>
+          <span className="text-xs font-medium" style={{ color: urgencyColor }}>
             {percent}%
           </span>
         </div>
@@ -826,8 +816,7 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
         {/* Progress bar */}
         <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700">
           <div
-            className={`h-full rounded-full transition-all duration-300 ${barColor}`}
-            style={{ width: `${percent}%` }}
+            className="h-full rounded-full transition-all duration-300" style={{ backgroundColor: barColor, width: `${percent}%` }}
           />
         </div>
 
