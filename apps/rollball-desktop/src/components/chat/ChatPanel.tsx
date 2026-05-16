@@ -263,6 +263,17 @@ export function ChatPanel() {
             isInitialLoadRef.current = false;
           };
           void initSession();
+        } else {
+          // Messages already cached — restore session list and selection without reloading
+          const restoreSessionSelection = async () => {
+            await useSessionStore.getState().fetchSessions(selectedAgentId);
+            const rememberedId = useSessionStore.getState().agentSessionMap[selectedAgentId];
+            const sessions = useSessionStore.getState().sessions;
+            if (rememberedId && sessions.some(s => s.session_id === rememberedId)) {
+              useSessionStore.getState().switchSession(rememberedId, selectedAgentId);
+            }
+          };
+          void restoreSessionSelection();
         }
       }
     } else if (!isSameAgentRemount) {
