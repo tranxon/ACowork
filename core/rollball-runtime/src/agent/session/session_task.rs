@@ -340,6 +340,44 @@ impl SessionTask {
                     )
                     .await;
 
+                    // ── Debug mode: auto-resume if paused/stepping ──
+                    // When the user sends a chat message, they expect a response.
+                    // If the debug controller is Paused or Stepping, the agent loop
+                    // will block at await_debug_resume().  Auto-resume so the
+                    // message is processed immediately.
+                    if let Some(ref ctrl) = debug_ctrl {
+                        let mut guard = ctrl.lock().await;
+                        match guard.state {
+                            crate::debug::controller::DebugState::Paused
+                            | crate::debug::controller::DebugState::Stepping => {
+                                let old_state = guard.state.clone();
+                                guard.state = crate::debug::controller::DebugState::Running;
+                                let iteration = guard.iteration;
+                                drop(guard);
+                                tracing::info!(
+                                    session_id = %session_id,
+                                    old_state = ?old_state,
+                                    "Debug: auto-resuming on chat_message"
+                                );
+                                // Notify the debug frontend so it updates the UI
+                                if let Some(ref tx) = agent_loop.core.debug_event_tx() {
+                                    let _ = tx.send(
+                                        crate::debug::server::DebugEvent::ExecutionStateChanged {
+                                            new_state: crate::debug::controller::DebugState::Running,
+                                            iteration,
+                                        },
+                                    );
+                                }
+                                // Wake the agent loop's await_debug_resume() if it's
+                                // currently blocking on the resume notify.
+                                if let Some(ref notify) = resume_notify {
+                                    notify.notify_one();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
                     match agent_loop.run(&content, &mut context_builder).await {
                         Ok(response) => {
                             tracing::info!(
