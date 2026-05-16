@@ -765,13 +765,16 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
   const total = formatTokenCount(usage.total_tokens);
   const usable = formatTokenCount(usage.usable_context);
 
-  // Color coding based on usage percentage
-  const iconColor =
+  // Hover state -- button shows accent color only on hover
+  const [hovered, setHovered] = useState(false);
+
+  // Color coding for tooltip internals -- urgency-based
+  const urgencyColor =
     percent >= 90
-      ? "text-red-400 hover:text-red-300"
+      ? "text-red-500 dark:text-red-400"
       : percent >= 70
-        ? "text-amber-400 hover:text-amber-300"
-        : "text-emerald-400 hover:text-emerald-300";
+        ? "text-amber-500 dark:text-amber-400"
+        : "text-emerald-500 dark:text-emerald-400";
 
   const barColor =
     percent >= 90
@@ -784,7 +787,10 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
     <div className="group relative">
       {/* Icon button */}
       <button
-        className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors ${iconColor} hover:bg-zinc-200 dark:hover:bg-zinc-700`}
+        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors text-zinc-400 dark:text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
+        style={hovered ? { color: "var(--color-accent-green)" } : undefined}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
         aria-label="Context usage"
       >
         <Layers size={14} />
@@ -796,9 +802,7 @@ function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">Context Usage</span>
-          <span className={`text-xs font-medium ${
-            percent >= 90 ? "text-red-500 dark:text-red-400" : percent >= 70 ? "text-amber-500 dark:text-amber-400" : "text-emerald-500 dark:text-emerald-400"
-          }`}>
+          <span className={`text-xs font-medium ${urgencyColor}`}>
             {percent}%
           </span>
         </div>
@@ -1036,7 +1040,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             </div>
             <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               {message.content && (
-                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text" style={fontSizeStyle}>
+                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text whitespace-pre-wrap break-words" style={fontSizeStyle}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                 </div>
               )}
