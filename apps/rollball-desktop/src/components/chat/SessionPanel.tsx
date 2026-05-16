@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { Brain, MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
@@ -61,13 +61,14 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
   }, [open]);
 
   // Force scrollbar recalculation when sessions change (fixes stale scrollbar after agent switch)
-  useEffect(() => {
+  // useLayoutEffect runs synchronously after DOM mutations, before paint
+  useLayoutEffect(() => {
     if (listRef.current) {
-      // Trigger reflow to recalculate scrollbar dimensions
       const el = listRef.current;
-      el.style.overflow = 'hidden';
-      void el.offsetHeight; // force reflow
-      el.style.overflow = '';
+      // Force browser to recalculate overflow geometry
+      el.style.overflowY = 'hidden';
+      void el.offsetHeight;
+      el.style.overflowY = '';
     }
   }, [sessions]);
 

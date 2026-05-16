@@ -27,6 +27,9 @@ interface SessionState {
   reset: () => void;
 }
 
+/** Tracks the latest fetch request to discard stale responses on agent switch */
+let fetchSessionId = 0;
+
 export const useSessionStore = create<SessionState>((set) => ({
   sessions: [],
   currentSessionId: null,
@@ -36,7 +39,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   agentSessionMap: {},
 
   fetchSessions: async (agentId: string) => {
-    set({ isLoading: true }); // Keep old sessions visible while loading
+    // Cancel any in-flight fetch by bumping the id
+    const requestId = ++fetchSessionId;
+    set({ isLoading: true });
     try {
       const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -45,7 +50,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         (a, b) =>
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
       );
-      // Update session title for this agent
+      // Discard stale response — a newer fetch has already started
+      if (requestId !== fetchSessionId) return;
       const title = sessions.length > 0 ? (sessions[0]?.title ?? "") : null;
       set((state) => ({
         sessions,
@@ -53,6 +59,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessionTitles: { ...state.sessionTitles, [agentId]: title },
       }));
     } catch (e) {
+      // Discard stale error too
+      if (requestId !== fetchSessionId) return;
       console.error("[SessionStore] Failed to fetch sessions:", e);
       set({ sessions: [], isLoading: false });
     }
@@ -188,6 +196,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   reset: () => {
+    // Bump fetch id to cancel any in-flight fetch for the previous agent
+    ++fetchSessionId;
     set((state) => ({
       sessions: [],
       currentSessionId: null,
