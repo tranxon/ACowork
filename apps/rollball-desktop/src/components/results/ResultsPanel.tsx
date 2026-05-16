@@ -32,6 +32,7 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 export function ResultsPanel({ width, onCollapse, isDebugMode = false }: ResultsPanelProps & { width: number }) {
   const { agents, selectedAgentId } = useAgentStore();
   const tokenUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.tokenUsage ?? null) : null);
+  const contextUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.contextUsage ?? null) : null);
   const messages = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.messages ?? EMPTY_MESSAGES) : EMPTY_MESSAGES);
   const [activeTab, setActiveTab] = useState<PanelTab>(isDebugMode ? "debug" : "results");
 
@@ -339,9 +340,9 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
               Session Stats
             </h3>
             <div className="rounded-md bg-white p-3 text-xs dark:bg-zinc-800">
-              <StatRow label="Prompt tokens" value={tokenUsage?.prompt_tokens?.toLocaleString()} />
-              <StatRow label="Completion tokens" value={tokenUsage?.completion_tokens?.toLocaleString()} />
-              <StatRow label="Total tokens" value={tokenUsage?.total_tokens?.toLocaleString()} />
+              <StatRow label="Prompt tokens" value={(tokenUsage?.prompt_tokens ?? contextUsage?.input_tokens)?.toLocaleString()} />
+              <StatRow label="Completion tokens" value={(tokenUsage?.completion_tokens ?? contextUsage?.output_tokens)?.toLocaleString()} />
+              <StatRow label="Total tokens" value={(tokenUsage?.total_tokens ?? contextUsage?.total_tokens)?.toLocaleString()} />
               <StatRow label="Iterations" value={iterations ? String(iterations) : undefined} />
             </div>
           </div>
