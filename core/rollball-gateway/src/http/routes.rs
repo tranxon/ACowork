@@ -149,6 +149,8 @@ pub struct AppState {
     pub log_reload_handle: Option<crate::LogReloadHandle>,
     /// gRPC session manager for Gateway→Runtime request-response
     pub grpc_session_mgr: Option<SharedGrpcSessionMgr>,
+    /// Whether CORS is enabled (allows any origin for remote Desktop connections)
+    pub cors_enabled: bool,
 }
 
 impl AppState {
@@ -171,6 +173,7 @@ impl AppState {
             }),
             log_reload_handle: None,
             grpc_session_mgr: None,
+            cors_enabled: false,
         }
     }
 
@@ -195,30 +198,36 @@ impl AppState {
             }),
             log_reload_handle,
             grpc_session_mgr: None,
+            cors_enabled: false,
         }
     }
 }
 
 /// Build the HTTP router with all routes
 pub fn build_router(state: AppState) -> Router {
-    // P1-1 fix: Restrict CORS to localhost origins only.
-    // Allow both localhost and 127.0.0.1 for Desktop App development.
-    let cors = tower_http::cors::CorsLayer::new()
-        .allow_origin([
-            "http://localhost:3000".parse().unwrap(),
-            "http://localhost:5173".parse().unwrap(), // Vite dev server
-            "http://127.0.0.1:3000".parse().unwrap(),
-        ])
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PUT,
-            axum::http::Method::DELETE,
-        ])
-        .allow_headers([
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::AUTHORIZATION,
-        ]);
+    // When CORS is enabled (remote Desktop ↔ Gateway scenarios),
+    // allow any origin. Otherwise, restrict to localhost.
+    let cors = if state.cors_enabled {
+        tower_http::cors::CorsLayer::permissive()
+            .allow_credentials(true)
+    } else {
+        tower_http::cors::CorsLayer::new()
+            .allow_origin([
+                "http://localhost:3000".parse().unwrap(),
+                "http://localhost:5173".parse().unwrap(),
+                "http://127.0.0.1:3000".parse().unwrap(),
+            ])
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ])
+    };
 
     Router::new()
         .route("/health", get(health_check))

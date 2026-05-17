@@ -70,6 +70,7 @@ message ServerMessage {
     MemoryStatsQuery        memory_stats_query    = 28;
     MemoryConsolidateQuery  memory_consolidate_query = 29;
     MemoryDeleteQuery       memory_delete_query   = 30;
+    LogRotate               log_rotate            = 32;
   }
 }
 
@@ -148,6 +149,7 @@ message IdentityDelivery        { repeated IdentityEntry entries = 1; }
 message WorkspaceContextUpdate  { string context_text = 1; string current_workspace_id = 2; string current_workspace_path = 3; }
 message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
 message LogLevelUpdate           { string log_level = 1; }
+message LogRotate               {}
 message RuntimeConfigUpdate      { optional uint64 max_output_tokens = 1; optional uint32 max_iterations = 2; optional float temperature = 3; string system_prompt_override = 4; }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }

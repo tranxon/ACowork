@@ -20,9 +20,9 @@ const MAX_SIDEBAR_WIDTH = 400;
 const DEFAULT_SIDEBAR_WIDTH = 240;
 const SIDEBAR_WIDTH_KEY = "rollball-sidebar-width";
 
-const MIN_RIGHT_WIDTH = 200;
+const MIN_RIGHT_WIDTH = 340;
 const MAX_RIGHT_WIDTH = 600;
-const DEFAULT_RIGHT_WIDTH = 320;
+const DEFAULT_RIGHT_WIDTH = 340;
 const RIGHT_WIDTH_KEY = "rollball-right-width";
 
 export function AppLayout() {
@@ -77,7 +77,7 @@ export function AppLayout() {
   // Navigate via nav bar — reset settings tab to default
   const handleViewChange = useCallback((view: NavView) => {
     if (view === "settings") {
-      setSettingsInitialTab("gateway");
+      setSettingsInitialTab("profile");
     }
     setCurrentView(view);
   }, []);

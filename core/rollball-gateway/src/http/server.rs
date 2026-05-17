@@ -147,6 +147,7 @@ pub(crate) async fn start_http_server(
         log_reload_handle,
     );
     app_state.grpc_session_mgr = grpc_session_mgr;
+    app_state.cors_enabled = http_config.cors_enabled;
 
     // S5.9: Clean up stale pidfile from a previous Gateway run before writing a new one.
     // If the previous process is still alive, this returns an error (prevents dual Gateway).

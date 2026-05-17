@@ -8,6 +8,8 @@ const STORAGE_KEY_LOG_LEVEL = "rollball-log-level";
 const STORAGE_KEY_CONTENT_WIDTH = "rollball-content-width";
 const STORAGE_KEY_OPACITY = "rollball-opacity";
 const STORAGE_KEY_ACCENT_COLOR = "rollball-accent-color";
+const STORAGE_KEY_GATEWAY_URL = "rollball-gateway-url";
+const STORAGE_KEY_LOG_FILE_SIZE = "rollball-log-file-size";
 
 const DEFAULT_ACCENT_COLOR = "#00C375";
 
@@ -97,6 +99,27 @@ function getPersistedAccentColor(): string {
   return DEFAULT_ACCENT_COLOR;
 }
 
+/** Read persisted gateway URL from localStorage, fallback to DEFAULT_GATEWAY_URL */
+function getPersistedGatewayUrl(): string {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_URL);
+    if (stored) return stored;
+  } catch {}
+  return DEFAULT_GATEWAY_URL;
+}
+
+/** Read persisted log file size from localStorage, fallback to 10 (MB) */
+function getPersistedLogFileSizeMb(): number {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_LOG_FILE_SIZE);
+    if (stored) {
+      const val = parseInt(stored, 10);
+      if (!isNaN(val) && val >= 0) return val;
+    }
+  } catch {}
+  return 10;
+}
+
 /** Read persisted opacity from localStorage, fallback to 1.0 (opaque) */
 function getPersistedOpacity(): number {
   try {
@@ -117,6 +140,7 @@ interface SettingsStore {
   accentColor: string;
   gatewayUrl: string;
   logLevel: string;
+  logFileSizeMb: number;
   setTheme: (theme: Theme) => void;
   setFontSize: (size: number) => void;
   setContentWidth: (width: number) => void;
@@ -124,6 +148,7 @@ interface SettingsStore {
   setAccentColor: (color: string) => void;
   setGatewayUrl: (url: string) => void;
   setLogLevel: (level: string) => void;
+  setLogFileSizeMb: (size: number) => void;
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => {
@@ -146,8 +171,9 @@ export const useSettingsStore = create<SettingsStore>((set) => {
     contentWidth: initialContentWidth,
     opacity: initialOpacity,
     accentColor: initialAccentColor,
-    gatewayUrl: DEFAULT_GATEWAY_URL,
+    gatewayUrl: getPersistedGatewayUrl(),
     logLevel: initialLogLevel,
+    logFileSizeMb: getPersistedLogFileSizeMb(),
 
     setTheme: (theme) => {
       applyTheme(theme);
@@ -179,10 +205,17 @@ export const useSettingsStore = create<SettingsStore>((set) => {
       set({ accentColor });
     },
 
-    setGatewayUrl: (gatewayUrl) => set({ gatewayUrl }),
+    setGatewayUrl: (gatewayUrl) => {
+      try { localStorage.setItem(STORAGE_KEY_GATEWAY_URL, gatewayUrl); } catch {}
+      set({ gatewayUrl });
+    },
     setLogLevel: (logLevel) => {
       try { localStorage.setItem(STORAGE_KEY_LOG_LEVEL, logLevel); } catch {}
       set({ logLevel });
+    },
+    setLogFileSizeMb: (logFileSizeMb) => {
+      try { localStorage.setItem(STORAGE_KEY_LOG_FILE_SIZE, String(logFileSizeMb)); } catch {}
+      set({ logFileSizeMb });
     },
   };
 });

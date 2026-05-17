@@ -75,22 +75,6 @@ impl GatewayClient {
         self.base_url = url;
     }
 
-    // ── Health ──────────────────────────────────────────────────────────
-
-    /// `GET /health`
-    pub async fn health(&self) -> Result<HealthResponse> {
-        let resp = self.client.get(format!("{}/health", self.base_url)).send().await?;
-        parse_gateway_response(resp).await
-    }
-
-    // ── System Status ──────────────────────────────────────────────────
-
-    /// `GET /api/status`
-    pub async fn system_status(&self) -> Result<SystemStatusResponse> {
-        let resp = self.client.get(format!("{}/api/status", self.base_url)).send().await?;
-        parse_gateway_response(resp).await
-    }
-
     // ── Agent Management ───────────────────────────────────────────────
 
     /// `GET /api/agents`
@@ -371,85 +355,12 @@ impl GatewayClient {
     }
 
     // ── Config ─────────────────────────────────────────────────────────
-
-    /// `GET /api/config`
-    pub async fn get_config(&self) -> Result<ConfigResponse> {
-        let resp = self
-            .client
-            .get(format!("{}/api/config", self.base_url))
-            .send()
-            .await?;
-        parse_gateway_response(resp).await
-    }
-
-    /// `PUT /api/config`
-    pub async fn update_config(
-        &self,
-        log_level: Option<&str>,
-        idle_timeout_secs: Option<u64>,
-        default_provider: Option<&str>,
-        default_model: Option<&str>,
-        max_output_tokens_limit: Option<u64>,
-    ) -> Result<GenericMessageResponse> {
-        let mut body = serde_json::Map::new();
-        if let Some(level) = log_level {
-            body.insert("log_level".to_string(), serde_json::Value::String(level.to_string()));
-        }
-        if let Some(timeout) = idle_timeout_secs {
-            body.insert(
-                "idle_timeout_secs".to_string(),
-                serde_json::Value::Number(timeout.into()),
-            );
-        }
-        if let Some(provider) = default_provider {
-            body.insert("default_provider".to_string(), serde_json::Value::String(provider.to_string()));
-        }
-        if let Some(model) = default_model {
-            body.insert("default_model".to_string(), serde_json::Value::String(model.to_string()));
-        }
-        if let Some(limit) = max_output_tokens_limit {
-            body.insert(
-                "max_output_tokens_limit".to_string(),
-                serde_json::Value::Number(limit.into()),
-            );
-        }
-        let resp = self
-            .client
-            .put(format!("{}/api/config", self.base_url))
-            .json(&body)
-            .send()
-            .await?;
-        parse_gateway_response(resp).await
-    }
+    //
+    // Config and log management are now handled by the frontend directly
+    // via fetch() to the Gateway HTTP API (getGatewayUrl()).
 }
 
 // ── API response types ──────────────────────────────────────────────
-
-/// Health check response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthResponse {
-    pub status: String,
-    pub version: String,
-    #[serde(default)]
-    pub checks: std::collections::HashMap<String, CheckResult>,
-}
-
-/// Individual check result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckResult {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-/// System status response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemStatusResponse {
-    pub version: String,
-    pub agents_installed: usize,
-    pub agents_running: usize,
-    pub uptime_secs: u64,
-}
 
 /// Agent list entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -611,31 +522,4 @@ pub struct ModelModalities {
 
 fn default_true() -> bool {
     true
-}
-
-/// Config response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigResponse {
-    pub socket_path: String,
-    pub packages_dir: String,
-    pub data_dir: String,
-    pub log_level: String,
-    pub idle_timeout_secs: u64,
-    pub dev_mode: bool,
-    pub http: HttpConfigResponse,
-    /// Default LLM provider (if configured)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_provider: Option<String>,
-    /// Default LLM model (if configured)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_model: Option<String>,
-}
-
-/// HTTP config subset
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpConfigResponse {
-    pub enabled: bool,
-    pub host: String,
-    pub port: u16,
-    pub auth_enabled: bool,
 }

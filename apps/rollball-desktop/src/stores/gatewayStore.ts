@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { invoke } from "@tauri-apps/api/core";
+import { getGatewayUrl } from "../lib/config";
 import type { HealthResponse, GatewayStatus } from "../lib/types";
 
 interface GatewayStore {
@@ -14,7 +14,9 @@ export const useGatewayStore = create<GatewayStore>((set) => ({
 
   checkHealth: async () => {
     try {
-      const health = await invoke<HealthResponse>("gateway_health");
+      const resp = await fetch(`${getGatewayUrl()}/health`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const health = await resp.json() as HealthResponse;
       set({ status: "connected", health });
     } catch {
       set({ status: "error", health: null });

@@ -1253,6 +1253,7 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
         Some(ServerPayload::LogLevelUpdate(lu)) => GatewayResponse::LogLevelUpdate {
             log_level: lu.log_level,
         },
+        Some(ServerPayload::LogRotate(_)) => GatewayResponse::LogRotate,
 
         None => {
             tracing::warn!("Received ServerMessage with empty payload");

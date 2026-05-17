@@ -4,6 +4,7 @@ import type { VaultKeyEntry, GatewayConfig, ModelInfo } from "../../lib/types";
 import { Key, Home, Plus, Trash2, Star, Pencil, Loader2 } from "lucide-react";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
+import { getGatewayUrl } from "../../lib/config";
 
 type ProviderWithStatus = {
   id: string;
@@ -43,7 +44,9 @@ export function ModelsPage() {
 
   const fetchConfig = useCallback(async () => {
     try {
-      const result = await invoke<GatewayConfig>("get_config");
+      const resp = await fetch(`${getGatewayUrl()}/api/config`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const result = await resp.json() as GatewayConfig;
       setConfig(result);
     } catch {
       // Gateway may not be running
@@ -133,9 +136,13 @@ export function ModelsPage() {
   const handleSetDefaultProvider = async (provider: string) => {
     try {
       const entry = keys.find((k) => k.provider === provider);
-      await invoke("update_config", {
-        defaultProvider: provider,
-        defaultModel: entry?.default_model || undefined,
+      await fetch(`${getGatewayUrl()}/api/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          default_provider: provider,
+          default_model: entry?.default_model || undefined,
+        }),
       });
       await fetchConfig();
     } catch (e) {

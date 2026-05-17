@@ -31,6 +31,7 @@ pub async fn spawn_agent_process(
     gateway_grpc_endpoint: &str,
     dev_mode: bool,
     debug_port: Option<u16>,
+    log_file_size_mb: u64,
 ) -> Result<AgentChild, GatewayError> {
     // Locate the rollball-runtime binary (sibling of current executable)
     let runtime_bin = std::env::current_exe()
@@ -71,6 +72,8 @@ pub async fn spawn_agent_process(
     let log_level = if dev_mode { "debug" } else { "info" };
     cmd.arg("--log-level")
         .arg(log_level)
+        .arg("--log-file-size-mb")
+        .arg(log_file_size_mb.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
 
@@ -240,6 +243,7 @@ mod tests {
             "http://127.0.0.1:19877",
             false,
             None,
+            10,
         )
         .await;
         assert!(result.is_err());

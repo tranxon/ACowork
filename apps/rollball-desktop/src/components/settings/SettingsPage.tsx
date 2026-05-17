@@ -2,39 +2,34 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import type { GatewayConfig, VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry } from "../../lib/types";
+import type { GatewayConfig, VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, AgentListResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
-import { Star } from "lucide-react";
-import { inputReadonly, selectBase } from "../../lib/ui-styles";
+import { Star, Bug, Monitor } from "lucide-react";
+import { inputReadonly, selectBase, inputBase } from "../../lib/ui-styles";
 import { ProfileTab } from "./ProfileTab";
 
 type SettingsTab = "gateway" | "providers" | "appearance" | "general" | "profile";
 
-export function SettingsPage({ initialTab = "gateway" }: { initialTab?: SettingsTab }) {
+export function SettingsPage({ initialTab = "profile" }: { initialTab?: SettingsTab }) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
   const tabs: { id: SettingsTab; label: string }[] = [
-    { id: "gateway", label: "Gateway" },
-    { id: "providers", label: "Providers" },
-    { id: "appearance", label: "Appearance" },
-    { id: "general", label: "General" },
     { id: "profile", label: "My Profile" },
+    { id: "general", label: "General" },
+    { id: "appearance", label: "Appearance" },
+    { id: "providers", label: "Providers" },
+    { id: "gateway", label: "Gateway" },
   ];
 
   return (
     <div
-      className="flex flex-1 flex-col bg-white dark:bg-zinc-900"
+      className="flex flex-1 flex-col bg-zinc-50 dark:bg-zinc-900"
     >
-      {/* Header */}
-      <div className="border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
-        <h1 className="text-xl font-semibold">Settings</h1>
-      </div>
-
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-zinc-200 px-6 dark:border-zinc-800">
+      <div className="flex gap-1 border-b border-zinc-200 px-6 pt-3 dark:border-zinc-800">
         {tabs.map((tab) => (
           <button
             key={tab.id}
@@ -66,7 +61,30 @@ export function SettingsPage({ initialTab = "gateway" }: { initialTab?: Settings
 /** Gateway connection settings */
 function GatewayTab() {
   const { status, health, checkHealth } = useGatewayStore();
+  const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
+  const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
   const [testing, setTesting] = useState(false);
+  const [agents, setAgents] = useState<AgentListResponse[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(false);
+  const [urlDraft, setUrlDraft] = useState(gatewayUrl);
+
+  // Sync draft when gatewayUrl changes externally
+  useEffect(() => { setUrlDraft(gatewayUrl); }, [gatewayUrl]);
+
+  const handleUrlSave = useCallback(() => {
+    const trimmed = urlDraft.trim();
+    if (trimmed && trimmed !== gatewayUrl) {
+      setGatewayUrl(trimmed);
+    } else if (!trimmed) {
+      setUrlDraft(gatewayUrl);
+    }
+  }, [urlDraft, gatewayUrl, setGatewayUrl]);
+
+  const handleUrlKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleUrlSave();
+    }
+  }, [handleUrlSave]);
 
   const handleTest = useCallback(async () => {
     setTesting(true);
@@ -74,22 +92,61 @@ function GatewayTab() {
     setTesting(false);
   }, [checkHealth]);
 
+  const fetchAgents = useCallback(async () => {
+    setAgentsLoading(true);
+    try {
+      const resp = await fetch(`${getGatewayUrl()}/api/agents`);
+      if (resp.ok) {
+        const data: AgentListResponse[] = await resp.json();
+        // Show only running/connected agents
+        setAgents(data.filter(a => a.running || a.connected));
+      }
+    } catch {
+      // Gateway not reachable
+    } finally {
+      setAgentsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (status === "connected") {
+      fetchAgents();
+    }
+  }, [status, fetchAgents]);
+
   return (
     <div className="max-w-lg space-y-4">
-      <h2 className="text-sm font-medium">Gateway Connection</h2>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Gateway Connection</h2>
 
-      <div className="space-y-3">
+        <div className="space-y-3">
         <div>
-          <label className="mb-1 block text-xs text-zinc-500">Address</label>
-          <input
-            type="text"
-            value={DEFAULT_GATEWAY_URL}
-            readOnly
-            className={`w-full ${inputReadonly}`}
-          />
+          <label className="mb-1 block text-xs text-zinc-500">Gateway URL</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={urlDraft}
+              onChange={(e) => setUrlDraft(e.target.value)}
+              onBlur={handleUrlSave}
+              onKeyDown={handleUrlKeyDown}
+              placeholder={DEFAULT_GATEWAY_URL}
+              className={`flex-1 ${inputBase}`}
+            />
+            {urlDraft !== gatewayUrl && (
+              <button
+                onClick={handleUrlSave}
+                className="rounded-md bg-accent-green px-3 py-2 text-xs font-medium text-white hover:opacity-90"
+              >
+                Apply
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-zinc-400">
+            Set the Gateway HTTP API address. Default: {DEFAULT_GATEWAY_URL}
+          </p>
         </div>
 
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-2 text-xs">
           <span className="text-zinc-500">Status</span>
           <span
             className={cn(
@@ -108,7 +165,7 @@ function GatewayTab() {
 
         {health && (
           <>
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex items-center gap-2 text-xs">
               <span className="text-zinc-500">Version</span>
               <span>{health.version}</span>
             </div>
@@ -122,6 +179,65 @@ function GatewayTab() {
         >
           {testing ? "Testing..." : "Test Connection"}
         </button>
+      </div>
+      </div>
+
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Connected Agents</h2>
+
+        {status !== "connected" ? (
+          <p className="text-xs text-zinc-400">Connect to Gateway to see running agents</p>
+        ) : agentsLoading ? (
+          <p className="text-xs text-zinc-400">Loading...</p>
+        ) : agents.length === 0 ? (
+          <p className="text-xs text-zinc-400">No agents running</p>
+        ) : (
+          <div className="space-y-1">
+            {agents.map((agent) => (
+              <RuntimeRow key={agent.agent_id} agent={agent} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Single runtime row component — fetches model info independently */
+function RuntimeRow({ agent }: { agent: AgentListResponse }) {
+  const [modelInfo, setModelInfo] = useState<{ provider: string; model: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${getGatewayUrl()}/api/agents/${agent.agent_id}/model`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!cancelled && data) {
+          setModelInfo({ provider: data.provider, model: data.model });
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [agent.agent_id]);
+
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+      <div className="flex items-center gap-2 min-w-0">
+        <Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+        <span className="text-xs font-medium truncate">{agent.name}</span>
+        {agent.dev_mode && (
+          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+            <Bug className="h-3 w-3" />
+            Debug
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        {modelInfo ? (
+          <span className="text-xs text-zinc-500">{modelInfo.provider}/{modelInfo.model}</span>
+        ) : (
+          <span className="text-xs text-zinc-400">—</span>
+        )}
       </div>
     </div>
   );
@@ -189,7 +305,9 @@ function ProvidersTab() {
 
   const fetchConfig = useCallback(async () => {
     try {
-      const result = await invoke<GatewayConfig>("get_config");
+      const resp = await fetch(`${getGatewayUrl()}/api/config`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const result = await resp.json() as GatewayConfig;
       setConfig(result);
     } catch {
       // Gateway may not be running
@@ -424,9 +542,13 @@ function ProvidersTab() {
   const handleSetDefaultProvider = async (provider: string) => {
     try {
       const entry = keys.find((k) => k.provider === provider);
-      await invoke("update_config", {
-        defaultProvider: provider,
-        defaultModel: entry?.models?.[0] || entry?.default_model || undefined,
+      await fetch(`${getGatewayUrl()}/api/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          default_provider: provider,
+          default_model: entry?.models?.[0] || entry?.default_model || undefined,
+        }),
       });
       await fetchConfig();
     } catch (e) {
@@ -509,11 +631,11 @@ function ProvidersTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium">Provider Management</h2>
-      </div>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xs font-medium">Provider Management</h2>
+        </div>
 
-        <div className="space-y-3">
           {/* Configured Providers (top section) — depends on fetchKeys */}
           {keysLoading ? (
             <div className="py-3 text-center text-xs text-zinc-400">Loading keys...</div>
@@ -526,10 +648,10 @@ function ProvidersTab() {
                   const providerName = provider?.name || keyEntry.provider;
 
                   return (
-                    <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
+                    <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center flex-nowrap gap-2">
-                          <span className="shrink-0 text-sm font-medium">{providerName}</span>
+                          <span className="shrink-0 text-xs font-medium">{providerName}</span>
                           {keyEntry.models?.length ? (
                             <span className="shrink-0 text-xs text-accent-green">{keyEntry.models.join(", ")}</span>
                           ) : keyEntry.default_model ? (
@@ -574,10 +696,9 @@ function ProvidersTab() {
             </div>
           )}
 
-          {/* Divider */}
-          {keys.length > 0 && (
-            <div className="border-t border-zinc-200 dark:border-zinc-700" />
-          )}
+      </div>
+
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
 
           {/* Available Providers (bottom section) — renders independently */}
           <div>
@@ -597,7 +718,7 @@ function ProvidersTab() {
                     // Re-fetch from API
                     fetchDynamicProviders(false);
                   }}
-                  className="rounded px-2 py-0.5 text-[10px] text-zinc-500 hover:text-red-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-red-400 dark:hover:bg-zinc-800"
+                  className="rounded px-2 py-0.5 text-xs text-zinc-500 hover:text-red-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-red-400 dark:hover:bg-zinc-800"
                   title="Clear cache and refresh"
                 >
                   🗑 Clear Cache
@@ -605,7 +726,7 @@ function ProvidersTab() {
                 <button
                   onClick={() => fetchDynamicProviders(false)}
                   disabled={dynamicProvidersLoading}
-                  className="rounded px-2 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-zinc-800"
+                  className="rounded px-2 py-0.5 text-xs text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-zinc-800"
                   title="Refresh provider list"
                 >
                   {dynamicProvidersLoading ? "Refreshing..." : "↻ Refresh"}
@@ -632,10 +753,10 @@ function ProvidersTab() {
                   if (!needsApiKey(providerId)) return null;
 
                   return (
-                    <div key={providerId} className="rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-700">
+                    <div key={providerId} className="rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
                       <div className="flex items-center justify-between">
                         <div className="min-w-0 flex-1">
-                          <span className="text-sm font-medium">{providerName}</span>
+                          <span className="text-xs font-medium">{providerName}</span>
                           {modelCount && (
                             <span className="ml-2 text-xs text-zinc-400">{modelCount} models available</span>
                           )}
@@ -653,7 +774,7 @@ function ProvidersTab() {
                             setNewSupportsToolCalling(true);
                             setShowAddDialog(true);
                           }}
-                          className="rounded-md bg-zinc-100 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                          className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
                         >
                           Add Key
                         </button>
@@ -664,7 +785,7 @@ function ProvidersTab() {
               )}
             </div>
           </div>
-        </div>
+      </div>
 
       {/* Add key dialog */}
       {showAddDialog && (
@@ -724,7 +845,7 @@ function ProvidersTab() {
                         : [...modelCapabilityFilter, 'tool_call']
                     )}
                     className={cn(
-                      "rounded px-2 py-0.5 text-[10px] font-medium",
+                      "rounded px-2 py-0.5 text-xs font-medium",
                       modelCapabilityFilter.includes('tool_call')
                         ? "bg-accent-green/10 text-accent-green"
                         : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
@@ -739,7 +860,7 @@ function ProvidersTab() {
                         : [...modelCapabilityFilter, 'reasoning']
                     )}
                     className={cn(
-                      "rounded px-2 py-0.5 text-[10px] font-medium",
+                      "rounded px-2 py-0.5 text-xs font-medium",
                       modelCapabilityFilter.includes('reasoning')
                         ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
                         : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
@@ -802,7 +923,7 @@ function ProvidersTab() {
                           />
                           <div className="flex flex-1 flex-col gap-0.5">
                             <span className="truncate">{m.name || m.id}</span>
-                            <div className="flex gap-2 text-[10px] text-zinc-400">
+                            <div className="flex gap-2 text-xs text-zinc-400">
                               {m.context_window && (
                                 <span>{(m.context_window / 1000).toFixed(0)}K context</span>
                               )}
@@ -857,12 +978,12 @@ function ProvidersTab() {
                   <div>
                     <label className="mb-1 block text-xs text-zinc-500">
                       Model Capabilities
-                      {hasModelsDevData && <span className="ml-1 text-[10px] text-zinc-400">(from models.dev)</span>}
-                      {!hasModelsDevData && <span className="ml-1 text-[10px] text-amber-500">(manual input required)</span>}
+                      {hasModelsDevData && <span className="ml-1 text-xs text-zinc-400">(from models.dev)</span>}
+                      {!hasModelsDevData && <span className="ml-1 text-xs text-amber-500">(manual input required)</span>}
                     </label>
                     <div className="flex gap-2">
                       <div className="flex-1">
-                        <label className="mb-0.5 block text-[10px] text-zinc-400">Context Window</label>
+                        <label className="mb-0.5 block text-xs text-zinc-400">Context Window</label>
                         <input
                           type="number"
                           value={displayContextWindow}
@@ -878,7 +999,7 @@ function ProvidersTab() {
                         />
                       </div>
                       <div className="flex-1">
-                        <label className="mb-0.5 block text-[10px] text-zinc-400">Max Output Tokens</label>
+                        <label className="mb-0.5 block text-xs text-zinc-400">Max Output Tokens</label>
                         <input
                           type="number"
                           value={displayMaxOutputTokens}
@@ -947,14 +1068,14 @@ function ProvidersTab() {
               <div className="flex gap-2 shrink-0">
                 <button
                   onClick={() => { setShowAddDialog(false); setNewModels([]); setTestResult(null); }}
-                  className="w-20 rounded-md px-3 py-1.5 text-xs font-medium text-center text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                  className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleAdd}
                   disabled={(needsApiKey(newProvider) ? !newKey.trim() : false) || testing}
-                  className="w-20 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-center text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                  className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
                 >
                   {testing ? "Saving..." : "Save"}
                 </button>
@@ -1040,7 +1161,7 @@ function ProvidersTab() {
                           />
                           <div className="flex flex-1 flex-col gap-0.5">
                             <span className="truncate">{m.name || m.id}</span>
-                            <div className="flex gap-2 text-[10px] text-zinc-400">
+                            <div className="flex gap-2 text-xs text-zinc-400">
                               {m.context_window && (
                                 <span>{(m.context_window / 1000).toFixed(0)}K context</span>
                               )}
@@ -1088,12 +1209,12 @@ function ProvidersTab() {
                   <div>
                     <label className="mb-1 block text-xs text-zinc-500">
                       Model Capabilities
-                      {hasModelsDevData && <span className="ml-1 text-[10px] text-zinc-400">(from models.dev)</span>}
-                      {!hasModelsDevData && <span className="ml-1 text-[10px] text-amber-500">(manual input required)</span>}
+                      {hasModelsDevData && <span className="ml-1 text-xs text-zinc-400">(from models.dev)</span>}
+                      {!hasModelsDevData && <span className="ml-1 text-xs text-amber-500">(manual input required)</span>}
                     </label>
                     <div className="flex gap-2">
                       <div className="flex-1">
-                        <label className="mb-0.5 block text-[10px] text-zinc-400">Context Window</label>
+                        <label className="mb-0.5 block text-xs text-zinc-400">Context Window</label>
                         <input
                           type="number"
                           value={displayContextWindow}
@@ -1109,7 +1230,7 @@ function ProvidersTab() {
                         />
                       </div>
                       <div className="flex-1">
-                        <label className="mb-0.5 block text-[10px] text-zinc-400">Max Output Tokens</label>
+                        <label className="mb-0.5 block text-xs text-zinc-400">Max Output Tokens</label>
                         <input
                           type="number"
                           value={displayMaxOutputTokens}
@@ -1189,12 +1310,12 @@ function AppearanceTab() {
   ];
 
   return (
-    <div className="max-w-lg space-y-6">
-      <div>
-        <h2 className="mb-3 text-sm font-medium">Theme</h2>
+    <div className="max-w-lg space-y-4">
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Theme</h2>
         <div className="flex gap-4">
           {(["light", "dark", "system"] as const).map((t) => (
-            <label key={t} className="flex items-center gap-2 text-sm">
+            <label key={t} className="flex items-center gap-2 text-xs">
               <input
                 type="radio"
                 name="theme"
@@ -1209,16 +1330,23 @@ function AppearanceTab() {
         </div>
       </div>
 
-      <div>
-        <h2 className="mb-3 text-sm font-medium">Accent Color</h2>
-        <p className="mb-2 text-xs text-zinc-500">全局高亮色</p>
-        <div className="flex gap-2">
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Accent Color</h2>
+        <p className="mb-3 text-xs text-zinc-500">全局高亮色</p>
+        <div className="flex gap-3">
           {[
-            { label: "Green", value: "#00C375" },
+            // Cool tones
             { label: "Blue", value: "#3b82f6" },
+            { label: "Indigo", value: "#6366f1" },
             { label: "Violet", value: "#8b5cf6" },
             { label: "Cyan", value: "#06b6d4" },
+            { label: "Teal", value: "#14b8a6" },
+            // Warm tones
+            { label: "Green", value: "#00C375" },
             { label: "Rose", value: "#f43f5e" },
+            { label: "Orange", value: "#f97316" },
+            { label: "Amber", value: "#f59e0b" },
+            { label: "Pink", value: "#ec4899" },
           ].map((c) => (
             <button
               key={c.value}
@@ -1239,8 +1367,8 @@ function AppearanceTab() {
         </div>
       </div>
 
-      <div>
-        <h2 className="mb-3 text-sm font-medium">Content Width</h2>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Content Width</h2>
         <p className="mb-2 text-xs text-zinc-500">聊天消息、工具调用、Thinking 的最大显示宽度</p>
         <div className="flex gap-1">
           {contentWidths.map((cw) => (
@@ -1260,8 +1388,8 @@ function AppearanceTab() {
         </div>
       </div>
 
-      <div>
-        <h2 className="mb-3 text-sm font-medium">Font Size</h2>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Font Size</h2>
         <div className="flex gap-1">
           {fontSizes.map((fs) => (
             <button
@@ -1280,8 +1408,8 @@ function AppearanceTab() {
         </div>
       </div>
 
-      <div>
-        <h2 className="mb-3 text-sm font-medium">Opacity</h2>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Opacity</h2>
         <p className="mb-2 text-xs text-zinc-500">窗口透明度（需配合窗口毛玻璃效果使用）</p>
         <div className="flex items-center gap-3">
           <input
@@ -1300,6 +1428,7 @@ function AppearanceTab() {
         </div>
       </div>
 
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
       <button
         onClick={() => { setTheme("system"); setFontSize(0.875); setContentWidth(90); setOpacity(1.0); setAccentColor("#00C375"); }}
         className="rounded-lg btn-solid px-3 py-1.5 text-xs"
@@ -1307,52 +1436,151 @@ function AppearanceTab() {
         Reset to defaults
       </button>
     </div>
+    </div>
   );
 }
 
 /** General settings */
 function GeneralTab() {
   const [config, setConfig] = useState<GatewayConfig | null>(null);
-  const { logLevel, setLogLevel } = useSettingsStore();
+  const [deleting, setDeleting] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const { logLevel, setLogLevel, logFileSizeMb, setLogFileSizeMb } = useSettingsStore();
 
   useEffect(() => {
-    invoke<GatewayConfig>("get_config")
-      .then((cfg) => {
+    fetch(`${getGatewayUrl()}/api/config`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((cfg: GatewayConfig) => {
         setConfig(cfg);
         // Gateway value takes precedence over localStorage
         setLogLevel(cfg.log_level);
+        if (cfg.log_file_size_mb !== undefined) {
+          setLogFileSizeMb(cfg.log_file_size_mb);
+        }
       })
       .catch(() => {});
-  }, [setLogLevel]);
+  }, [setLogLevel, setLogFileSizeMb]);
 
   const currentLogLevel = config?.log_level || logLevel || "info";
+  const currentLogFileSize = config?.log_file_size_mb ?? logFileSizeMb;
+
+  const handleDeleteLogs = async () => {
+    setShowDeleteConfirm(false);
+    setDeleting(true);
+    try {
+      await fetch(`${getGatewayUrl()}/api/logs`, { method: "DELETE" });
+    } catch { /* ignore */ }
+    finally { setDeleting(false); }
+  };
 
   return (
-    <div className="max-w-lg space-y-6">
-      <div>
-        <h2 className="mb-3 text-sm font-medium">Log Level</h2>
-        <select
-          value={currentLogLevel}
-          onChange={async (e) => {
-            const val = e.target.value;
-            try {
-              await invoke("update_config", { logLevel: val });
-              setConfig((prev) => (prev ? { ...prev, log_level: val } : prev));
-              setLogLevel(val);
-            } catch { /* ignore */ }
-          }}
-          className={selectBase}
+    <div className="max-w-lg space-y-4">
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Log setup</h2>
+
+        {/* Log level */}
+        <div className="mb-3">
+          <label className="block mb-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+            Log Level
+          </label>
+          <select
+            value={currentLogLevel}
+            onChange={async (e) => {
+              const val = e.target.value;
+              try {
+                await fetch(`${getGatewayUrl()}/api/config`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ log_level: val }),
+                });
+                setConfig((prev) => (prev ? { ...prev, log_level: val } : prev));
+                setLogLevel(val);
+              } catch { /* ignore */ }
+            }}
+            className={selectBase}
+          >
+            <option value="trace">trace</option>
+            <option value="debug">debug</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+        </div>
+
+        {/* Log file size */}
+        <div className="mb-3">
+          <label className="block mb-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+            Log File Size (MB)
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={1024}
+              value={currentLogFileSize}
+              onChange={async (e) => {
+                const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                setLogFileSizeMb(val);
+                try {
+                  await fetch(`${getGatewayUrl()}/api/config`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ log_file_size_mb: val }),
+                  });
+                  setConfig((prev) => (prev ? { ...prev, log_file_size_mb: val } : prev));
+                } catch { /* ignore */ }
+              }}
+              className={`w-24 ${inputBase} text-xs`}
+            />
+            <span className="text-xs text-zinc-400">
+              {currentLogFileSize === 0 ? "No split" : `Auto-split at ${currentLogFileSize} MB`}
+            </span>
+          </div>
+          <p className="mt-1 text-[10px] text-zinc-400">
+            0 = disable split. Files named as YYYYMMDD_HHMMSS.log
+          </p>
+        </div>
+
+        {/* Delete all logs */}
+        <button
+          onClick={() => setShowDeleteConfirm(true)}
+          disabled={deleting}
+          className="btn-outline rounded-lg px-3 py-1.5 text-xs font-medium disabled:opacity-50"
         >
-          <option value="trace">trace</option>
-          <option value="debug">debug</option>
-          <option value="info">info</option>
-          <option value="warn">warn</option>
-          <option value="error">error</option>
-        </select>
+          {deleting ? "Deleting..." : "Delete all logs"}
+        </button>
+
+        {/* Delete confirmation dialog */}
+        {showDeleteConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="w-[380px] rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+              <h3 className="mb-2 text-sm font-semibold">Delete all logs</h3>
+              <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
+                This will delete all log files from Gateway and all Agent workspaces.
+                Running agents will also rotate their log files.
+                This action cannot be undone.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDeleteLogs}
+                  className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-600"
+                >
+                  Confirm Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      <div>
-        <h2 className="mb-3 text-sm font-medium">Data Directory</h2>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">Data Directory</h2>
         <input
           type="text"
           value={config?.data_dir ?? "\u2014"}
@@ -1361,8 +1589,8 @@ function GeneralTab() {
         />
       </div>
 
-      <div>
-        <h2 className="mb-3 text-sm font-medium">About</h2>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="mb-3 text-xs font-medium">About</h2>
         <div className="text-xs text-zinc-500 dark:text-zinc-400">
           <p>Rollball Desktop v0.1.0</p>
           <p className="mt-1">Built with Tauri v2 + React 19</p>

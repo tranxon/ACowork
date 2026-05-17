@@ -5,20 +5,10 @@ use tokio::sync::RwLock;
 
 use crate::gateway_client::GatewayClient;
 
-/// Gateway connection status
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GatewayStatus {
-    Connected,
-    Disconnected,
-    Error(String),
-}
-
 /// Shared application state
 pub struct AppState {
     /// Gateway HTTP client
     pub gateway: Arc<RwLock<GatewayClient>>,
-    /// Current Gateway connection status
-    pub status: Arc<RwLock<GatewayStatus>>,
 }
 
 impl AppState {
@@ -26,7 +16,6 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             gateway: Arc::new(RwLock::new(GatewayClient::new())),
-            status: Arc::new(RwLock::new(GatewayStatus::Disconnected)),
         }
     }
 }

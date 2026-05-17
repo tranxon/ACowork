@@ -5,6 +5,27 @@ export interface HealthResponse {
   checks?: Record<string, { status: string; detail?: string }>;
 }
 
+/** Agent list entry — matches Gateway HTTP API GET /api/agents */
+export interface AgentListResponse {
+  agent_id: string;
+  name: string;
+  display_name: string | null;
+  role: string | null;
+  avatar: string | null;
+  version: string;
+  running: boolean;
+  connected: boolean;
+  dev_mode: boolean;
+  debug_port: number | null;
+}
+
+/** Agent model info — matches Gateway HTTP API GET /api/agents/{id}/model */
+export interface AgentModelResponse {
+  provider: string;
+  model: string;
+  available_models: string[];
+}
+
 /** System status response */
 export interface SystemStatusResponse {
   version: string;
@@ -116,8 +137,10 @@ export interface GatewayConfig {
   default_provider?: string;
   /** Default LLM model (if configured) */
   default_model?: string;
-  /** Global max output tokens limit (default 32768) */
+  /// Global max output tokens limit (default 32768)
   max_output_tokens_limit: number;
+  /// Log file max size in MB before auto-split (0 = disabled)
+  log_file_size_mb: number;
 }
 
 /** Generic message response */

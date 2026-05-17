@@ -774,6 +774,11 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     proto::LogLevelUpdate { log_level: log_level.clone() },
                 ))
             }
+            protocol::GatewayResponse::LogRotate => {
+                Some(proto::server_message::Payload::LogRotate(
+                    proto::LogRotate {},
+                ))
+            }
             protocol::GatewayResponse::RuntimeConfigUpdate {
                 max_output_tokens,
                 max_iterations,

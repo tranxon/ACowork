@@ -36,6 +36,9 @@ pub struct RuntimeConfig {
     /// Log level
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Log file size in MB before auto-split (0 = no split)
+    #[serde(default = "default_log_file_size_mb")]
+    pub log_file_size_mb: u64,
     /// Maximum iterations per conversation
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
@@ -55,6 +58,10 @@ pub struct RuntimeConfig {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+fn default_log_file_size_mb() -> u64 {
+    10
 }
 
 fn default_debug_port() -> u16 {
@@ -95,6 +102,7 @@ impl Default for RuntimeConfig {
             dev_mode: false,
             debug_port: default_debug_port(),
             log_level: default_log_level(),
+            log_file_size_mb: default_log_file_size_mb(),
             max_iterations: default_max_iterations(),
             iteration_timeout_ms: default_iteration_timeout_ms(),
             tool_timeout_ms: default_tool_timeout_ms(),
@@ -121,6 +129,7 @@ impl RuntimeConfig {
             dev_mode: cli.dev_mode,
             debug_port: cli.debug_port,
             log_level: cli.log_level.clone(),
+            log_file_size_mb: cli.log_file_size_mb,
             ..Default::default()
         }
     }

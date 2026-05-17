@@ -163,8 +163,11 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   connect: (agentId: string, debugPort?: number) => {
     const state = get();
-    // If already connected to this agent, no-op
-    if (state.connected && state.debugAgentId === agentId) return;
+    // If already connected to this agent with an open socket, no-op.
+    // Guard: only skip when the socket is actually open (WebSocket.OPEN === 1).
+    // After a ResultsPanel remount (e.g. coming back from Settings), the
+    // socket may be stale/closed while the store still thinks it's connected.
+    if (state.connected && state.debugAgentId === agentId && state.socket?.readyState === WebSocket.OPEN) return;
     // If connecting to a different agent, disconnect first
     if (state.socket) {
       state.socket.close();

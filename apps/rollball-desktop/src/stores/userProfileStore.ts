@@ -8,7 +8,7 @@ const STORAGE_KEY = "rollball-user-profile";
 
 const DEFAULT_PROFILE: UserProfile = {
   displayName: "我",
-  avatarType: "boring",
+  avatarType: "icon",
   avatarVariant: "beam",
   avatarSeed: "user",
   avatarIcon: null,

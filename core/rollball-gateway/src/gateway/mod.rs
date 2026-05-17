@@ -35,6 +35,7 @@ impl Gateway {
     /// Create a new Gateway instance with the given configuration
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
         let idle_timeout = config.idle_timeout_secs;
+        let log_file_size_mb = config.log_file_size_mb;
         let vault_dir = config.vault_dir.clone();
         let data_dir = config.data_dir.clone();
 
@@ -59,7 +60,7 @@ impl Gateway {
         Ok(Self {
             config,
             state: GatewayState::new(&vault_dir),
-            lifecycle: LifecycleManager::new(idle_timeout, gateway_grpc_endpoint),
+            lifecycle: LifecycleManager::new(idle_timeout, gateway_grpc_endpoint, log_file_size_mb),
             perm_store,
         })
     }
@@ -758,6 +759,7 @@ mod tests {
             packages_dir: std::env::temp_dir().join("rollball-test-packages").to_string_lossy().to_string(),
             data_dir: std::env::temp_dir().join("rollball-test-data").to_string_lossy().to_string(),
             log_level: "info".to_string(),
+            log_file_size_mb: 10,
             idle_timeout_secs: 0,
             max_iterations: 20,
             iteration_timeout_ms: 30000,

@@ -2,6 +2,7 @@
 
 @theme {
   --color-accent-green: #00C375;
+  --color-text-secondary: hsl(240 3.7% 46.9%); /* ~zinc-500: secondary labels & icons */
 }
 
 /* Enable class-based dark mode for Tailwind v4 */
@@ -38,7 +39,7 @@
   --color-gateway-error: hsl(0 84.2% 60.2%);
 
   /* Spacing */
-  --spacing-nav: 48px;
+  --spacing-nav: 52px;
   --spacing-agent-list: 240px;
   --spacing-results: 320px;
   --spacing-chat-min: 360px;
@@ -77,6 +78,7 @@
 
   --color-bg: hsl(240 10% 3.9%);
   --color-text: hsl(0 0% 98%);
+  --color-text-secondary: hsl(240 5% 64.9%); /* ~zinc-400 for dark mode */
 
   /* Shimmer gradient stops (dark) */
   --shimmer-from: hsl(240 5% 40%);

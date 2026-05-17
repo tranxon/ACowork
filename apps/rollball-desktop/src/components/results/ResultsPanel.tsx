@@ -18,13 +18,14 @@ import {
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
+import { isGatewayLocal } from "../../lib/config";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
   isDebugMode?: boolean;
 }
 
-type PanelTab = "debug" | "results" | "setup";
+type PanelTab = "debug" | "status" | "setup";
 
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -34,7 +35,7 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
   const tokenUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.tokenUsage ?? null) : null);
   const contextUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.contextUsage ?? null) : null);
   const messages = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.messages ?? EMPTY_MESSAGES) : EMPTY_MESSAGES);
-  const [activeTab, setActiveTab] = useState<PanelTab>(isDebugMode ? "debug" : "results");
+  const [activeTab, setActiveTab] = useState<PanelTab>(isDebugMode ? "debug" : "status");
 
   // ── Debug store (always called, conditionally used) ──────────────
   const {
@@ -84,6 +85,11 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
   // ── Debug auto-connect effect ────────────────────────────────────
   useEffect(() => {
     if (!isDebugMode || !selectedAgentId) return;
+
+    // Debug WebSocket is a direct Desktop ↔ Runtime connection (127.0.0.1:19878).
+    // In remote mode (Desktop on a different machine than Gateway/Runtime),
+    // this connection cannot be established. Skip silently.
+    if (!isGatewayLocal()) return;
 
     const agentChanged = selectedAgentId !== prevAgentId.current;
 
@@ -176,10 +182,10 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
               </TabButton>
             )}
             <TabButton
-              active={activeTab === "results"}
-              onClick={() => setActiveTab("results")}
+              active={activeTab === "status"}
+              onClick={() => setActiveTab("status")}
             >
-              Results
+              Status
             </TabButton>
             <TabButton
               active={activeTab === "setup"}
@@ -201,7 +207,18 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
       {/* ── Debug tab content ─────────────────────────────────────── */}
       {activeTab === "debug" && isDebugMode && (
         <>
-          {!connected ? (
+          {!isGatewayLocal() ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+              <WifiOff className="h-5 w-5" />
+              <span className="text-center text-xs">
+                Debug unavailable in remote mode
+              </span>
+              <span className="text-center text-xs text-zinc-400">
+                Debug requires a direct local connection to the Agent Runtime.
+                The Desktop App and Gateway must run on the same machine.
+              </span>
+            </div>
+          ) : !connected ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
               {connecting ? (
                 <>
@@ -331,8 +348,8 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
         </>
       )}
 
-      {/* ── Results tab content ───────────────────────────────────── */}
-      {activeTab === "results" && (
+      {/* ── Status tab content ───────────────────────────────────── */}
+      {activeTab === "status" && (
         <div className="flex-1 overflow-y-auto p-3">
           {/* Token statistics */}
           <div className="mb-4">
@@ -414,10 +431,10 @@ function TabButton({
     <button
       onClick={onClick}
       className={cn(
-        "px-3 py-2 text-xs font-medium transition-colors border-b-2 -mb-px",
+        "border-b-2 px-3 py-2 text-xs font-medium transition-colors",
         active
-          ? "border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
-          : "border-transparent text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300",
+          ? "border-accent-green text-accent-green dark:border-accent-green dark:text-accent-green"
+          : "border-transparent text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
       )}
     >
       {children}

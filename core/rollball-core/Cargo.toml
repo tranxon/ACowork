@@ -20,6 +20,8 @@ grafeo-common.workspace = true
 directories.workspace = true
 prost.workspace = true
 tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

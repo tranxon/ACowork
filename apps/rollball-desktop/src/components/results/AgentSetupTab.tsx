@@ -94,7 +94,7 @@ export function AgentSetupTab() {
               displayName={agentName}
               avatarType="icon"
               avatarIcon={profile.avatarIconId ?? undefined}
-              size={48}
+              size={64}
             />
           </button>
           {iconOpen && (
@@ -117,7 +117,7 @@ export function AgentSetupTab() {
                       src={BUILTIN_ICONS[iconId] ?? ""}
                       alt={iconId}
                       draggable={false}
-                      className="h-10 w-10 rounded-full object-cover"
+                      className="h-16 w-16 rounded-full object-cover"
                     />
                   </button>
                 ))}
@@ -226,17 +226,17 @@ export function AgentSetupTab() {
       </div>
 
       {/* Action buttons */}
-      <div className="mt-4 border-t border-zinc-200 pt-3 dark:border-zinc-700 space-y-2">
+      <div className="mt-4 border-t border-zinc-200 pt-3 dark:border-zinc-700 flex gap-3">
         <button
           onClick={handleApply}
           disabled={configSaving}
-          className="w-full rounded-lg bg-zinc-200 px-3 py-1.5 text-xs text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-200 dark:text-zinc-800 dark:hover:bg-zinc-300"
+          className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
         >
           {configSaving ? "Applying..." : "Apply to Runtime"}
         </button>
         <button
           onClick={() => resetProfile(selectedAgentId)}
-          className="w-full rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-500 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="flex-1 rounded-lg btn-outline px-3 py-1.5 text-xs font-medium"
         >
           Reset to defaults
         </button>

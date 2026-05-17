@@ -33,8 +33,6 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
-            commands::gateway::gateway_health,
-            commands::gateway::gateway_status,
             commands::agent::list_agents,
             commands::agent::get_agent_detail,
             commands::agent::install_agent,
@@ -47,8 +45,6 @@ pub fn run() {
             commands::vault::add_key,
             commands::vault::remove_key,
             commands::vault::update_key,
-            commands::settings::get_config,
-            commands::settings::update_config,
             commands::publish::prepare_publish,
             commands::publish::build_publish,
             commands::publish::export_package,

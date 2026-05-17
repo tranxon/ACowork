@@ -26,6 +26,9 @@ pub struct GatewayConfig {
     /// Log level (trace/debug/info/warn/error)
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Log file maximum size in MB before auto-split (0 = no split, default 10)
+    #[serde(default = "default_log_file_size_mb")]
+    pub log_file_size_mb: u64,
     /// Default idle timeout in seconds (0 = no timeout)
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
@@ -102,6 +105,7 @@ impl Default for HttpConfig {
 }
 
 fn default_log_level() -> String { "info".to_string() }
+fn default_log_file_size_mb() -> u64 { 10 }
 fn default_idle_timeout() -> u64 { 300 } // 5 minutes
 fn default_max_iterations() -> u32 { 20 }
 fn default_iteration_timeout_ms() -> u64 { 30_000 }
@@ -172,6 +176,9 @@ impl GatewayConfig {
                 file_config.as_ref().map(|c| c.log_level.clone())
                     .unwrap_or_else(default_log_level)
             },
+            log_file_size_mb: file_config.as_ref()
+                .map(|c| c.log_file_size_mb)
+                .unwrap_or_else(default_log_file_size_mb),
             idle_timeout_secs: file_config.as_ref().map(|c| c.idle_timeout_secs)
                 .unwrap_or_else(default_idle_timeout),
             max_iterations: file_config.as_ref().map(|c| c.max_iterations)
@@ -230,6 +237,7 @@ impl Default for GatewayConfig {
             packages_dir: base_dir.join("packages").to_string_lossy().to_string(),
             data_dir: data_dir.to_string_lossy().to_string(),
             log_level: default_log_level(),
+            log_file_size_mb: default_log_file_size_mb(),
             idle_timeout_secs: default_idle_timeout(),
             max_iterations: default_max_iterations(),
             iteration_timeout_ms: default_iteration_timeout_ms(),

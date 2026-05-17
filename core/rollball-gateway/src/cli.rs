@@ -120,10 +120,11 @@ pub enum PermissionAction {
 impl Cli {
     /// Run the CLI
     pub fn run(self) -> Result<(), GatewayError> {
-        // Initialize tracing with reload support (daemon mode only needs the handle)
-        let log_reload_handle = init_tracing(&self.log_level);
-
+        // Load config first (needed for log file settings)
         let config = GatewayConfig::from_cli(&self)?;
+        // Initialize tracing with reload support
+        let log_reload_handle = init_tracing(&config.log_level, config.log_file_size_mb);
+
         let mut gateway = Gateway::new(config)?;
 
         match self.command {
@@ -217,7 +218,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CrlfStderr {
 ///
 /// Returns the reload handle so the Gateway can dynamically change
 /// the log level at runtime via the HTTP config API.
-fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
+fn init_tracing(level: &str, log_file_size_mb: u64) -> Option<crate::LogReloadHandle> {
     use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::fmt::time::LocalTime;
@@ -249,8 +250,11 @@ fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
         return Some(handle);
     }
 
-    // File appender for persistent logging
-    let file_appender = tracing_appender::rolling::never(&log_dir, "gateway.log");
+    // Size-based rolling file appender: splits when file exceeds log_file_size_mb
+    let file_appender = rollball_core::logging::SizeRollingFileAppender::new(
+        log_dir,
+        if log_file_size_mb > 0 { log_file_size_mb } else { 10 },
+    );
     let (filter, handle) = reload::Layer::new(env_filter);
 
     // Stderr layer (for terminal output, compact format, no colors)
@@ -281,6 +285,8 @@ fn init_tracing(level: &str) -> Option<crate::LogReloadHandle> {
 
     Some(handle)
 }
+
+// Re-export from rollball-core (shared with Agent Runtime)
 
 /// Async main entry point for daemon mode
 async fn async_main(

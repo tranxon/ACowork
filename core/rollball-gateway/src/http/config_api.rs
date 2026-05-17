@@ -9,17 +9,18 @@ use axum::{
     extract::State,
     http::StatusCode,
     Json,
-    routing::get,
+    routing::{delete, get},
     Router,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};
 
-/// Build the config/status router
+/// Build the config/status/logs router
 pub fn config_routes() -> Router<AppState> {
     Router::new()
         .route("/api/config", get(get_config).put(update_config))
+        .route("/api/logs", delete(delete_logs))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -31,6 +32,8 @@ pub struct ConfigResponse {
     pub packages_dir: String,
     pub data_dir: String,
     pub log_level: String,
+    /// Log file maximum size in MB (0 = disabled, default 10)
+    pub log_file_size_mb: u64,
     pub idle_timeout_secs: u64,
     pub dev_mode: bool,
     pub http: HttpConfigResponse,
@@ -59,6 +62,9 @@ pub struct UpdateConfigRequest {
     /// Log level (trace/debug/info/warn/error)
     #[serde(default)]
     pub log_level: Option<String>,
+    /// Log file maximum size in megabytes (0 = disable split)
+    #[serde(default)]
+    pub log_file_size_mb: Option<u64>,
     /// Idle timeout in seconds
     #[serde(default)]
     pub idle_timeout_secs: Option<u64>,
@@ -108,6 +114,7 @@ pub async fn get_config(
         default_provider: config.default_provider.clone(),
         default_model: config.default_model.clone(),
         max_output_tokens_limit: config.max_output_tokens_limit,
+        log_file_size_mb: config.log_file_size_mb,
     }))
 }
 
@@ -142,6 +149,12 @@ pub async fn update_config(
     if let Some(limit) = body.max_output_tokens_limit {
         updates.push(format!("max_output_tokens_limit={}", limit));
     }
+    if let Some(size) = body.log_file_size_mb {
+        if size > 1024 {
+            return Err(ApiError::bad_request("log_file_size_mb must be between 0 and 1024"));
+        }
+        updates.push(format!("log_file_size_mb={}", size));
+    }
 
     if updates.is_empty() {
         return Err(ApiError::bad_request("No configuration fields to update"));
@@ -174,6 +187,9 @@ pub async fn update_config(
         }
         if let Some(limit) = body.max_output_tokens_limit {
             config.max_output_tokens_limit = limit;
+        }
+        if let Some(size) = body.log_file_size_mb {
+            config.log_file_size_mb = size;
         }
     }
     drop(gw);
@@ -218,6 +234,100 @@ pub async fn update_config(
 
     Ok(Json(MessageResponse {
         message: format!("Config updated: {}", updates.join(", ")),
+    }))
+}
+
+/// `DELETE /api/logs` — delete all log files
+///
+/// Three-phase cleanup:
+/// 1. Push LogRotate to **running** agents via IPC — each Runtime
+///    force-rotates to a new log file and deletes old `*.log` files.
+/// 2. Delete **Gateway**'s own log files in the project config directory.
+/// 3. For **stopped** agents (installed but not running), delete
+///    `{install_path}/workspace/logs/*.log` directly via filesystem.
+pub async fn delete_logs(
+    State(state): State<AppState>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+    let mut total_deleted = 0u64;
+
+    // ── Phase 1: Push LogRotate to running agents via IPC ──────────────
+    if let Some(session_mgr) = &state.session_mgr {
+        let mgr = session_mgr.lock().await;
+        let agent_ids: Vec<String> = {
+            let gw = state.gateway_state.read().await;
+            gw.running_agents.keys().cloned().collect()
+        };
+        for agent_id in &agent_ids {
+            if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
+                let push_result = session
+                    .push_message(rollball_core::protocol::GatewayResponse::LogRotate)
+                    .await;
+                if push_result {
+                    tracing::info!(agent = %agent_id, "Pushed LogRotate to Runtime");
+                } else {
+                    tracing::warn!(agent = %agent_id, "Failed to push LogRotate (channel closed)");
+                }
+            }
+        }
+    }
+
+    // ── Phase 2: Delete Gateway's own log files ───────────────────────
+    {
+        let log_dir = crate::config::GatewayConfig::project_config_dir().join("logs");
+        if log_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&log_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |ext| ext == "log") {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            tracing::warn!("Failed to delete Gateway log {:?}: {}", path, e);
+                        } else {
+                            total_deleted += 1;
+                        }
+                    }
+                }
+            }
+        }
+        tracing::info!("Gateway logs cleaned from {:?}", log_dir);
+    }
+
+    // ── Phase 3: Delete stopped agents' workspace logs ────────────────
+    {
+        let gw = state.gateway_state.read().await;
+        let running_ids: std::collections::HashSet<&String> =
+            gw.running_agents.keys().collect();
+        for (agent_id, info) in &gw.installed_agents {
+            if running_ids.contains(agent_id) {
+                continue; // running agents handle their own logs via IPC
+            }
+            let workspace_logs = std::path::PathBuf::from(&info.install_path)
+                .join("workspace")
+                .join("logs");
+            if workspace_logs.exists() {
+                if let Ok(entries) = std::fs::read_dir(&workspace_logs) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map_or(false, |ext| ext == "log") {
+                            if let Err(e) = std::fs::remove_file(&path) {
+                                tracing::warn!(
+                                    agent = %agent_id,
+                                    "Failed to delete stopped agent log {:?}: {}",
+                                    path, e
+                                );
+                            } else {
+                                total_deleted += 1;
+                                tracing::debug!(agent = %agent_id, "Deleted stopped agent log {:?}", path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!("Log cleanup complete: {} log files deleted", total_deleted);
+    Ok(Json(MessageResponse {
+        message: format!("Deleted {} log file(s)", total_deleted),
     }))
 }
 
@@ -269,6 +379,7 @@ mod tests {
             default_provider: Some("deepseek".to_string()),
             default_model: Some("deepseek-chat".to_string()),
             max_output_tokens_limit: 32768,
+            log_file_size_mb: 10,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("19876"));

@@ -18,6 +18,11 @@ pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registr
 /// Retry interval when Gateway recv encounters a transient error
 const GATEWAY_RECV_RETRY_INTERVAL_MS: u64 = 100;
 
+/// Global reference to the SizeRollingFileAppender for runtime log rotation.
+/// Set by init_tracing() and read by the LogRotate IPC handler.
+static FILE_APPENDER: std::sync::OnceLock<Arc<rollball_core::logging::SizeRollingFileAppender>> =
+    std::sync::OnceLock::new();
+
 /// Agent Runtime CLI
 #[derive(Parser)]
 #[command(name = "rollball-runtime")]
@@ -59,6 +64,10 @@ pub struct Cli {
     #[arg(long, default_value = "info", env = "ROLLBALL_LOG_LEVEL")]
     pub log_level: String,
 
+    /// Log file maximum size in MB before auto-split (0 = no split, default 10)
+    #[arg(long, default_value = "10", env = "ROLLBALL_LOG_FILE_SIZE_MB")]
+    pub log_file_size_mb: u64,
+
     /// Path to manifest.toml (overrides package-embedded manifest)
     #[arg(long)]
     pub manifest_path: Option<String>,
@@ -96,7 +105,7 @@ impl Cli {
     /// Initialize tracing subscriber with both stderr and file output.
     ///
     /// Logs are written to stderr (for Gateway capture) AND to
-    /// `{work_dir}/logs/runtime.log` for user inspection.
+    /// `{work_dir}/logs/YYYYMMDD_HHMMSS.log` for user inspection.
     ///
     /// Returns a reload handle that allows dynamic log level changes
     /// at runtime (e.g. when Gateway pushes LogLevelUpdate).
@@ -128,8 +137,11 @@ impl Cli {
             return Some(reload_handle);
         }
 
+        let max_mb = if self.log_file_size_mb > 0 { self.log_file_size_mb } else { 10 };
         let file_appender =
-            tracing_appender::rolling::never(&log_dir, "runtime.log");
+            Arc::new(rollball_core::logging::SizeRollingFileAppender::new(log_dir, max_mb));
+        // Store for LogRotate IPC handler
+        let _ = FILE_APPENDER.set(file_appender.clone());
 
         let (filter, reload_handle) = reload::Layer::new(env_filter);
 
@@ -1593,6 +1605,30 @@ async fn process_gateway_recv(
                                 level = %log_level,
                                 "No reload handle available — cannot update log level dynamically"
                             );
+                        }
+                        return LoopAction::Continue;
+                    }
+                    GatewayResponse::LogRotate => {
+                        tracing::info!("Received LogRotate from Gateway");
+                        // 1. Force-rotate to close current file handle and create a new one
+                        if let Some(appender) = FILE_APPENDER.get() {
+                            appender.force_rotate();
+                        }
+                        // 2. Delete old log files (handle is now on the new file)
+                        let logs_dir = std::path::Path::new(work_dir).join("logs");
+                        if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+                            let mut deleted = 0u64;
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if path.extension().is_some_and(|ext| ext == "log") {
+                                    if let Err(e) = std::fs::remove_file(&path) {
+                                        tracing::warn!("Failed to delete log file {:?}: {}", path, e);
+                                    } else {
+                                        deleted += 1;
+                                    }
+                                }
+                            }
+                            tracing::info!("Deleted {} runtime log files", deleted);
                         }
                         return LoopAction::Continue;
                     }

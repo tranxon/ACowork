@@ -345,7 +345,7 @@ export function StateLabel({
 }) {
   return (
     <>
-      <span className="text-zinc-400 dark:text-zinc-500">{label}</span>
+      <span className="text-text-secondary">{label}</span>
       <span
         className={cn(
           "text-right font-mono",

@@ -550,6 +550,13 @@ pub enum GatewayResponse {
         /// New log level string (e.g. "trace", "debug", "info", "warn", "error")
         log_level: String,
     },
+    /// Log rotation request (Gateway → Runtime, push)
+    ///
+    /// Gateway pushes this when the user triggers log cleanup in Settings.
+    /// The Runtime must:
+    ///   1. Delete all *.log files in its workspace/logs/ directory
+    ///   2. Force-rotate to create a fresh log file for subsequent writes
+    LogRotate,
     /// Runtime configuration update (Gateway → Runtime, push)
     ///
     /// Gateway pushes per-agent config overrides to the Runtime.
