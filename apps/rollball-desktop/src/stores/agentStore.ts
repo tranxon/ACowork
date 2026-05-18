@@ -18,6 +18,8 @@ interface AgentStore {
   startAgent: (agentId: string, devMode?: boolean) => Promise<void>;
   stopAgent: (agentId: string) => Promise<void>;
   getAgentDetail: (agentId: string) => Promise<AgentDetail>;
+  /** Poll fetchAgents until agent.ready === true (max 30×500ms = 15s). */
+  waitForAgentReady: (agentId: string) => Promise<void>;
 }
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
@@ -27,9 +29,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   error: null,
 
   fetchAgents: async () => {
+    const t0 = performance.now();
     set({ loading: true, error: null });
     try {
       const agents = await invoke<AgentInfo[]>("list_agents");
+      const t1 = performance.now();
+      // Diagnostic: log timing and ready flags to trace poll delay
+      const sr = agents.find((a: AgentInfo) => a.agent_id === "com.rollball.senior-engineer");
+      if (sr) {
+        console.log(`[AgentStore] fetchAgents took ${(t1 - t0).toFixed(0)}ms | senior-engineer: running=${sr.running} ready=${sr.ready} connected=${sr.connected}`);
+      }
       set({ agents, loading: false });
       
       // Auto-select System Agent if available and nothing is selected
@@ -105,5 +114,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   getAgentDetail: async (agentId) => {
     return await invoke<AgentDetail>("get_agent_detail", { agentId });
+  },
+
+  waitForAgentReady: async (agentId) => {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await get().fetchAgents();
+      const agent = get().agents.find((a) => a.agent_id === agentId);
+      if (agent?.ready) {
+        return;
+      }
+      if (!agent?.running) {
+        throw new Error("Agent process exited before becoming ready");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error("Agent did not become ready within 15 seconds");
   },
 }));

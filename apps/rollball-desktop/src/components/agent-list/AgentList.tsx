@@ -42,21 +42,11 @@ export function AgentList({ width }: AgentListProps) {
   const waitForAgentReady = async (agentId: string, devMode: boolean) => {
     setStartingAgentIds((prev) => new Set(prev).add(agentId));
     try {
-      for (let attempt = 0; attempt < 30; attempt++) {
-        await useAgentStore.getState().fetchAgents();
-        const agent = useAgentStore.getState().agents.find((a) => a.agent_id === agentId);
-        if (agent?.ready) {
-          useChatStore.getState().connectStream(agentId, getGatewayUrl());
-          addToast({ type: "success", message: devMode ? "Agent started in debug mode" : "Agent started" });
-          return;
-        }
-        if (!agent?.running) {
-          addToast({ type: "error", message: "Agent process exited before becoming ready" });
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-      addToast({ type: "error", message: "Agent did not become ready within 15 seconds" });
+      await useAgentStore.getState().waitForAgentReady(agentId);
+      useChatStore.getState().connectStream(agentId, getGatewayUrl());
+      addToast({ type: "success", message: devMode ? "Agent started in debug mode" : "Agent started" });
+    } catch (e: any) {
+      addToast({ type: "error", message: e?.message ?? String(e) });
     } finally {
       setStartingAgentIds((prev) => {
         const next = new Set(prev);
@@ -151,9 +141,12 @@ export function AgentList({ width }: AgentListProps) {
 
   const handleStart = async (agentId: string) => {
     try {
+      console.log(`[AgentList] handleStart calling startAgent for ${agentId}`);
       await startAgent(agentId);
+      console.log(`[AgentList] handleStart startAgent done, launching waitForAgentReady for ${agentId}`);
       // Poll until ready, then connect WebSocket
       waitForAgentReady(agentId, false);
+      console.log(`[AgentList] handleStart waitForAgentReady launched (fire-and-forget) for ${agentId}`);
     } catch (e) {
       addToast({ type: "error", message: `Failed to start agent: ${String(e)}` });
     }

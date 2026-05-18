@@ -180,6 +180,12 @@ export function ChatPanel() {
     // This prevents redundant clearMessages + reload when selectedAgent.running
     // is re-evaluated without actually changing (e.g. agent list refresh).
     if (selectedAgentId && selectedAgentId === lastInitAgentId && selectedAgent?.running && selectedAgent?.ready) {
+      // Still ensure WebSocket is connected — the early return used to skip
+      // connectStream, causing ~18s of "streaming unavailable" until
+      // waitForAgentReady's poll loop finally caught up.
+      if (!wsMap[selectedAgentId]) {
+        connectStream(selectedAgentId, getGatewayUrl());
+      }
       return;
     }
 
@@ -461,7 +467,12 @@ export function ChatPanel() {
           <div className="mx-auto text-3xl text-zinc-300 dark:text-zinc-600">⏸</div>
           <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">{selectedAgent.name} is stopped</p>
           <button
-            onClick={() => startAgent(selectedAgent.agent_id)}
+            onClick={async () => {
+              await startAgent(selectedAgent.agent_id);
+              const { waitForAgentReady } = useAgentStore.getState();
+              await waitForAgentReady(selectedAgent.agent_id);
+              connectStream(selectedAgent.agent_id, getGatewayUrl());
+            }}
             className="mt-3 inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium"
           >
             <Play className="h-3.5 w-3.5" /> Start Agent
@@ -666,8 +677,8 @@ export function ChatPanel() {
               ? "Gateway not connected"
               : !wsMap[selectedAgentId!] || wsMap[selectedAgentId!].readyState !== WebSocket.OPEN
                 ? activeSkill
-                  ? "输入参数... (HTTP mode — streaming unavailable)"
-                  : "Type a message... (HTTP mode — streaming unavailable)"
+                  ? "输入参数... (Connecting to agent...)"
+                  : "Type a message... (Connecting to agent...)"
                 : activeSkill
                   ? "输入参数... (Enter to send, Shift+Enter for new line)"
                   : "Type a message... (Enter to send, Shift+Enter for new line)"
