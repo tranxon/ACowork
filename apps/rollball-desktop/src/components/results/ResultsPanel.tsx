@@ -17,6 +17,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
+import { MemoryPanel } from "../memory/MemoryPanel";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { isGatewayLocal } from "../../lib/config";
 
@@ -25,7 +26,7 @@ interface ResultsPanelProps {
   isDebugMode?: boolean;
 }
 
-type PanelTab = "debug" | "status" | "setup";
+type PanelTab = "debug" | "status" | "setup" | "memory";
 
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -186,6 +187,12 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
               onClick={() => setActiveTab("status")}
             >
               Status
+            </TabButton>
+            <TabButton
+              active={activeTab === "memory"}
+              onClick={() => setActiveTab("memory")}
+            >
+              Memory
             </TabButton>
             <TabButton
               active={activeTab === "setup"}
@@ -402,6 +409,9 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
           </div>
         </div>
       )}
+
+      {/* ── Memory tab content ────────────────────────────────────── */}
+      {activeTab === "memory" && <MemoryPanel />}
 
       {/* ── Setup tab content ─────────────────────────────────────── */}
       {activeTab === "setup" && <AgentSetupTab />}

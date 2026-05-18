@@ -84,9 +84,9 @@ export function MemoryNodeList({
   const end = Math.min(page * pageSize, total);
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* List header */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-2 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
         <span>
           {total > 0 ? (
             <>Showing {start}–{end} of {total}</>
@@ -105,7 +105,7 @@ export function MemoryNodeList({
         )}
 
         {!loading && nodes.length === 0 && (
-          <div className="flex h-full items-center justify-center text-sm text-zinc-400 dark:text-zinc-500">
+          <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
             No memory data available
           </div>
         )}
@@ -120,7 +120,7 @@ export function MemoryNodeList({
                 key={node.node_id}
                 onClick={() => onSelectNode(node.node_id)}
                 className={cn(
-                  "flex w-full flex-col gap-1.5 px-4 py-3 text-left transition-colors",
+                  "flex w-full flex-col gap-1 px-3 py-2 text-left transition-colors",
                   isSelected
                     ? "bg-zinc-100 dark:bg-zinc-800"
                     : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
@@ -152,18 +152,18 @@ export function MemoryNodeList({
                 </div>
 
                 {/* Content summary */}
-                <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                <p className="text-xs text-zinc-700 dark:text-zinc-300">
                   {truncateContent(node.content)}
                 </p>
 
                 {/* Bottom row: confidence + decay + date */}
-                <div className="flex items-center gap-3 text-xs text-zinc-400 dark:text-zinc-500">
+                <div className="flex items-center gap-2 text-[11px] text-zinc-400 dark:text-zinc-500">
                   <span>Confidence: {(node.confidence * 100).toFixed(0)}%</span>
 
                   {/* Decay score bar */}
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1">
                     <span>Decay:</span>
-                    <div className="h-1.5 w-16 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                    <div className="h-1 w-12 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                       <div
                         className={cn("h-full rounded-full", getDecayColor(node.decay_score))}
                         style={{ width: `${node.decay_score * 100}%` }}
@@ -182,23 +182,23 @@ export function MemoryNodeList({
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-between border-t border-zinc-200 px-4 py-2 dark:border-zinc-800">
+        <div className="flex items-center justify-between border-t border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
           <button
             onClick={() => onPageChange(page - 1)}
             disabled={page <= 1}
-            className="inline-flex items-center rounded-md p-1 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded p-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
           >
-            <ChevronLeft className="h-4 w-4" />
+            <ChevronLeft className="h-3.5 w-3.5" />
           </button>
-          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+          <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
             Page {page} of {totalPages}
           </span>
           <button
             onClick={() => onPageChange(page + 1)}
             disabled={page >= totalPages}
-            className="inline-flex items-center rounded-md p-1 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded p-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
           >
-            <ChevronRight className="h-4 w-4" />
+            <ChevronRight className="h-3.5 w-3.5" />
           </button>
         </div>
       )}

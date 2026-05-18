@@ -19,7 +19,6 @@ import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContextUsageInfo, VaultKeyEntry, ModelInfo } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { ExploreBlock } from "./ExploreBlock";
-import { MemoryPanel } from "../memory/MemoryPanel";
 import { SessionPanel } from "./SessionPanel";
 import { SkillsPanel } from "../skills/SkillsPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
@@ -55,7 +54,6 @@ export function ChatPanel() {
   const [inputValue, setInputValue] = useState("");
   const [queuedMessage, setQueuedMessage] = useState<string | null>(null);
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
-  const [activeDrawer, setActiveDrawer] = useState<"memory" | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef<number>(0);
@@ -614,30 +612,6 @@ export function ChatPanel() {
           )}
           <div ref={messagesEndRef} />
         </div>
-
-        {/* Drawer panel — slides in from the right */}
-        {activeDrawer && (
-          <div
-            className="absolute inset-0 flex justify-end bg-black/20 z-20"
-            onClick={() => setActiveDrawer(null)}
-          >
-            <div
-              className="w-[480px] max-w-full h-full bg-white dark:bg-zinc-900 shadow-xl overflow-y-auto"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="sticky top-0 flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 z-10">
-                <span className="font-medium text-sm text-zinc-900 dark:text-zinc-100">Memory</span>
-                <button
-                  className="rounded-md p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                  onClick={() => setActiveDrawer(null)}
-                >
-                  <X size={16} />
-                </button>
-              </div>
-              {activeDrawer === "memory" && <MemoryPanel />}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Unified input container with toolbar */}
@@ -719,7 +693,7 @@ export function ChatPanel() {
             {/* Workspace button */}
             <WorkspaceSelector />
             {/* Session button */}
-            {selectedAgentId && <SessionPanel agentId={selectedAgentId} onOpenMemory={() => setActiveDrawer("memory")} />}
+            {selectedAgentId && <SessionPanel agentId={selectedAgentId} />}
             {/* Skills dropdown */}
             <SkillsPanel />
           </div>

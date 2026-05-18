@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import { useSessionStore } from "../../stores/sessionStore";
-import { Brain, MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
+import { MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 interface SessionPanelProps {
   agentId: string;
-  onOpenMemory: () => void;
+  onOpenMemory?: () => void;
 }
 
 /** Format a date string to relative time in Chinese */
@@ -25,7 +25,7 @@ function formatRelativeTime(dateStr: string): string {
   return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
 }
 
-export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
+export function SessionPanel({ agentId }: SessionPanelProps) {
   const {
     sessions,
     currentSessionId,
@@ -109,16 +109,6 @@ export function SessionPanel({ agentId, onOpenMemory }: SessionPanelProps) {
             <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
               Sessions
             </span>
-            <button
-              onClick={() => {
-                setOpen(false);
-                onOpenMemory();
-              }}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-zinc-700"
-            >
-              <Brain className="h-3 w-3" />
-              Memory
-            </button>
           </div>
 
           {/* Session list */}

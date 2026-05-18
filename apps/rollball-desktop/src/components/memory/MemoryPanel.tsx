@@ -3,7 +3,7 @@ import { useMemoryStore } from "../../stores/memoryStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
-import { Brain, RefreshCw, Zap, AlertTriangle } from "lucide-react";
+import { RefreshCw, Zap, AlertTriangle } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 export function MemoryPanel() {
@@ -59,48 +59,44 @@ export function MemoryPanel() {
   // ── Empty state: no agent selected ──
   if (!selectedAgentId) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-white dark:bg-zinc-900">
-        <div className="text-center">
-          <Brain className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
-          <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">Select an agent to view memory</p>
-        </div>
+      <div className="flex flex-1 items-center justify-center p-6 text-xs text-zinc-400 dark:text-zinc-500">
+        Select an agent to view memory
       </div>
     );
   }
 
   return (
-    <div className="flex flex-1 flex-col bg-white dark:bg-zinc-900">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
-        <h1 className="text-xl font-semibold">Memory Management</h1>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <div className="flex gap-2">
           <button
             onClick={handleConsolidate}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded-md btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
           >
-            <Zap className="h-3.5 w-3.5" />
+            <Zap className="h-3 w-3" />
             Consolidate
           </button>
           <button
             onClick={handleRefresh}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
-            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+            <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
             Refresh
           </button>
         </div>
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 border-b border-zinc-200 px-6 py-3 dark:border-zinc-800">
+      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <input
           type="text"
           value={filters.keyword}
           onChange={(e) => setFilters({ keyword: e.target.value })}
           placeholder="Search nodes..."
-          className="min-w-[200px] flex-1 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
+          className="min-w-[160px] flex-1 rounded border border-zinc-200 bg-white px-2 py-1 text-[11px] outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
         />
         <select
           value={filters.type}
@@ -114,7 +110,7 @@ export function MemoryPanel() {
                 | "Autobiographical",
             })
           }
-          className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+          className="rounded border border-zinc-200 bg-white px-2 py-1 text-[11px] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
         >
           <option value="All">All Types</option>
           <option value="Knowledge">Knowledge</option>
@@ -129,7 +125,7 @@ export function MemoryPanel() {
               timeRange: e.target.value as "1h" | "1d" | "7d" | "30d" | "all",
             })
           }
-          className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+          className="rounded border border-zinc-200 bg-white px-2 py-1 text-[11px] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
         >
           <option value="all">All Time</option>
           <option value="1h">Last Hour</option>
@@ -141,7 +137,7 @@ export function MemoryPanel() {
 
       {/* Stats cards */}
       {stats && (
-        <div className="grid grid-cols-2 gap-3 border-b border-zinc-200 px-6 py-3 sm:grid-cols-4 dark:border-zinc-800">
+        <div className="grid grid-cols-2 gap-2 border-b border-zinc-200 px-3 py-2 sm:grid-cols-4 dark:border-zinc-800">
           <StatCard label="Total Nodes" value={stats.total_nodes} />
           <StatCard label="Active" value={stats.by_status["Active"] ?? 0} color="green" />
           <StatCard label="Dormant" value={stats.by_status["Dormant"] ?? 0} color="amber" />
@@ -155,14 +151,14 @@ export function MemoryPanel() {
 
       {/* Error banner */}
       {error && (
-        <div className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-6 py-2 dark:border-red-900 dark:bg-red-950">
-          <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
-          <span className="text-xs text-red-700 dark:text-red-300">{error}</span>
+        <div className="flex items-center gap-1.5 border-b border-red-200 bg-red-50 px-3 py-1.5 dark:border-red-900 dark:bg-red-950">
+          <AlertTriangle className="h-3 w-3 text-red-600 dark:text-red-400" />
+          <span className="text-[11px] text-red-700 dark:text-red-300">{error}</span>
         </div>
       )}
 
-      {/* Main content: drawer-style master-detail toggle */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* Main content: master-detail toggle */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         {!selectedNode ? (
           <MemoryNodeList
             nodes={nodes}
@@ -209,9 +205,9 @@ function StatCard({
           : "text-zinc-900 dark:text-zinc-100";
 
   return (
-    <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">{label}</p>
-      <p className={cn("mt-1 text-lg font-semibold", valueColor)}>{value}</p>
+    <div className="rounded border border-zinc-200 p-2 dark:border-zinc-700">
+      <p className="text-[10px] text-zinc-500 dark:text-zinc-400">{label}</p>
+      <p className={cn("mt-0.5 text-xs font-semibold", valueColor)}>{value}</p>
     </div>
   );
 }
