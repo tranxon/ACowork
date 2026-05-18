@@ -163,6 +163,14 @@ pub async fn list_agents(
             }
         })
         .collect();
+    // Diagnostic: if senior-engineer is running, log its ready state
+    // to help trace why frontend polls may not see ready=true promptly.
+    if let Some(sr) = gw.running_agents.get("com.rollball.senior-engineer") {
+        tracing::info!(
+            "[DIAG] list_agents: senior-engineer running=true ready={} connected={}",
+            sr.ready, sr.connected
+        );
+    }
     Json(agents)
 }
 
@@ -930,10 +938,14 @@ pub async fn get_agent_tools(
 
     // Determine active tools: config override > manifest
     let per_agent = agent_config::load_agent_config(&data_dir, &agent_id).unwrap_or(None);
-    let active_tools = per_agent
+    let raw_active_tools = per_agent
         .as_ref()
         .and_then(|o| o.active_tools.clone())
         .unwrap_or_else(|| read_manifest_tools(&info.install_path));
+
+    // Normalize platform-specific shell names (bash, powershell, pwsh)
+    // to the unified "shell" tool name for consistent UI display.
+    let active_tools = normalize_shell_tools(&raw_active_tools);
 
     Ok(Json(AvailableToolsResponse {
         agent_id,
@@ -972,18 +984,8 @@ fn builtin_tool_metadata() -> Vec<AvailableTool> {
             required_permissions: vec!["search:web".into()],
         },
         AvailableTool {
-            name: "bash".into(),
-            description: "Execute commands in Git Bash (Windows)".into(),
-            required_permissions: vec!["filesystem:exec".into()],
-        },
-        AvailableTool {
-            name: "powershell".into(),
-            description: "Execute PowerShell commands (Windows)".into(),
-            required_permissions: vec!["filesystem:exec".into()],
-        },
-        AvailableTool {
             name: "shell".into(),
-            description: "Execute shell commands (Linux/macOS)".into(),
+            description: "Execute shell commands in the platform's native shell".into(),
             required_permissions: vec!["filesystem:exec".into()],
         },
         AvailableTool {
@@ -1017,26 +1019,36 @@ fn builtin_tool_metadata() -> Vec<AvailableTool> {
             required_permissions: vec!["intent:send:<target>".into()],
         },
         AvailableTool {
-            name: "identity_store".into(),
-            description: "Store user identity information (System Agent only)".into(),
-            required_permissions: vec!["identity:write".into()],
-        },
-        AvailableTool {
-            name: "identity_query".into(),
-            description: "Query user identity fields from System Agent".into(),
-            required_permissions: vec!["identity:read".into()],
-        },
-        AvailableTool {
-            name: "identity_observe".into(),
-            description: "Subscribe to identity field changes".into(),
-            required_permissions: vec!["identity:read".into()],
-        },
-        AvailableTool {
             name: "rag_query".into(),
             description: "Query enterprise RAG knowledge base".into(),
             required_permissions: vec!["rag:query".into(), "network:<rag_url>".into()],
         },
     ]
+}
+
+/// Normalize platform-specific shell tool names in the active tools list.
+///
+/// The Runtime registers platform-specific shells (e.g. "bash", "powershell"
+/// on Windows; "shell" on Linux/macOS), but the agent setup UI presents a
+/// single unified "shell" toggle.  This function maps any platform-specific
+/// shell variants back to "shell" so the UI checkbox reflects the correct
+/// state, and deduplicates in case multiple variants were present.
+fn normalize_shell_tools(tools: &[String]) -> Vec<String> {
+    let shell_names: &[&str] = &["bash", "powershell", "pwsh"];
+    let has_shell_variant = tools.iter().any(|t| shell_names.contains(&t.as_str()));
+    if !has_shell_variant {
+        return tools.to_vec();
+    }
+    let mut result: Vec<String> = tools
+        .iter()
+        .filter(|t| !shell_names.contains(&t.as_str()))
+        .cloned()
+        .collect();
+    // Deduplicate: only push "shell" once
+    if !result.contains(&"shell".to_string()) {
+        result.push("shell".to_string());
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1077,5 +1089,37 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("Agent started"));
+    }
+
+    #[test]
+    fn test_normalize_shell_tools_bash_to_shell() {
+        let tools = vec!["bash".to_string(), "file_read".to_string()];
+        let result = normalize_shell_tools(&tools);
+        assert!(result.contains(&"shell".to_string()));
+        assert!(!result.contains(&"bash".to_string()));
+        assert!(result.contains(&"file_read".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_shell_tools_powershell_to_shell() {
+        let tools = vec!["powershell".to_string(), "http_request".to_string()];
+        let result = normalize_shell_tools(&tools);
+        assert!(result.contains(&"shell".to_string()));
+        assert!(!result.contains(&"powershell".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_shell_tools_deduplicate_both() {
+        let tools = vec!["bash".to_string(), "powershell".to_string()];
+        let result = normalize_shell_tools(&tools);
+        // Should only have one "shell" entry
+        assert_eq!(result.iter().filter(|t| *t == "shell").count(), 1);
+    }
+
+    #[test]
+    fn test_normalize_shell_tools_no_shell_variant() {
+        let tools = vec!["file_read".to_string(), "http_request".to_string()];
+        let result = normalize_shell_tools(&tools);
+        assert_eq!(result, tools);
     }
 }

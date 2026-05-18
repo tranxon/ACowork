@@ -17,9 +17,6 @@
 //! | glob_search | filesystem:read:<path> |
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
-//! | identity_store | identity:write |
-//! | identity_query | identity:read |
-//! | identity_observe | identity:read |
 //! | rag_query | rag:query + network:<rag_url> (dual permission, S4.6) |
 
 use rollball_core::permission::Permission;
@@ -37,8 +34,6 @@ pub fn tool_required_permission(tool_name: &str) -> Option<Permission> {
         "file_read" | "glob_search" | "content_search" => Some(Permission::FilesystemRead(None)),
         "file_write" | "file_edit" => Some(Permission::FilesystemWrite(None)),
         "intent_send" => Some(Permission::IntentSend(None)),
-        "identity_store" => Some(Permission::IdentityWrite),
-        "identity_query" | "identity_observe" => Some(Permission::IdentityRead),
         // RAG tool: base permission is RagQuery; validate_permission also checks
         // network whitelist for the RAG endpoint (dual permission, S4.6)
         "rag_query" => Some(Permission::RagQuery(None)),
@@ -203,9 +198,6 @@ mod tests {
             [[permissions]]
             type = "IntentSend"
 
-            [[permissions]]
-            type = "IdentityWrite"
-
             [[tools]]
             name = "shell"
 
@@ -241,9 +233,6 @@ mod tests {
 
             [[tools]]
             name = "intent_send"
-
-            [[tools]]
-            name = "identity_store"
         "#;
         AgentManifest::from_toml(toml_str).unwrap()
     }
@@ -279,12 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_required_permission_identity_store() {
-        let perm = tool_required_permission("identity_store").unwrap();
-        assert!(matches!(perm, Permission::IdentityWrite));
-    }
-
-    #[test]
     fn test_tool_required_permission_unknown() {
         assert!(tool_required_permission("weather").is_none());
         assert!(tool_required_permission("calculator").is_none());
@@ -307,7 +290,6 @@ mod tests {
         assert!(validate_permission(&manifest, "glob_search").is_ok());
         assert!(validate_permission(&manifest, "content_search").is_ok());
         assert!(validate_permission(&manifest, "intent_send").is_ok());
-        assert!(validate_permission(&manifest, "identity_store").is_ok());
     }
 
     #[test]

@@ -8,4 +8,4 @@ When users interact with you directly:
 - Assist with preference changes
 - Explain what other agents can do
 
-You can store identity information using the `identity_store` tool and recall it using `memory_recall`.
+You can store identity information using the `memory_store` tool and recall it using `memory_recall`.

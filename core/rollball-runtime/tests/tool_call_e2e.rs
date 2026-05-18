@@ -93,12 +93,6 @@ fn full_manifest() -> rollball_core::AgentManifest {
         [[tools]]
         name = "intent_send"
 
-        [[tools]]
-        name = "identity_store"
-
-        [[tools]]
-        name = "identity_query"
-
         [llm]
         provider = "mock"
         model = "mock-model"
@@ -963,38 +957,6 @@ async fn test_intent_send_invalid_target() {
 
     assert!(!result.ok);
     assert!(result.error.unwrap().contains("reverse-domain"));
-}
-
-#[tokio::test]
-async fn test_identity_store_and_query() {
-    let store_tool = builtin::identity_store::IdentityStoreTool::new("com.rollball.system");
-    let query_tool = builtin::identity_query::IdentityQueryTool::new("com.test.e2e");
-
-    // Store identity
-    let store_result = store_tool
-        .execute(serde_json::json!({
-            "field": "language",
-            "value": "zh-CN",
-            "confidence": 0.9,
-            "source": "user_input"
-        }))
-        .await
-        .unwrap();
-
-    assert!(store_result.ok);
-    assert!(store_result.content.contains("language"));
-    assert!(store_result.content.contains("zh-CN"));
-
-    // Query identity
-    let query_result = query_tool
-        .execute(serde_json::json!({
-            "fields": ["language"]
-        }))
-        .await
-        .unwrap();
-
-    assert!(query_result.ok);
-    assert!(query_result.content.contains("language"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════

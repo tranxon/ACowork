@@ -1,187 +1,217 @@
-//! Permission persistence store (rusqlite backend)
+//! Permission persistence store (JSON file backend)
 //!
 //! Stores user authorization decisions per Agent: granted permissions,
 //! scope constraints, expiry, and revocation. Used by Gateway to
 //! persist authorization decisions and answer Runtime permission queries.
 //!
-//! Schema versioning:
-//! - v1: Initial schema (permission_grants table)
-//! - Future versions will add migrations via `run_migrations()`.
+//! Data is stored as a JSON array of `PermissionGrant` objects,
+//! written atomically (write-to-temp + rename).
+//!
+//! Migration: on first open, if an old `permissions.db` SQLite file exists
+//! but the JSON file does not, data is migrated automatically.
 
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection};
 use rollball_core::permission::{Permission, PermissionGrant};
 
-/// Current schema version
-const SCHEMA_VERSION: u32 = 1;
+// ── Store ────────────────────────────────────────────────────────────────
 
 /// Persistent store for permission grants.
 ///
-/// Schema versioning:
-/// - `schema_version` table tracks the current DB version
-/// - `init_schema()` creates v1 tables if they don't exist
-/// - `run_migrations()` applies incremental upgrades from older versions
-///
-/// Schema (v1):
-/// ```sql
-/// CREATE TABLE permission_grants (
-///     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-///     agent_id    TEXT NOT NULL,
-///     perm_type   TEXT NOT NULL,       -- serialized Permission.type
-///     perm_value  TEXT,                -- serialized Permission.value (nullable)
-///     authorized_by TEXT NOT NULL,     -- "user" / "system" / "auto"
-///     granted_at  INTEGER NOT NULL,    -- Unix millis
-///     expires_at  INTEGER,             -- Unix millis (nullable = permanent)
-///     scope       TEXT                 -- optional scope constraint
-/// );
-/// CREATE INDEX idx_grants_agent ON permission_grants(agent_id);
-/// ```
-
+/// Internally uses `Mutex<Vec<PermissionGrant>>` with JSON file persistence.
+/// In-memory mode (for tests) skips file I/O entirely.
 #[derive(Debug)]
 pub struct PermissionStore {
-    conn: Mutex<Connection>,
+    inner: Mutex<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    grants: Vec<PermissionGrant>,
+    /// None = in-memory (no file persistence)
+    path: Option<PathBuf>,
 }
 
 impl PermissionStore {
     /// Open (or create) the permission store at the given path.
     ///
-    /// If the file does not exist, it will be created with the schema.
+    /// If an old `permissions.db` SQLite file exists and the JSON file does not,
+    /// data is migrated automatically and the old DB is renamed to `.db.bak`.
     pub fn open(path: &Path) -> Result<Self, PermissionStoreError> {
-        let conn = Connection::open(path)?;
-        let store = Self { conn: Mutex::new(conn) };
-        store.init_schema()?;
-        Ok(store)
-    }
-
-    /// Open an in-memory store (for testing).
-    pub fn open_in_memory() -> Result<Self, PermissionStoreError> {
-        let conn = Connection::open_in_memory()?;
-        let store = Self { conn: Mutex::new(conn) };
-        store.init_schema()?;
-        Ok(store)
-    }
-
-    /// Check if the database connection is alive.
-    /// Performs a lightweight `SELECT 1` query.
-    pub fn health_check(&self) -> Result<(), PermissionStoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT 1", [], |_row| Ok(()))?;
-        Ok(())
-    }
-
-    fn init_schema(&self) -> Result<(), PermissionStoreError> {
-        let conn = self.conn.lock().unwrap();
-
-        // Create schema_version table if not exists
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER NOT NULL
-            );"
-        )?;
-
-        // Check current version
-        let current_version: Option<u32> = conn
-            .query_row(
-                "SELECT version FROM schema_version LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
-
-        match current_version {
-            None => {
-                // Fresh database: create v1 schema and set version
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS permission_grants (
-                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                        agent_id      TEXT NOT NULL,
-                        perm_type     TEXT NOT NULL,
-                        perm_value    TEXT,
-                        authorized_by TEXT NOT NULL,
-                        granted_at    INTEGER NOT NULL,
-                        expires_at    INTEGER,
-                        scope         TEXT
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_grants_agent ON permission_grants(agent_id);
-                    INSERT INTO schema_version (version) VALUES (1);"
-                )?;
-            }
-            Some(v) if v < SCHEMA_VERSION => {
-                // Old version: run migrations
-                drop(conn); // release lock before re-acquiring in run_migrations
-                self.run_migrations(v)?;
-            }
-            Some(_) => {
-                // Already at current version, nothing to do
+        // Attempt migration from old SQLite DB
+        let db_path = path.with_extension("db");
+        let json_path = path.with_extension("json");
+        if db_path.exists() && !json_path.exists() {
+            if let Err(e) = Self::migrate_from_sqlite(&db_path, &json_path) {
+                tracing::warn!(
+                    "Failed to migrate permission store from {}: {}. Starting fresh.",
+                    db_path.display(),
+                    e
+                );
             }
         }
 
+        let grants = if json_path.exists() {
+            let data = std::fs::read_to_string(&json_path).map_err(PermissionStoreError::Io)?;
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                grants,
+                path: Some(json_path),
+            }),
+        })
+    }
+
+    /// Open an in-memory store (for testing). No file I/O.
+    pub fn open_in_memory() -> Result<Self, PermissionStoreError> {
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                grants: Vec::new(),
+                path: None,
+            }),
+        })
+    }
+
+    /// Check if the store is healthy (file is readable if on-disk).
+    pub fn health_check(&self) -> Result<(), PermissionStoreError> {
+        let inner = self.inner.lock().unwrap();
+        if let Some(ref path) = inner.path {
+            if path.exists() {
+                let _ = std::fs::read_to_string(path).map_err(PermissionStoreError::Io)?;
+            }
+        }
         Ok(())
     }
 
-    /// Run database migrations from `from_version` to the current version.
-    /// Called automatically by `init_schema()` when an outdated DB is detected.
-    fn run_migrations(&self, from_version: u32) -> Result<(), PermissionStoreError> {
-        let conn = self.conn.lock().unwrap();
+    // ── CRUD ─────────────────────────────────────────────────────────
 
-        // Migration v1→v2 example (future):
-        // if from_version < 2 {
-        //     conn.execute_batch("ALTER TABLE permission_grants ADD COLUMN new_field TEXT;")?;
-        // }
-
-        // Update schema version
-        conn.execute(
-            "UPDATE schema_version SET version = ?1",
-            rusqlite::params![SCHEMA_VERSION],
-        )?;
-
-        tracing::info!(
-            "Permission store migrated from v{} to v{}",
-            from_version, SCHEMA_VERSION
-        );
-        Ok(())
-    }
-
-    /// Grant a permission to an agent. Returns the row id.
+    /// Grant a permission to an agent. Returns a synthetic id.
     pub fn grant(&self, g: &PermissionGrant) -> Result<i64, PermissionStoreError> {
-        let (perm_type, perm_value) = serialize_permission(&g.permission);
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO permission_grants (agent_id, perm_type, perm_value, authorized_by, granted_at, expires_at, scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![g.agent_id, perm_type, perm_value, g.authorized_by, g.granted_at, g.expires_at, g.scope],
-        )?;
-        Ok(conn.last_insert_rowid())
+        let mut inner = self.inner.lock().unwrap();
+        inner.grants.push(g.clone());
+        self.save_locked(&inner)?;
+        Ok(inner.grants.len() as i64)
     }
 
     /// Query all active (non-expired) grants for an agent.
     pub fn query_grants(&self, agent_id: &str) -> Result<Vec<PermissionGrant>, PermissionStoreError> {
+        let inner = self.inner.lock().unwrap();
         let now = chrono::Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT agent_id, perm_type, perm_value, authorized_by, granted_at, expires_at, scope
-             FROM permission_grants
-             WHERE agent_id = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
-        )?;
-        let rows = stmt.query_map(params![agent_id, now], |row| {
-            let perm_type: String = row.get(1)?;
-            let perm_value: Option<String> = row.get(2)?;
-            Ok((
-                row.get::<_, String>(0)?, // agent_id
-                perm_type,
-                perm_value,
-                row.get::<_, String>(3)?, // authorized_by
-                row.get::<_, i64>(4)?,    // granted_at
-                row.get::<_, Option<i64>>(5)?, // expires_at
-                row.get::<_, Option<String>>(6)?, // scope
-            ))
-        })?;
+        Ok(inner
+            .grants
+            .iter()
+            .filter(|g| {
+                g.agent_id == agent_id
+                    && g.expires_at.map_or(true, |exp| exp > now)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Revoke all grants for an agent, or a specific permission.
+    /// If `permission` is Some, only revoke grants matching that permission.
+    /// If `permission` is None, revoke all grants for the agent.
+    pub fn revoke(
+        &self,
+        agent_id: &str,
+        permission: Option<&Permission>,
+    ) -> Result<usize, PermissionStoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.grants.len();
+        match permission {
+            Some(perm) => {
+                inner.grants.retain(|g| {
+                    !(g.agent_id == agent_id && g.permission == *perm)
+                });
+            }
+            None => {
+                inner.grants.retain(|g| g.agent_id != agent_id);
+            }
+        }
+        let removed = before - inner.grants.len();
+        self.save_locked(&inner)?;
+        Ok(removed)
+    }
+
+    /// Reset all grants for an agent (revoke everything).
+    pub fn reset(&self, agent_id: &str) -> Result<usize, PermissionStoreError> {
+        self.revoke(agent_id, None)
+    }
+
+    /// Check if an agent has a specific permission granted (active only).
+    pub fn has_permission(
+        &self,
+        agent_id: &str,
+        requested: &Permission,
+    ) -> Result<bool, PermissionStoreError> {
+        let grants = self.query_grants(agent_id)?;
+        Ok(grants.iter().any(|g| g.matches_request(requested)))
+    }
+
+    /// Clean up expired grants. Returns the number of removed rows.
+    pub fn cleanup_expired(&self) -> Result<usize, PermissionStoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let before = inner.grants.len();
+        inner.grants.retain(|g| {
+            g.expires_at.map_or(true, |exp| exp > now)
+        });
+        let removed = before - inner.grants.len();
+        if removed > 0 {
+            self.save_locked(&inner)?;
+        }
+        Ok(removed)
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────
+
+    /// Save grants to file. Must hold the lock.
+    fn save_locked(&self, inner: &Inner) -> Result<(), PermissionStoreError> {
+        if let Some(ref path) = inner.path {
+            save_json_atomic(path, &inner.grants)?;
+        }
+        Ok(())
+    }
+
+    /// Migrate data from an old permissions.db SQLite file to JSON.
+    fn migrate_from_sqlite(db_path: &Path, json_path: &Path) -> Result<(), PermissionStoreError> {
+        // Lazy-load rusqlite only for migration
+        let conn = rusqlite::Connection::open(db_path)
+            .map_err(|e| PermissionStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, perm_type, perm_value, authorized_by, granted_at, expires_at, scope
+                 FROM permission_grants",
+            )
+            .map_err(|e| PermissionStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|e| PermissionStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
         let mut grants = Vec::new();
         for row in rows {
-            let (agent_id, perm_type, perm_value, authorized_by, granted_at, expires_at, scope) = row?;
-            let permission = deserialize_permission(&perm_type, perm_value.as_deref())?;
+            let (agent_id, perm_type, perm_value, authorized_by, granted_at, expires_at, scope) = row
+                .map_err(|e| PermissionStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            let permission =
+                deserialize_permission(&perm_type, perm_value.as_deref())?;
             grants.push(PermissionGrant {
                 agent_id,
                 permission,
@@ -191,67 +221,29 @@ impl PermissionStore {
                 scope,
             });
         }
-        Ok(grants)
-    }
 
-    /// Revoke all grants for an agent, or a specific permission.
-    /// If `permission` is Some, only revoke grants matching that permission.
-    /// If `permission` is None, revoke all grants for the agent.
-    pub fn revoke(&self, agent_id: &str, permission: Option<&Permission>) -> Result<usize, PermissionStoreError> {
-        let conn = self.conn.lock().unwrap();
-        let affected = match permission {
-            Some(perm) => {
-                let (perm_type, perm_value) = serialize_permission(perm);
-                conn.execute(
-                    "DELETE FROM permission_grants WHERE agent_id = ?1 AND perm_type = ?2 AND ifnull(perm_value, '') = ifnull(?3, '')",
-                    params![agent_id, perm_type, perm_value],
-                )?
-            }
-            None => {
-                conn.execute(
-                    "DELETE FROM permission_grants WHERE agent_id = ?1",
-                    params![agent_id],
-                )?
-            }
-        };
-        Ok(affected)
-    }
+        save_json_atomic(json_path, &grants)?;
 
-    /// Reset all grants for an agent (revoke everything).
-    pub fn reset(&self, agent_id: &str) -> Result<usize, PermissionStoreError> {
-        self.revoke(agent_id, None)
-    }
+        // Rename old DB to .bak instead of deleting
+        let bak = db_path.with_extension("db.bak");
+        let _ = std::fs::rename(db_path, &bak);
 
-    /// Check if an agent has a specific permission granted (active only).
-    pub fn has_permission(&self, agent_id: &str, requested: &Permission) -> Result<bool, PermissionStoreError> {
-        let grants = self.query_grants(agent_id)?;
-        Ok(grants.iter().any(|g| g.matches_request(requested)))
-    }
-
-    /// Clean up expired grants. Returns the number of removed rows.
-    pub fn cleanup_expired(&self) -> Result<usize, PermissionStoreError> {
-        let now = chrono::Utc::now().timestamp_millis();
-        let affected = self.conn.lock().unwrap().execute(
-            "DELETE FROM permission_grants WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-            params![now],
-        )?;
-        Ok(affected)
+        tracing::info!(
+            "Migrated {} permission grants from {} to {}",
+            grants.len(),
+            db_path.display(),
+            json_path.display()
+        );
+        Ok(())
     }
 }
 
 // ── Serialization helpers ─────────────────────────────────────────────
 
-/// Serialize a Permission into (type, value) for DB storage.
-/// Uses Permission::type_name() and type_value() for single-source-of-truth.
-fn serialize_permission(perm: &Permission) -> (String, Option<String>) {
-    (
-        perm.type_name().to_string(),
-        perm.type_value().map(|s| s.to_string()),
-    )
-}
-
-/// Deserialize a Permission from (type, value) stored in DB.
-fn deserialize_permission(perm_type: &str, perm_value: Option<&str>) -> Result<Permission, PermissionStoreError> {
+fn deserialize_permission(
+    perm_type: &str,
+    perm_value: Option<&str>,
+) -> Result<Permission, PermissionStoreError> {
     match perm_type {
         "Network" => Ok(Permission::Network(perm_value.map(|s| s.to_string()))),
         "FilesystemRead" => Ok(Permission::FilesystemRead(perm_value.map(|s| s.to_string()))),
@@ -268,15 +260,34 @@ fn deserialize_permission(perm_type: &str, perm_value: Option<&str>) -> Result<P
     }
 }
 
+// ── Atomic JSON helpers ──────────────────────────────────────────────
+
+/// Save data to a JSON file atomically (write to `.tmp`, then rename).
+fn save_json_atomic<T: serde::Serialize>(
+    path: &Path,
+    data: &T,
+) -> Result<(), PermissionStoreError> {
+    let json = serde_json::to_string_pretty(data)
+        .map_err(PermissionStoreError::Json)?;
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, &json).map_err(PermissionStoreError::Io)?;
+    std::fs::rename(&tmp_path, path).map_err(PermissionStoreError::Io)?;
+    Ok(())
+}
+
 // ── Error type ────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum PermissionStoreError {
-    #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("Invalid permission type: {0}")]
     InvalidPermissionType(String),
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -346,15 +357,12 @@ mod tests {
 
         store.grant(&PermissionGrant::new(
             "com.example.agent",
-            Permission::Network(None), // broad: all network
+            Permission::Network(None),
             "user",
         )).unwrap();
 
-        // Broad grant matches narrow request
         assert!(store.has_permission("com.example.agent", &Permission::Network(Some("https://api.weather.com".into()))).unwrap());
-        // Broad grant matches broad request
         assert!(store.has_permission("com.example.agent", &Permission::Network(None)).unwrap());
-        // Different type doesn't match
         assert!(!store.has_permission("com.example.agent", &Permission::Shell).unwrap());
     }
 
@@ -407,5 +415,25 @@ mod tests {
         let grants_b = store.query_grants("agent.b").unwrap();
         assert_eq!(grants_b.len(), 1);
         assert!(matches!(grants_b[0].permission, Permission::MemoryRead));
+    }
+
+    #[test]
+    fn test_open_on_disk_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_perms.json");
+
+        // Create and populate
+        {
+            let store = PermissionStore::open(&path).unwrap();
+            store.grant(&PermissionGrant::new("agent.1", Permission::Shell, "user")).unwrap();
+            store.grant(&PermissionGrant::new("agent.1", Permission::MemoryRead, "auto")).unwrap();
+        }
+
+        // Reopen and verify
+        {
+            let store = PermissionStore::open(&path).unwrap();
+            let grants = store.query_grants("agent.1").unwrap();
+            assert_eq!(grants.len(), 2);
+        }
     }
 }
