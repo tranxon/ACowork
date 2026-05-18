@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { ChevronRight, ChevronDown, Brain, Wrench, Terminal, Check, X } from "lucide-react";
+import { ChevronRight, ChevronDown, Atom, Wrench, Terminal, Check, X } from "lucide-react";
 import type { ChatMessage } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 
@@ -54,7 +54,7 @@ export function ExploreBlock({ items, isStreaming }: ExploreBlockProps) {
         className="flex w-fit items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-zinc-500 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
-        <Brain className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+        <Atom className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
         <span className="font-medium text-zinc-400 dark:text-zinc-500">
           {isStreaming ? "Exploring..." : "Explored"}
         </span>

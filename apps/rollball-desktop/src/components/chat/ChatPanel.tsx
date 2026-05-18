@@ -1040,7 +1040,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             </div>
             <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               {message.content && (
-                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text whitespace-pre-wrap break-words" style={fontSizeStyle}>
+                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words" style={fontSizeStyle}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                 </div>
               )}

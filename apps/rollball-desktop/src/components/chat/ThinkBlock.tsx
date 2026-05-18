@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { ChevronRight, ChevronDown, Zap } from "lucide-react";
+import { ChevronRight, ChevronDown, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -50,7 +50,7 @@ export function ThinkBlock({ content, isStreaming, startTime, endTime, defaultEx
         className="flex items-center gap-2 text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300 transition-colors"
         style={{ fontSize: THINK_HEADER_FONT_SIZE }}
       >
-        <Zap className="h-3 w-3 shrink-0" />
+        <Sparkles className="h-3 w-3 shrink-0" />
         <span>{(!isStreaming || endTime != null) ? "Thought" : "Thinking"}</span>
         {duration !== null && <span style={{ fontSize: THINK_DURATION_FONT_SIZE }}>({duration}s)</span>}
         {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
