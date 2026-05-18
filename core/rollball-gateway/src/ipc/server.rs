@@ -738,7 +738,7 @@ pub async fn handle_cron_register(
         }
     };
 
-    // P1-9 fix: Use spawn_blocking for synchronous rusqlite operations
+    // P1-9 fix: Use spawn_blocking for file I/O in CronStore
     if let Some(store) = store_clone {
         let entry = crate::cron::StoredCronEntry {
             id: cron_id.clone(),
@@ -782,7 +782,7 @@ pub async fn handle_cron_unregister(
         (removed, store)
     };
 
-    // P1-9 fix: Use spawn_blocking for synchronous rusqlite operations
+    // P1-9 fix: Use spawn_blocking for file I/O in CronStore
     if removed
         && let Some(store) = store_clone
     {

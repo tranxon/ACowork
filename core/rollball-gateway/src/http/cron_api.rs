@@ -129,9 +129,7 @@ pub async fn add_cron(
             )))?
     };
 
-    // Persist to CronStore
-    // P1-9 fix: Use spawn_blocking to avoid blocking tokio runtime
-    // with synchronous rusqlite operations.
+    // Persist to CronStore (spawn_blocking for file I/O)
     {
         let store_opt = {
             let gw = state.gateway_state.read().await;

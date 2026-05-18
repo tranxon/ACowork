@@ -37,9 +37,6 @@ name = "memory_store"
 name = "memory_recall"
 
 [[tools]]
-name = "identity_store"
-
-[[tools]]
 name = "intent_send"
 
 [llm]

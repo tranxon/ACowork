@@ -441,21 +441,6 @@ async fn test_t11_permission_request() {
     assert!(result.is_ok(), "T11 timed out");
 }
 
-/// T12: IdentityQuery → IdentityQueryResult
-#[tokio::test]
-async fn test_t12_identity_query() {
-    let server = TestServer::start().await;
-    let result = tokio::time::timeout(TEST_TIMEOUT, async {
-        let client = server.connect_and_register("com.test.agent").await;
-
-        let fields = vec!["name".to_string(), "city".to_string()];
-        let result = client.query_identity(&fields).await;
-        let _ = result;
-    })
-    .await;
-    assert!(result.is_ok(), "T12 timed out");
-}
-
 /// T13: CapabilityQuery → CapabilityOverview
 #[tokio::test]
 async fn test_t13_capability_query() {
@@ -1303,11 +1288,7 @@ async fn test_t37_full_conversation_chain() {
         let current_session = client.get_current_session_id().await;
         let _ = current_session;
 
-        // 14. IdentityQuery
-        let identity_result = client.query_identity(&["name".to_string()]).await;
-        let _ = identity_result;
-
-        // 15. CapabilityQuery
+        // 14. CapabilityQuery
         let cap_result = client.query_capabilities(None).await;
         let _ = cap_result;
 

@@ -129,12 +129,6 @@ fn full_manifest() -> rollball_core::AgentManifest {
         [[tools]]
         name = "intent_send"
 
-        [[tools]]
-        name = "identity_store"
-
-        [[tools]]
-        name = "identity_query"
-
         [llm]
         provider = "mock"
         model = "mock-model"

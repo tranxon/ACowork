@@ -38,6 +38,8 @@ zip.workspace = true
 parking_lot.workspace = true
 directories.workspace = true
 toml.workspace = true
+# SQLite for one-time data migration (permissions.db + cron_entries.db → .json).
+# TODO: remove after all users have migrated (gateway v0.3+).
 rusqlite.workspace = true
 axum.workspace = true
 tower.workspace = true
