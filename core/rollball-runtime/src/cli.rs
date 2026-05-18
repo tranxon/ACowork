@@ -626,6 +626,25 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             }
         }
 
+        // Step 10: Notify Gateway that the agent is ready to receive messages.
+        // The Desktop App polls GET /api/agents for ready=true before
+        // establishing WebSocket connections for chat streaming.
+        {
+            let agent_ready_msg = rollball_core::proto::ClientMessage {
+                request_id: 0,
+                payload: Some(rollball_core::proto::client_message::Payload::AgentReady(
+                    rollball_core::proto::AgentReadyRequest {
+                        agent_id: agent_id.clone(),
+                    },
+                )),
+            };
+            if client.outbound_sender().send(agent_ready_msg).await.is_err() {
+                tracing::warn!("Failed to send AgentReady to Gateway — stream may already be closed");
+            } else {
+                tracing::info!("AgentReady sent to Gateway for agent={}", agent_id);
+            }
+        }
+
         // Spawn chunk relay task: consumes ChunkEvent from mpsc channel and
         // forwards each event to Gateway via the shared main gRPC connection.
         // No separate connection needed — gRPC HTTP/2 is full-duplex.

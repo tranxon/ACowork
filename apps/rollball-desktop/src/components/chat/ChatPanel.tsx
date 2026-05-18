@@ -179,7 +179,7 @@ export function ChatPanel() {
     // Skip re-init if this agent was already initialized and is still running.
     // This prevents redundant clearMessages + reload when selectedAgent.running
     // is re-evaluated without actually changing (e.g. agent list refresh).
-    if (selectedAgentId && selectedAgentId === lastInitAgentId && selectedAgent?.running) {
+    if (selectedAgentId && selectedAgentId === lastInitAgentId && selectedAgent?.running && selectedAgent?.ready) {
       return;
     }
 
@@ -202,10 +202,16 @@ export function ChatPanel() {
       useSessionStore.getState().reset();
     }
 
-    if (selectedAgentId && selectedAgent?.running) {
+    if (selectedAgentId && selectedAgent?.running && selectedAgent?.ready) {
       if (!isSameAgentRemount) {
         lastInitAgentId = selectedAgentId;
-        connectStream(selectedAgentId, getGatewayUrl());
+        // Guard against double-connect: waitForAgentReady in AgentList already
+        // calls connectStream when the agent becomes ready. If the WebSocket
+        // is already open (e.g. ready flag arrived before this effect fired),
+        // skip the redundant connectStream call.
+        if (!wsMap[selectedAgentId]) {
+          connectStream(selectedAgentId, getGatewayUrl());
+        }
       }
       // Load model from Gateway API FIRST (reads per-agent .agent_model.json),
       // THEN reload the model list. This ensures currentModel is set before
@@ -290,7 +296,7 @@ export function ChatPanel() {
       // Only clear reconnect timers for the old agent to avoid stale reconnects.
       // The ws connections are per-agent and managed in wsMap.
     };
-  }, [selectedAgentId, selectedAgent?.running, connectStream, loadAgentModel, loadModels]);
+  }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready, connectStream, loadAgentModel, loadModels]);
 
   // Load messages when active session changes (from SessionPanel or createSession)
   useEffect(() => {

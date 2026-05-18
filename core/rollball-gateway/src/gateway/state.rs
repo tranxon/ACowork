@@ -30,6 +30,8 @@ pub struct RunningAgentInfo {
     pub workspace: String,
     /// Whether the Agent has completed the gRPC AgentHello handshake
     pub connected: bool,
+    /// Whether the Agent has completed SessionTask initialization and is ready to receive messages
+    pub ready: bool,
     /// Whether the agent was started in developer mode (Debug Protocol enabled)
     pub dev_mode: bool,
     /// Debug WebSocket port (set when dev_mode is true)
@@ -120,6 +122,13 @@ impl GatewayState {
     pub fn set_agent_connected(&mut self, agent_id: &str, connected: bool) {
         if let Some(info) = self.running_agents.get_mut(agent_id) {
             info.connected = connected;
+        }
+    }
+
+    /// Set the ready state of a running agent
+    pub fn set_agent_ready(&mut self, agent_id: &str, ready: bool) {
+        if let Some(info) = self.running_agents.get_mut(agent_id) {
+            info.ready = ready;
         }
     }
 
@@ -248,6 +257,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             workspace: "/tmp/weather-workspace".to_string(),
             connected: false,
+            ready: false,
             dev_mode: false,
             debug_port: None,
         });

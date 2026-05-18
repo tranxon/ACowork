@@ -9,11 +9,12 @@ import { PublishWizard } from "./PublishWizard";
 import { CreateWizard } from "./CreateWizard";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { cn } from "../../lib/utils";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, Loader } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import type { CloneResponse } from "../../lib/types";
+import { getGatewayUrl } from "../../lib/config";
 
 interface AgentListProps {
   width?: number;
@@ -32,6 +33,38 @@ export function AgentList({ width }: AgentListProps) {
   const addMenuRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+
+  // Track agents currently waiting for the Runtime to become ready
+  const [startingAgentIds, setStartingAgentIds] = useState<Set<string>>(new Set());
+
+  /// Poll fetchAgents until the agent's `ready` flag becomes true, then connect WebSocket.
+  /// Called after startAgent() succeeds. Max wait 15 seconds (30 × 500ms).
+  const waitForAgentReady = async (agentId: string, devMode: boolean) => {
+    setStartingAgentIds((prev) => new Set(prev).add(agentId));
+    try {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await useAgentStore.getState().fetchAgents();
+        const agent = useAgentStore.getState().agents.find((a) => a.agent_id === agentId);
+        if (agent?.ready) {
+          useChatStore.getState().connectStream(agentId, getGatewayUrl());
+          addToast({ type: "success", message: devMode ? "Agent started in debug mode" : "Agent started" });
+          return;
+        }
+        if (!agent?.running) {
+          addToast({ type: "error", message: "Agent process exited before becoming ready" });
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      addToast({ type: "error", message: "Agent did not become ready within 15 seconds" });
+    } finally {
+      setStartingAgentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(agentId);
+        return next;
+      });
+    }
+  };
 
   // Confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -119,7 +152,8 @@ export function AgentList({ width }: AgentListProps) {
   const handleStart = async (agentId: string) => {
     try {
       await startAgent(agentId);
-      addToast({ type: "success", message: "Agent started" });
+      // Poll until ready, then connect WebSocket
+      waitForAgentReady(agentId, false);
     } catch (e) {
       addToast({ type: "error", message: `Failed to start agent: ${String(e)}` });
     }
@@ -136,7 +170,8 @@ export function AgentList({ width }: AgentListProps) {
         chatStore.disconnectStream(agentId);
       }
       await startAgent(agentId, true);
-      addToast({ type: "success", message: "Agent started in debug mode" });
+      // Poll until ready, then connect WebSocket
+      waitForAgentReady(agentId, true);
     } catch (e) {
       addToast({ type: "error", message: `Failed to start debug agent: ${String(e)}` });
     }
@@ -155,7 +190,8 @@ export function AgentList({ width }: AgentListProps) {
 
       await stopAgent(agentId);
       await startAgent(agentId, true);
-      addToast({ type: "success", message: "Agent restarted in debug mode" });
+      // Poll until ready, then connect WebSocket
+      waitForAgentReady(agentId, true);
     } catch (e) {
       addToast({ type: "error", message: `Failed to restart in debug: ${String(e)}` });
     }

@@ -17,7 +17,7 @@ use crate::ipc::server::{
     handle_context_usage_report, handle_cron_list, handle_cron_register,
     handle_cron_unregister, handle_identity_query, handle_intent_send,
     handle_key_release, handle_permission_request, handle_rate_acquire,
-    handle_usage_report, SharedPermissionStore, SharedState,
+    handle_usage_report, handle_agent_ready, SharedPermissionStore, SharedState,
 };
 use crate::ipc::session::SessionManager;
 
@@ -157,6 +157,10 @@ pub async fn dispatch_grpc_request(
                 session_mgr,
             )
             .await
+        }
+
+        Some(proto::client_message::Payload::AgentReady(req)) => {
+            handle_agent_ready(&req.agent_id, state).await
         }
 
         Some(proto::client_message::Payload::ListSessions(_req)) => {

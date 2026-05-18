@@ -43,6 +43,8 @@ export interface AgentInfo {
   avatar?: string;
   version: string;
   running: boolean;
+  connected: boolean;
+  ready: boolean;
   dev_mode: boolean;
   debug_port?: number;
 }
@@ -59,6 +61,8 @@ export interface AgentDetail {
   author: string;
   install_path: string;
   running: boolean;
+  connected: boolean;
+  ready: boolean;
   pid: number | null;
   started_at: string | null;
 }

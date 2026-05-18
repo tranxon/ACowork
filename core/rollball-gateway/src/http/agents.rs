@@ -49,6 +49,8 @@ pub struct AgentListResponse {
     pub version: String,
     pub running: bool,
     pub connected: bool,
+    /// Whether the agent's SessionTask is initialized and ready to receive messages
+    pub ready: bool,
     /// Whether the agent is running in developer mode (Debug Protocol enabled)
     pub dev_mode: bool,
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
@@ -69,6 +71,8 @@ pub struct AgentDetailResponse {
     pub install_path: String,
     pub running: bool,
     pub connected: bool,
+    /// Whether the agent's SessionTask is initialized and ready to receive messages
+    pub ready: bool,
     pub pid: Option<u32>,
     pub started_at: Option<String>,
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
@@ -140,6 +144,7 @@ pub async fn list_agents(
                 .map(|r| is_process_alive(r.pid))
                 .unwrap_or(false);
             let connected = running_info.map(|r| r.connected).unwrap_or(false);
+            let ready = running_info.map(|r| r.ready).unwrap_or(false);
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
@@ -149,6 +154,7 @@ pub async fn list_agents(
                 version: info.version.clone(),
                 running: actually_running,
                 connected,
+                ready,
                 dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
                 debug_port: running_info.and_then(|r| r.debug_port),
             }
@@ -172,6 +178,7 @@ pub async fn get_agent_detail(
         .map(|r| is_process_alive(r.pid))
         .unwrap_or(false);
     let connected = running_info.map(|r| r.connected).unwrap_or(false);
+    let ready = running_info.map(|r| r.ready).unwrap_or(false);
     let resp = AgentDetailResponse {
         agent_id: info.agent_id.clone(),
         name: info.name.clone(),
@@ -184,6 +191,7 @@ pub async fn get_agent_detail(
         install_path: info.install_path.clone(),
         running: actually_running,
         connected,
+        ready,
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
         debug_port: running_info.and_then(|r| r.debug_port),
@@ -812,6 +820,7 @@ mod tests {
             version: "1.0.0".to_string(),
             running: false,
             connected: false,
+            ready: false,
             dev_mode: false,
             debug_port: None,
         };

@@ -28,6 +28,7 @@ message ClientMessage {
     CreateSessionRequest    create_session        = 17;
     GetCurrentSessionIdRequest get_current_session_id = 18;
     DeleteSessionRequest    delete_session        = 26;
+    AgentReadyRequest       agent_ready           = 27;
     StreamChunk             stream_chunk          = 19;
     MemoryNodesResult       memory_nodes_result   = 20;
     MemoryStatsResult       memory_stats_result   = 21;
@@ -141,6 +142,7 @@ message CurrentSessionId        { string session_id = 1; }
 message SessionDeleted          { bool success = 1; string error = 2; }
 
 message DeleteSessionRequest    { string session_id = 1; }
+message AgentReadyRequest       { string agent_id = 1; }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }

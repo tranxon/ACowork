@@ -367,8 +367,13 @@ impl GatewayClient {
 pub struct AgentListEntry {
     pub agent_id: String,
     pub name: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+    pub avatar: Option<String>,
     pub version: String,
     pub running: bool,
+    pub connected: bool,
+    pub ready: bool,
     pub dev_mode: bool,
     pub debug_port: Option<u16>,
 }
@@ -378,13 +383,19 @@ pub struct AgentListEntry {
 pub struct AgentDetailResponse {
     pub agent_id: String,
     pub name: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+    pub avatar: Option<String>,
     pub version: String,
     pub description: String,
     pub author: String,
     pub install_path: String,
     pub running: bool,
+    pub connected: bool,
+    pub ready: bool,
     pub pid: Option<u32>,
     pub started_at: Option<String>,
+    pub debug_port: Option<u16>,
 }
 
 /// Generic message response

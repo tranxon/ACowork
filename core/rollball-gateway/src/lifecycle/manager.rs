@@ -96,6 +96,7 @@ impl LifecycleManager {
             started_at: chrono::Utc::now(),
             workspace: workspace.to_string_lossy().to_string(),
             connected: false,
+            ready: false,
             dev_mode,
             debug_port,
         });
