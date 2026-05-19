@@ -1,1 +1,0 @@
-$c = Get-Content -Path "d:\projects\rust\agent-study\apps\rollball-desktop\src\components\results\AgentSetupTab.tsx" -Raw; $c = $c -replace "`u{000C}", ""; $c = $c -replace "className=\{`\flex", "className='flex"; Set-Content -Path "d:\projects\rust\agent-study\apps\rollball-desktop\src\components\results\AgentSetupTab.tsx" -Value $c -NoNewline
