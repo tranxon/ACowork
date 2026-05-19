@@ -28,7 +28,7 @@ export function AgentSetupTab() {
   const profile = selectedAgentId ? getProfile(selectedAgentId) : null;
 
   // Fetch agent runtime config from Gateway API on mount
-  const [configLoading, setConfigLoading] = useState(false);
+  const [_configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [iconOpen, setIconOpen] = useState(false);
 
@@ -307,13 +307,13 @@ export function AgentSetupTab() {
               return (
                 <label
                   key={tool.name}
-                  className="flex items-start gap-2 py-1 px-1.5 rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
+                  className="flex items-center gap-2 py-1 px-1.5 rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
                 >
                   <input
                     type="checkbox"
                     checked={checked}
                     onChange={toggle}
-                    className="mt-0.5 h-3.5 w-3.5 rounded accent-[var(--color-accent)]"
+                    className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
                   />
                   <div className="flex-1 min-w-0">
                     <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">

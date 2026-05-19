@@ -550,6 +550,9 @@ impl Gateway {
 
         // Clean up HTTP server on any exit path (triggers PidFileGuard::Drop for pidfile cleanup)
         http_handle.abort();
+        // Wait for the HTTP task to actually drop, ensuring PidFileGuard::Drop runs
+        // before this function returns and the runtime is torn down.
+        let _ = http_handle.await;
 
         shutdown_result?;
 

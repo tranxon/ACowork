@@ -217,7 +217,7 @@ export function SkillBrowser() {
                           {skill.triggers.slice(0, 3).map((t) => (
                             <span
                               key={t}
-                              className="rounded px-1.5 py-0.5 text-[10px] font-medium border" style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)", color: "var(--color-accent)", borderColor: "var(--color-accent)" }}>
+                              className="rounded px-1.5 py-0.5 text-[10px] font-medium border" style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)", color: "var(--color-accent)", borderColor: "var(--color-accent)" }}
                             >
                               {t}
                             </span>

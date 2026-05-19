@@ -9,7 +9,6 @@ import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { SettingsPage } from "../settings/SettingsPage";
-import { ToolApprovalModal } from "../tools/ToolApprovalModal";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "providers" | "appearance" | "general" | "profile";
@@ -191,8 +190,6 @@ export function AppLayout() {
         {currentView === "settings" && <SettingsPage initialTab={settingsInitialTab} />}
       </div>
 
-      {/* Global tool approval modal */}
-      <ToolApprovalModal />
     </div>
   );
 }

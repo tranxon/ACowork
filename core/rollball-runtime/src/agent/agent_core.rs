@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 use crate::agent::loop_::ChunkEvent;
+use crate::agent::loop_::ApprovalHandle;
 use crate::config::RuntimeConfig;
 use crate::debug::controller::DebugController;
 use crate::debug::server::DebugEventSender;
@@ -90,8 +91,15 @@ pub struct AgentCore {
     pub(crate) user_display_name: Option<String>,
     /// Approval gate for shell command risk confirmation.
     /// None in standalone/CLI mode (uses CliApprovalGate).
-    /// Some(Arc<GatewayApprovalGate>) in Gateway mode (Desktop App).
+    /// Some(Arc<dyn ApprovalGate>) in CLI mode with non-default gate.
+    /// Note: In Gateway mode, `approval_handle` is used instead
+    /// (unified pause architecture via AgentLoop).
     pub(crate) approval_gate: Option<Arc<dyn ApprovalGate>>,
+    /// Approval handle for shell command risk confirmation (Gateway mode).
+    /// When set, spawned tool tasks use this handle to route approval
+    /// requests through the AgentLoop main loop (unified pause architecture).
+    /// None in CLI mode (uses `approval_gate` directly).
+    pub(crate) approval_handle: Option<ApprovalHandle>,
     /// Shell approval threshold: Low / Medium / High / Never.
     /// Default: "medium" — Medium and High risk commands need approval.
     pub(crate) shell_approval_threshold: ShellApprovalThreshold,
@@ -126,6 +134,7 @@ impl AgentCore {
             debug_event_tx: None,
             user_display_name: None,
             approval_gate: None,
+            approval_handle: None,
             shell_approval_threshold,
         }
     }
@@ -337,6 +346,7 @@ impl AgentCore {
             debug_event_tx: self.debug_event_tx.clone(),
             user_display_name: self.user_display_name.clone(),
             approval_gate: self.approval_gate.clone(),
+            approval_handle: self.approval_handle.clone(),
             shell_approval_threshold: self.shell_approval_threshold.clone(),
         }
     }

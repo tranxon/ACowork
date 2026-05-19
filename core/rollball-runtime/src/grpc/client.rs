@@ -302,16 +302,6 @@ impl GatewayGrpcClient {
         Ok(())
     }
 
-    /// Get a clone of the pending response map (for external request-response handling).
-    pub fn pending_map(&self) -> Arc<Mutex<HashMap<u64, oneshot::Sender<proto::ServerMessage>>>> {
-        Arc::clone(&self.pending)
-    }
-
-    /// Get a clone of the next-request-id counter (for external request-response handling).
-    pub fn next_request_id_counter(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.next_request_id)
-    }
-
     /// Get a clone of the outbound message sender.
     ///
     /// Allows external tasks (e.g. chunk relay) to send messages through

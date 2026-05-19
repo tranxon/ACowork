@@ -104,7 +104,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
             {detail.triggers.map((t) => (
               <span
                 key={t}
-                className="rounded-full px-2.5 py-0.5 text-xs font-medium border" style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)", color: "var(--color-accent)", borderColor: "var(--color-accent)" }}>
+                className="rounded-full px-2.5 py-0.5 text-xs font-medium border" style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)", color: "var(--color-accent)", borderColor: "var(--color-accent)" }}
               >
                 {t}
               </span>

@@ -561,19 +561,6 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             }
         }
 
-        // Inject GatewayApprovalGate for shell command risk confirmation.
-        // This allows the Runtime to send approval requests to the Gateway
-        // (which forwards them to the Desktop App BridgeEvent) and wait for
-        // the user's Allow/Deny response before executing shell commands.
-        {
-            use crate::security::approval_gate::GatewayApprovalGate;
-            let gate = GatewayApprovalGate::from_client(&client, agent_id.clone());
-            if let Some(c) = Arc::get_mut(&mut core) {
-                c.set_approval_gate(Arc::new(gate));
-                tracing::info!("GatewayApprovalGate injected into AgentCore");
-            }
-        }
-
         let session_manager_config = SessionManagerConfig {
             inbound_channel_capacity: 64,
             system_prompt: system_prompt.clone(),
@@ -803,6 +790,30 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                             };
                             if outbound_tx.send(msg).await.is_err() {
                                 tracing::warn!("Iteration limit paused relay send failed — main connection may be closed");
+                            }
+                        }
+                        crate::agent::loop_::ChunkEvent::ToolApprovalNeeded { request_id, tool_name, action, risk_level, reason } => {
+                            let params = serde_json::json!({
+                                "request_id": request_id,
+                                "agent_id": agent_id_for_relay,
+                                "tool_name": tool_name,
+                                "action": action,
+                                "risk_level": risk_level,
+                                "reason": reason,
+                            });
+                            let msg = rollball_core::proto::ClientMessage {
+                                request_id: 0,
+                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+                                    rollball_core::proto::IntentSendRequest {
+                                        target: "http-api".to_string(),
+                                        action: "tool_approval_needed".to_string(),
+                                        params_json: params.to_string(),
+                                        r#async: false,
+                                    },
+                                )),
+                            };
+                            if outbound_tx.send(msg).await.is_err() {
+                                tracing::warn!("ToolApprovalNeeded relay send failed — main connection may be closed");
                             }
                         }
                         crate::agent::loop_::ChunkEvent::Done { content, message_id } => {
@@ -1336,6 +1347,49 @@ async fn process_gateway_recv(
                             }
                             None => {
                                 tracing::warn!(session_id = %target_session_id, "Continue target session not found");
+                            }
+                        }
+                        return LoopAction::Continue;
+                    }
+
+                    if action == "approval_decision" {
+                        let request_id = params.get("request_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let approved = params.get("approved")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let allow_all_session = params.get("allow_all_session")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let reason = params.get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        tracing::info!(
+                            request_id = %request_id,
+                            approved,
+                            allow_all_session,
+                            session_id = %target_session_id,
+                            "Routing approval_decision to session"
+                        );
+                        // Route directly to AgentLoop's inbound channel to
+                        // unblock `await_approval_decision()` immediately.
+                        match session_manager.get_session(&target_session_id) {
+                            Some(handle) => {
+                                if let Err(e) = handle.send_inbound(
+                                    InboundMessage::ApprovalDecision {
+                                        request_id,
+                                        approved,
+                                        allow_all_session,
+                                        reason,
+                                    },
+                                ) {
+                                    tracing::warn!("Failed to deliver approval decision to AgentLoop: {}", e);
+                                }
+                            }
+                            None => {
+                                tracing::warn!(session_id = %target_session_id, "Approval decision target session not found");
                             }
                         }
                         return LoopAction::Continue;

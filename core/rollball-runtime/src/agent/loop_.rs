@@ -8,6 +8,7 @@
 //! S1.7: Parallel tool execution with per-tool timeout
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use rollball_core::providers::traits::{
@@ -16,6 +17,7 @@ use rollball_core::providers::traits::{
 use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::tools::traits::Tool;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::agent::agent_core::AgentCore;
 use crate::agent::budget_guard::BudgetCheckResult;
@@ -27,6 +29,50 @@ use crate::agent::session_state::SessionState;
 use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
+use crate::security::approval_gate::ApprovalRequest;
+
+/// User's decision on a tool approval request.
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovalDecision {
+    pub approved: bool,
+    #[allow(dead_code)]
+    pub allow_all_session: bool,
+}
+
+/// Lightweight handle for spawned tool tasks to request user approval.
+///
+/// The spawned task calls `request_approval()` (no timeout), which sends the
+/// request to the AgentLoop main loop via an mpsc channel and blocks on a
+/// oneshot. The main loop receives the request, emits ChunkEvent::ToolApprovalNeeded
+/// to the Gateway (which forwards to the Desktop App), pauses via
+/// `await_approval_decision()`, and resolves the oneshot when the user's
+/// decision arrives as InboundMessage::ApprovalDecision.
+#[derive(Clone)]
+pub(crate) struct ApprovalHandle {
+    request_tx: mpsc::Sender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+}
+
+impl ApprovalHandle {
+    pub fn new(
+        request_tx: mpsc::Sender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+    ) -> Self {
+        Self { request_tx }
+    }
+
+    /// Request user approval for a tool execution.
+    /// Blocks without timeout until the user decides (Allow/Deny).
+    pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
+        let (tx, rx) = oneshot::channel();
+        if self.request_tx.send((req, tx)).await.is_err() {
+            tracing::warn!("ApprovalHandle: request channel closed, auto-rejecting");
+            return ApprovalDecision { approved: false, allow_all_session: false };
+        }
+        rx.await.unwrap_or_else(|_| {
+            tracing::warn!("ApprovalHandle: oneshot sender dropped, auto-rejecting");
+            ApprovalDecision { approved: false, allow_all_session: false }
+        })
+    }
+}
 
 /// Streaming chunk event emitted during LLM response generation.
 ///
@@ -61,6 +107,21 @@ pub enum ChunkEvent {
     IterationLimitPaused {
         iteration: u32,
         max_iterations: u32,
+    },
+    /// Tool execution requires user approval (shell command risk check).
+    /// The Desktop App displays a confirmation dialog; the Runtime pauses
+    /// until Gateway delivers an InboundMessage::ApprovalDecision.
+    ToolApprovalNeeded {
+        /// Unique approval request ID
+        request_id: String,
+        /// The tool name (e.g. "bash", "powershell")
+        tool_name: String,
+        /// The command being executed
+        action: String,
+        /// Risk level: "Low", "Medium", "High"
+        risk_level: String,
+        /// Human-readable reason for the risk assessment
+        reason: String,
     },
     /// Agent response interrupted by user stop signal
     Interrupted {
@@ -102,6 +163,13 @@ pub struct AgentLoop {
     pub(crate) session: SessionState,
     /// Inbound message receiver for external message injection
     pub(crate) inbound_rx: tokio::sync::mpsc::Receiver<InboundMessage>,
+    /// Approval request receiver: spawned tool tasks send requests here,
+    /// the main loop receives them and handles the pause/resume cycle.
+    pub(crate) approval_rx: mpsc::Receiver<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+    /// Approval handle (sender side) — cloned into spawned tool tasks.
+    pub(crate) approval_handle: ApprovalHandle,
+    /// Counter for generating unique approval request IDs.
+    pub(crate) approval_next_id: AtomicU64,
 }
 
 impl AgentLoop {
@@ -124,13 +192,20 @@ impl AgentLoop {
         conversation: Option<ConversationSession>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
+        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
         let max_tokens = config.history_max_tokens;
         let keep_full = config.keep_full_results;
-        let loop_ = Self {
+        let approval_handle = ApprovalHandle::new(approval_tx);
+        let mut loop_ = Self {
             core: AgentCore::new(config, manifest, provider, tools, on_chunk),
             session: SessionState::new(max_tokens, keep_full, budget, conversation),
             inbound_rx,
+            approval_rx,
+            approval_handle: approval_handle.clone(),
+            approval_next_id: AtomicU64::new(0),
         };
+        // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
+        loop_.core.approval_handle = Some(approval_handle);
         (loop_, inbound_tx)
     }
 
@@ -149,7 +224,12 @@ impl AgentLoop {
         session: SessionState,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
-        (Self { core, session, inbound_rx }, inbound_tx)
+        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
+        let approval_handle = ApprovalHandle::new(approval_tx);
+        let mut session_loop = Self { core, session, inbound_rx, approval_rx, approval_handle: approval_handle.clone(), approval_next_id: AtomicU64::new(0) };
+        // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
+        session_loop.core.approval_handle = Some(approval_handle);
+        (session_loop, inbound_tx)
     }
 
     /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
@@ -1388,6 +1468,11 @@ impl AgentLoop {
                 InboundMessage::ContinueExecution { .. } => {
                     tracing::debug!("Ignoring deferred ContinueExecution");
                 }
+                InboundMessage::ApprovalDecision { .. } => {
+                    // Approval decisions arrive via inbound channel during
+                    // approval pause; during normal drain, ignore.
+                    tracing::debug!("Ignoring deferred ApprovalDecision");
+                }
             }
         }
 
@@ -1427,6 +1512,10 @@ impl AgentLoop {
                     // Continue is only meaningful during iteration limit pause;
                     // during normal drain, ignore it.
                     tracing::debug!("Ignoring ContinueExecution during normal drain");
+                }
+                InboundMessage::ApprovalDecision { .. } => {
+                    // Approval decisions are only meaningful during approval pause.
+                    tracing::debug!("Ignoring ApprovalDecision during normal drain");
                 }
             }
         }
@@ -1528,6 +1617,160 @@ impl AgentLoop {
                 }
             }
         }
+    }
+
+    /// Await user approval decision for a tool execution request.
+    ///
+    /// Blocks the main loop on `inbound_rx` without timeout until the
+    /// matching `InboundMessage::ApprovalDecision` arrives. Non-matching
+    /// messages are buffered in `deferred_inbound` for later processing
+    /// (mirrors `await_debug_resume`'s `poll_interrupt` pattern).
+    ///
+    /// Also polls `approval_rx` so that concurrent approval requests from
+    /// parallel tool execution are processed (queued) rather than blocking
+    /// the channel. Each new approval request gets its own `ChunkEvent`
+    /// sent to the Gateway before we continue waiting for the current one.
+    ///
+    /// Returns `ApprovalDecision` with the user's choice, or auto-rejects
+    /// on `Interrupt` / channel close.
+    async fn await_approval_decision(&mut self, request_id: &str) -> ApprovalDecision {
+        loop {
+            tokio::select! {
+                // Primary: wait for the matching approval decision from inbound channel
+                msg = self.inbound_rx.recv() => {
+                    match msg {
+                        Some(InboundMessage::ApprovalDecision {
+                            request_id: rid,
+                            approved,
+                            allow_all_session,
+                            ..
+                        }) if rid == request_id => {
+                            tracing::info!(
+                                request_id = %request_id,
+                                approved,
+                                allow_all_session,
+                                "Approval decision received"
+                            );
+                            return ApprovalDecision { approved, allow_all_session };
+                        }
+                        Some(InboundMessage::ApprovalDecision {
+                            request_id: rid,
+                            approved,
+                            allow_all_session,
+                            ..
+                        }) => {
+                            // Approval decision for a DIFFERENT request — buffer it.
+                            // This can happen when multiple concurrent approval requests
+                            // are in flight and responses arrive out of order.
+                            tracing::debug!(
+                                expected = %request_id,
+                                got = %rid,
+                                "Buffering approval decision for different request"
+                            );
+                            self.session.deferred_inbound.push(InboundMessage::ApprovalDecision {
+                                request_id: rid,
+                                approved,
+                                allow_all_session,
+                                reason: None,
+                            });
+                        }
+                        Some(InboundMessage::Interrupt { reason }) => {
+                            tracing::info!(
+                                reason = %reason,
+                                request_id = %request_id,
+                                "Approval interrupted, auto-rejecting"
+                            );
+                            return ApprovalDecision { approved: false, allow_all_session: false };
+                        }
+                        Some(other) => {
+                            tracing::debug!(
+                                ?other,
+                                "Buffering non-approval message during approval wait"
+                            );
+                            self.session.deferred_inbound.push(other);
+                        }
+                        None => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                "Inbound channel closed during approval wait, auto-rejecting"
+                            );
+                            return ApprovalDecision { approved: false, allow_all_session: false };
+                        }
+                    }
+                }
+                // Secondary: process concurrent approval requests from other spawned tasks.
+                // Without this branch, a second tool needing approval would block on the
+                // mpsc channel, its ToolApprovalNeeded event would never reach the Gateway,
+                // and the user would never see the second approval dialog.
+                approval_req = self.approval_rx.recv() => {
+                    match approval_req {
+                        Some((req, decision_tx)) => {
+                            tracing::info!(
+                                current_request_id = %request_id,
+                                new_tool = %req.tool_name,
+                                "Queuing concurrent approval request while waiting for decision"
+                            );
+                            self.handle_approval_request(req, decision_tx).await;
+                            // After handling the concurrent request, continue waiting
+                            // for the ORIGINAL request's decision.
+                        }
+                        None => {
+                            tracing::warn!("Approval channel closed during approval wait");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send ToolApprovalNeeded chunk event to Gateway (via on_chunk channel).
+    fn send_tool_approval_needed(&self, request_id: &str, req: &ApprovalRequest) {
+        if let Some(ref tx) = self.core.on_chunk {
+            let _ = tx.try_send(ChunkEvent::ToolApprovalNeeded {
+                request_id: request_id.to_string(),
+                tool_name: req.tool_name.clone(),
+                action: req.action.clone(),
+                risk_level: req.risk_level.label().to_string(),
+                reason: req.reason.clone(),
+            });
+        }
+    }
+
+    /// Handle an approval request received on the approval_rx channel.
+    ///
+    /// Called from `execute_tools_parallel`'s `select!` when a spawned tool
+    /// task sends an approval request. Generates a unique request ID, sends
+    /// `ChunkEvent::ToolApprovalNeeded` to the Gateway, blocks the main loop
+    /// via `await_approval_decision()`, and resolves the spawned task's
+    /// oneshot with the user's decision.
+    pub(crate) fn handle_approval_request(
+        &mut self,
+        req: ApprovalRequest,
+        decision_tx: oneshot::Sender<ApprovalDecision>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let request_id = self
+                .approval_next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .to_string();
+
+            tracing::info!(
+                request_id = %request_id,
+                tool_name = %req.tool_name,
+                action = %req.action,
+                risk = %req.risk_level.label(),
+                "Handling approval request from spawned tool task"
+            );
+
+            // 1. Send ChunkEvent to Gateway → Desktop App
+            self.send_tool_approval_needed(&request_id, &req);
+
+            // 2. Pause and wait for user decision (no timeout)
+            let decision = self.await_approval_decision(&request_id).await;
+
+            // 3. Resolve the spawned task's oneshot
+            let _ = decision_tx.send(decision);
+        })
     }
 
     /// Update the debug phase and check for breakpoints.

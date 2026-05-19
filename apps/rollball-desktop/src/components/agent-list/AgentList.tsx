@@ -9,7 +9,7 @@ import { PublishWizard } from "./PublishWizard";
 import { CreateWizard } from "./CreateWizard";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { cn } from "../../lib/utils";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, Loader } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
@@ -35,7 +35,7 @@ export function AgentList({ width }: AgentListProps) {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
 
   // Track agents currently waiting for the Runtime to become ready
-  const [startingAgentIds, setStartingAgentIds] = useState<Set<string>>(new Set());
+  const [, setStartingAgentIds] = useState<Set<string>>(new Set());
 
   /// Poll fetchAgents until the agent's `ready` flag becomes true, then connect WebSocket.
   /// Called after startAgent() succeeds. Max wait 15 seconds (30 × 500ms).
