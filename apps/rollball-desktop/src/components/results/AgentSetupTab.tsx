@@ -276,9 +276,9 @@ export function AgentSetupTab() {
           }}
           className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
         >
-          <option value="medium">Medium (default) — ask for Medium risk and above</option>
-          <option value="low">Low — ask for Low risk and above (most cautious)</option>
-          <option value="high">High — only ask for High risk commands</option>
+          <option value="medium">Medium (default) — e.g. curl, wget, python, node</option>
+          <option value="low">Low — e.g. ls, cat, echo, pwd, grep (most cautious)</option>
+          <option value="high">High — e.g. sudo, eval, source</option>
           <option value="never">Never — auto-approve all shell commands</option>
         </select>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
@@ -296,7 +296,7 @@ export function AgentSetupTab() {
         ) : availableTools.length === 0 ? (
           <span className="text-[10px] text-zinc-400 dark:text-zinc-500">No tools available</span>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
             {availableTools.map((tool) => {
               const checked = activeTools.includes(tool.name);
               const toggle = () => {

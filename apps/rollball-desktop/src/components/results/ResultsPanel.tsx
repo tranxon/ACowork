@@ -153,6 +153,17 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDebugMode]);
 
+  // ── Switch to status tab when agent stops ────────────────────────
+  const prevRunning = useRef(selectedAgent?.running);
+  useEffect(() => {
+    const isRunning = selectedAgent?.running ?? false;
+    const wasRunning = prevRunning.current;
+    if (!isRunning && wasRunning !== false && (activeTab === "memory" || activeTab === "setup")) {
+      setActiveTab("status");
+    }
+    prevRunning.current = isRunning;
+  }, [selectedAgent?.running, activeTab]);
+
   return (
     <div className="flex flex-col border-l border-zinc-200 bg-zinc-50 transition-[width] duration-250 ease-in-out dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
       {/* Header with tabs */}
@@ -187,18 +198,22 @@ export function ResultsPanel({ width, onCollapse, isDebugMode = false }: Results
             >
               Status
             </TabButton>
-            <TabButton
-              active={activeTab === "memory"}
-              onClick={() => setActiveTab("memory")}
-            >
-              Memory
-            </TabButton>
-            <TabButton
-              active={activeTab === "setup"}
-              onClick={() => setActiveTab("setup")}
-            >
-              Setup
-            </TabButton>
+            {selectedAgent?.running && (
+              <TabButton
+                active={activeTab === "memory"}
+                onClick={() => setActiveTab("memory")}
+              >
+                Memory
+              </TabButton>
+            )}
+            {selectedAgent?.running && (
+              <TabButton
+                active={activeTab === "setup"}
+                onClick={() => setActiveTab("setup")}
+              >
+                Setup
+              </TabButton>
+            )}
           </div>
         </div>
       </div>
