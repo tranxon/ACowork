@@ -72,7 +72,11 @@ impl AgentLoop {
                 tokio::spawn(async move {
                     // Shell risk check: if this is a shell command and risk >= threshold,
                     // request user approval via the ApprovalGate before execution.
-                    if tc.function.name == "shell" {
+                    let is_shell_tool = matches!(
+                        tc.function.name.as_str(),
+                        "bash" | "powershell" | "pwsh" | "shell"
+                    );
+                    if is_shell_tool {
                         if let Some(ref gate) = approval_gate {
                             if let Some(rejection) = check_shell_approval(
                                 gate.as_ref(),
