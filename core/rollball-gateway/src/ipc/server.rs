@@ -8,7 +8,6 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Mutex};
 
 use rollball_core::protocol::GatewayResponse;
-use rollball_core::permission::{Permission, PermissionGrant, PermissionPolicy};
 use crate::gateway::state::GatewayState;
 use crate::http::agent_config;
 use crate::ipc::session::SessionManager;
@@ -17,10 +16,6 @@ use crate::ipc::session::SessionManager;
 /// RwLock chosen because handlers are predominantly read-heavy (key lookup,
 /// budget query) with occasional writes (install/uninstall).
 pub type SharedState = Arc<RwLock<GatewayState>>;
-
-/// Shared permission store type.
-/// PermissionStore internally uses Mutex<Connection> for thread safety.
-pub type SharedPermissionStore = Arc<crate::permission_store::PermissionStore>;
 
 /// Shared session manager type
 pub type SharedSessionMgr = Arc<Mutex<SessionManager>>;
@@ -95,7 +90,6 @@ pub async fn handle_intent_send(
     conn_id: &str,
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
-    perm_store: &SharedPermissionStore,
     bridge_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> GatewayResponse {
     let from = {
@@ -190,35 +184,6 @@ pub async fn handle_intent_send(
         return GatewayResponse::IntentDelivered {
             message_id: message_id.clone(),
         };
-    }
-
-    // S2.4: Intent permission check — sender must hold intent:send permission
-    let intent_send_perm = Permission::IntentSend(Some(target.to_string()));
-    let intent_send_broad = Permission::IntentSend(None); // broad: intent:send to any
-
-    let has_intent_perm = perm_store.has_permission(&from, &intent_send_perm)
-        .unwrap_or_else(|_| {
-            // Also check broad permission (intent:send without target restriction)
-            perm_store.has_permission(&from, &intent_send_broad).unwrap_or(false)
-        });
-
-    if !has_intent_perm {
-        // Broad permission may cover the narrow one
-        let has_broad = perm_store.has_permission(&from, &intent_send_broad).unwrap_or(false);
-        if !has_broad {
-            // P1-8 fix: Structured audit log for permission denial
-            tracing::warn!(
-                event = "permission_denied",
-                permission = "intent:send",
-                agent_id = %from,
-                target = %target,
-                action = %action,
-                "Intent blocked by permission check"
-            );
-            return GatewayResponse::IntentDelivered {
-                message_id: format!("error:permission-denied:intent:send:{}", target),
-            };
-        }
     }
 
     // S2.4: Params size limit (64KB)
@@ -386,263 +351,6 @@ pub async fn handle_rate_acquire(provider: &str, state: &SharedState) -> Gateway
         GatewayResponse::RateToken {
             granted: true,
             retry_after_ms: None,
-        }
-    }
-}
-
-/// User approval callback for permission requests (S2.2).
-///
-/// This is the synchronous callback interface from Phase 3.
-/// Phase 5 (Desktop App) will replace this with a GUI dialog via trait abstraction.
-pub trait PermissionApprovalCallback: Send + Sync {
-    /// Ask the user whether to grant a permission.
-    /// Returns true if approved, false if denied.
-    fn request_approval(&self, agent_id: &str, permission: &str, reason: &str) -> bool;
-}
-
-/// Default CLI-based approval callback (auto-deny in non-interactive mode).
-///
-/// S5.1: With `interactive-cli` feature, uses `dialoguer::Confirm` to
-/// prompt the user. Without the feature, auto-denies as before.
-pub struct CliApprovalCallback;
-
-impl PermissionApprovalCallback for CliApprovalCallback {
-    fn request_approval(&self, agent_id: &str, permission: &str, reason: &str) -> bool {
-        #[cfg(feature = "interactive-cli")]
-        {
-            use dialoguer::Confirm;
-            let prompt = format!(
-                "\n\n  [Permission] Agent '{}' requests: {}\n  Reason: {}\n\n  Grant?",
-                agent_id, permission, reason
-            );
-            Confirm::new()
-                .with_prompt(prompt)
-                .default(false)
-                .interact()
-                .unwrap_or(false)
-        }
-
-        #[cfg(not(feature = "interactive-cli"))]
-        {
-            tracing::warn!(
-                "Permission request auto-denied (non-interactive): agent={}, perm={}, reason={}",
-                agent_id, permission, reason
-            );
-            false
-        }
-    }
-}
-
-/// S2.2: Async permission approval callback.
-///
-/// This trait is used for approval mechanisms that may take time
-/// (e.g., Desktop App GUI dialog, interactive CLI prompt).
-/// The callback is spawned as a separate tokio task so that
-/// the IPC main loop is not blocked while waiting for user input.
-///
-/// A timeout is applied — if the user does not respond within
-/// the timeout, the request is automatically denied.
-#[async_trait::async_trait]
-pub trait AsyncPermissionApprovalCallback: Send + Sync {
-    /// Ask the user whether to grant a permission.
-    /// Returns true if approved, false if denied.
-    /// The implementor should respect the timeout (the caller will
-    /// also enforce a timeout as a safety net).
-    async fn request_approval(
-        &self,
-        agent_id: &str,
-        permission: &str,
-        reason: &str,
-        timeout_ms: u64,
-    ) -> bool;
-}
-
-/// S2.2: Default async callback that wraps the synchronous CLI callback.
-///
-/// S5.1: With `interactive-cli` feature, spawns the `dialoguer` prompt
-/// in `tokio::task::spawn_blocking()` to avoid blocking the IPC main loop.
-/// Without the feature, auto-denies as before.
-pub struct AsyncCliApprovalCallback;
-
-#[async_trait::async_trait]
-impl AsyncPermissionApprovalCallback for AsyncCliApprovalCallback {
-    async fn request_approval(
-        &self,
-        agent_id: &str,
-        permission: &str,
-        reason: &str,
-        _timeout_ms: u64,
-    ) -> bool {
-        #[cfg(feature = "interactive-cli")]
-        {
-            // Spawn blocking task for interactive stdin prompt.
-            // This ensures the IPC handler task can continue processing
-            // other connections while waiting for user input.
-            let agent_id = agent_id.to_string();
-            let permission = permission.to_string();
-            let reason = reason.to_string();
-            tokio::task::spawn_blocking(move || {
-                use dialoguer::Confirm;
-                let prompt = format!(
-                    "\n\n  [Permission] Agent '{}' requests: {}\n  Reason: {}\n\n  Grant?",
-                    agent_id, permission, reason
-                );
-                Confirm::new()
-                    .with_prompt(prompt)
-                    .default(false)
-                    .interact()
-                    .unwrap_or(false)
-            }).await.unwrap_or(false)
-        }
-
-        #[cfg(not(feature = "interactive-cli"))]
-        {
-            let callback = CliApprovalCallback;
-            callback.request_approval(agent_id, permission, reason)
-        }
-    }
-}
-
-/// S2.2: Handle runtime permission request.
-///
-/// Steps:
-/// 1. Resolve agent_id from session
-/// 2. Parse the requested permission
-/// 3. Check if already granted in PermissionStore → auto-approve
-/// 4. Check policy for auto-approval
-/// 5. Ask the user via callback (currently auto-denies in non-interactive mode)
-/// 6. Return PermissionResult with request_id for correlation
-///
-/// Note: The Gateway processes this in the IPC handler task. For S2.2,
-/// when we implement interactive CLI approval, the approval step will
-/// be spawned as a separate tokio task to avoid blocking the IPC loop.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_permission_request(
-    request_id: &str,
-    permission: &str,
-    reason: &str,
-    timeout_ms: u64,
-    conn_id: &str,
-    _state: &SharedState,
-    session_mgr: &SharedSessionMgr,
-    perm_store: &SharedPermissionStore,
-) -> GatewayResponse {
-    // 1. Resolve agent_id from session
-    let agent_id = {
-        let mgr = session_mgr.lock().await;
-        mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
-    };
-    let agent_id = match agent_id {
-        Some(id) => id,
-        None => {
-            return GatewayResponse::PermissionResult {
-                request_id: request_id.to_string(),
-                granted: false,
-                reason: Some("Not authenticated".to_string()),
-            };
-        }
-    };
-
-    // 2. Parse the requested permission
-    let requested = match Permission::parse(permission) {
-        Ok(p) => p,
-        Err(e) => {
-            return GatewayResponse::PermissionResult {
-                request_id: request_id.to_string(),
-                granted: false,
-                reason: Some(format!("Invalid permission: {}", e)),
-            };
-        }
-    };
-
-    // 3. Check if already granted in PermissionStore
-    match perm_store.has_permission(&agent_id, &requested) {
-        Ok(true) => {
-            tracing::info!("Permission already granted: agent={}, perm={}", agent_id, permission);
-            return GatewayResponse::PermissionResult {
-                request_id: request_id.to_string(),
-                granted: true,
-                reason: None,
-            };
-        }
-        Ok(false) => {} // Not yet granted, continue to approval
-        Err(e) => {
-            return GatewayResponse::PermissionResult {
-                request_id: request_id.to_string(),
-                granted: false,
-                reason: Some(format!("Permission store error: {}", e)),
-            };
-        }
-    }
-
-    // 4. Check policy for auto-approval
-    let policy = PermissionPolicy::for_permission(&requested);
-    if policy == PermissionPolicy::Allow {
-        // Auto-approve and persist
-        let grant = PermissionGrant::new(&agent_id, requested.clone(), "auto");
-        if let Err(e) = perm_store.grant(&grant) {
-            return GatewayResponse::PermissionResult {
-                request_id: request_id.to_string(),
-                granted: false,
-                reason: Some(format!("Failed to persist grant: {}", e)),
-            };
-        }
-        tracing::info!("Permission auto-approved: agent={}, perm={}", agent_id, permission);
-        return GatewayResponse::PermissionResult {
-            request_id: request_id.to_string(),
-            granted: true,
-            reason: None,
-        };
-    }
-
-    // 5. Ask the user via async callback (S2.2)
-    //
-    // The async callback is spawned in a separate tokio task with a timeout.
-    // This ensures the IPC handler task does not block other connections
-    // while waiting for user input. The timeout is enforced both by the
-    // callback implementation and as a safety net here.
-    let callback = AsyncCliApprovalCallback;
-    let approval_result = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        callback.request_approval(&agent_id, permission, reason, timeout_ms),
-    ).await;
-
-    let approved = match approval_result {
-        Ok(approved) => approved,
-        Err(_) => {
-            // Timeout — auto-deny
-            tracing::warn!(
-                "Permission request timed out ({}ms): agent={}, perm={}",
-                timeout_ms, agent_id, permission
-            );
-            return GatewayResponse::PermissionResult {
-                request_id: request_id.to_string(),
-                granted: false,
-                reason: Some(format!("Permission request timed out after {}ms", timeout_ms)),
-            };
-        }
-    };
-
-    if approved {
-        // Persist the grant
-        let grant = PermissionGrant::new(&agent_id, requested.clone(), "user");
-        if let Err(e) = perm_store.grant(&grant) {
-            return GatewayResponse::PermissionResult {
-                request_id: request_id.to_string(),
-                granted: false,
-                reason: Some(format!("Failed to persist grant: {}", e)),
-            };
-        }
-        GatewayResponse::PermissionResult {
-            request_id: request_id.to_string(),
-            granted: true,
-            reason: None,
-        }
-    } else {
-        GatewayResponse::PermissionResult {
-            request_id: request_id.to_string(),
-            granted: false,
-            reason: Some(format!("User denied permission: {}", permission)),
         }
     }
 }
@@ -932,6 +640,7 @@ pub async fn handle_agent_hello(
         let mut rt_max_iterations: Option<u32> = None;
         let mut rt_temperature: Option<f32> = None;
         let mut rt_system_prompt_override: Option<String> = None;
+        let mut rt_shell_approval_threshold: Option<String> = None;
 
         // Only resolve config for main connections.
         // chunk-relay connections don't need LLM config — they only send StreamChunk.
@@ -1025,7 +734,8 @@ pub async fn handle_agent_hello(
                     let has_override = per_agent.max_iterations.is_some()
                         || per_agent.temperature.is_some()
                         || per_agent.system_prompt_override.is_some()
-                        || per_agent.max_output_tokens.is_some();
+                        || per_agent.max_output_tokens.is_some()
+                        || per_agent.shell_approval_threshold.is_some();
                     if has_override {
                         tracing::info!(
                             agent_id = %agent_id,
@@ -1036,6 +746,7 @@ pub async fn handle_agent_hello(
                         rt_max_iterations = per_agent.max_iterations;
                         rt_temperature = per_agent.temperature;
                         rt_system_prompt_override = per_agent.system_prompt_override;
+                        rt_shell_approval_threshold = per_agent.shell_approval_threshold.map(|t| format!("{:?}", t).to_lowercase());
                     }
                 }
             }
@@ -1059,6 +770,7 @@ pub async fn handle_agent_hello(
             runtime_max_iterations: rt_max_iterations,
             runtime_temperature: rt_temperature,
             runtime_system_prompt_override: rt_system_prompt_override,
+            runtime_shell_approval_threshold: rt_shell_approval_threshold,
         }
     } else {
         tracing::warn!("AgentHello from unknown connection {}", conn_id);
@@ -1080,6 +792,7 @@ pub async fn handle_agent_hello(
             runtime_max_iterations: None,
             runtime_temperature: None,
             runtime_system_prompt_override: None,
+            runtime_shell_approval_threshold: None,
         }
     }
 }

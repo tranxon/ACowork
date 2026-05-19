@@ -413,8 +413,6 @@ export interface ToolApprovalNeededEvent {
   };
   params: Record<string, unknown>;
   params_summary: string;
-  required_permission: string;
-  timeout_ms: number;
 }
 
 /** Tool approval request payload */

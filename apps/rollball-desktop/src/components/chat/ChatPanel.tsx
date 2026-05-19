@@ -685,7 +685,7 @@ export function ChatPanel() {
           }
           disabled={inputDisabled}
           rows={3}
-          className="w-full resize-none border-0 bg-transparent p-3 pb-2 text-sm outline-none placeholder:text-zinc-500 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+          className="w-full resize-none border-0 bg-transparent p-3 pb-2 text-xs outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();

@@ -1,6 +1,5 @@
 //! Agent creation commands — create new agent skeleton and install it
 
-use std::collections::HashMap;
 use std::io::Write;
 
 use serde::Serialize;
@@ -14,7 +13,6 @@ use crate::state::AppState;
 struct AgentManifest<'a> {
     package: PackageSection<'a>,
     llm: LlmSection<'a>,
-    permissions: HashMap<&'a str, Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -47,7 +45,6 @@ pub async fn create_agent(
     author: Option<String>,
     suggested_provider: Option<String>,
     suggested_model: Option<String>,
-    permissions: Option<Vec<String>>,
 ) -> Result<String, String> {
     let version = version.unwrap_or_else(|| "0.1.0".to_string());
     let description = description.unwrap_or_else(|| format!("{} agent", name));
@@ -74,14 +71,6 @@ pub async fn create_agent(
     std::fs::create_dir_all(&prompts_dir)
         .map_err(|e| format!("Failed to create prompts dir: {}", e))?;
 
-    // Build permission map from the flat permissions list (each entry like "network"
-    // becomes `network = ["*"]` in TOML). Default to network only if none provided.
-    let perm_list = permissions.unwrap_or_else(|| vec!["network".to_string()]);
-    let mut perm_map: HashMap<&str, Vec<String>> = HashMap::new();
-    for p in &perm_list {
-        perm_map.entry(p.as_str()).or_default().push("*".to_string());
-    }
-
     // Generate manifest.toml via safe TOML serialization
     let manifest = AgentManifest {
         package: PackageSection {
@@ -97,7 +86,6 @@ pub async fn create_agent(
             suggested_provider: &provider,
             suggested_model: &model,
         },
-        permissions: perm_map,
     };
 
     let manifest_toml = toml::to_string(&manifest)

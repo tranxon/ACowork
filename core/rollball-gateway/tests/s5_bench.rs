@@ -159,55 +159,6 @@ async fn bench_s5_http_config_api_latency() {
 }
 
 // ============================================================================
-// Benchmark 2: Permission check latency
-// ============================================================================
-
-#[tokio::test]
-#[ignore]
-async fn bench_s5_permission_check_latency() {
-    use rollball_core::permission::{Permission, PermissionGrant};
-    use rollball_gateway::permission_store::PermissionStore;
-
-    let perm_store = PermissionStore::open_in_memory().unwrap();
-
-    // Pre-grant some permissions
-    let agent_id = "com.example.bench";
-    for i in 0..50 {
-        let perm = Permission::Network(Some(format!("https://api{}.example.com", i)));
-        let grant = PermissionGrant::new(agent_id, perm, "bench");
-        perm_store.grant(&grant).unwrap();
-    }
-
-    let iterations = 500;
-    let mut latencies_ns: Vec<u64> = Vec::with_capacity(iterations);
-
-    // Measure permission check (cache hit path)
-    for i in 0..iterations {
-        let perm = Permission::Network(Some(format!("https://api{}.example.com", i % 50)));
-        let start = Instant::now();
-        let result = perm_store.has_permission(agent_id, &perm);
-        let elapsed = start.elapsed().as_nanos() as u64;
-        assert!(result.is_ok());
-        latencies_ns.push(elapsed);
-    }
-
-    let p50 = percentile(latencies_ns.clone(), 50.0);
-    let p99 = percentile(latencies_ns.clone(), 99.0);
-
-    println!("Permission check latency: P50={:.2}µs, P99={:.2}µs",
-        p50 as f64 / 1_000.0,
-        p99 as f64 / 1_000.0,
-    );
-
-    // Permission check should be under 5ms
-    assert!(
-        p99 < 5_000_000, // 5ms
-        "Permission check P99 latency too high: {:.2}µs",
-        p99 as f64 / 1_000.0,
-    );
-}
-
-// ============================================================================
 // Benchmark 3: GrafeoStore query latency
 // ============================================================================
 

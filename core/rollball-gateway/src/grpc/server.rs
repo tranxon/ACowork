@@ -21,7 +21,8 @@ use rollball_core::proto::gateway_service_server::{GatewayService, GatewayServic
 use rollball_core::proto_bridge::GatewayResponseToProto;
 use rollball_core::protocol::GatewayResponse;
 
-use crate::ipc::server::{SharedPermissionStore, SharedState};
+use crate::ipc::server::SharedState;
+use crate::http::approval::ApprovalPendingRequests;
 use crate::http::routes::{BridgeEvent, SessionPendingRequests, SharedSessionMgr};
 
 use super::dispatch::{dispatch_grpc_request, is_stream_chunk};
@@ -307,10 +308,10 @@ pub struct GatewayGrpcService {
     /// Legacy IPC session manager — shared with IPC server for intent routing.
     /// gRPC sessions register here too so that IntentReceived push works.
     ipc_session_mgr: SharedSessionMgr,
-    perm_store: SharedPermissionStore,
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: Option<SessionPendingRequests>,
+    approval_pending: Option<ApprovalPendingRequests>,
 }
 
 #[async_trait::async_trait]
@@ -353,10 +354,10 @@ impl GatewayService for GatewayGrpcService {
         let state = Arc::clone(&self.state);
         let grpc_session_mgr = Arc::clone(&self.grpc_session_mgr);
         let ipc_session_mgr = Arc::clone(&self.ipc_session_mgr);
-        let perm_store = Arc::clone(&self.perm_store);
         let mut cap_rx = self.capability_tx.subscribe();
         let bridge_tx = self.bridge_tx.clone();
         let session_pending = self.session_pending.clone();
+        let approval_pending = self.approval_pending.clone();
         let conn_id_clone = conn_id.clone();
 
         // Spawn handler task for this connection
@@ -386,9 +387,9 @@ impl GatewayService for GatewayGrpcService {
                                         &conn_id_clone,
                                         &state,
                                         &ipc_session_mgr,
-                                        &perm_store,
                                         &bridge_tx,
                                         &session_pending,
+                                        &approval_pending,
                                     ).await;
                                     continue;
                                 }
@@ -416,9 +417,9 @@ impl GatewayService for GatewayGrpcService {
                                     &conn_id_clone,
                                     &state,
                                     &ipc_session_mgr,
-                                    &perm_store,
                                     &bridge_tx,
                                     &session_pending,
+                                    &approval_pending,
                                 ).await;
 
                                 // For AgentHello, the handler also pushes LLMConfigDelivery
@@ -550,19 +551,19 @@ pub async fn start_grpc_server(
     state: SharedState,
     grpc_session_mgr: SharedGrpcSessionMgr,
     ipc_session_mgr: SharedSessionMgr,
-    perm_store: SharedPermissionStore,
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: Option<SessionPendingRequests>,
+    approval_pending: Option<ApprovalPendingRequests>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let service = GatewayGrpcService {
         state,
         grpc_session_mgr,
         ipc_session_mgr,
-        perm_store,
         capability_tx,
         bridge_tx,
         session_pending,
+        approval_pending,
     };
 
     tracing::info!("gRPC server starting on {}", addr);

@@ -33,7 +33,7 @@ pub use manifest::{AgentManifest, CapabilityDef, LlmConfig, ProviderConfig, Rout
 pub use protocol::{GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo, ModelModalities, ProtocolType, SessionInfoDto, ConversationEntryDto};
 
 pub use intent::Intent;
-pub use permission::{Permission, PermissionGrant, PermissionPolicy, PermissionPolicyConfig, PermissionMetrics};
+pub use permission::Permission;
 pub use identity::{Identity, IdentityCategory, IdentityEntry, IdentityQueryResult, IdentityStore, IdentitySubscription, PrivacyLevel};
 pub use budget::{Budget, UsageReport};
 pub use tools::{Tool, ToolSpec, ToolResult};

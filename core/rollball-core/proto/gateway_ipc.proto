@@ -15,7 +15,6 @@ message ClientMessage {
     BudgetQueryRequest      budget_query          = 4;
     UsageReportRequest      usage_report          = 5;
     RateAcquireRequest      rate_acquire          = 6;
-    PermissionRequest       permission_request    = 7;
     IdentityQueryRequest    identity_query        = 8;
     CapabilityQueryRequest  capability_query      = 9;
     CronRegisterRequest     cron_register         = 10;
@@ -48,7 +47,6 @@ message ServerMessage {
     UsageReportAck          usage_report_ack      = 6;
     ContextUsageAck         context_usage_ack     = 7;
     RateToken               rate_token            = 8;
-    PermissionResult        permission_result     = 9;
     IdentityQueryResult     identity_query_result = 10;
     CapabilityOverview      capability_overview   = 11;
     CronRegisterResult      cron_register_result  = 12;
@@ -80,7 +78,6 @@ message IntentSendRequest       { string target = 1; string action = 2; string p
 message BudgetQueryRequest      { string provider = 1; }
 message UsageReportRequest      { string agent_id = 1; string provider = 2; uint64 tokens_used = 3; double cost_usd = 4; string timestamp = 5; string error = 6; }
 message RateAcquireRequest      { string provider = 1; }
-message PermissionRequest       { string request_id = 1; string permission = 2; string reason = 3; uint64 timeout_ms = 4; }
 message IdentityQueryRequest    { repeated string fields = 1; }
 message CapabilityQueryRequest  { string agent_id = 1; }
 message CronRegisterRequest     { string agent_id = 1; string schedule = 2; string action = 3; string params_json = 4; }
@@ -121,6 +118,7 @@ message AgentHelloResult {
   optional uint32 runtime_max_iterations = 15;
   optional float runtime_temperature = 16;
   string runtime_system_prompt_override = 17;
+  string runtime_shell_approval_threshold = 18;
 }
 message KeyReleaseResult        { string api_key = 1; string error = 2; }
 message IntentDelivered         { string message_id = 1; }
@@ -128,7 +126,6 @@ message BudgetInfo              { uint64 remaining_tokens = 1; double remaining_
 message UsageReportAck          {}
 message ContextUsageAck         {}
 message RateToken               { bool granted = 1; uint64 retry_after_ms = 2; }
-message PermissionResult        { string request_id = 1; bool granted = 2; string reason = 3; }
 message IdentityQueryResult     { map<string, string> values = 1; map<string, float> confidence = 2; }
 message CapabilityOverview      { map<string, StringList> capabilities = 1; }
 message StringList              { repeated string items = 1; }
@@ -152,7 +149,7 @@ message WorkspaceContextUpdate  { string context_text = 1; string current_worksp
 message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
 message LogLevelUpdate           { string log_level = 1; }
 message LogRotate               {}
-message RuntimeConfigUpdate      { optional uint64 max_output_tokens = 1; optional uint32 max_iterations = 2; optional float temperature = 3; string system_prompt_override = 4; repeated string active_tools = 5; }
+message RuntimeConfigUpdate      { optional uint64 max_output_tokens = 1; optional uint32 max_iterations = 2; optional float temperature = 3; string system_prompt_override = 4; repeated string active_tools = 5; string shell_approval_threshold = 6; }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }
 

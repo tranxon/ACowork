@@ -17,9 +17,6 @@ use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
 use crate::package_manager::uninstall;
 use crate::package_manager::upgrade;
-use crate::permission_store::PermissionStore;
-use crate::cli::PermissionAction;
-use rollball_core::permission::Permission;
 
 /// Gateway — the top-level orchestrator
 ///
@@ -28,7 +25,6 @@ pub struct Gateway {
     config: GatewayConfig,
     state: GatewayState,
     lifecycle: LifecycleManager,
-    perm_store: PermissionStore,
 }
 
 impl Gateway {
@@ -45,13 +41,6 @@ impl Gateway {
                 "Failed to create data directory '{}': {}", data_dir, e
             )))?;
 
-        let perm_db_path = std::path::Path::new(&data_dir).join("permissions.db");
-        let perm_store = PermissionStore::open(&perm_db_path)
-            .map_err(|e| GatewayError::Config(format!(
-                "Failed to open permission store at '{}': {}",
-                perm_db_path.display(), e
-            )))?;
-
         // Build the gRPC endpoint URL that Runtime processes will use to connect.
         // Runtime expects an HTTP URL like "http://127.0.0.1:19877".
         let grpc_addr = crate::grpc::server::default_grpc_addr();
@@ -61,7 +50,6 @@ impl Gateway {
             config,
             state: GatewayState::new(&vault_dir),
             lifecycle: LifecycleManager::new(idle_timeout, gateway_grpc_endpoint, log_file_size_mb),
-            perm_store,
         })
     }
 
@@ -409,25 +397,6 @@ impl Gateway {
             }
         }
 
-        // P0-1 fix: Inject shared PermissionStore into GatewayState
-        // so that HTTP API and IPC server share the same permission data.
-        {
-            let mut gw = shared_state.write().await;
-            // Note: The IPC server opens a separate Connection to the same DB file,
-            // so both the IPC store and the GatewayState store point to the same
-            // underlying database. This is safe because SQLite supports multiple
-            // readers, and PermissionStore uses Mutex per connection.
-            let perm_db_path = std::path::Path::new(&self.config.data_dir).join("permissions.db");
-            match crate::permission_store::PermissionStore::open(&perm_db_path) {
-                Ok(store) => {
-                    gw.permission_store = Some(std::sync::Arc::new(store));
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to open permission store for GatewayState: {}", e);
-                }
-            }
-        }
-
         // P0-2 fix: Store config snapshot in GatewayState for Config API
         {
             let mut gw = shared_state.write().await;
@@ -452,16 +421,6 @@ impl Gateway {
         });
 
         tracing::info!("Gateway entering IPC event loop (async multi-connection)");
-
-        // Open a separate connection to the same permission database for IPC server.
-        // SQLite supports multiple readers, and PermissionStore uses Mutex per connection.
-        let perm_db_path = std::path::Path::new(&self.config.data_dir).join("permissions.db");
-        let ipc_perm_store = crate::permission_store::PermissionStore::open(&perm_db_path)
-            .map_err(|e| GatewayError::Config(format!(
-                "Failed to open permission store for IPC: {}", e
-            )))?;
-        let shared_perm_store: crate::ipc::server::SharedPermissionStore =
-            Arc::new(ipc_perm_store);
 
         // Clone HTTP config before moving into the task
         let http_config = self.config.http.clone();
@@ -517,6 +476,14 @@ impl Gateway {
         let http_session_pending = Some(session_pending.clone());
         let grpc_session_pending = Some(session_pending);
 
+        // C1+C2: Create shared approval_pending for HTTP approval endpoint ↔ gRPC dispatch.
+        // gRPC dispatch stores oneshot senders here when Runtime requests tool approval;
+        // HTTP handler resolves them when Desktop App user clicks Allow/Deny.
+        let approval_pending: crate::http::approval::ApprovalPendingRequests =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let http_approval_pending = Some(approval_pending.clone());
+        let grpc_approval_pending = Some(approval_pending);
+
         // Task #12: Create shared gRPC session manager for Gateway→Runtime request-response.
         // Both the gRPC server and HTTP server share this instance.
         let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr =
@@ -538,6 +505,7 @@ impl Gateway {
                 http_bridge_tx,
                 http_models_cache,
                 http_session_pending,
+                http_approval_pending,
                 log_reload_handle,
             ).await {
                 tracing::error!("HTTP server failed: {}", e);
@@ -548,7 +516,6 @@ impl Gateway {
         // The gRPC server registers each connection in ipc_session_mgr,
         // so HTTP handlers find gRPC-connected agents via the same path.
         let grpc_state = shared_state.clone();
-        let grpc_perm_store = shared_perm_store.clone();
         let grpc_bridge_tx = Some(bridge_tx.clone());
         let (capability_tx, _) = tokio::sync::broadcast::channel::<rollball_core::protocol::GatewayResponse>(64);
         let grpc_handle = tokio::spawn(async move {
@@ -558,10 +525,10 @@ impl Gateway {
                 grpc_state,
                 grpc_session_mgr,
                 session_mgr,
-                grpc_perm_store,
                 capability_tx,
                 grpc_bridge_tx,
                 grpc_session_pending,
+                grpc_approval_pending,
             ).await {
                 tracing::error!("gRPC server failed: {}", e);
             }
@@ -652,46 +619,6 @@ impl Gateway {
                 running: self.state.is_running(&info.agent_id),
             })
             .collect()
-    }
-
-    /// Handle permission CLI subcommands
-    pub fn handle_permission_cli(&self, action: PermissionAction) -> Result<String, GatewayError> {
-        match action {
-            PermissionAction::Revoke { agent_id, permission } => {
-                let perm = Permission::parse(&permission)
-                    .map_err(|e| GatewayError::Package(format!("Invalid permission: {}", e)))?;
-                let count = self.perm_store.revoke(&agent_id, Some(&perm))
-                    .map_err(|e| GatewayError::Package(format!("Failed to revoke: {}", e)))?;
-                if count > 0 {
-                    tracing::info!("Revoked permission '{}' from agent {}", permission, agent_id);
-                    Ok(format!("Revoked '{}' from {} ({} grant(s) removed)", permission, agent_id, count))
-                } else {
-                    Ok(format!("No matching grant found for '{}' on {}", permission, agent_id))
-                }
-            }
-            PermissionAction::Reset { agent_id } => {
-                let count = self.perm_store.reset(&agent_id)
-                    .map_err(|e| GatewayError::Package(format!("Failed to reset: {}", e)))?;
-                tracing::info!("Reset all permissions for agent {}", agent_id);
-                Ok(format!("Reset {} permission grant(s) for {}", count, agent_id))
-            }
-            PermissionAction::List { agent_id } => {
-                let grants = self.perm_store.query_grants(&agent_id)
-                    .map_err(|e| GatewayError::Package(format!("Failed to list: {}", e)))?;
-                if grants.is_empty() {
-                    Ok(format!("No permissions granted for {}", agent_id))
-                } else {
-                    let lines: Vec<String> = grants.iter()
-                        .map(|g| format!("  {} (by {}, {})",
-                            g.permission.to_permission_string(),
-                            g.authorized_by,
-                            if g.expires_at.is_some() { "temporary" } else { "permanent" }
-                        ))
-                        .collect();
-                    Ok(format!("Permissions for {}:\n{}", agent_id, lines.join("\n")))
-                }
-            }
-        }
     }
 
     /// Package an installed agent into .agent file (CLI command)

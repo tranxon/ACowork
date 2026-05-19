@@ -561,6 +561,19 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             }
         }
 
+        // Inject GatewayApprovalGate for shell command risk confirmation.
+        // This allows the Runtime to send approval requests to the Gateway
+        // (which forwards them to the Desktop App BridgeEvent) and wait for
+        // the user's Allow/Deny response before executing shell commands.
+        {
+            use crate::security::approval_gate::GatewayApprovalGate;
+            let gate = GatewayApprovalGate::from_client(&client, agent_id.clone());
+            if let Some(c) = Arc::get_mut(&mut core) {
+                c.set_approval_gate(Arc::new(gate));
+                tracing::info!("GatewayApprovalGate injected into AgentCore");
+            }
+        }
+
         let session_manager_config = SessionManagerConfig {
             inbound_channel_capacity: 64,
             system_prompt: system_prompt.clone(),
@@ -611,6 +624,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                 || cfg.runtime_max_iterations.is_some()
                 || cfg.runtime_temperature.is_some()
                 || cfg.runtime_system_prompt_override.is_some()
+                || cfg.runtime_shell_approval_threshold.is_some()
             {
                 tracing::info!(
                     max_output_tokens = ?cfg.runtime_max_output_tokens,
@@ -623,6 +637,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                     cfg.runtime_max_iterations,
                     cfg.runtime_temperature,
                     cfg.runtime_system_prompt_override.clone(),
+                    cfg.runtime_shell_approval_threshold.clone(),
                 );
             }
         }
@@ -1658,12 +1673,14 @@ async fn process_gateway_recv(
                         temperature,
                         system_prompt_override,
                         active_tools,
+                        shell_approval_threshold,
                     } => {
                         tracing::info!(
                             max_output_tokens = ?max_output_tokens,
                             max_iterations = ?max_iterations,
                             temperature = ?temperature,
                             active_tools = ?active_tools,
+                            shell_approval_threshold = ?shell_approval_threshold,
                             "Received RuntimeConfigUpdate from Gateway — applying to current and future sessions"
                         );
                         // Use `apply_runtime_config_override` (not raw `broadcast`)
@@ -1677,6 +1694,7 @@ async fn process_gateway_recv(
                             max_iterations,
                             temperature,
                             system_prompt_override,
+                            shell_approval_threshold,
                         );
                         // Hot-rebuild tool definitions when active_tools changes.
                         // This must be called separately from apply_runtime_config_override

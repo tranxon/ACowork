@@ -22,6 +22,8 @@ export interface AgentProfileSettings {
   systemPrompt?: string;
   /** Active tool names (from manifest + overrides) */
   activeTools?: string[];
+  /** Shell approval threshold: "low" | "medium" | "high" | "never" */
+  shellApprovalThreshold?: string;
 }
 
 const STORAGE_KEY = "rollball-agent-profiles";
@@ -74,6 +76,7 @@ function loadProfiles(): Record<string, AgentProfileSettings> {
           temperature: typeof settings.temperature === "number" ? settings.temperature : 0.7,
           systemPrompt: settings.systemPrompt,
           activeTools: Array.isArray(settings.activeTools) ? settings.activeTools : undefined,
+          shellApprovalThreshold: settings.shellApprovalThreshold,
         };
       }
       return result;

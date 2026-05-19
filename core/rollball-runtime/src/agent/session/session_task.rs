@@ -52,6 +52,7 @@ pub enum SessionMessage {
         max_iterations: Option<u32>,
         temperature: Option<f32>,
         system_prompt_override: Option<String>,
+        shell_approval_threshold: Option<String>,
     },
     /// Update workspace context text
     UpdateWorkspaceContext { context_text: String },
@@ -477,6 +478,7 @@ impl SessionTask {
                     max_iterations,
                     temperature,
                     system_prompt_override,
+                    shell_approval_threshold,
                 }) => {
                     tracing::info!(
                         session_id = %session_id,
@@ -490,6 +492,7 @@ impl SessionTask {
                         max_iterations,
                         temperature,
                         system_prompt_override,
+                        shell_approval_threshold,
                     );
                 }
                 Some(SessionMessage::UpdateWorkspaceContext { context_text }) => {

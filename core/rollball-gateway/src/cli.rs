@@ -74,12 +74,6 @@ pub enum Commands {
     },
     /// List installed agents
     List,
-    /// Manage agent permissions
-    Permission {
-        /// Subcommand: revoke, reset, list
-        #[command(subcommand)]
-        action: PermissionAction,
-    },
     /// Package an installed agent into .agent file
     Package {
         /// Agent ID to package
@@ -93,27 +87,6 @@ pub enum Commands {
         /// Signing key directory (default: examples/.signing-keys)
         #[arg(long, env = "ROLLBALL_PACKAGE_KEY_DIR")]
         key_dir: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum PermissionAction {
-    /// Revoke a specific permission from an agent
-    Revoke {
-        /// Agent ID
-        agent_id: String,
-        /// Permission string (e.g., "shell", "network:https://api.example.com")
-        permission: String,
-    },
-    /// Reset all permissions for an agent
-    Reset {
-        /// Agent ID
-        agent_id: String,
-    },
-    /// List granted permissions for an agent
-    List {
-        /// Agent ID
-        agent_id: String,
     },
 }
 
@@ -166,10 +139,6 @@ impl Cli {
                         println!("  {}", entry);
                     }
                 }
-            }
-            Some(Commands::Permission { action }) => {
-                let msg = gateway.handle_permission_cli(action)?;
-                println!("{}", msg);
             }
             Some(Commands::Package { agent_id, output, sign, key_dir }) => {
                 let msg = gateway.package_agent(&agent_id, output.as_deref(), sign, key_dir.as_deref())?;

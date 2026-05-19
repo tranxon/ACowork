@@ -55,6 +55,7 @@ pub struct AgentHelloConfig {
     pub runtime_max_iterations: Option<u32>,
     pub runtime_temperature: Option<f32>,
     pub runtime_system_prompt_override: Option<String>,
+    pub runtime_shell_approval_threshold: Option<String>,
 }
 
 /// Request timeout for individual RPC calls
@@ -74,7 +75,7 @@ pub struct GatewayGrpcClient {
     /// Outbound message sender (feeds the gRPC stream via ReceiverStream)
     outbound_tx: mpsc::Sender<proto::ClientMessage>,
     /// Request ID counter (atomic for concurrent access from `&self` methods)
-    next_request_id: AtomicU64,
+    next_request_id: Arc<AtomicU64>,
     /// Pending request map: request_id → oneshot sender for response
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<proto::ServerMessage>>>>,
     /// Push message receiver (consumed by `recv_message()`)
@@ -126,6 +127,7 @@ impl GatewayGrpcClient {
         let pending = Arc::new(Mutex::new(
             HashMap::<u64, oneshot::Sender<proto::ServerMessage>>::new(),
         ));
+        let next_request_id = Arc::new(AtomicU64::new(1));
         let (push_tx, push_rx) = mpsc::unbounded_channel();
         let (memory_query_tx, memory_query_rx) = mpsc::unbounded_channel();
         let connected = Arc::new(AtomicBool::new(true));
@@ -188,7 +190,7 @@ impl GatewayGrpcClient {
         Ok(Self {
             endpoint: endpoint.to_string(),
             outbound_tx,
-            next_request_id: AtomicU64::new(1),
+            next_request_id,
             pending,
             push_rx,
             connected,
@@ -298,6 +300,16 @@ impl GatewayGrpcClient {
         let _config = self.send_agent_hello(agent_id, version, "main").await?;
         self.flush_pending_reports().await?;
         Ok(())
+    }
+
+    /// Get a clone of the pending response map (for external request-response handling).
+    pub fn pending_map(&self) -> Arc<Mutex<HashMap<u64, oneshot::Sender<proto::ServerMessage>>>> {
+        Arc::clone(&self.pending)
+    }
+
+    /// Get a clone of the next-request-id counter (for external request-response handling).
+    pub fn next_request_id_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.next_request_id)
     }
 
     /// Get a clone of the outbound message sender.
@@ -485,6 +497,14 @@ impl GatewayGrpcClient {
                             None
                         } else {
                             Some(result.runtime_system_prompt_override)
+                        },
+                        runtime_shell_approval_threshold: if result
+                            .runtime_shell_approval_threshold
+                            .is_empty()
+                        {
+                            None
+                        } else {
+                            Some(result.runtime_shell_approval_threshold)
                         },
                     };
                     Ok(config)
@@ -697,69 +717,6 @@ impl GatewayGrpcClient {
                     Some(token.retry_after_ms)
                 },
             )),
-            Some(other) => Err(RollballError::Ipc(format!(
-                "Unexpected response: {:?}",
-                other
-            ))),
-            None => Err(RollballError::Ipc(
-                "Empty response payload".to_string(),
-            )),
-        }
-    }
-
-    /// Request a runtime permission.
-    pub async fn request_permission(
-        &self,
-        permission: &str,
-        reason: &str,
-    ) -> Result<(bool, Option<String>), RollballError> {
-        self.request_permission_with_timeout(
-            permission,
-            reason,
-            rollball_core::protocol::PERMISSION_REQUEST_TIMEOUT_MS,
-        )
-        .await
-    }
-
-    /// Request a runtime permission with a custom timeout.
-    pub async fn request_permission_with_timeout(
-        &self,
-        permission: &str,
-        reason: &str,
-        timeout_ms: u64,
-    ) -> Result<(bool, Option<String>), RollballError> {
-        let perm_req_id = format!(
-            "perm-{}-{}",
-            self.next_request_id.fetch_add(1, Ordering::SeqCst),
-            chrono::Utc::now().timestamp_millis()
-        );
-
-        let request = GatewayRequest::PermissionRequest {
-            request_id: perm_req_id.clone(),
-            permission: permission.to_string(),
-            reason: reason.to_string(),
-            timeout_ms,
-        };
-
-        let resp = self.send_gateway_request(request).await?;
-        match resp.payload {
-            Some(ServerPayload::PermissionResult(result)) => {
-                if result.request_id != perm_req_id {
-                    tracing::warn!(
-                        expected = %perm_req_id,
-                        got = %result.request_id,
-                        "PermissionResult request_id mismatch"
-                    );
-                }
-                Ok((
-                    result.granted,
-                    if result.reason.is_empty() {
-                        None
-                    } else {
-                        Some(result.reason)
-                    },
-                ))
-            }
             Some(other) => Err(RollballError::Ipc(format!(
                 "Unexpected response: {:?}",
                 other
@@ -1116,6 +1073,11 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 } else {
                     Some(rcu.active_tools)
                 },
+                shell_approval_threshold: if rcu.shell_approval_threshold.is_empty() {
+                    None
+                } else {
+                    Some(rcu.shell_approval_threshold)
+                },
             }
         }
 
@@ -1162,6 +1124,11 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             } else {
                 Some(r.runtime_system_prompt_override)
             },
+            runtime_shell_approval_threshold: if r.runtime_shell_approval_threshold.is_empty() {
+                None
+            } else {
+                Some(r.runtime_shell_approval_threshold)
+            },
         },
         Some(ServerPayload::KeyReleaseResult(r)) => GatewayResponse::KeyReleaseResult {
             api_key: if r.api_key.is_empty() {
@@ -1190,15 +1157,6 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 None
             } else {
                 Some(r.retry_after_ms)
-            },
-        },
-        Some(ServerPayload::PermissionResult(r)) => GatewayResponse::PermissionResult {
-            request_id: r.request_id,
-            granted: r.granted,
-            reason: if r.reason.is_empty() {
-                None
-            } else {
-                Some(r.reason)
             },
         },
         Some(ServerPayload::IdentityQueryResult(r)) => GatewayResponse::IdentityQueryResult {

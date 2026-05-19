@@ -15,9 +15,6 @@ use rollball_core::permission::Permission;
 use rollball_core::tools::traits::Tool;
 use rollball_core::AgentManifest;
 use rollball_runtime::tools::builtin::rag_query::RagQueryTool;
-use rollball_runtime::tools::permission::{
-    validate_permission, validate_rag_network_whitelist,
-};
 use rollball_runtime::tools::rag::client::{RagAuthCredential, RagClient, RagClientConfig};
 use rollball_runtime::tools::rag::types::{
     AnnotatedRagResult, RagQueryRequest, RagQueryResponse, RagResultItem,
@@ -75,32 +72,6 @@ fn no_rag_manifest() -> AgentManifest {
     AgentManifest::from_toml(toml).unwrap()
 }
 
-fn rag_manifest_no_permissions() -> AgentManifest {
-    let toml = r#"
-        agent_id = "com.test.rag"
-        version = "1.0.0"
-        name = "RAG Agent No Perms"
-        description = "Test"
-        author = "test"
-        runtime_version = "0.1.0"
-
-        [llm]
-        provider = "openai"
-        model = "gpt-4"
-
-        [[tools]]
-        type = "rag"
-        name = "enterprise_knowledge"
-
-        [tools.rag]
-        endpoint = "https://rag.corp.example.com/v1/query"
-        collection = "product_docs"
-        max_results = 5
-        score_threshold = 0.7
-    "#;
-    AgentManifest::from_toml(toml).unwrap()
-}
-
 // ── Helper: mock RagClient ────────────────────────────────────────────────
 
 fn mock_rag_client() -> Arc<RagClient> {
@@ -137,158 +108,6 @@ fn test_manifest_no_rag_zero_intrusion() {
     let manifest = no_rag_manifest();
     assert!(!manifest.has_rag(), "has_rag() should return false without RAG declaration");
     assert!(manifest.rag_config().is_none());
-}
-
-// ── Test 2: RAG dual permission validation ────────────────────────────────
-
-#[test]
-fn test_rag_dual_permission_both_granted() {
-    let manifest = rag_manifest();
-    assert!(validate_permission(&manifest, "rag_query").is_ok(),
-        "rag_query should pass with both rag:query + network permissions");
-}
-
-#[test]
-fn test_rag_dual_permission_missing_both() {
-    let manifest = rag_manifest_no_permissions();
-    let result = validate_permission(&manifest, "rag_query");
-    assert!(result.is_err(), "rag_query should fail without permissions");
-}
-
-#[test]
-fn test_rag_network_whitelist_broad() {
-    let manifest = rag_manifest();
-    assert!(validate_rag_network_whitelist(&manifest).is_ok(),
-        "Broad Network(None) should cover any RAG endpoint");
-}
-
-#[test]
-fn test_rag_network_whitelist_no_rag_config() {
-    let manifest = no_rag_manifest();
-    assert!(validate_rag_network_whitelist(&manifest).is_ok(),
-        "No RAG config → nothing to validate, should pass");
-}
-
-#[test]
-fn test_rag_network_whitelist_missing_network_perm() {
-    let manifest = rag_manifest_no_permissions();
-    let result = validate_rag_network_whitelist(&manifest);
-    assert!(result.is_err(), "Should fail without network permission");
-    let err = result.unwrap_err();
-    assert!(err.contains("network permission"), "Error should mention network: {err}");
-    assert!(err.contains("https://rag.corp.example.com/v1/query"), "Error should mention endpoint: {err}");
-}
-
-// ── Test 3: RAG scoped permission ─────────────────────────────────────────
-
-#[test]
-fn test_rag_scoped_permission_matches_endpoint() {
-    let toml = r#"
-        agent_id = "com.test.rag"
-        version = "1.0.0"
-        name = "RAG Agent"
-        description = "Test"
-        author = "test"
-        runtime_version = "0.1.0"
-
-        [llm]
-        provider = "openai"
-        model = "gpt-4"
-
-        [[permissions]]
-        type = "RagQuery"
-        value = "https://rag.corp.example.com/v1/query"
-
-        [[permissions]]
-        type = "Network"
-        value = "https://rag.corp.example.com/v1/query"
-
-        [[tools]]
-        type = "rag"
-        name = "enterprise_knowledge"
-
-        [tools.rag]
-        endpoint = "https://rag.corp.example.com/v1/query"
-        max_results = 5
-        score_threshold = 0.7
-    "#;
-    let manifest = AgentManifest::from_toml(toml).unwrap();
-    assert!(validate_permission(&manifest, "rag_query").is_ok(),
-        "Scoped rag:query + scoped network matching endpoint should pass");
-}
-
-#[test]
-fn test_rag_scoped_network_mismatch_denied() {
-    let toml = r#"
-        agent_id = "com.test.rag"
-        version = "1.0.0"
-        name = "RAG Agent"
-        description = "Test"
-        author = "test"
-        runtime_version = "0.1.0"
-
-        [llm]
-        provider = "openai"
-        model = "gpt-4"
-
-        [[permissions]]
-        type = "RagQuery"
-
-        [[permissions]]
-        type = "Network"
-        value = "https://other-api.example.com"
-
-        [[tools]]
-        type = "rag"
-        name = "enterprise_knowledge"
-
-        [tools.rag]
-        endpoint = "https://rag.corp.example.com/v1/query"
-        max_results = 5
-        score_threshold = 0.7
-    "#;
-    let manifest = AgentManifest::from_toml(toml).unwrap();
-    let result = validate_permission(&manifest, "rag_query");
-    assert!(result.is_err(), "Network scope mismatch should deny rag_query");
-    assert!(result.unwrap_err().contains("network permission"));
-}
-
-// ── Test 3.5: RAG endpoint HTTPS enforcement (P0-2 from review) ──────────
-
-#[test]
-fn test_rag_http_endpoint_rejected() {
-    let toml = r#"
-        agent_id = "com.test.rag"
-        version = "1.0.0"
-        name = "RAG Agent"
-        description = "Test"
-        author = "test"
-        runtime_version = "0.1.0"
-
-        [llm]
-        provider = "openai"
-        model = "gpt-4"
-
-        [[permissions]]
-        type = "RagQuery"
-
-        [[permissions]]
-        type = "Network"
-
-        [[tools]]
-        type = "rag"
-        name = "enterprise_knowledge"
-
-        [tools.rag]
-        endpoint = "http://insecure-rag.internal/v1/query"
-        max_results = 5
-        score_threshold = 0.7
-    "#;
-    let manifest = AgentManifest::from_toml(toml).unwrap();
-    let result = validate_permission(&manifest, "rag_query");
-    assert!(result.is_err(), "HTTP endpoint should be rejected");
-    let err = result.unwrap_err();
-    assert!(err.contains("HTTPS"), "Error should mention HTTPS: {err}");
 }
 
 // ── Test 4: RagQueryTool end-to-end ───────────────────────────────────────
@@ -484,26 +303,6 @@ async fn test_rag_query_tool_whitespace_query_rejected() {
     let result = tool.execute(serde_json::json!({ "query": "   " })).await.unwrap();
     assert!(!result.ok, "Whitespace-only query should be rejected");
     assert!(result.error.unwrap().contains("Missing 'query'"));
-}
-
-// ── Test 9: No RAG Agent zero-intrusion end-to-end ────────────────────────
-
-#[test]
-fn test_no_rag_agent_zero_intrusion_permissions() {
-    // Agent without RAG declaration should have no rag-related permissions
-    let manifest = no_rag_manifest();
-    assert!(!manifest.has_rag(), "Non-RAG agent should not have RAG");
-    assert!(manifest.rag_config().is_none(), "Non-RAG agent should have no RAG config");
-    assert!(validate_rag_network_whitelist(&manifest).is_ok(),
-        "Non-RAG agent: network whitelist check should be a no-op");
-}
-
-#[test]
-fn test_no_rag_agent_rag_tool_permission_denied() {
-    // Non-RAG agent trying to use rag_query should fail permission
-    let manifest = no_rag_manifest();
-    let result = validate_permission(&manifest, "rag_query");
-    assert!(result.is_err(), "Non-RAG agent should not have rag_query permission");
 }
 
 // ── Test 10: Mock HTTP server end-to-end ─────────────────────────────────

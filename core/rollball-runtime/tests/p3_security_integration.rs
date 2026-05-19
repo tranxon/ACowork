@@ -21,9 +21,7 @@ use rollball_runtime::security::approval_gate::{
 use rollball_runtime::security::audit_log::{AuditLogger, ShellAuditEntry};
 use rollball_runtime::security::file_provenance::{FileProvenance, FileSource};
 use rollball_runtime::security::shell_risk::{assess_shell_risk, ShellRisk};
-use rollball_runtime::tools::permission::validate_permission;
-use rollball_runtime::tools::permission_checker::{CheckResult, PermissionChecker};
-use rollball_runtime::tools::wrappers::{PathGuardedTool, PermissionCheckedTool, WorkspaceDir, WorkspaceAccess};
+use rollball_runtime::tools::wrappers::{PathGuardedTool, WorkspaceDir, WorkspaceAccess};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -186,24 +184,14 @@ impl Tool for MockShellTool {
     }
 }
 
-/// Simulates the full shell execution pipeline with permission checking.
+/// Simulates the full shell execution pipeline (risk assessment + approval gate).
 /// Returns (tool_allowed, risk_level, audit_entry).
-async fn execute_shell_with_permission_and_security<G: ApprovalGate>(
-    manifest: &rollball_core::AgentManifest,
+async fn execute_shell_with_security_pipeline<G: ApprovalGate>(
     command: &str,
     provenance: &FileProvenance,
     gate: &G,
 ) -> (bool, Option<ShellRisk>, ShellAuditEntry) {
-    // Step 1: Permission check (manifest-level)
-    if let Err(e) = validate_permission(manifest, "shell") {
-        let entry = ShellAuditEntry::new("shell", command)
-            .with_risk(ShellRisk::Blocked, &e)
-            .with_approval("permission_denied")
-            .with_provenance_elevated(false);
-        return (false, None, entry);
-    }
-
-    // Step 2: Risk assessment with provenance
+    // Step 1: Risk assessment with provenance
     let assessment = assess_shell_risk(command, |path| provenance.lookup(path));
 
     // Step 3: Blocked check
@@ -260,47 +248,12 @@ async fn execute_shell_with_permission_and_security<G: ApprovalGate>(
     }
 }
 
-/// S5.2-1: No shell permission → shell tool unavailable
+/// S5.2-2: High-risk command → needs approval
 ///
-/// Agent without Shell permission in manifest cannot use shell tool.
-#[tokio::test]
-async fn test_no_shell_permission_tool_unavailable() {
-    let manifest = rollball_core::AgentManifest::from_toml(
-        r#"
-        agent_id = "com.test.no-shell"
-        version = "1.0.0"
-        name = "No Shell Agent"
-        description = "Test"
-        author = "test"
-        runtime_version = "0.1.0"
-
-        [[tools]]
-        name = "shell"
-
-        [llm]
-        provider = "mock"
-        model = "mock-model"
-    "#,
-    )
-    .unwrap();
-
-    let provenance = FileProvenance::new_in_memory(Path::new("/workspace")).unwrap();
-    let gate = AutoApproveGate;
-
-    let (allowed, risk, entry) =
-        execute_shell_with_permission_and_security(&manifest, "ls -la", &provenance, &gate).await;
-
-    assert!(!allowed, "Shell should be denied without Shell permission");
-    assert!(risk.is_none(), "Risk assessment should not be reached");
-    assert_eq!(entry.approved_by, "permission_denied");
-}
-
-/// S5.2-2: Shell permission + high-risk command → needs approval
-///
-/// Agent with Shell permission, but high-risk command requires user confirmation.
+/// High-risk commands require user confirmation via approval gate.
 #[tokio::test]
 async fn test_shell_perm_high_risk_needs_approval() {
-    let manifest = rollball_core::AgentManifest::from_toml(
+    let _manifest = rollball_core::AgentManifest::from_toml(
         r#"
         agent_id = "com.test.shell"
         version = "1.0.0"
@@ -327,7 +280,7 @@ async fn test_shell_perm_high_risk_needs_approval() {
     // Test with auto-reject gate → should be rejected
     let gate = AutoRejectGate;
     let (allowed, risk, entry) =
-        execute_shell_with_permission_and_security(&manifest, "sudo apt install foo", &provenance, &gate).await;
+        execute_shell_with_security_pipeline("sudo apt install foo", &provenance, &gate).await;
 
     assert!(!allowed, "High-risk command should be rejected by gate");
     assert_eq!(risk, Some(ShellRisk::High));
@@ -339,7 +292,7 @@ async fn test_shell_perm_high_risk_needs_approval() {
 /// Low-risk commands should pass through even with an auto-reject gate.
 #[tokio::test]
 async fn test_shell_perm_low_risk_auto_approved() {
-    let manifest = rollball_core::AgentManifest::from_toml(
+    let _manifest = rollball_core::AgentManifest::from_toml(
         r#"
         agent_id = "com.test.shell"
         version = "1.0.0"
@@ -366,7 +319,7 @@ async fn test_shell_perm_low_risk_auto_approved() {
     // Even with auto-reject gate, low-risk is auto-approved
     let gate = AutoRejectGate;
     let (allowed, risk, entry) =
-        execute_shell_with_permission_and_security(&manifest, "ls -la /workspace", &provenance, &gate).await;
+        execute_shell_with_security_pipeline("ls -la /workspace", &provenance, &gate).await;
 
     assert!(allowed, "Low-risk command should be auto-approved");
     assert_eq!(risk, Some(ShellRisk::Low));
@@ -393,7 +346,7 @@ async fn test_shell_perm_low_risk_auto_approved() {
 /// Even with Shell permission, blocked commands (rm -rf /, etc.) are never allowed.
 #[tokio::test]
 async fn test_shell_perm_blocked_command_still_blocked() {
-    let manifest = rollball_core::AgentManifest::from_toml(
+    let _manifest = rollball_core::AgentManifest::from_toml(
         r#"
         agent_id = "com.test.shell"
         version = "1.0.0"
@@ -420,7 +373,7 @@ async fn test_shell_perm_blocked_command_still_blocked() {
     // Even with auto-approve gate, blocked commands are never allowed
     let gate = AutoApproveGate;
     let (allowed, risk, entry) =
-        execute_shell_with_permission_and_security(&manifest, "rm -rf /", &provenance, &gate).await;
+        execute_shell_with_security_pipeline("rm -rf /", &provenance, &gate).await;
 
     assert!(!allowed, "Blocked command should never be allowed even with Shell permission");
     assert_eq!(risk, Some(ShellRisk::Blocked));
@@ -589,73 +542,7 @@ fn test_redteam_wasm_filesystem_escape_denied() {
         "Write to read-only path should be denied");
 }
 
-/// S5.3-5: Permission escalation attempt → runtime check blocks
-///
-/// Verifies that a PermissionCheckedTool wrapper blocks tools whose
-/// required permissions are not declared in the manifest.
-#[tokio::test]
-async fn test_redteam_permission_escalation_blocked() {
-    // Manifest with only MemoryRead permission
-    let manifest = rollball_core::AgentManifest::from_toml(
-        r#"
-        agent_id = "com.test.escalation"
-        version = "1.0.0"
-        name = "Escalation Test"
-        description = "Test"
-        author = "test"
-        runtime_version = "0.1.0"
-
-        [[permissions]]
-        type = "MemoryRead"
-
-        [[tools]]
-        name = "shell"
-
-        [[tools]]
-        name = "http_request"
-
-        [llm]
-        provider = "mock"
-        model = "mock-model"
-    "#,
-    )
-    .unwrap();
-
-    // Shell tool requires Shell permission (not declared)
-    let shell_tool = Arc::new(MockShellTool);
-    let checked = PermissionCheckedTool::new(shell_tool, manifest.clone());
-    let result = checked.execute(serde_json::json!({"command": "ls"})).await.unwrap();
-    assert!(!result.ok, "Shell tool should be blocked without Shell permission");
-    assert!(result.error.unwrap().contains("Permission"));
-
-    // HTTP tool requires Network permission (not declared)
-    struct MockHttpTool;
-    #[async_trait]
-    impl Tool for MockHttpTool {
-        fn spec(&self) -> ToolSpec {
-            ToolSpec {
-                name: "http_request".to_string(),
-                description: "HTTP request".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-            }
-        }
-        async fn execute(&self, _params: Value) -> rollball_core::error::Result<ToolResult> {
-            Ok(ToolResult { ok: true, content: "ok".to_string(), error: None, token_usage: None })
-        }
-    }
-
-    let http_tool = Arc::new(MockHttpTool);
-    let checked = PermissionCheckedTool::new(http_tool, manifest);
-    let result = checked.execute(serde_json::json!({})).await.unwrap();
-    assert!(!result.ok, "HTTP tool should be blocked without Network permission");
-
-    // Also verify via PermissionChecker that runtime-level checks deny
-    let checker = PermissionChecker::empty("com.test.escalation");
-    assert!(matches!(checker.check(&Permission::Shell), CheckResult::NeedsRequest(_)));
-    assert!(matches!(checker.check(&Permission::Network(None)), CheckResult::NeedsRequest(_)));
-}
-
-/// S5.3-6: Downloaded file execution → provenance elevation + approval required
+/// S5.3-5: Downloaded file execution → provenance elevation + approval required
 ///
 /// Simulates a full attack chain: file is downloaded from the internet,
 /// then an attempt is made to execute it. FileProvenance should flag it
@@ -663,7 +550,7 @@ async fn test_redteam_permission_escalation_blocked() {
 /// should require user confirmation.
 #[tokio::test]
 async fn test_redteam_downloaded_file_execution_chain() {
-    let manifest = rollball_core::AgentManifest::from_toml(
+    let _manifest = rollball_core::AgentManifest::from_toml(
         r#"
         agent_id = "com.test.shell"
         version = "1.0.0"
@@ -701,7 +588,7 @@ async fn test_redteam_downloaded_file_execution_chain() {
     // Attempt to execute the downloaded file with auto-reject gate
     let gate = AutoRejectGate;
     let (allowed, risk, entry) =
-        execute_shell_with_permission_and_security(&manifest, "./update.sh", &provenance, &gate).await;
+        execute_shell_with_security_pipeline("./update.sh", &provenance, &gate).await;
 
     assert!(!allowed, "Downloaded file execution should be blocked by default");
     assert_eq!(risk, Some(ShellRisk::High), "Downloaded file should be High risk");

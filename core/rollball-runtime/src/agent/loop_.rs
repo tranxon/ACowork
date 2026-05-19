@@ -177,8 +177,9 @@ impl AgentLoop {
         max_iterations: Option<u32>,
         temperature: Option<f32>,
         system_prompt_override: Option<String>,
+        shell_approval_threshold: Option<String>,
     ) {
-        self.core.apply_runtime_config(max_output_tokens, max_iterations, temperature, system_prompt_override);
+        self.core.apply_runtime_config(max_output_tokens, max_iterations, temperature, system_prompt_override, shell_approval_threshold);
     }
 
     /// Get the current conversation session ID (S1.14)

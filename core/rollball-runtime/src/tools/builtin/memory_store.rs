@@ -1,8 +1,8 @@
 //! Memory store tool — store memories via Grafeo backend
 //!
 //! Adapted from zeroclaw/src/tools/memory_store.rs
-//! Rollball deviation: uses rollball_core::Tool trait; replaces SecurityPolicy
-//! with manifest-driven PermissionCheckedTool wrapper; adds agent_id isolation.
+//! Rollball deviation: uses rollball_core::Tool trait;
+//! adds agent_id isolation via Grafeo backend.
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};

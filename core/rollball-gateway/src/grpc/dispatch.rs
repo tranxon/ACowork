@@ -11,13 +11,14 @@ use rollball_core::proto;
 use rollball_core::proto_bridge::GatewayResponseToProto;
 use rollball_core::protocol::GatewayResponse;
 
+use crate::http::approval::ApprovalPendingRequests;
 use crate::http::routes::{BridgeEvent, SessionPendingRequests};
 use crate::ipc::server::{
     handle_agent_hello, handle_budget_query, handle_capability_query,
     handle_context_usage_report, handle_cron_list, handle_cron_register,
     handle_cron_unregister, handle_identity_query, handle_intent_send,
-    handle_key_release, handle_permission_request, handle_rate_acquire,
-    handle_usage_report, handle_agent_ready, SharedPermissionStore, SharedState,
+    handle_key_release, handle_rate_acquire,
+    handle_usage_report, handle_agent_ready, SharedState,
 };
 use crate::ipc::session::SessionManager;
 
@@ -34,9 +35,9 @@ pub async fn dispatch_grpc_request(
     conn_id: &str,
     state: &SharedState,
     session_mgr: &Arc<Mutex<SessionManager>>,
-    perm_store: &SharedPermissionStore,
     bridge_tx: &Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: &Option<SessionPendingRequests>,
+    approval_pending: &Option<ApprovalPendingRequests>,
 ) -> proto::ServerMessage {
     let request_id = client_msg.request_id;
 
@@ -48,6 +49,14 @@ pub async fn dispatch_grpc_request(
         Some(proto::client_message::Payload::IntentSend(req)) => {
             let params: serde_json::Value = serde_json::from_str(&req.params_json)
                 .unwrap_or(serde_json::Value::Null);
+
+            // C2: Intercept tool_approval_needed from Runtime.
+            // Create oneshot, send BridgeEvent to Desktop App, await user decision.
+            if req.action == "tool_approval_needed" && req.target == "http-api" {
+                return handle_tool_approval_needed_grpc(
+                    &params, bridge_tx, approval_pending, request_id,
+                ).await;
+            }
 
             // S1.14: Check if this is a session response from Runtime
             if req.action == "session_response" {
@@ -69,7 +78,6 @@ pub async fn dispatch_grpc_request(
                     conn_id,
                     state,
                     session_mgr,
-                    perm_store,
                     bridge_tx,
                 )
                 .await
@@ -87,20 +95,6 @@ pub async fn dispatch_grpc_request(
 
         Some(proto::client_message::Payload::RateAcquire(req)) => {
             handle_rate_acquire(&req.provider, state).await
-        }
-
-        Some(proto::client_message::Payload::PermissionRequest(req)) => {
-            handle_permission_request(
-                &req.request_id,
-                &req.permission,
-                &req.reason,
-                req.timeout_ms,
-                conn_id,
-                state,
-                session_mgr,
-                perm_store,
-            )
-            .await
         }
 
         Some(proto::client_message::Payload::IdentityQuery(req)) => {
@@ -283,6 +277,135 @@ pub fn is_stream_chunk(msg: &proto::ClientMessage) -> bool {
         msg.payload,
         Some(proto::client_message::Payload::StreamChunk(_))
     )
+}
+
+/// Handle tool_approval_needed IntentSend from Runtime (C2).
+///
+/// Creates a oneshot channel, stores it in ApprovalPendingRequests,
+/// sends a BridgeEvent::ToolApprovalNeeded to the Desktop App via WebSocket,
+/// and awaits the user's decision (Allow/Deny) via the HTTP approval endpoint.
+/// Returns IntentDelivered with message_id encoding the result:
+///   "approved:{request_id}" or "denied:{request_id}:{reason}"
+async fn handle_tool_approval_needed_grpc(
+    params: &serde_json::Value,
+    bridge_tx: &Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
+    approval_pending: &Option<ApprovalPendingRequests>,
+    request_id: u64,
+) -> proto::ServerMessage {
+    let approval_request_id = params
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    tracing::info!(
+        approval_req = %approval_request_id,
+        agent_id = %agent_id,
+        "Tool approval requested from Runtime"
+    );
+
+    // Step 1: Create oneshot channel and store in pending map
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<crate::http::approval::ApprovalResult>();
+
+    if let Some(pending) = approval_pending {
+        let mut map = pending.lock().await;
+        map.insert(approval_request_id.to_string(), tx);
+    } else {
+        tracing::error!("No approval_pending map available — rejecting");
+        let resp = GatewayResponse::IntentDelivered {
+            message_id: format!("denied:{}:no-approval-channel", approval_request_id),
+        };
+        return resp.to_proto(request_id);
+    }
+
+    // Step 2: Send BridgeEvent::ToolApprovalNeeded to Desktop App via WebSocket
+    if let Some(tx_bridge) = bridge_tx {
+        let event = BridgeEvent {
+            agent_id: agent_id.to_string(),
+            message_id: approval_request_id.to_string(),
+            event_type: crate::http::routes::BridgeEventType::ToolApprovalNeeded,
+            payload: params.clone(),
+        };
+        if let Err(e) = tx_bridge.send(event) {
+            tracing::warn!(
+                approval_req = %approval_request_id,
+                error = %e,
+                "Failed to send ToolApprovalNeeded bridge event — no Desktop App subscribers"
+            );
+            // Clean up
+            if let Some(pending) = approval_pending {
+                let mut map = pending.lock().await;
+                map.remove(approval_request_id);
+            }
+            let resp = GatewayResponse::IntentDelivered {
+                message_id: format!("denied:{}:no-desktop-app", approval_request_id),
+            };
+            return resp.to_proto(request_id);
+        }
+    } else {
+        tracing::warn!("No bridge channel — cannot forward approval request");
+        if let Some(pending) = approval_pending {
+            let mut map = pending.lock().await;
+            map.remove(approval_request_id);
+        }
+        let resp = GatewayResponse::IntentDelivered {
+            message_id: format!("denied:{}:no-bridge", approval_request_id),
+        };
+        return resp.to_proto(request_id);
+    }
+
+    // Step 3: Await user decision with 60s timeout
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        &mut rx,
+    ).await;
+
+    // Clean up any leftover pending entry
+    if let Some(pending) = approval_pending {
+        let mut map = pending.lock().await;
+        map.remove(approval_request_id);
+    }
+
+    match result {
+        Ok(Ok(approval_result)) => {
+            tracing::info!(
+                approval_req = %approval_request_id,
+                action = %approval_result.action,
+                "Tool approval resolved"
+            );
+            match approval_result.action.as_str() {
+                "allow" | "allow_all_session" => {
+                    let resp = GatewayResponse::IntentDelivered {
+                        message_id: format!("approved:{}", approval_request_id),
+                    };
+                    resp.to_proto(request_id)
+                }
+                _ => {
+                    let resp = GatewayResponse::IntentDelivered {
+                        message_id: format!("denied:{}:user-rejected", approval_request_id),
+                    };
+                    resp.to_proto(request_id)
+                }
+            }
+        }
+        Ok(Err(_)) => {
+            tracing::warn!(approval_req = %approval_request_id, "Approval oneshot sender dropped");
+            let resp = GatewayResponse::IntentDelivered {
+                message_id: format!("denied:{}:channel-closed", approval_request_id),
+            };
+            resp.to_proto(request_id)
+        }
+        Err(_) => {
+            tracing::warn!(approval_req = %approval_request_id, "Tool approval timed out (60s)");
+            let resp = GatewayResponse::IntentDelivered {
+                message_id: format!("denied:{}:timeout", approval_request_id),
+            };
+            resp.to_proto(request_id)
+        }
+    }
 }
 
 /// Handle session response from Runtime via gRPC (S1.14).

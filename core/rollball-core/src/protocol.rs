@@ -9,14 +9,6 @@ use serde_json::Value;
 use crate::budget::UsageReport;
 use crate::identity::IdentityEntry;
 
-/// Default timeout for runtime permission requests (60 seconds)
-pub const PERMISSION_REQUEST_TIMEOUT_MS: u64 = 60_000;
-
-/// Default value helper for serde default attribute
-fn default_permission_timeout() -> u64 {
-    PERMISSION_REQUEST_TIMEOUT_MS
-}
-
 /// Default connection role for backward compatibility
 fn default_connection_role() -> String {
     "main".to_string()
@@ -188,23 +180,6 @@ pub enum GatewayRequest {
     UsageReport(UsageReport),
     /// Acquire a rate limit token
     RateAcquire { provider: String },
-    /// Request a runtime permission (S2.1)
-    ///
-    /// Runtime sends this when PermissionChecker cache miss occurs
-    /// and the permission policy requires user interaction.
-    /// Gateway processes this in a separate tokio task to avoid
-    /// blocking the IPC main loop.
-    PermissionRequest {
-        /// Unique request ID for correlating request/response
-        request_id: String,
-        /// Permission string (e.g., "filesystem:read:/etc")
-        permission: String,
-        /// Human-readable reason for the permission request
-        reason: String,
-        /// Timeout in milliseconds (default: 60000)
-        #[serde(default = "default_permission_timeout")]
-        timeout_ms: u64,
-    },
     /// Query identity fields from System Agent
     IdentityQuery { fields: Vec<String> },
     /// Query capabilities for a specific agent or all agents
@@ -358,6 +333,9 @@ pub enum GatewayResponse {
         runtime_temperature: Option<f32>,
         /// Per-agent system prompt override
         runtime_system_prompt_override: Option<String>,
+        /// Per-agent shell approval threshold.
+        /// "low" | "medium" (default) | "high" | "never"
+        runtime_shell_approval_threshold: Option<String>,
     },
     /// API key release result
     KeyReleaseResult {
@@ -392,19 +370,6 @@ pub enum GatewayResponse {
     RateToken {
         granted: bool,
         retry_after_ms: Option<u64>,
-    },
-    /// Permission request result (S2.1)
-    ///
-    /// Response to GatewayRequest::PermissionRequest.
-    /// Includes request_id for correlation (important when
-    /// multiple permission requests are in-flight).
-    PermissionResult {
-        /// Request ID from the original PermissionRequest
-        request_id: String,
-        /// Whether the permission was granted
-        granted: bool,
-        /// Reason for denial or additional info
-        reason: Option<String>,
     },
     /// Identity delivery (Gateway → Runtime, cold-start injection)
     IdentityDelivery {
@@ -599,6 +564,11 @@ pub enum GatewayResponse {
         /// Some(vec![]) means no tools active; None means keep current.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_tools: Option<Vec<String>>,
+        /// Shell command approval threshold.
+        /// Controls which risk levels require user confirmation before execution.
+        /// "low" | "medium" (default) | "high" | "never"
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell_approval_threshold: Option<String>,
     },
     /// Unknown or unrecognized message from Gateway.
     ///
@@ -825,94 +795,4 @@ mod tests {
 
 
 
-    // ── S2.1: PermissionRequest/PermissionResult protocol tests ──────
-
-    #[test]
-    fn test_permission_request_serialization() {
-        let req = GatewayRequest::PermissionRequest {
-            request_id: "req-001".to_string(),
-            permission: "filesystem:read:/etc".to_string(),
-            reason: "Need to read config".to_string(),
-            timeout_ms: PERMISSION_REQUEST_TIMEOUT_MS,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("\"type\":\"PermissionRequest\""));
-        assert!(json.contains("\"request_id\":\"req-001\""));
-        assert!(json.contains("\"permission\":\"filesystem:read:/etc\""));
-        assert!(json.contains("\"timeout_ms\":60000"));
-    }
-
-    #[test]
-    fn test_permission_request_roundtrip() {
-        let req = GatewayRequest::PermissionRequest {
-            request_id: "req-002".to_string(),
-            permission: "shell".to_string(),
-            reason: "Execute build script".to_string(),
-            timeout_ms: 30_000,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let parsed: GatewayRequest = serde_json::from_str(&json).unwrap();
-        if let GatewayRequest::PermissionRequest {
-            request_id,
-            permission,
-            reason,
-            timeout_ms,
-        } = parsed
-        {
-            assert_eq!(request_id, "req-002");
-            assert_eq!(permission, "shell");
-            assert_eq!(reason, "Execute build script");
-            assert_eq!(timeout_ms, 30_000);
-        } else {
-            panic!("Expected PermissionRequest variant");
-        }
-    }
-
-    #[test]
-    fn test_permission_request_default_timeout() {
-        // When timeout_ms is missing from JSON, it should default to 60000
-        let json = r#"{"type":"PermissionRequest","request_id":"req-003","permission":"network:https://api.example.com","reason":"API call"}"#;
-        let parsed: GatewayRequest = serde_json::from_str(json).unwrap();
-        if let GatewayRequest::PermissionRequest { timeout_ms, .. } = parsed {
-            assert_eq!(timeout_ms, PERMISSION_REQUEST_TIMEOUT_MS);
-        } else {
-            panic!("Expected PermissionRequest variant");
-        }
-    }
-
-    #[test]
-    fn test_permission_result_serialization() {
-        let resp = GatewayResponse::PermissionResult {
-            request_id: "req-001".to_string(),
-            granted: true,
-            reason: None,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("\"type\":\"PermissionResult\""));
-        assert!(json.contains("\"request_id\":\"req-001\""));
-        assert!(json.contains("\"granted\":true"));
-    }
-
-    #[test]
-    fn test_permission_result_roundtrip() {
-        let resp = GatewayResponse::PermissionResult {
-            request_id: "req-004".to_string(),
-            granted: false,
-            reason: Some("User denied".to_string()),
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
-        if let GatewayResponse::PermissionResult {
-            request_id,
-            granted,
-            reason,
-        } = parsed
-        {
-            assert_eq!(request_id, "req-004");
-            assert!(!granted);
-            assert_eq!(reason.unwrap(), "User denied");
-        } else {
-            panic!("Expected PermissionResult variant");
-        }
-    }
 }

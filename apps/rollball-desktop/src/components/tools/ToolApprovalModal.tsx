@@ -1,10 +1,8 @@
 import { usePermissionStore } from "../../stores/permissionStore";
-import { useAgentStore } from "../../stores/agentStore";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 export function ToolApprovalModal() {
-  const { selectedAgentId } = useAgentStore();
   const { currentRequest, loading, approve, dismissCurrent } = usePermissionStore();
 
   if (!currentRequest) {
@@ -12,8 +10,8 @@ export function ToolApprovalModal() {
   }
 
   const handleAction = (action: "allow" | "deny" | "allow_all_session") => {
-    if (!selectedAgentId || loading) return;
-    void approve(selectedAgentId, currentRequest.request_id, action);
+    if (loading) return;
+    void approve(currentRequest.request_id, action);
   };
 
   const riskColor =
@@ -96,18 +94,6 @@ export function ToolApprovalModal() {
             <pre className="mt-1.5 max-h-40 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
               {JSON.stringify(currentRequest.params, null, 2)}
             </pre>
-          </div>
-
-          {/* Meta */}
-          <div className="flex flex-wrap gap-3 text-xs text-zinc-500 dark:text-zinc-400">
-            <span>
-              <span className="font-medium">Permission:</span>{" "}
-              {currentRequest.required_permission}
-            </span>
-            <span>
-              <span className="font-medium">Timeout:</span>{" "}
-              {Math.round(currentRequest.timeout_ms / 1000)}s
-            </span>
           </div>
         </div>
 

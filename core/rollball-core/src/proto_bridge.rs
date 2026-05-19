@@ -387,21 +387,6 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                     proto::RateAcquireRequest { provider: provider.clone() },
                 ))
             }
-            protocol::GatewayRequest::PermissionRequest {
-                request_id: rid,
-                permission,
-                reason,
-                timeout_ms,
-            } => {
-                Some(proto::client_message::Payload::PermissionRequest(
-                    proto::PermissionRequest {
-                        request_id: rid.clone(),
-                        permission: permission.clone(),
-                        reason: reason.clone(),
-                        timeout_ms: *timeout_ms,
-                    },
-                ))
-            }
             protocol::GatewayRequest::IdentityQuery { fields } => {
                 Some(proto::client_message::Payload::IdentityQuery(
                     proto::IdentityQueryRequest { fields: fields.clone() },
@@ -536,6 +521,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 runtime_max_iterations,
                 runtime_temperature,
                 runtime_system_prompt_override,
+                runtime_shell_approval_threshold,
             } => {
                 Some(proto::server_message::Payload::AgentHelloResult(
                     proto::AgentHelloResult {
@@ -564,6 +550,9 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         runtime_max_iterations: runtime_max_iterations.clone(),
                         runtime_temperature: runtime_temperature.clone(),
                         runtime_system_prompt_override: runtime_system_prompt_override
+                            .clone()
+                            .unwrap_or_default(),
+                        runtime_shell_approval_threshold: runtime_shell_approval_threshold
                             .clone()
                             .unwrap_or_default(),
                     },
@@ -618,19 +607,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     proto::RateToken {
                         granted: *granted,
                         retry_after_ms: retry_after_ms.unwrap_or(0),
-                    },
-                ))
-            }
-            protocol::GatewayResponse::PermissionResult {
-                request_id: rid,
-                granted,
-                reason,
-            } => {
-                Some(proto::server_message::Payload::PermissionResult(
-                    proto::PermissionResult {
-                        request_id: rid.clone(),
-                        granted: *granted,
-                        reason: reason.clone().unwrap_or_default(),
                     },
                 ))
             }
@@ -792,6 +768,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 temperature,
                 system_prompt_override,
                 active_tools,
+                shell_approval_threshold,
             } => {
                 Some(proto::server_message::Payload::RuntimeConfigUpdate(
                     proto::RuntimeConfigUpdate {
@@ -800,6 +777,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         temperature: temperature.clone(),
                         system_prompt_override: system_prompt_override.clone().unwrap_or_default(),
                         active_tools: active_tools.clone().unwrap_or_default(),
+                        shell_approval_threshold: shell_approval_threshold.clone().unwrap_or_default(),
                     },
                 ))
             }

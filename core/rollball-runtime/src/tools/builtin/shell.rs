@@ -64,25 +64,16 @@ impl ShellTool {
         let description = match self.tool_name.as_str() {
             "bash" => format!(
                 "Execute a command in Git Bash (Unix-style shell on Windows). \
-                 The working directory is already set to: {work_dir}. \
-                 Do NOT use 'cd' to navigate to the workspace — commands run there by default. \
-                 Use relative paths for files within the workspace. \
                  For absolute paths outside the workspace, prefer Windows format (e.g. 'C:/Users/...'). \
-                 Supports standard Unix commands (ls, grep, find, cat, etc.). \
                  {fallback}",
-                work_dir = self.work_dir,
                 fallback = self.fallback_hint()
             ),
             "powershell" => format!(
                 "Execute a command in {shell_name} ({shell_binary}). \
-                 The working directory is already set to: {work_dir}. \
-                 Do NOT use 'cd' to navigate to the workspace — commands run there by default. \
-                 Supports PowerShell cmdlets and Windows conventions. \
                  Use this if 'bash' is unavailable or for Windows-specific tasks. \
                  {fallback}",
                 shell_name = self.shell_name,
                 shell_binary = self.shell_binary,
-                work_dir = self.work_dir,
                 fallback = self.fallback_hint()
             ),
             _ => format!(

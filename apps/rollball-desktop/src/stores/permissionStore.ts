@@ -15,10 +15,9 @@ interface PermissionStore {
   // Actions
   showApprovalDialog: (event: ToolApprovalNeededEvent) => void;
   approve: (
-    agentId: string,
     requestId: string,
     action: "allow" | "deny" | "allow_all_session",
-  ) => Promise<void>;
+  ) => void;
   dismissCurrent: () => void;
   clearAll: () => void;
 }
@@ -31,10 +30,18 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
 
   showApprovalDialog: (event) => {
     const { sessionAllowed } = get();
-    // If tool is already session-approved, auto-approve
+    // If tool is already session-approved, auto-approve without showing dialog
     if (sessionAllowed.has(event.tool_name)) {
-      // Auto-approve without showing dialog
-      get().approve(event.agent_id, event.request_id, "allow");
+      // Send approval to Gateway API directly, then advance queue
+      void sendApprovalToGateway(event.agent_id, event.request_id, "allow");
+      set((s) => {
+        const next = s.pendingRequests[0] || null;
+        return {
+          loading: false,
+          currentRequest: next,
+          pendingRequests: next ? s.pendingRequests.slice(1) : [],
+        };
+      });
       return;
     }
     // Show dialog
@@ -47,40 +54,36 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
     });
   },
 
-  approve: async (agentId, requestId, action) => {
+  approve: (requestId, action) => {
     set({ loading: true });
-    try {
-      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/permissions/approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request_id: requestId, action }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await res.json();
 
-      if (action === "allow_all_session") {
-        const current = get().currentRequest;
-        if (current) {
-          set((s) => {
-            const newSet = new Set(s.sessionAllowed);
-            newSet.add(current.tool_name);
-            return { sessionAllowed: newSet };
-          });
-        }
+    const current = get().currentRequest;
+
+    if (action === "allow_all_session") {
+      if (current) {
+        set((s) => {
+          const newSet = new Set(s.sessionAllowed);
+          newSet.add(current.tool_name);
+          return { sessionAllowed: newSet };
+        });
       }
-    } catch (e) {
-      console.error("Failed to send approval:", e);
-    } finally {
-      // Show next pending request or clear
-      set((s) => {
-        const next = s.pendingRequests[0] || null;
-        return {
-          loading: false,
-          currentRequest: next,
-          pendingRequests: next ? s.pendingRequests.slice(1) : [],
-        };
-      });
     }
+
+    // Send approval decision to Gateway API (C4)
+    const agentId = current?.agent_id;
+    if (agentId) {
+      void sendApprovalToGateway(agentId, requestId, action);
+    }
+
+    // Show next pending request or clear
+    set((s) => {
+      const next = s.pendingRequests[0] || null;
+      return {
+        loading: false,
+        currentRequest: next,
+        pendingRequests: next ? s.pendingRequests.slice(1) : [],
+      };
+    });
   },
 
   dismissCurrent: () => {
@@ -100,3 +103,28 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
       sessionAllowed: new Set(),
     }),
 }));
+
+/// Send tool approval decision to Gateway HTTP API (C4).
+/// This resolves the oneshot channel on the Gateway side,
+/// which unblocks the gRPC dispatch handler waiting for the Runtime.
+async function sendApprovalToGateway(
+  agentId: string,
+  requestId: string,
+  action: string,
+): Promise<void> {
+  try {
+    const url = `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/approval`;
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: requestId, action }),
+    });
+    if (!resp.ok) {
+      console.warn(
+        `[PermissionStore] Approval API returned ${resp.status} for ${requestId}`,
+      );
+    }
+  } catch (err) {
+    console.error("[PermissionStore] Failed to send approval:", err);
+  }
+}

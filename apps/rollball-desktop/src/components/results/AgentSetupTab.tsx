@@ -51,6 +51,7 @@ export function AgentSetupTab() {
           maxTokens: data.max_output_tokens,
           maxIterations: data.max_iterations,
           temperature: data.temperature,
+          shellApprovalThreshold: data.shell_approval_threshold,
         });
       })
       .catch(() => {})
@@ -83,6 +84,7 @@ export function AgentSetupTab() {
       if (profile.maxTokens && profile.maxTokens > 0) body.max_output_tokens = profile.maxTokens;
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
       if (profile.temperature !== undefined) body.temperature = profile.temperature;
+      if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
       // Always send active_tools (even empty array = disable all tools)
       if (activeTools.length >= 0) body.active_tools = activeTools;
 
@@ -257,6 +259,31 @@ export function AgentSetupTab() {
           <span>0 (deterministic)</span>
           <span>2 (creative)</span>
         </div>
+      </div>
+
+      {/* Shell Command Approval Threshold */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          Shell Command Approval
+        </label>
+        <select
+          value={profile.shellApprovalThreshold ?? "medium"}
+          onChange={(e) => {
+            const v = e.target.value;
+            setProfile(selectedAgentId, {
+              shellApprovalThreshold: v === "medium" ? undefined : v,
+            });
+          }}
+          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+        >
+          <option value="medium">Medium (default) — ask for Medium risk and above</option>
+          <option value="low">Low — ask for Low risk and above (most cautious)</option>
+          <option value="high">High — only ask for High risk commands</option>
+          <option value="never">Never — auto-approve all shell commands</option>
+        </select>
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          Controls which shell commands require user confirmation. Default: Medium.
+        </p>
       </div>
 
       {/* Tools Configuration */}

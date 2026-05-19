@@ -183,11 +183,6 @@ impl AgentManifest {
         self.tools.iter().find(|t| t.name == tool_name)
     }
 
-    /// Check if a specific permission is declared
-    pub fn has_permission(&self, perm: &Permission) -> bool {
-        self.permissions.iter().any(|p| p.matches(perm))
-    }
-
     /// Get all cron triggers from the manifest
     pub fn cron_triggers(&self) -> Vec<&Trigger> {
         self.triggers

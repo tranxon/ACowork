@@ -86,6 +86,7 @@ pub struct RuntimeConfigOverrides {
     pub temperature: Option<f32>,
     pub system_prompt_override: Option<String>,
     pub active_tools: Option<Vec<String>>,
+    pub shell_approval_threshold: Option<String>,
 }
 
 impl RuntimeConfigOverrides {
@@ -96,6 +97,7 @@ impl RuntimeConfigOverrides {
             && self.temperature.is_none()
             && self.system_prompt_override.is_none()
             && self.active_tools.is_none()
+            && self.shell_approval_threshold.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -107,6 +109,7 @@ impl RuntimeConfigOverrides {
         temperature: Option<f32>,
         system_prompt_override: Option<String>,
         active_tools: Option<Vec<String>>,
+        shell_approval_threshold: Option<String>,
     ) {
         if max_output_tokens.is_some() {
             self.max_output_tokens = max_output_tokens;
@@ -122,6 +125,9 @@ impl RuntimeConfigOverrides {
         }
         if active_tools.is_some() {
             self.active_tools = active_tools;
+        }
+        if shell_approval_threshold.is_some() {
+            self.shell_approval_threshold = shell_approval_threshold;
         }
     }
 }
@@ -260,6 +266,7 @@ impl SessionManager {
                     max_iterations: ov.max_iterations,
                     temperature: ov.temperature,
                     system_prompt_override: ov.system_prompt_override,
+                    shell_approval_threshold: ov.shell_approval_threshold,
                 });
             }
         }
@@ -402,6 +409,7 @@ impl SessionManager {
         max_iterations: Option<u32>,
         temperature: Option<f32>,
         system_prompt_override: Option<String>,
+        shell_approval_threshold: Option<String>,
     ) -> Vec<String> {
         self.runtime_overrides.merge(
             max_output_tokens,
@@ -409,12 +417,14 @@ impl SessionManager {
             temperature,
             system_prompt_override.clone(),
             None, // active_tools handled separately via apply_active_tools
+            shell_approval_threshold.clone(),
         );
         self.broadcast(SessionMessage::UpdateRuntimeConfig {
             max_output_tokens,
             max_iterations,
             temperature,
             system_prompt_override,
+            shell_approval_threshold,
         })
     }
 
@@ -641,24 +651,24 @@ mod tests {
     #[test]
     fn test_overrides_merge_active_tools() {
         let mut ov = RuntimeConfigOverrides::default();
-        ov.merge(None, None, None, None, Some(vec!["tool_a".into()]));
+        ov.merge(None, None, None, None, Some(vec!["tool_a".into()]), None);
         assert!(!ov.is_empty());
         assert_eq!(ov.active_tools.as_deref(), Some(&["tool_a".to_string()][..]));
 
         // Re-merge with Some replaces
-        ov.merge(None, None, None, None, Some(vec!["tool_b".into()]));
+        ov.merge(None, None, None, None, Some(vec!["tool_b".into()]), None);
         assert_eq!(ov.active_tools.as_deref(), Some(&["tool_b".to_string()][..]));
 
         // None preserves
-        ov.merge(None, None, None, None, None);
+        ov.merge(None, None, None, None, None, None);
         assert_eq!(ov.active_tools.as_deref(), Some(&["tool_b".to_string()][..]));
     }
 
     #[test]
     fn test_overrides_empty_vec_clears_tools() {
         let mut ov = RuntimeConfigOverrides::default();
-        ov.merge(None, None, None, None, Some(vec!["tool_a".into()]));
-        ov.merge(None, None, None, None, Some(vec![]));
+        ov.merge(None, None, None, None, Some(vec!["tool_a".into()]), None);
+        ov.merge(None, None, None, None, Some(vec![]), None);
         assert_eq!(ov.active_tools, Some(vec![]));
     }
 

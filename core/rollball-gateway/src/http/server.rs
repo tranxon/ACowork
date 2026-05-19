@@ -14,7 +14,7 @@ use crate::config::HttpConfig;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
-use crate::http::routes::{self, AppState, SharedSessionMgr, BridgeEvent};
+use crate::http::routes::{self, AppState, SharedSessionMgr, BridgeEvent, SessionPendingRequests};
 
 /// PID file content for Desktop App discovery
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -124,7 +124,8 @@ pub(crate) async fn start_http_server(
     grpc_session_mgr: Option<crate::grpc::SharedGrpcSessionMgr>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     models_cache: crate::http::models_api::ModelsCache,
-    session_pending: Option<crate::http::routes::SessionPendingRequests>,
+    session_pending: Option<SessionPendingRequests>,
+    approval_pending: Option<crate::http::approval::ApprovalPendingRequests>,
     log_reload_handle: Option<crate::LogReloadHandle>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
@@ -148,6 +149,10 @@ pub(crate) async fn start_http_server(
     );
     app_state.grpc_session_mgr = grpc_session_mgr;
     app_state.cors_enabled = http_config.cors_enabled;
+    // C1+C2: Use shared approval_pending instead of the default (empty) one
+    if let Some(ap) = approval_pending {
+        app_state.approval_pending = ap;
+    }
 
     // S5.9: Clean up stale pidfile from a previous Gateway run before writing a new one.
     // If the previous process is still alive, this returns an error (prevents dual Gateway).

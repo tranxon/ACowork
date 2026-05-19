@@ -4,7 +4,6 @@ import { cn } from "../../lib/utils";
 import {
   Sparkles,
   Bot,
-  Shield,
   Layout,
   Check,
   Loader2,
@@ -18,12 +17,11 @@ interface CreateWizardProps {
   onClose: () => void;
 }
 
-type WizardStep = "basic" | "llm" | "permissions" | "template" | "preview";
+type WizardStep = "basic" | "llm" | "template" | "preview";
 
 const STEPS: { key: WizardStep; label: string; icon: React.ElementType }[] = [
   { key: "basic", label: "Basic", icon: Bot },
   { key: "llm", label: "LLM", icon: Sparkles },
-  { key: "permissions", label: "Permissions", icon: Shield },
   { key: "template", label: "Template", icon: Layout },
   { key: "preview", label: "Preview", icon: Check },
 ];
@@ -36,7 +34,6 @@ interface AgentFormData {
   author: string;
   suggested_provider: string;
   suggested_model: string;
-  permissions: string[];
 }
 
 const DEFAULT_FORM: AgentFormData = {
@@ -47,7 +44,6 @@ const DEFAULT_FORM: AgentFormData = {
   author: "",
   suggested_provider: "openai",
   suggested_model: "gpt-4o",
-  permissions: ["network"],
 };
 
 const TEMPLATES = [
@@ -139,7 +135,6 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
         author: form.author || null,
         suggestedProvider: form.suggested_provider || null,
         suggestedModel: form.suggested_model || null,
-        permissions: form.permissions.length > 0 ? form.permissions : null,
       });
       onCreated(agentId);
     } catch (e) {
@@ -318,46 +313,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
             </div>
           )}
 
-          {/* Step 3: Permissions */}
-          {step === "permissions" && (
-            <div className="space-y-3">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                Select the permissions your agent needs. You can always adjust these later in the manifest.
-              </p>
-              <div className="space-y-2">
-                {["network", "fs_read", "fs_write", "shell"].map((perm) => (
-                  <label
-                    key={perm}
-                    className="flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-1.5 text-xs transition-colors hover:bg-zinc-50 dark:border-zinc-600 dark:hover:bg-zinc-700"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={form.permissions.includes(perm)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          update({
-                            permissions: [...form.permissions, perm],
-                          });
-                        } else {
-                          update({
-                            permissions: form.permissions.filter(
-                              (p) => p !== perm,
-                            ),
-                          });
-                        }
-                      }}
-                      className="h-4 w-4"
-                    />
-                    <span className="font-medium text-zinc-700 dark:text-zinc-200">
-                      {perm}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Step 4: Template */}
+          {/* Step 3: Template */}
           {step === "template" && (
             <div className="space-y-3">
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -398,7 +354,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
             </div>
           )}
 
-          {/* Step 5: Preview */}
+          {/* Step 4: Preview */}
           {step === "preview" && (
             <div className="space-y-3">
               <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
@@ -418,9 +374,6 @@ dev = true
 [llm]
 suggested_provider = "${form.suggested_provider}"
 suggested_model = "${form.suggested_model}"
-
-[permissions]
-${form.permissions.map((p) => `${p} = ["*"]`).join("\n")}
 `}
                 </pre>
               </div>

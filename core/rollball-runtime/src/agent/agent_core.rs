@@ -24,6 +24,7 @@ use crate::config::RuntimeConfig;
 use crate::debug::controller::DebugController;
 use crate::debug::server::DebugEventSender;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
+use crate::security::approval_gate::ApprovalGate;
 
 /// Cross-session shared state for the agent loop.
 ///
@@ -86,6 +87,13 @@ pub struct AgentCore {
     /// User display name delivered by Gateway via identity delivery.
     /// Used for user-facing messages like stop confirmation.
     pub(crate) user_display_name: Option<String>,
+    /// Approval gate for shell command risk confirmation.
+    /// None in standalone/CLI mode (uses CliApprovalGate).
+    /// Some(Arc<GatewayApprovalGate>) in Gateway mode (Desktop App).
+    pub(crate) approval_gate: Option<Arc<dyn ApprovalGate>>,
+    /// Shell approval threshold: Low / Medium / High / Never.
+    /// Default: "medium" — Medium and High risk commands need approval.
+    pub(crate) shell_approval_threshold: String,
 }
 
 impl AgentCore {
@@ -98,6 +106,7 @@ impl AgentCore {
         tools: Vec<Arc<dyn Tool>>,
         on_chunk: Option<mpsc::Sender<ChunkEvent>>,
     ) -> Self {
+        let shell_approval_threshold = config.shell_approval_threshold.clone();
         Self {
             config,
             manifest,
@@ -114,6 +123,8 @@ impl AgentCore {
             debug_resume_notify: None,
             debug_event_tx: None,
             user_display_name: None,
+            approval_gate: None,
+            shell_approval_threshold,
         }
     }
 
@@ -201,6 +212,7 @@ impl AgentCore {
         max_iterations: Option<u32>,
         temperature: Option<f32>,
         system_prompt_override: Option<String>,
+        shell_approval_threshold: Option<String>,
     ) {
         if let Some(limit) = max_output_tokens {
             tracing::info!(old = self.max_output_tokens_limit, new = limit, "runtime config: max_output_tokens updated");
@@ -224,6 +236,14 @@ impl AgentCore {
                 "runtime config: system_prompt_override updated"
             );
             self.system_prompt_override = system_prompt_override;
+        }
+        if let Some(ref threshold) = shell_approval_threshold {
+            tracing::info!(
+                old = %self.shell_approval_threshold,
+                new = %threshold,
+                "runtime config: shell_approval_threshold updated"
+            );
+            self.shell_approval_threshold = threshold.clone();
         }
     }
 
@@ -312,6 +332,8 @@ impl AgentCore {
             debug_resume_notify: self.debug_resume_notify.clone(),
             debug_event_tx: self.debug_event_tx.clone(),
             user_display_name: self.user_display_name.clone(),
+            approval_gate: self.approval_gate.clone(),
+            shell_approval_threshold: self.shell_approval_threshold.clone(),
         }
     }
 
@@ -365,6 +387,21 @@ impl AgentCore {
     /// Access the debug event sender, if in DevMode.
     pub fn debug_event_tx(&self) -> Option<&DebugEventSender> {
         self.debug_event_tx.as_ref()
+    }
+
+    /// Access the approval gate, if configured.
+    pub fn approval_gate(&self) -> Option<&Arc<dyn ApprovalGate>> {
+        self.approval_gate.as_ref()
+    }
+
+    /// Set the approval gate (for Gateway mode initialization).
+    pub fn set_approval_gate(&mut self, gate: Arc<dyn ApprovalGate>) {
+        self.approval_gate = Some(gate);
+    }
+
+    /// Access the shell approval threshold.
+    pub fn shell_approval_threshold(&self) -> &str {
+        &self.shell_approval_threshold
     }
 
     /// Get the usable context budget for history trimming.

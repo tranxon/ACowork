@@ -14,7 +14,6 @@ pub mod ipc;
 pub mod config;
 pub mod cli;
 pub mod error;
-pub mod permission_store;
 pub mod cron;
 pub mod http;
 pub mod grpc;

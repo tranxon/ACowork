@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::grpc::SharedGrpcSessionMgr;
+use crate::http::approval::ApprovalPendingRequests;
 use crate::http::auth::HttpAuth;
 use crate::ipc::session::SessionManager;
 
@@ -145,6 +146,8 @@ pub struct AppState {
     pub(crate) models_cache: crate::http::models_api::ModelsCache,
     /// Pending session requests for IPC response correlation (S1.14)
     pub session_pending: SessionPendingRequests,
+    /// Pending approval requests for tool approval flow (C1+C2)
+    pub approval_pending: ApprovalPendingRequests,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
     /// gRPC session manager for Gateway→Runtime request-response
@@ -171,6 +174,7 @@ impl AppState {
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
+            approval_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             log_reload_handle: None,
             grpc_session_mgr: None,
             cors_enabled: false,
@@ -196,6 +200,7 @@ impl AppState {
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
+            approval_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             log_reload_handle,
             grpc_session_mgr: None,
             cors_enabled: false,
@@ -236,13 +241,13 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::chat::chat_routes())
         .merge(crate::http::vault_api::vault_routes())
         .merge(crate::http::config_api::config_routes())
-        .merge(crate::http::permission_api::permission_routes())
         .merge(crate::http::cron_api::cron_routes())
         .merge(crate::http::models_api::models_routes())
         .merge(crate::http::memory_api::memory_routes())
         .merge(crate::http::skills_api::skills_routes())
         .merge(crate::http::workspaces::workspace_routes())
         .merge(crate::http::publish_api::publish_routes())
+        .merge(crate::http::approval::approval_routes())
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
@@ -256,10 +261,8 @@ pub fn build_router(state: AppState) -> Router {
 pub enum HealthStatus {
     /// All checks passed
     Ok,
-    /// Some non-critical checks failed (system still functional)
+    /// Some checks failed (system still functional)
     Degraded,
-    /// Critical checks failed (system may not function correctly)
-    Unhealthy,
 }
 
 /// Individual check result
@@ -285,14 +288,12 @@ const MIN_DISK_SPACE_BYTES: u64 = 100 * 1024 * 1024;
 ///
 /// Checks critical dependencies and returns an aggregated status:
 /// - `"ok"` — all checks passed
-/// - `"degraded"` — non-critical checks failed (IPC unavailable, disk low)
-/// - `"unhealthy"` — critical checks failed (permission/cron stores unreachable)
+/// - `"degraded"` — some checks failed (IPC unavailable, disk low)
 pub async fn health_check(
     State(state): State<AppState>,
 ) -> Json<HealthResponse> {
     let mut checks = std::collections::HashMap::new();
     let mut has_degraded = false;
-    let mut has_unhealthy = false;
 
     // 1. IPC Session Manager check
     match &state.session_mgr {
@@ -311,39 +312,9 @@ pub async fn health_check(
         }
     }
 
-    // 2. PermissionStore database check
+    // 2. CronStore database check
     {
         let gw = state.gateway_state.read().await;
-        match &gw.permission_store {
-            Some(store) => {
-                // Try a lightweight query to verify the DB is reachable
-                match store.health_check() {
-                    Ok(()) => {
-                        checks.insert("permission_store".to_string(), CheckResult {
-                            status: "ok".to_string(),
-                            detail: None,
-                        });
-                    }
-                    Err(e) => {
-                        has_unhealthy = true;
-                        checks.insert("permission_store".to_string(), CheckResult {
-                            status: "unhealthy".to_string(),
-                            detail: Some(format!("Database error: {}", e)),
-                        });
-                    }
-                }
-            }
-            None => {
-                // PermissionStore not yet initialized is degraded, not unhealthy
-                has_degraded = true;
-                checks.insert("permission_store".to_string(), CheckResult {
-                    status: "degraded".to_string(),
-                    detail: Some("PermissionStore not initialized".to_string()),
-                });
-            }
-        }
-
-        // 3. CronStore database check
         match &gw.cron_store {
             Some(store) => {
                 match store.health_check() {
@@ -408,9 +379,7 @@ pub async fn health_check(
         }
     }
 
-    let overall = if has_unhealthy {
-        HealthStatus::Unhealthy
-    } else if has_degraded {
+    let overall = if has_degraded {
         HealthStatus::Degraded
     } else {
         HealthStatus::Ok
@@ -420,7 +389,6 @@ pub async fn health_check(
         status: match overall {
             HealthStatus::Ok => "ok".to_string(),
             HealthStatus::Degraded => "degraded".to_string(),
-            HealthStatus::Unhealthy => "unhealthy".to_string(),
         },
         version: env!("CARGO_PKG_VERSION").to_string(),
         checks,

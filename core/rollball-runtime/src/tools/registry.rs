@@ -8,7 +8,7 @@ use rollball_core::tools::traits::Tool;
 use rollball_core::AgentManifest;
 use std::sync::Arc;
 
-use crate::tools::wrappers::{PathGuardedTool, PermissionCheckedTool, RateLimitedTool, WorkspaceDir, WorkspaceAccess};
+use crate::tools::wrappers::{PathGuardedTool, RateLimitedTool, WorkspaceDir, WorkspaceAccess};
 
 /// Tool registry
 pub struct ToolRegistry {
@@ -38,10 +38,12 @@ impl ToolRegistry {
 
     /// Activate tools based on manifest declarations.
     ///
+    /// Tool activation IS authorization — no separate permission check needed.
+    ///
     /// Steps:
     /// 1. If manifest.tools is non-empty, filter to only declared tools
     /// 2. Load workspace directories from `.agent_workspaces.json`
-    /// 3. Apply security decorators: PermissionChecked → PathGuarded → RateLimited
+    /// 3. Apply security decorators: PathGuarded → RateLimited
     pub fn activate(
         &self,
         manifest: &AgentManifest,
@@ -72,16 +74,10 @@ impl ToolRegistry {
         filtered
             .into_iter()
             .map(|tool| {
-                // Layer 1: Permission check
-                let perm_checked = Arc::new(PermissionCheckedTool::new(
-                    tool.clone(),
-                    manifest.clone(),
-                )) as Arc<dyn Tool>;
+                // Layer 1: Path guard (for filesystem tools)
+                let path_guarded = Arc::new(PathGuardedTool::new(tool, allowed_dirs.clone())) as Arc<dyn Tool>;
 
-                // Layer 2: Path guard (for filesystem tools)
-                let path_guarded = Arc::new(PathGuardedTool::new(perm_checked, allowed_dirs.clone())) as Arc<dyn Tool>;
-
-                // Layer 3: Rate limit
+                // Layer 2: Rate limit
                 Arc::new(RateLimitedTool::new(path_guarded, max_calls_per_minute)) as Arc<dyn Tool>
             })
             .collect()

@@ -851,6 +851,7 @@ pub async fn update_agent_config(
     // Clone String fields before move so we can use them for push later
     let req_system_prompt_override = req.system_prompt_override.clone();
     let req_active_tools = req.active_tools.clone();
+    let req_shell_approval_threshold = req.shell_approval_threshold;
     let updated = AgentConfigOverride {
         max_output_tokens: req.max_output_tokens.or(existing.max_output_tokens),
         max_iterations: req.max_iterations.or(existing.max_iterations),
@@ -861,6 +862,9 @@ pub async fn update_agent_config(
         active_tools: req
             .active_tools
             .or(existing.active_tools),
+        shell_approval_threshold: req
+            .shell_approval_threshold
+            .or(existing.shell_approval_threshold),
     };
 
     // Save to disk
@@ -883,6 +887,7 @@ pub async fn update_agent_config(
                     temperature: req.temperature,
                     system_prompt_override: req_system_prompt_override,
                     active_tools: req_active_tools,
+                    shell_approval_threshold: req_shell_approval_threshold.map(|t| format!("{:?}", t).to_lowercase()),
                 })
                 .await;
             if !push_result {

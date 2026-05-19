@@ -13,6 +13,26 @@ use std::path::{Path, PathBuf};
 
 use crate::error::GatewayError;
 
+/// Shell approval threshold variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellApprovalThreshold {
+    /// Prompt for Low risk and above (most conservative).
+    Low,
+    /// Prompt for Medium risk and above (default).
+    Medium,
+    /// Prompt for High risk only.
+    High,
+    /// Never prompt — auto-approve all shell commands.
+    Never,
+}
+
+impl Default for ShellApprovalThreshold {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
 /// Per-agent config override (persisted to disk).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfigOverride {
@@ -33,6 +53,9 @@ pub struct AgentConfigOverride {
     /// Some(vec![]) means no tools active.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_tools: Option<Vec<String>>,
+    /// Shell command approval threshold (None = use default Medium).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_approval_threshold: Option<ShellApprovalThreshold>,
 }
 
 /// Effective (merged) config returned to API consumers.
@@ -53,6 +76,8 @@ pub struct AgentConfigResponse {
     pub system_prompt_override: Option<String>,
     /// Active tool names (from manifest + config overrides)
     pub active_tools: Vec<String>,
+    /// Effective shell approval threshold
+    pub shell_approval_threshold: ShellApprovalThreshold,
 }
 
 /// PUT request body for updating agent config.
@@ -68,12 +93,15 @@ pub struct UpdateAgentConfigRequest {
     pub system_prompt_override: Option<String>,
     #[serde(default)]
     pub active_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub shell_approval_threshold: Option<ShellApprovalThreshold>,
 }
 
 /// Default global values used as fallback when no override exists.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;
+pub const DEFAULT_SHELL_APPROVAL_THRESHOLD: ShellApprovalThreshold = ShellApprovalThreshold::Medium;
 
 /// Build the path to the per-agent config file.
 fn config_path(data_dir: &Path, agent_id: &str) -> PathBuf {
@@ -155,5 +183,8 @@ pub fn get_effective_config(
         active_tools: over
             .and_then(|o| o.active_tools.clone())
             .unwrap_or(manifest_active_tools),
+        shell_approval_threshold: over
+            .and_then(|o| o.shell_approval_threshold)
+            .unwrap_or(DEFAULT_SHELL_APPROVAL_THRESHOLD),
     }
 }

@@ -27,9 +27,8 @@ use rollball_core::protocol::{GatewayResponse, ProtocolType};
 use rollball_gateway::gateway::state::{AgentInfo, GatewayState, RunningAgentInfo};
 use rollball_gateway::grpc::server::GrpcSessionManager;
 use rollball_gateway::http::routes::{BridgeEvent, SessionPendingRequests, SharedSessionMgr};
-use rollball_gateway::ipc::server::{SharedPermissionStore, SharedState};
+use rollball_gateway::ipc::server::SharedState;
 use rollball_gateway::ipc::session::SessionManager;
-use rollball_gateway::permission_store::PermissionStore;
 
 use rollball_runtime::grpc::client::GatewayGrpcClient;
 
@@ -129,8 +128,6 @@ impl TestServer {
 
         let state: SharedState = Arc::new(RwLock::new(gw_state));
         let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
-        let perm_store: SharedPermissionStore =
-            Arc::new(PermissionStore::open_in_memory().expect("in-memory perm store"));
         let (capability_tx, _) = tokio::sync::broadcast::channel(64);
         let (bridge_tx, _) = tokio::sync::broadcast::channel::<BridgeEvent>(256);
         let session_pending: SessionPendingRequests =
@@ -145,7 +142,6 @@ impl TestServer {
         let grpc_session_mgr = Arc::new(Mutex::new(GrpcSessionManager::new()));
         let grpc_session_mgr_clone = Arc::clone(&grpc_session_mgr);
         let session_mgr_clone = Arc::clone(&session_mgr);
-        let perm_store_clone = Arc::clone(&perm_store);
         let capability_tx_clone = capability_tx.clone();
         let bridge_tx_clone = bridge_tx.clone();
         let session_pending_clone = session_pending.clone();
@@ -156,7 +152,6 @@ impl TestServer {
                 state_clone,
                 grpc_session_mgr_clone,
                 session_mgr_clone,
-                perm_store_clone,
                 capability_tx_clone,
                 Some(bridge_tx_clone),
                 Some(session_pending_clone),

@@ -6,12 +6,9 @@
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
-use rollball_core::AgentManifest;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
-
-use crate::tools::permission::validate_permission;
 
 /// Rate-limited tool wrapper
 ///
@@ -296,39 +293,6 @@ impl Tool for PathGuardedTool {
                     }
                 }
             }
-        }
-        self.inner.execute(params).await
-    }
-}
-
-/// Permission-checked tool wrapper
-///
-/// Validates manifest permissions before executing the tool.
-pub struct PermissionCheckedTool {
-    inner: Arc<dyn Tool>,
-    manifest: AgentManifest,
-}
-
-impl PermissionCheckedTool {
-    pub fn new(inner: Arc<dyn Tool>, manifest: AgentManifest) -> Self {
-        Self { inner, manifest }
-    }
-}
-
-#[async_trait]
-impl Tool for PermissionCheckedTool {
-    fn spec(&self) -> ToolSpec {
-        self.inner.spec()
-    }
-
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
-        if let Err(e) = validate_permission(&self.manifest, &self.inner.name()) {
-            return Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some(e),
-                token_usage: None,
-            });
         }
         self.inner.execute(params).await
     }

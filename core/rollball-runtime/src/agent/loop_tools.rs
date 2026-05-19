@@ -4,8 +4,8 @@
 //! shared between production [`AgentLoop::run`] and debug `DebugSessionTask`.
 //!
 //! Handles:
-//! - Permission validation (Phase 1)
-//! - Parallel execution with per-tool timeout + iteration deadline (Phase 2-3)
+//! - Tool activation filtering (done at registry build time — no runtime check needed)
+//! - Parallel execution with per-tool timeout + iteration deadline
 //! - Result collection with original ordering
 
 use std::sync::Arc;
@@ -15,14 +15,16 @@ use rollball_core::tools::traits::Tool;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
+use crate::security::approval_gate::{ApprovalGate, ApprovalRequest};
+use crate::security::shell_risk::{self, ShellRisk};
+
 use super::loop_::AgentLoop;
 
 impl AgentLoop {
     /// Execute tool calls in parallel with per-tool timeout and iteration-level deadline.
     ///
-    /// Phase 1: Permission check (batch — each tool checked independently)
-    /// Phase 2: Approval gate (placeholder for future)
-    /// Phase 3: Parallel execution with spawn + select + deadline
+    /// Tool activation filtering is done at registry build time via
+    /// [`ToolRegistry::activate`] — no runtime permission check needed here.
     ///
     /// Returns results in the same order as input tool calls.
     /// Individual tool failures are captured as error strings, not propagated.
@@ -43,50 +45,9 @@ impl AgentLoop {
             "Executing tool calls"
         );
 
-        // Phase 1: Permission check (batch)
-        // Check each tool independently; denied tools get error results,
-        // allowed tools proceed to parallel execution.
-        let mut permission_results: Vec<Option<String>> =
-            Vec::with_capacity(tool_calls.len());
-        for tool_call in tool_calls {
-            match crate::tools::permission::validate_permission(
-                &self.core.manifest,
-                &tool_call.function.name,
-            ) {
-                Ok(()) => permission_results.push(None),
-                Err(e) => {
-                    tracing::warn!(
-                        "Permission denied for tool '{}': {}",
-                        tool_call.function.name,
-                        e
-                    );
-                    permission_results.push(Some(format!(
-                        "Error: Permission denied — {}",
-                        e
-                    )));
-                }
-            }
-        }
+        // Phase 1: Execute tools in parallel with spawn + select + deadline
+        let all_indices: Vec<usize> = (0..tool_calls.len()).collect();
 
-        // Collect indices of tools that passed permission check
-        let allowed_indices: Vec<usize> = permission_results
-            .iter()
-            .enumerate()
-            .filter_map(|(i, result)| if result.is_none() { Some(i) } else { None })
-            .collect();
-
-        // If no tools passed permission, return all error results immediately
-        if allowed_indices.is_empty() {
-            return permission_results
-                .into_iter()
-                .map(|r| r.unwrap_or_default())
-                .collect();
-        }
-
-        // Phase 2: Approval gate (placeholder for future)
-        // TODO(Phase 3): Implement approval gate for high-risk tools
-
-        // Phase 3: Parallel execution with spawn + select + deadline
         let tool_timeout = Duration::from_millis(self.core.config.tool_timeout_ms);
         let iteration_timeout =
             Duration::from_millis(self.core.config.iteration_timeout_ms);
@@ -94,14 +55,37 @@ impl AgentLoop {
         // Channel to collect results from spawned tasks
         let (tx, mut rx) = mpsc::channel::<(usize, String)>(tool_calls.len());
 
-        // Spawn each allowed tool as an independent task
-        let handles: Vec<tokio::task::JoinHandle<()>> = allowed_indices
+        // Clone shared state for spawned tasks
+        let approval_gate = self.core.approval_gate.clone();
+        let shell_threshold = self.core.shell_approval_threshold.clone();
+
+        // Spawn each tool as an independent task
+        let handles: Vec<tokio::task::JoinHandle<()>> = all_indices
             .iter()
             .map(|&idx| {
                 let tools = self.core.tools.clone();
                 let tc = tool_calls[idx].clone();
                 let tx = tx.clone();
+                let approval_gate = approval_gate.clone();
+                let shell_threshold = shell_threshold.clone();
                 tokio::spawn(async move {
+                    // Shell risk check: if this is a shell command and risk >= threshold,
+                    // request user approval via the ApprovalGate before execution.
+                    if tc.function.name == "shell" {
+                        if let Some(ref gate) = approval_gate {
+                            if let Some(rejection) = check_shell_approval(
+                                gate.as_ref(),
+                                &tc.function.arguments,
+                                &shell_threshold,
+                            )
+                            .await
+                            {
+                                let _ = tx.send((idx, rejection)).await;
+                                return;
+                            }
+                        }
+                    }
+
                     let result = match tokio::time::timeout(
                         tool_timeout,
                         execute_single_tool(&tools, &tc),
@@ -126,8 +110,8 @@ impl AgentLoop {
         // Collect results with iteration-level deadline
         let deadline = Instant::now() + iteration_timeout;
         let mut collected: Vec<(usize, String)> =
-            Vec::with_capacity(allowed_indices.len());
-        let total = allowed_indices.len();
+            Vec::with_capacity(all_indices.len());
+        let total = all_indices.len();
 
         while collected.len() < total {
             tokio::select! {
@@ -155,20 +139,13 @@ impl AgentLoop {
         }
 
         // Build final results in original order
-        let results: Vec<String> = permission_results
-            .into_iter()
-            .enumerate()
-            .map(|(idx, perm_result)| {
-                if let Some(err) = perm_result {
-                    // Permission-denied tool
-                    err
-                } else if let Some(pos) =
+        let results: Vec<String> = (0..tool_calls.len())
+            .map(|idx| {
+                if let Some(pos) =
                     collected.iter().find(|(i, _)| *i == idx)
                 {
-                    // Tool that completed successfully or with error
                     pos.1.clone()
                 } else {
-                    // Tool that didn't complete due to iteration timeout
                     format!(
                         "Error: iteration timed out, tool {} not completed",
                         tool_calls[idx].function.name
@@ -267,4 +244,104 @@ pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &Too
         },
         None => format!("Unknown tool: {tool_name}"),
     }
+}
+
+/// Check if a shell command requires user approval based on risk assessment.
+///
+/// Returns `Some(error_message)` if the command was rejected by the user,
+/// or `None` if the command can proceed (approved or below threshold).
+async fn check_shell_approval(
+    gate: &dyn ApprovalGate,
+    params_json: &str,
+    threshold: &str,
+) -> Option<String> {
+    // Parse the command from shell tool params
+    let params: serde_json::Value = match serde_json::from_str(params_json) {
+        Ok(p) => p,
+        Err(_) => return None, // Can't parse params, let the tool handle the error
+    };
+
+    let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if command.is_empty() {
+        return None;
+    }
+
+    // Assess risk (with no provenance lookup in the spawned task context)
+    let assessment = shell_risk::assess_shell_risk(command, |_path| None);
+
+    // Parse threshold string to ShellRisk
+    let threshold_risk = match threshold.to_lowercase().as_str() {
+        "low" => ShellRisk::Low,
+        "medium" => ShellRisk::Medium,
+        "high" => ShellRisk::High,
+        "never" => return None, // Never require approval
+        _ => ShellRisk::Medium,  // Default to medium
+    };
+
+    // Check if risk meets/exceeds threshold
+    if !risk_meets_threshold(assessment.risk, threshold_risk) {
+        return None; // Risk below threshold, proceed normally
+    }
+
+    // Blocked commands: always reject without asking
+    if assessment.risk == ShellRisk::Blocked {
+        return Some(format!(
+            "Error: Shell command execution was blocked for safety reasons. {}",
+            assessment.reason
+        ));
+    }
+
+    // Build approval request
+    let approval_req = ApprovalRequest {
+        tool_name: "shell".to_string(),
+        action: command.to_string(),
+        risk_level: assessment.risk,
+        reason: assessment.reason.clone(),
+        executable_paths: assessment.executable_paths.clone(),
+        provenance_elevated: assessment.provenance_elevated,
+    };
+
+    tracing::info!(
+        risk = %assessment.risk.label(),
+        command = %command,
+        reason = %assessment.reason,
+        "Requesting user approval for shell command"
+    );
+
+    // Request approval
+    let response = gate.request_approval(&approval_req).await;
+
+    match response {
+        crate::security::approval_gate::ApprovalResponse::Approved => {
+            tracing::info!(command = %command, "Shell command approved by user");
+            None
+        }
+        crate::security::approval_gate::ApprovalResponse::Rejected => {
+            tracing::info!(command = %command, "Shell command rejected by user");
+            Some(format!(
+                "Error: Shell command execution was rejected by the user based on risk assessment. \
+                 Risk level: {}, Reason: {}",
+                assessment.risk.label(),
+                assessment.reason
+            ))
+        }
+        crate::security::approval_gate::ApprovalResponse::AlwaysAllow { .. } => {
+            tracing::info!(command = %command, "Shell command approved (always allow)");
+            None
+        }
+    }
+}
+
+/// Check if a given risk level meets or exceeds the threshold.
+/// Risk ordering: Low < Medium < High < Blocked.
+fn risk_meets_threshold(risk: ShellRisk, threshold: ShellRisk) -> bool {
+    fn risk_ordinal(r: ShellRisk) -> u8 {
+        match r {
+            ShellRisk::Low => 0,
+            ShellRisk::Medium => 1,
+            ShellRisk::High => 2,
+            ShellRisk::Blocked => 3,
+        }
+    }
+    risk_ordinal(risk) >= risk_ordinal(threshold)
 }
