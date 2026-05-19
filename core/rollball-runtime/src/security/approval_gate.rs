@@ -9,6 +9,7 @@
 
 use crate::security::shell_risk::ShellRisk;
 use async_trait::async_trait;
+use rollball_core::proto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -203,58 +204,47 @@ impl ApprovalGate for AutoRejectGate {
 /// Used in Gateway mode (Desktop App). The Gateway forwards the approval
 /// request to the frontend via BridgeEvent, the user clicks Allow/Deny,
 /// and the result is relayed back through the oneshot channel in dispatch.rs.
+///
+/// Holds cloned gRPC client components (outbound sender, pending map, request ID
+/// counter) so it can operate independently from the main GatewayGrpcClient loop.
 pub struct GatewayApprovalGate {
     /// Outbound gRPC message sender (cloned from GatewayGrpcClient)
-    outbound_tx: tokio::sync::mpsc::Sender<rollball_core::proto::ClientMessage>,
+    outbound_tx: tokio::sync::mpsc::Sender<proto::ClientMessage>,
     /// Shared pending response map (cloned from GatewayGrpcClient)
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<rollball_core::proto::ServerMessage>>>>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<proto::ServerMessage>>>>,
     /// Shared request ID counter (cloned from GatewayGrpcClient)
     next_id: Arc<AtomicU64>,
-    /// Agent ID for the approval request
+    /// Agent ID for the approval request (included in params for Gateway dispatch)
     agent_id: String,
 }
 
-impl GatewayApprovalGate {
-    /// Create a new GatewayApprovalGate from GatewayGrpcClient components.
-    pub fn new(
-        outbound_tx: tokio::sync::mpsc::Sender<rollball_core::proto::ClientMessage>,
-        pending: Arc<Mutex<HashMap<u64, oneshot::Sender<rollball_core::proto::ServerMessage>>>>,
-        next_id: Arc<AtomicU64>,
-        agent_id: String,
-    ) -> Self {
-        Self {
-            outbound_tx,
-            pending,
-            next_id,
-            agent_id,
-        }
-    }
+/// Timeout for tool approval requests (seconds).
+pub const APPROVAL_TIMEOUT_SECS: u64 = 60;
 
+impl GatewayApprovalGate {
     /// Create a new GatewayApprovalGate from an existing GatewayGrpcClient.
-    /// This clones the sender, pending map, and next_id counter.
     pub fn from_client(
         client: &crate::grpc::client::GatewayGrpcClient,
         agent_id: String,
     ) -> Self {
-        Self::new(
-            client.outbound_sender(),
-            client.pending_map(),
-            client.next_request_id_counter(),
+        Self {
+            outbound_tx: client.outbound_sender(),
+            pending: client.pending_map(),
+            next_id: client.next_request_id_counter(),
             agent_id,
-        )
+        }
     }
 }
 
 #[async_trait]
 impl ApprovalGate for GatewayApprovalGate {
     async fn request_approval(&self, request: &ApprovalRequest) -> ApprovalResponse {
-        use rollball_core::proto;
-
         let request_id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
-        // Build params JSON for the approval request
+        // Build params JSON for the approval request (includes agent_id for dispatch)
         let params = serde_json::json!({
             "request_id": request_id.to_string(),
+            "agent_id": self.agent_id,
             "tool_name": request.tool_name,
             "action": request.action,
             "risk_level": request.risk_level.label(),
@@ -286,26 +276,23 @@ impl ApprovalGate for GatewayApprovalGate {
                 request_id,
                 "GatewayApprovalGate: failed to send approval request"
             );
-            // Clean up pending entry
             let mut map = self.pending.lock().await;
             map.remove(&request_id);
             return ApprovalResponse::Rejected;
         }
 
-        // Wait for response with 60-second timeout (matches Gateway dispatch timeout)
-        let timeout = tokio::time::Duration::from_secs(60);
+        // Wait for response with timeout
+        let timeout = tokio::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS);
         let result = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(_)) => {
                 tracing::warn!(request_id, "GatewayApprovalGate: response channel closed");
-                // Clean up
                 let mut map = self.pending.lock().await;
                 map.remove(&request_id);
                 return ApprovalResponse::Rejected;
             }
             Err(_) => {
                 tracing::warn!(request_id, "GatewayApprovalGate: approval request timed out");
-                // Clean up pending entry
                 let mut map = self.pending.lock().await;
                 map.remove(&request_id);
                 return ApprovalResponse::Rejected;

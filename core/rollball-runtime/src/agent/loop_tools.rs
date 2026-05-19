@@ -17,6 +17,7 @@ use tokio::time::{Duration, Instant};
 
 use crate::security::approval_gate::{ApprovalGate, ApprovalRequest};
 use crate::security::shell_risk::{self, ShellRisk};
+use rollball_core::ShellApprovalThreshold;
 
 use super::loop_::AgentLoop;
 
@@ -57,7 +58,7 @@ impl AgentLoop {
 
         // Clone shared state for spawned tasks
         let approval_gate = self.core.approval_gate.clone();
-        let shell_threshold = self.core.shell_approval_threshold.clone();
+        let shell_threshold = *self.core.shell_approval_threshold();
 
         // Spawn each tool as an independent task
         let handles: Vec<tokio::task::JoinHandle<()>> = all_indices
@@ -253,12 +254,20 @@ pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &Too
 async fn check_shell_approval(
     gate: &dyn ApprovalGate,
     params_json: &str,
-    threshold: &str,
+    threshold: &ShellApprovalThreshold,
 ) -> Option<String> {
+    // "Never" threshold: skip approval entirely
+    if *threshold == ShellApprovalThreshold::Never {
+        return None;
+    }
+
     // Parse the command from shell tool params
     let params: serde_json::Value = match serde_json::from_str(params_json) {
         Ok(p) => p,
-        Err(_) => return None, // Can't parse params, let the tool handle the error
+        Err(e) => {
+            tracing::warn!("check_shell_approval: failed to parse shell params: {}", e);
+            return None; // Can't parse params, let the tool handle the error
+        }
     };
 
     let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -269,13 +278,12 @@ async fn check_shell_approval(
     // Assess risk (with no provenance lookup in the spawned task context)
     let assessment = shell_risk::assess_shell_risk(command, |_path| None);
 
-    // Parse threshold string to ShellRisk
-    let threshold_risk = match threshold.to_lowercase().as_str() {
-        "low" => ShellRisk::Low,
-        "medium" => ShellRisk::Medium,
-        "high" => ShellRisk::High,
-        "never" => return None, // Never require approval
-        _ => ShellRisk::Medium,  // Default to medium
+    // Convert ShellApprovalThreshold to ShellRisk for comparison
+    let threshold_risk = match threshold {
+        ShellApprovalThreshold::Low => ShellRisk::Low,
+        ShellApprovalThreshold::Medium => ShellRisk::Medium,
+        ShellApprovalThreshold::High => ShellRisk::High,
+        ShellApprovalThreshold::Never => unreachable!(), // handled above
     };
 
     // Check if risk meets/exceeds threshold

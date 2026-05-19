@@ -132,6 +132,8 @@ impl TestServer {
         let (bridge_tx, _) = tokio::sync::broadcast::channel::<BridgeEvent>(256);
         let session_pending: SessionPendingRequests =
             Arc::new(Mutex::new(HashMap::new()));
+        let approval_pending: rollball_gateway::http::approval::ApprovalPendingRequests =
+            Arc::new(Mutex::new(HashMap::new()));
 
         // Listen on 127.0.0.1:0 for OS-assigned port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -145,6 +147,7 @@ impl TestServer {
         let capability_tx_clone = capability_tx.clone();
         let bridge_tx_clone = bridge_tx.clone();
         let session_pending_clone = session_pending.clone();
+        let approval_pending_clone = approval_pending.clone();
 
         let server_handle = tokio::spawn(async move {
             let _ = rollball_gateway::grpc::start_grpc_server(
@@ -155,6 +158,7 @@ impl TestServer {
                 capability_tx_clone,
                 Some(bridge_tx_clone),
                 Some(session_pending_clone),
+                Some(approval_pending_clone),
             )
             .await;
         });
@@ -420,21 +424,7 @@ async fn test_t10_rate_acquire() {
     assert!(result.is_ok(), "T10 timed out");
 }
 
-/// T11: PermissionRequest → PermissionResult
-#[tokio::test]
-async fn test_t11_permission_request() {
-    let server = TestServer::start().await;
-    let result = tokio::time::timeout(TEST_TIMEOUT, async {
-        let client = server.connect_and_register("com.test.agent").await;
-
-        let result = client
-            .request_permission("file_write", "Need to save data")
-            .await;
-        let _ = result;
-    })
-    .await;
-    assert!(result.is_ok(), "T11 timed out");
-}
+/// T11: PermissionRequest — removed (old permission system deleted)
 
 /// T13: CapabilityQuery → CapabilityOverview
 #[tokio::test]

@@ -11,27 +11,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use rollball_core::ShellApprovalThreshold;
+
 use crate::error::GatewayError;
-
-/// Shell approval threshold variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ShellApprovalThreshold {
-    /// Prompt for Low risk and above (most conservative).
-    Low,
-    /// Prompt for Medium risk and above (default).
-    Medium,
-    /// Prompt for High risk only.
-    High,
-    /// Never prompt — auto-approve all shell commands.
-    Never,
-}
-
-impl Default for ShellApprovalThreshold {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
 
 /// Per-agent config override (persisted to disk).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

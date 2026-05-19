@@ -25,6 +25,7 @@ use crate::debug::controller::DebugController;
 use crate::debug::server::DebugEventSender;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
+use rollball_core::ShellApprovalThreshold;
 
 /// Cross-session shared state for the agent loop.
 ///
@@ -93,7 +94,7 @@ pub struct AgentCore {
     pub(crate) approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// Shell approval threshold: Low / Medium / High / Never.
     /// Default: "medium" — Medium and High risk commands need approval.
-    pub(crate) shell_approval_threshold: String,
+    pub(crate) shell_approval_threshold: ShellApprovalThreshold,
 }
 
 impl AgentCore {
@@ -106,7 +107,8 @@ impl AgentCore {
         tools: Vec<Arc<dyn Tool>>,
         on_chunk: Option<mpsc::Sender<ChunkEvent>>,
     ) -> Self {
-        let shell_approval_threshold = config.shell_approval_threshold.clone();
+        let shell_approval_threshold = ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
+            .unwrap_or_default();
         Self {
             config,
             manifest,
@@ -238,12 +240,14 @@ impl AgentCore {
             self.system_prompt_override = system_prompt_override;
         }
         if let Some(ref threshold) = shell_approval_threshold {
+            let new_threshold = ShellApprovalThreshold::from_str_loose(threshold)
+                .unwrap_or_default();
             tracing::info!(
-                old = %self.shell_approval_threshold,
-                new = %threshold,
+                old = ?self.shell_approval_threshold,
+                new = ?new_threshold,
                 "runtime config: shell_approval_threshold updated"
             );
-            self.shell_approval_threshold = threshold.clone();
+            self.shell_approval_threshold = new_threshold;
         }
     }
 
@@ -400,7 +404,7 @@ impl AgentCore {
     }
 
     /// Access the shell approval threshold.
-    pub fn shell_approval_threshold(&self) -> &str {
+    pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold {
         &self.shell_approval_threshold
     }
 

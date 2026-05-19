@@ -458,6 +458,55 @@ impl<'de> Deserialize<'de> for Permission {
     }
 }
 
+// ── Shell Approval Threshold ─────────────────────────────────────────────
+
+/// Threshold for shell command risk approval.
+///
+/// Controls which risk levels require user confirmation before execution.
+/// Shared between Gateway (agent_config.rs) and Runtime (loop_tools.rs)
+/// to avoid duplicating type definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellApprovalThreshold {
+    /// Prompt for Low risk and above (most conservative).
+    Low,
+    /// Prompt for Medium risk and above (default).
+    Medium,
+    /// Prompt for High risk only.
+    High,
+    /// Never prompt — auto-approve all shell commands.
+    Never,
+}
+
+impl Default for ShellApprovalThreshold {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+impl ShellApprovalThreshold {
+    /// Parse from string (case-insensitive). Returns None for unrecognized values.
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+
+    /// Convert to the label used in API/protocol.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Never => "never",
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
