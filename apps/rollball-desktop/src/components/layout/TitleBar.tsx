@@ -54,7 +54,7 @@ export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
   return (
     <div
       data-tauri-drag-region
-      className="flex h-7 w-full items-center justify-between select-none pl-3"
+      className="flex h-8 w-full items-center justify-between select-none pl-3"
       style={{
         "-webkit-app-region": "drag",
         backgroundColor: bgColor,
@@ -71,7 +71,7 @@ export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
       <div className="flex items-center gap-1">
         {/* Right panel toggle — VS Code style, left of window controls */}
         <button
-          className="flex h-7 w-7 items-center justify-center rounded text-zinc-500 hover:text-zinc-700 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
+          className="flex h-8 w-8 items-center justify-center rounded text-zinc-500 hover:text-zinc-700 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
           style={{ "-webkit-app-region": "no-drag" } as React.CSSProperties}
           onClick={onTogglePanel}
           aria-label={panelExpanded ? "Collapse right panel" : "Expand right panel"}
@@ -86,7 +86,7 @@ export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
 
         {/* Minimize */}
         <button
-          className="flex h-7 w-7 items-center justify-center rounded text-zinc-600 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-700"
+          className="flex h-8 w-8 items-center justify-center rounded text-zinc-600 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-700"
           style={{ "-webkit-app-region": "no-drag" } as React.CSSProperties}
           onClick={handleMinimize}
         >
@@ -95,7 +95,7 @@ export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
 
         {/* Maximize/Restore */}
         <button
-          className="flex h-7 w-7 items-center justify-center rounded text-zinc-600 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-700"
+          className="flex h-8 w-8 items-center justify-center rounded text-zinc-600 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-700"
           style={{ "-webkit-app-region": "no-drag" } as React.CSSProperties}
           onClick={handleMaximize}
         >
@@ -104,7 +104,7 @@ export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
 
         {/* Close */}
         <button
-          className="flex h-7 w-7 items-center justify-center rounded text-zinc-600 hover:bg-red-500 hover:text-white dark:text-zinc-400 dark:hover:bg-red-600"
+          className="flex h-8 w-8 items-center justify-center rounded text-zinc-600 hover:bg-red-500 hover:text-white dark:text-zinc-400 dark:hover:bg-red-600"
           style={{ "-webkit-app-region": "no-drag" } as React.CSSProperties}
           onClick={handleClose}
         >

@@ -684,8 +684,7 @@ export function ChatPanel() {
                   : "Type a message... (Enter to send, Shift+Enter for new line)"
           }
           disabled={inputDisabled}
-          rows={3}
-          className="w-full resize-none border-0 bg-transparent p-3 pb-2 text-xs outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+          className="w-full resize-none border-0 bg-transparent p-3 pb-2 text-xs outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -993,7 +992,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             {liveUserName && (
               <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
             )}
-            <div className="mt-[6px] max-w-[85%] rounded-lg rounded-br-sm bg-[var(--color-accent)]/15 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words" style={fontSizeStyle}>
+            <div className="mt-[6px] max-w-[85%] rounded-lg rounded-br-sm bg-[var(--color-accent)]/15 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
               {message.content}
             </div>
           </div>
