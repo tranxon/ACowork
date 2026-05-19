@@ -11,14 +11,17 @@ interface PermissionStore {
   sessionAllowed: Set<string>;
 
   loading: boolean;
+  // Last approval error (set when Gateway returns non-2xx)
+  approvalError: string | null;
 
   // Actions
   showApprovalDialog: (event: ToolApprovalNeededEvent) => void;
   approve: (
     requestId: string,
     action: "allow" | "deny" | "allow_all_session",
-  ) => void;
+  ) => Promise<void>;
   dismissCurrent: () => void;
+  clearApprovalError: () => void;
   clearAll: () => void;
 }
 
@@ -27,6 +30,7 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
   currentRequest: null,
   sessionAllowed: new Set(),
   loading: false,
+  approvalError: null,
 
   showApprovalDialog: (event) => {
     const { sessionAllowed } = get();
@@ -54,8 +58,8 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
     });
   },
 
-  approve: (requestId, action) => {
-    set({ loading: true });
+  approve: async (requestId, action) => {
+    set({ loading: true, approvalError: null });
 
     const current = get().currentRequest;
 
@@ -69,17 +73,26 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
       }
     }
 
-    // Send approval decision to Gateway API (C4)
+    // Send approval decision to Gateway API and await response
     const agentId = current?.agent_id;
     if (agentId) {
-      void sendApprovalToGateway(agentId, requestId, action);
+      const result = await sendApprovalToGateway(agentId, requestId, action);
+      if (!result.ok) {
+        // Gateway returned error (e.g. 404 = approval already timed out)
+        const errorMsg = result.status === 404
+          ? "审批请求已过期（Runtime 已超时拒绝），操作未生效"
+          : `审批发送失败 (HTTP ${result.status})`;
+        set({ loading: false, approvalError: errorMsg });
+        return; // Keep modal visible so user sees the error
+      }
     }
 
-    // Show next pending request or clear
+    // Success — advance to next pending request or clear
     set((s) => {
       const next = s.pendingRequests[0] || null;
       return {
         loading: false,
+        approvalError: null,
         currentRequest: next,
         pendingRequests: next ? s.pendingRequests.slice(1) : [],
       };
@@ -96,22 +109,25 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
     });
   },
 
+  clearApprovalError: () => set({ approvalError: null }),
+
   clearAll: () =>
     set({
       pendingRequests: [],
       currentRequest: null,
       sessionAllowed: new Set(),
+      approvalError: null,
     }),
 }));
 
-/// Send tool approval decision to Gateway HTTP API (C4).
+/// Send tool approval decision to Gateway HTTP API.
 /// This resolves the oneshot channel on the Gateway side,
 /// which unblocks the gRPC dispatch handler waiting for the Runtime.
 async function sendApprovalToGateway(
   agentId: string,
   requestId: string,
   action: string,
-): Promise<void> {
+): Promise<{ ok: boolean; status: number }> {
   try {
     const url = `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/approval`;
     const resp = await fetch(url, {
@@ -124,7 +140,9 @@ async function sendApprovalToGateway(
         `[PermissionStore] Approval API returned ${resp.status} for ${requestId}`,
       );
     }
+    return { ok: resp.ok, status: resp.status };
   } catch (err) {
     console.error("[PermissionStore] Failed to send approval:", err);
+    return { ok: false, status: 0 };
   }
 }

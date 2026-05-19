@@ -13,6 +13,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "wasm-tools")]
 use rollball_core::permission::Permission;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use rollball_runtime::security::approval_gate::{
@@ -155,6 +156,7 @@ mod s51_wasm_permission {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Mock shell tool for testing permission integration
+#[allow(dead_code)]
 struct MockShellTool;
 
 #[async_trait]

@@ -51,9 +51,6 @@ pub struct ApprovalResponse {
     pub status: String,
 }
 
-/// Maximum time (seconds) to wait for Runtime to pick up the approval result.
-const APPROVAL_TIMEOUT_SECS: u64 = 60;
-
 /// POST /api/agents/:agent_id/approval — resolve a pending tool approval request.
 ///
 /// The Desktop App calls this when the user clicks Allow or Deny in the
@@ -64,14 +61,14 @@ const APPROVAL_TIMEOUT_SECS: u64 = 60;
 /// Returns 200 with `{ request_id, action, status: "resolved" }` on success,
 /// or 404 if the request_id is not found (already resolved or timed out).
 async fn handle_approval(
-    Path(_agent_id): Path<String>,
+    Path(agent_id): Path<String>,
     State(state): State<AppState>,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<Json<ApprovalResponse>, (StatusCode, Json<ApiError>)> {
     let request_id = req.request_id.clone();
 
     tracing::info!(
-        agent_id = %_agent_id,
+        agent_id = %agent_id,
         request_id = %request_id,
         action = %req.action,
         "Tool approval received from Desktop App"

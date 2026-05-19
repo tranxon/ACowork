@@ -422,7 +422,7 @@ pub async fn system_status(
 // ── Error response helpers ────────────────────────────────────────────
 
 /// Standard API error response
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ApiError {
     pub error: String,
     pub code: u16,

@@ -1,9 +1,19 @@
 import { usePermissionStore } from "../../stores/permissionStore";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { useToast } from "../common/ToastProvider";
+import { useEffect } from "react";
 
 export function ToolApprovalModal() {
-  const { currentRequest, loading, approve, dismissCurrent } = usePermissionStore();
+  const { currentRequest, loading, approvalError, approve, dismissCurrent, clearApprovalError } = usePermissionStore();
+  const { addToast } = useToast();
+
+  // Show toast when approval error occurs
+  useEffect(() => {
+    if (approvalError) {
+      addToast({ type: "error", message: approvalError });
+    }
+  }, [approvalError, addToast]);
 
   if (!currentRequest) {
     return null;
@@ -12,6 +22,13 @@ export function ToolApprovalModal() {
   const handleAction = (action: "allow" | "deny" | "allow_all_session") => {
     if (loading) return;
     void approve(currentRequest.request_id, action);
+  };
+
+  const handleDismiss = () => {
+    if (!loading) {
+      clearApprovalError();
+      dismissCurrent();
+    }
   };
 
   const riskColor =
@@ -26,9 +43,7 @@ export function ToolApprovalModal() {
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/50"
-        onClick={() => {
-          if (!loading) dismissCurrent();
-        }}
+        onClick={handleDismiss}
       />
 
       {/* Modal */}
@@ -96,6 +111,13 @@ export function ToolApprovalModal() {
             </pre>
           </div>
         </div>
+
+        {/* Approval error */}
+        {approvalError && (
+          <div className="mx-5 mb-3 rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+            {approvalError}
+          </div>
+        )}
 
         {/* Footer actions */}
         <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-5 py-4 dark:border-zinc-800">
