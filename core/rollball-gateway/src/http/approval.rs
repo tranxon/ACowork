@@ -2,8 +2,9 @@
 //!
 //! Provides the HTTP API that the Desktop App calls when the user
 //! clicks Allow/Deny in the ToolApprovalModal. The endpoint resolves
-//! a oneshot channel that unblocks the gRPC dispatch handler, which
-//! in turn returns the approval result to the Runtime's ApprovalGate.
+//! a oneshot channel that unblocks the gRPC dispatch handler, and
+//! additionally pushes an `approval_decision` IntentReceived to the
+//! Runtime's AgentLoop (unified pause architecture).
 
 use axum::{
     Json,
@@ -15,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot};
+
+use rollball_core::protocol::GatewayResponse;
 
 use crate::http::routes::{ApiError, AppState};
 
@@ -91,6 +94,52 @@ async fn handle_approval(
                     request_id = %request_id,
                     "Approval oneshot receiver already dropped — Runtime may have timed out"
                 );
+            }
+
+            // Push approval_decision back to Runtime via gRPC (unified pause architecture).
+            // The Runtime's AgentLoop is blocked in `await_approval_decision()`
+            // waiting for InboundMessage::ApprovalDecision.
+            let approved = action == "allow" || action == "allow_all_session";
+            let allow_all_session = action == "allow_all_session";
+            if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+                let grpc_mgr = grpc_mgr.lock().await;
+                if let Some((_, session)) = grpc_mgr.find_by_agent_id(&agent_id) {
+                    let params = serde_json::json!({
+                        "request_id": &request_id,
+                        "approved": approved,
+                        "allow_all_session": allow_all_session,
+                    });
+                    let pushed = session.push_message(
+                        GatewayResponse::IntentReceived {
+                            from: "http-api".to_string(),
+                            action: "approval_decision".to_string(),
+                            params,
+                            command: None,
+                        },
+                    ).await;
+                    if !pushed {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            request_id = %request_id,
+                            "Failed to push approval_decision to Runtime — gRPC channel may be closed"
+                        );
+                    } else {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            request_id = %request_id,
+                            approved,
+                            allow_all_session,
+                            "Pushed approval_decision to Runtime"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        "No gRPC session found for agent — cannot push approval_decision"
+                    );
+                }
+            } else {
+                tracing::warn!("No grpc_session_mgr available — cannot push approval_decision");
             }
 
             tracing::info!(

@@ -54,7 +54,7 @@ pub async fn dispatch_grpc_request(
             // Create oneshot, send BridgeEvent to Desktop App, await user decision.
             if req.action == "tool_approval_needed" && req.target == "http-api" {
                 return handle_tool_approval_needed_grpc(
-                    &params, bridge_tx, approval_pending, request_id,
+                    &params, bridge_tx, approval_pending,
                 ).await;
             }
 
@@ -290,7 +290,6 @@ async fn handle_tool_approval_needed_grpc(
     params: &serde_json::Value,
     bridge_tx: &Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     approval_pending: &Option<ApprovalPendingRequests>,
-    request_id: u64,
 ) -> proto::ServerMessage {
     let approval_request_id = params
         .get("request_id")
@@ -308,17 +307,16 @@ async fn handle_tool_approval_needed_grpc(
     );
 
     // Step 1: Create oneshot channel and store in pending map
-    let (tx, mut rx) = tokio::sync::oneshot::channel::<crate::http::approval::ApprovalResult>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<crate::http::approval::ApprovalResult>();
 
     if let Some(pending) = approval_pending {
         let mut map = pending.lock().await;
         map.insert(approval_request_id.to_string(), tx);
     } else {
         tracing::error!("No approval_pending map available — rejecting");
-        let resp = GatewayResponse::IntentDelivered {
-            message_id: format!("denied:{}:no-approval-channel", approval_request_id),
-        };
-        return resp.to_proto(request_id);
+        // No pending map — approval can never be resolved. Return empty
+        // (no request-response correlation in the new unified architecture).
+        return proto::ServerMessage { request_id: 0, payload: None };
     }
 
     // Step 2: Send BridgeEvent::ToolApprovalNeeded to Desktop App via WebSocket
@@ -340,10 +338,8 @@ async fn handle_tool_approval_needed_grpc(
                 let mut map = pending.lock().await;
                 map.remove(approval_request_id);
             }
-            let resp = GatewayResponse::IntentDelivered {
-                message_id: format!("denied:{}:no-desktop-app", approval_request_id),
-            };
-            return resp.to_proto(request_id);
+            // No subscribers — approval can never be resolved.
+            return proto::ServerMessage { request_id: 0, payload: None };
         }
     } else {
         tracing::warn!("No bridge channel — cannot forward approval request");
@@ -351,61 +347,54 @@ async fn handle_tool_approval_needed_grpc(
             let mut map = pending.lock().await;
             map.remove(approval_request_id);
         }
-        let resp = GatewayResponse::IntentDelivered {
-            message_id: format!("denied:{}:no-bridge", approval_request_id),
-        };
-        return resp.to_proto(request_id);
+        // No bridge — approval can never be resolved.
+        return proto::ServerMessage { request_id: 0, payload: None };
     }
+    // Step 3: Spawn a task to await user decision (do NOT block the gRPC handler).
+    // This keeps the handler free to process other Runtime requests (e.g.
+    // session queries) while the user decides Allow/Deny.
+    //
+    // The approval result flows back to the Runtime via the NEW unified path:
+    //   HTTP approval endpoint → push approval_decision IntentReceived
+    //   → Runtime cli.rs process_gateway_recv → InboundMessage::ApprovalDecision
+    //
+    // The OLD path (IntentDelivered via outbound_tx) is no longer needed:
+    // - The Runtime's IntentSend uses request_id: 0 (fire-and-forget),
+    //   so the IntentDelivered would arrive as a push message and be ignored.
+    // - The new push path is the authoritative delivery mechanism.
+    let approval_req_id = approval_request_id.to_string();
+    let approval_pending_clone = approval_pending.clone();
+    tokio::spawn(async move {
+        // Wait for user decision (no timeout — the user may take as long as needed).
+        let result = rx.await;
 
-    // Step 3: Await user decision with 60s timeout
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        &mut rx,
-    ).await;
+        // Clean up the pending entry.
+        // Note: the HTTP approval handler also removes it, but if the oneshot
+        // sender is dropped without the HTTP handler being called (e.g. Gateway
+        // shutdown), we need this cleanup.
+        if let Some(ref pending) = approval_pending_clone {
+            let mut map = pending.lock().await;
+            map.remove(&approval_req_id);
+        }
 
-    // Clean up any leftover pending entry
-    if let Some(pending) = approval_pending {
-        let mut map = pending.lock().await;
-        map.remove(approval_request_id);
-    }
-
-    match result {
-        Ok(Ok(approval_result)) => {
-            tracing::info!(
-                approval_req = %approval_request_id,
-                action = %approval_result.action,
-                "Tool approval resolved"
-            );
-            match approval_result.action.as_str() {
-                "allow" | "allow_all_session" => {
-                    let resp = GatewayResponse::IntentDelivered {
-                        message_id: format!("approved:{}", approval_request_id),
-                    };
-                    resp.to_proto(request_id)
-                }
-                _ => {
-                    let resp = GatewayResponse::IntentDelivered {
-                        message_id: format!("denied:{}:user-rejected", approval_request_id),
-                    };
-                    resp.to_proto(request_id)
-                }
+        match result {
+            Ok(approval_result) => {
+                tracing::info!(
+                    approval_req = %approval_req_id,
+                    action = %approval_result.action,
+                    "Tool approval resolved (result delivered via push path)"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(approval_req = %approval_req_id, "Approval oneshot sender dropped");
             }
         }
-        Ok(Err(_)) => {
-            tracing::warn!(approval_req = %approval_request_id, "Approval oneshot sender dropped");
-            let resp = GatewayResponse::IntentDelivered {
-                message_id: format!("denied:{}:channel-closed", approval_request_id),
-            };
-            resp.to_proto(request_id)
-        }
-        Err(_) => {
-            tracing::warn!(approval_req = %approval_request_id, "Tool approval timed out (60s)");
-            let resp = GatewayResponse::IntentDelivered {
-                message_id: format!("denied:{}:timeout", approval_request_id),
-            };
-            resp.to_proto(request_id)
-        }
-    }
+        // No outbound.send() — the HTTP approval handler pushes the result
+        // back to the Runtime via the approval_decision IntentReceived path.
+    });
+
+    // Return immediately — the spawned task sends the real response later.
+    proto::ServerMessage { request_id: 0, payload: None }
 }
 
 /// Handle session response from Runtime via gRPC (S1.14).

@@ -77,8 +77,8 @@ pub fn cleanup_stale_pidfile(data_dir: &Path) -> Result<(), GatewayError> {
         )));
     }
 
-    // Stale pidfile — process no longer exists
-    tracing::warn!(
+    // Stale pidfile — process no longer exists (normal after non-clean shutdown)
+    tracing::info!(
         "Removing stale pidfile '{}' (old PID {} no longer running)",
         pid_path.display(),
         parsed.pid

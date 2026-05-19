@@ -19,7 +19,7 @@ use crate::security::approval_gate::{ApprovalGate, ApprovalRequest};
 use crate::security::shell_risk::{self, ShellRisk};
 use rollball_core::ShellApprovalThreshold;
 
-use super::loop_::AgentLoop;
+use super::loop_::{AgentLoop, ApprovalHandle};
 
 impl AgentLoop {
     /// Execute tool calls in parallel with per-tool timeout and iteration-level deadline.
@@ -30,7 +30,7 @@ impl AgentLoop {
     /// Returns results in the same order as input tool calls.
     /// Individual tool failures are captured as error strings, not propagated.
     pub(crate) async fn execute_tools_parallel(
-        &self,
+        &mut self,
         tool_calls: &[ToolCall],
     ) -> Vec<String> {
         if tool_calls.is_empty() {
@@ -57,8 +57,10 @@ impl AgentLoop {
         let (tx, mut rx) = mpsc::channel::<(usize, String)>(tool_calls.len());
 
         // Clone shared state for spawned tasks
+        let approval_handle = self.approval_handle.clone();
         let approval_gate = self.core.approval_gate.clone();
         let shell_threshold = *self.core.shell_approval_threshold();
+        let use_gateway_approval = self.core.approval_handle.is_some();
 
         // Spawn each tool as an independent task
         let handles: Vec<tokio::task::JoinHandle<()>> = all_indices
@@ -67,19 +69,35 @@ impl AgentLoop {
                 let tools = self.core.tools.clone();
                 let tc = tool_calls[idx].clone();
                 let tx = tx.clone();
+                let approval_handle = approval_handle.clone();
                 let approval_gate = approval_gate.clone();
                 let shell_threshold = shell_threshold.clone();
                 tokio::spawn(async move {
                     // Shell risk check: if this is a shell command and risk >= threshold,
-                    // request user approval via the ApprovalGate before execution.
+                    // request user approval before execution.
                     let is_shell_tool = matches!(
                         tc.function.name.as_str(),
                         "bash" | "powershell" | "pwsh" | "shell"
                     );
                     if is_shell_tool {
-                        if let Some(ref gate) = approval_gate {
+                        // Gateway mode: use ApprovalHandle → main loop handles pause/resume
+                        if use_gateway_approval {
+                            if let Some(rejection) = check_shell_approval_handle(
+                                &approval_handle,
+                                &tc.function.name,
+                                &tc.function.arguments,
+                                &shell_threshold,
+                            )
+                            .await
+                            {
+                                let _ = tx.send((idx, rejection)).await;
+                                return;
+                            }
+                        } else if let Some(ref gate) = approval_gate {
+                            // CLI / test mode: use ApprovalGate trait directly
                             if let Some(rejection) = check_shell_approval(
                                 gate.as_ref(),
+                                &tc.function.name,
                                 &tc.function.arguments,
                                 &shell_threshold,
                             )
@@ -112,33 +130,70 @@ impl AgentLoop {
         // Drop the remaining sender so rx.recv() returns None when all tasks complete
         drop(tx);
 
-        // Collect results with iteration-level deadline
+        // Collect results with iteration-level deadline.
+        // In Gateway mode, also listen for approval requests from spawned tasks.
         let deadline = Instant::now() + iteration_timeout;
         let mut collected: Vec<(usize, String)> =
             Vec::with_capacity(all_indices.len());
         let total = all_indices.len();
 
-        while collected.len() < total {
-            tokio::select! {
-                // A result arrived from a spawned task
-                entry = rx.recv() => {
-                    match entry {
-                        Some((idx, result)) => collected.push((idx, result)),
-                        None => break, // All senders dropped
+        if use_gateway_approval {
+            // ── Gateway mode: 3-way select (results / timeout / approval) ──
+            while collected.len() < total {
+                tokio::select! {
+                    // A result arrived from a spawned task
+                    entry = rx.recv() => {
+                        match entry {
+                            Some((idx, result)) => collected.push((idx, result)),
+                            None => break, // All senders dropped
+                        }
+                    }
+                    // Iteration-level deadline exceeded
+                    _ = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!(
+                            "Iteration timeout reached ({}ms), aborting {} remaining tool(s)",
+                            iteration_timeout.as_millis(),
+                            total - collected.len()
+                        );
+                        for handle in &handles {
+                            handle.abort();
+                        }
+                        break;
+                    }
+                    // Approval request from a spawned tool task
+                    approval_req = self.approval_rx.recv() => {
+                        match approval_req {
+                            Some((req, decision_tx)) => {
+                                self.handle_approval_request(req, decision_tx).await;
+                            }
+                            None => {
+                                tracing::warn!("Approval channel closed unexpectedly");
+                            }
+                        }
                     }
                 }
-                // Iteration-level deadline exceeded
-                _ = tokio::time::sleep_until(deadline) => {
-                    tracing::warn!(
-                        "Iteration timeout reached ({}ms), aborting {} remaining tool(s)",
-                        iteration_timeout.as_millis(),
-                        total - collected.len()
-                    );
-                    // Abort all remaining spawned tasks
-                    for handle in &handles {
-                        handle.abort();
+            }
+        } else {
+            // ── CLI / test mode: 2-way select (results / timeout) ──
+            while collected.len() < total {
+                tokio::select! {
+                    entry = rx.recv() => {
+                        match entry {
+                            Some((idx, result)) => collected.push((idx, result)),
+                            None => break,
+                        }
                     }
-                    break;
+                    _ = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!(
+                            "Iteration timeout reached ({}ms), aborting {} remaining tool(s)",
+                            iteration_timeout.as_millis(),
+                            total - collected.len()
+                        );
+                        for handle in &handles {
+                            handle.abort();
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -257,6 +312,7 @@ pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &Too
 /// or `None` if the command can proceed (approved or below threshold).
 async fn check_shell_approval(
     gate: &dyn ApprovalGate,
+    tool_name: &str,
     params_json: &str,
     threshold: &ShellApprovalThreshold,
 ) -> Option<String> {
@@ -305,7 +361,7 @@ async fn check_shell_approval(
 
     // Build approval request
     let approval_req = ApprovalRequest {
-        tool_name: "shell".to_string(),
+        tool_name: tool_name.to_string(),
         action: command.to_string(),
         risk_level: assessment.risk,
         reason: assessment.reason.clone(),
@@ -356,4 +412,93 @@ fn risk_meets_threshold(risk: ShellRisk, threshold: ShellRisk) -> bool {
         }
     }
     risk_ordinal(risk) >= risk_ordinal(threshold)
+}
+
+/// Check if a shell command requires user approval via ApprovalHandle (Gateway mode).
+///
+/// Same risk assessment as `check_shell_approval`, but uses the unified pause
+/// architecture: sends request to AgentLoop main loop via ApprovalHandle mpsc,
+/// which emits ChunkEvent::ToolApprovalNeeded to Gateway and blocks on inbound_rx
+/// until the user's ApprovalDecision arrives (no timeout).
+async fn check_shell_approval_handle(
+    handle: &ApprovalHandle,
+    tool_name: &str,
+    params_json: &str,
+    threshold: &ShellApprovalThreshold,
+) -> Option<String> {
+    // "Never" threshold: skip approval entirely
+    if *threshold == ShellApprovalThreshold::Never {
+        return None;
+    }
+
+    // Parse the command from shell tool params
+    let params: serde_json::Value = match serde_json::from_str(params_json) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("check_shell_approval_handle: failed to parse shell params: {}", e);
+            return None;
+        }
+    };
+
+    let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if command.is_empty() {
+        return None;
+    }
+
+    // Assess risk (with no provenance lookup in the spawned task context)
+    let assessment = shell_risk::assess_shell_risk(command, |_path| None);
+
+    // Convert ShellApprovalThreshold to ShellRisk for comparison
+    let threshold_risk = match threshold {
+        ShellApprovalThreshold::Low => ShellRisk::Low,
+        ShellApprovalThreshold::Medium => ShellRisk::Medium,
+        ShellApprovalThreshold::High => ShellRisk::High,
+        ShellApprovalThreshold::Never => unreachable!(),
+    };
+
+    // Check if risk meets/exceeds threshold
+    if !risk_meets_threshold(assessment.risk, threshold_risk) {
+        return None;
+    }
+
+    // Blocked commands: always reject without asking
+    if assessment.risk == ShellRisk::Blocked {
+        return Some(format!(
+            "Error: Shell command execution was blocked for safety reasons. {}",
+            assessment.reason
+        ));
+    }
+
+    // Build approval request
+    let approval_req = ApprovalRequest {
+        tool_name: tool_name.to_string(),
+        action: command.to_string(),
+        risk_level: assessment.risk,
+        reason: assessment.reason.clone(),
+        executable_paths: assessment.executable_paths.clone(),
+        provenance_elevated: assessment.provenance_elevated,
+    };
+
+    tracing::info!(
+        risk = %assessment.risk.label(),
+        command = %command,
+        reason = %assessment.reason,
+        "Requesting user approval for shell command (Gateway mode)"
+    );
+
+    // Request approval via ApprovalHandle (no timeout — main loop blocks on inbound_rx)
+    let decision = handle.request_approval(approval_req).await;
+
+    if decision.approved {
+        tracing::info!(command = %command, "Shell command approved by user");
+        None
+    } else {
+        tracing::info!(command = %command, "Shell command rejected by user");
+        Some(format!(
+            "Error: Shell command execution was rejected by the user based on risk assessment. \
+             Risk level: {}, Reason: {}",
+            assessment.risk.label(),
+            assessment.reason
+        ))
+    }
 }

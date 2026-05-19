@@ -60,6 +60,18 @@ pub enum InboundMessage {
         /// Reason for continuing (optional, for logging)
         reason: String,
     },
+    /// Tool approval decision from user (shell command risk confirmation).
+    /// Delivered by Gateway after user clicks Allow/Deny in the Desktop App.
+    ApprovalDecision {
+        /// The approval request ID (matches ChunkEvent::ToolApprovalNeeded)
+        request_id: String,
+        /// Whether the user approved the tool execution
+        approved: bool,
+        /// Whether to always allow for this session
+        allow_all_session: bool,
+        /// Optional reason for denial
+        reason: Option<String>,
+    },
 }
 
 impl InboundMessage {
@@ -115,6 +127,9 @@ impl InboundMessage {
             }
             InboundMessage::ContinueExecution { .. } => {
                 // Continue messages don't need size limits
+            }
+            InboundMessage::ApprovalDecision { .. } => {
+                // Approval decisions don't need size limits
             }
         }
         (self, truncated)

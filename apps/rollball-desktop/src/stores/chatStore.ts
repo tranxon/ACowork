@@ -47,6 +47,8 @@ interface AgentChatState {
   hasMoreMessages: boolean;
   messageCursor: string | null;
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
+  /** Pending high-risk tool approval request shown inline in chat */
+  pendingApproval: ToolApprovalNeededEvent | null;
   /** Whether initial session messages are being loaded for this agent */
   isLoadingSession: boolean;
   /** Error message when session message loading fails (null = no error) */
@@ -67,6 +69,7 @@ const DEFAULT_AGENT_STATE: AgentChatState = {
   hasMoreMessages: false,
   messageCursor: null,
   iterationLimitPaused: null,
+  pendingApproval: null,
   isLoadingSession: false,
   loadError: null,
   isReasoning: false,
@@ -142,6 +145,8 @@ interface ChatStore {
   loadAgentProvider: (agentId: string) => string | null;
   /** Continue agent execution after iteration limit pause */
   continueExecution: (agentId: string) => Promise<void>;
+  /** Clear the inline tool approval bar after user decision */
+  resolveApproval: (agentId: string) => void;
   /** Load model for a specific agent from Gateway API, returns the model name */
   loadAgentModel: (agentId: string) => Promise<string | null>;
   /** Load conversation history for a specific agent from Gateway API */
@@ -556,6 +561,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMoreMessages: false,
         messageCursor: null,
         iterationLimitPaused: null,
+        pendingApproval: null,
         currentTurnId: null,
         loadError: null,
       }),
@@ -626,6 +632,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (error) {
       console.error("[ChatStore] Failed to send continue signal:", error);
     }
+  },
+  resolveApproval: (agentId: string) => {
+    set((state) => updateAgentState(state, agentId, { pendingApproval: null }));
   },
   loadAgentModel: async (agentId: string): Promise<string | null> => {
     try {
@@ -1326,6 +1335,10 @@ function handleMessageEvent(
 
     case "tool_approval_needed":
       usePermissionStore.getState().showApprovalDialog(data as unknown as ToolApprovalNeededEvent);
+      // Also set per-agent inline approval state for ChatPanel rendering
+      set((state) => updateAgentState(state, agentId, {
+        pendingApproval: data as unknown as ToolApprovalNeededEvent,
+      }));
       break;
 
     case "memory_updated":

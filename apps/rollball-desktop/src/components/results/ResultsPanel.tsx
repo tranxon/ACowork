@@ -30,7 +30,7 @@ type PanelTab = "debug" | "status" | "setup" | "memory";
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-export function ResultsPanel({ width, onCollapse, isDebugMode = false }: ResultsPanelProps & { width: number }) {
+export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps & { width: number }) {
   const { agents, selectedAgentId } = useAgentStore();
   const tokenUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.tokenUsage ?? null) : null);
   const contextUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.contextUsage ?? null) : null);

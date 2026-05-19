@@ -6,6 +6,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
+import { usePermissionStore } from "../../stores/permissionStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { cn } from "../../lib/utils";
@@ -42,10 +43,11 @@ export function ChatPanel() {
   const thinkingMessageId = agentState?.thinkingMessageId ?? null;
   const contextUsage = agentState?.contextUsage ?? null;
   const iterationLimitPaused = agentState?.iterationLimitPaused ?? null;
+  const pendingApproval = agentState?.pendingApproval ?? null;
   const isReasoning = agentState?.isReasoning ?? false;
 
   // Global state and actions
-  const { sending, wsMap, connectStream, sendMessage, sendInterrupt, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution } = useChatStore();
+  const { sending, wsMap, connectStream, sendMessage, sendInterrupt, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution, resolveApproval } = useChatStore();
   const isLoadingSession = agentState?.isLoadingSession ?? false;
   const loadError = agentState?.loadError ?? null;
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
@@ -433,6 +435,14 @@ export function ChatPanel() {
     }
   };
 
+  // Tool approval: forward action to permission store then clear inline bar
+  const handleToolApprove = (action: "allow" | "deny", approval: import("../../lib/types").ToolApprovalNeededEvent) => {
+    const { approve } = usePermissionStore.getState();
+    void approve(approval.request_id, action).then(() => {
+      resolveApproval(selectedAgentId ?? "");
+    });
+  };
+
   // ── Empty state: no agents at all ──
   if (agents.length === 0) {
     return (
@@ -589,7 +599,7 @@ export function ChatPanel() {
 
                     {/* Regular message */}
                     {displayItem.type !== 'explore_group' && (
-                      <MessageBubble message={item as ChatMessage} isStreaming={(item as ChatMessage).id === streamingMessageId} agentId={selectedAgentId ?? ""} />
+                      <MessageBubble message={item as ChatMessage} isStreaming={(item as ChatMessage).id === streamingMessageId} agentId={selectedAgentId ?? ""} pendingApproval={pendingApproval} onApprove={(action) => handleToolApprove(action, pendingApproval!)} />
                     )}
                   </div>
                 );
@@ -970,7 +980,7 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
 }
 
 /** Single message bubble */
-function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage; isStreaming: boolean; agentId: string }) {
+function MessageBubble({ message, isStreaming, agentId, pendingApproval, onApprove }: { message: ChatMessage; isStreaming: boolean; agentId: string; pendingApproval: import("../../lib/types").ToolApprovalNeededEvent | null; onApprove: (action: "allow" | "deny") => void }) {
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
@@ -1093,17 +1103,36 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
   }
 
   if (message.type === "tool_call") {
+    const isPending = pendingApproval && pendingApproval.tool_name === message.toolName;
     return (
       <div className="flex justify-start">
-        <button
-          className="flex w-full items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          onClick={() => setExpanded(!expanded)}
-        >
-          <Wrench className="mt-0.5 h-3 w-3 shrink-0" />
-          <span className="font-medium">{message.toolName}</span>
-          <span className="min-w-0 break-all text-zinc-400 dark:text-zinc-500">{message.content}</span>
-          {expanded ? <ChevronDown className="ml-auto h-3 w-3 shrink-0" /> : <ChevronRight className="ml-auto h-3 w-3 shrink-0" />}
-        </button>
+        <div className={`flex w-full items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 ${isPending ? "" : "transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"}`}>
+          <button
+            className="flex flex-1 items-start gap-2 min-w-0"
+            onClick={() => setExpanded(!expanded)}
+          >
+            <Wrench className="mt-0.5 h-3 w-3 shrink-0" />
+            <span className="font-medium">{message.toolName}</span>
+            <span className="min-w-0 break-all text-zinc-400 dark:text-zinc-500">{message.content}</span>
+            {expanded ? <ChevronDown className="ml-auto h-3 w-3 shrink-0" /> : <ChevronRight className="ml-auto h-3 w-3 shrink-0" />}
+          </button>
+          {isPending && (
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={(e) => { e.stopPropagation(); onApprove("deny"); }}
+                className="rounded px-2 py-0.5 text-[11px] font-medium text-zinc-500 bg-zinc-200 hover:bg-zinc-300 dark:bg-zinc-600 dark:text-zinc-400 dark:hover:bg-zinc-500"
+              >
+                Deny
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onApprove("allow"); }}
+                className="rounded px-2 py-0.5 text-[11px] font-medium text-white bg-[var(--color-accent)] hover:opacity-90"
+              >
+                Allow
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
