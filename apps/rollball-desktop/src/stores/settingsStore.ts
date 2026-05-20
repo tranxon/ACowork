@@ -11,7 +11,7 @@ const STORAGE_KEY_ACCENT_COLOR = "rollball-accent-color";
 const STORAGE_KEY_GATEWAY_URL = "rollball-gateway-url";
 const STORAGE_KEY_LOG_FILE_SIZE = "rollball-log-file-size";
 
-const DEFAULT_ACCENT_COLOR = "#00C375";
+const DEFAULT_ACCENT_COLOR = "#3b82f6";
 
 /** Apply theme to DOM by toggling .dark class on <html> */
 function applyTheme(theme: Theme) {
@@ -91,7 +91,7 @@ function getPersistedContentWidth(): number {
   return 90;
 }
 
-/** Read persisted accent color from localStorage, fallback to #00C375 */
+/** Read persisted accent color from localStorage, fallback to default blue */
 function getPersistedAccentColor(): string {
   try {
     const stored = localStorage.getItem(STORAGE_KEY_ACCENT_COLOR);

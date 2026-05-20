@@ -329,10 +329,10 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               data-session-id={sessionId}
               onClick={() => handleTabClick(sessionId)}
               className={cn(
-                "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0 rounded-t-lg",
+                "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0",
                 isActive
-                  ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-sm"
-                  : "bg-zinc-200/50 dark:bg-zinc-700/50 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 dark:text-zinc-400",
+                  ? "bg-transparent text-[var(--color-accent)] rounded-t-lg border-b-2 border-[var(--color-accent)]"
+                  : "bg-transparent text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 border-r border-zinc-200 dark:border-zinc-700",
                 isProcessing && !isActive && "text-[var(--color-accent)]",
               )}
               title={getTitle(sessionId)}

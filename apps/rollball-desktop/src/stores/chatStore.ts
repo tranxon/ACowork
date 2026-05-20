@@ -51,6 +51,9 @@ interface SessionChatState {
   isReasoning: boolean;
   /** ADR-014: Session lifecycle status from backend (source of truth) */
   sessionStatus: SessionStatus | null;
+  /** Frontend optimistic flag: true between user clicking Send and backend pushing
+   *  session_state_changed. Cleared when sessionStatus arrives or on done/error/interrupted. */
+  pendingSend: boolean;
   /** Last accessed timestamp — used for LRU eviction */
   lastAccessed: number;
 }
@@ -72,6 +75,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   loadError: null,
   isReasoning: false,
   sessionStatus: null,
+  pendingSend: false,
   lastAccessed: 0,
 };
 
@@ -90,8 +94,6 @@ interface AgentState {
   /** Per-agent model info */
   model: string | null;
   provider: string | null;
-  /** Whether this agent is currently sending a message */
-  sending: boolean;
   /** Reconnect attempts counter */
   reconnectAttempts: number;
   /** Reconnect timer reference */
@@ -108,7 +110,6 @@ const DEFAULT_AGENT_STATE: AgentState = {
   openSessionIds: [],
   model: null,
   provider: null,
-  sending: false,
   reconnectAttempts: 0,
   reconnectTimer: null,
   lastLoadedSessionId: null,
@@ -177,41 +178,12 @@ function updateSessionState(
   };
 }
 
-/** Produce a new agentStates patch that merges BOTH agent-level and session-level patches.
- *  This MUST be used whenever both updateAgentState and updateSessionState would be spread
- *  together — spreading them separately causes the second `agentStates` key to overwrite
- *  the first, silently losing the agent-level patch (e.g. `sending: false`). */
-function updateAgentAndSession(
-  state: ChatStore,
-  agentId: string,
-  agentPatch: Partial<AgentState>,
-  sessionId: string,
-  sessionPatch: Partial<SessionChatState>,
-): { agentStates: Record<string, AgentState> } {
-  const agent = getAgentState(state, agentId);
-  const session = agent.sessionStates[sessionId] ?? DEFAULT_SESSION_STATE;
-  return {
-    agentStates: {
-      ...state.agentStates,
-      [agentId]: {
-        ...agent,
-        ...agentPatch,
-        sessionStates: {
-          ...agent.sessionStates,
-          [sessionId]: { ...session, ...sessionPatch, lastAccessed: Date.now() },
-        },
-      },
-    },
-  };
-}
-
-/** ADR-014: Derive `sending` from sessionStatus.
- *  Returns true if ANY session of this agent is streaming or waiting approval.
- *  This replaces the old optimistic `sending` local write. */
-function deriveSendingFromStatus(agent: AgentState): boolean {
-  return Object.values(agent.sessionStates).some(
-    (s) => s.sessionStatus?.status === "streaming" || s.sessionStatus?.status === "waiting_approval"
-  );
+/** Check whether a session is in an "active" (non-idle) state — used for deriving sending. */
+function isSessionSending(session: SessionChatState): boolean {
+  return session.pendingSend
+    || session.sessionStatus?.status === "streaming"
+    || session.sessionStatus?.status === "waiting_approval"
+    || session.sessionStatus?.status === "paused";
 }
 
 /** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS */
@@ -408,18 +380,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // ADR-014: Update session status from backend (Pull repair)
   updateSessionStatus: (agentId: string, sessionId: string, status: SessionStatus) => {
     set((state) => {
-      const agent = getAgentState(state, agentId);
-      const session = agent.sessionStates[sessionId];
+      const session = getAgentState(state, agentId).sessionStates[sessionId];
       if (!session) return {}; // Session not cached, skip
 
-      const updatedSession = { ...session, sessionStatus: status, lastAccessed: Date.now() };
-      const updatedSessions = { ...agent.sessionStates, [sessionId]: updatedSession };
-      const updatedAgent = { ...agent, sessionStates: updatedSessions };
-
-      // Re-derive sending from all session statuses
-      updatedAgent.sending = deriveSendingFromStatus(updatedAgent);
-
-      return { agentStates: { ...state.agentStates, [agentId]: updatedAgent } };
+      // Clear pendingSend when backend status arrives
+      return updateSessionState(state, agentId, sessionId, { sessionStatus: status, pendingSend: false });
     });
   },
 
@@ -432,11 +397,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       for (const [sessionId, status] of statuses) {
         const session = updatedSessions[sessionId];
         if (session) {
-          updatedSessions[sessionId] = { ...session, sessionStatus: status, lastAccessed: Date.now() };
+          // Clear pendingSend when backend status arrives
+          updatedSessions[sessionId] = { ...session, sessionStatus: status, pendingSend: false, lastAccessed: Date.now() };
         }
       }
       const updatedAgent = { ...agent, sessionStates: updatedSessions };
-      updatedAgent.sending = deriveSendingFromStatus(updatedAgent);
       return { agentStates: { ...state.agentStates, [agentId]: updatedAgent } };
     });
   },
@@ -528,6 +493,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessionId,
       );
 
+
+
       return {
         ...evictResult,
         // Update currentModel/currentProvider from the new session's agent
@@ -557,8 +524,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         pendingApproval: null,
         currentTurnId: null,
         loadError: null,
+        pendingSend: false,
       }),
-      ...(state.currentAgentId === targetId ? { sending: false } : {}),
     }));
   },
 
@@ -579,6 +546,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         currentTurnId: null,
         loadError: null,
         isReasoning: false,
+        pendingSend: false,
       }),
     }));
   },
@@ -662,14 +630,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               thinkingMessageId: null,
               isInThinkPhase: false,
               isReasoning: false,
+              pendingSend: false,
             })
           : {};
         return {
           wsMap: newMap,
           ...sessionPatch,
-          ...(state.currentAgentId === agentId
-            ? { sending: false }
-            : {}),
         };
       });
       scheduleReconnect(agentId, gatewayUrl);
@@ -686,13 +652,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => ({
       wsMap: { ...state.wsMap, [agentId]: ws },
       currentAgentId: agentId,
-      ...updateAgentState(state, agentId, {
-        sending: false,
-        // Clear streaming on the active session
-        ...(state.agentStates[agentId]?.activeSessionId
-          ? {}
-          : {}),
-      }),
     }));
     // Clear active session's streaming state
     const activeSessionId = getAgentState(get(), agentId).activeSessionId;
@@ -726,14 +685,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     if (sessionId) {
       set((state) => ({
-        ...updateAgentAndSession(state, agentId, { sending: true }, sessionId, {
+        ...updateSessionState(state, agentId, sessionId, {
+          pendingSend: true,
           messages: [...getSessionState(state, agentId, sessionId).messages, userMsg],
           currentTurnId: null,
         }),
-      }));
-    } else {
-      set((state) => ({
-        ...updateAgentState(state, agentId, { sending: true }),
       }));
     }
 
@@ -808,7 +764,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       };
       if (sessionId) {
         set((state) => ({
-          ...updateAgentAndSession(state, agentId, { sending: false }, sessionId, {
+          ...updateSessionState(state, agentId, sessionId, {
+            pendingSend: false,
             messages: [...getSessionState(state, agentId, sessionId).messages, replyMsg],
           }),
         }));
@@ -823,7 +780,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       };
       if (sessionId) {
         set((state) => ({
-          ...updateAgentAndSession(state, agentId, { sending: false }, sessionId, {
+          ...updateSessionState(state, agentId, sessionId, {
+            pendingSend: false,
             messages: [...getSessionState(state, agentId, sessionId).messages, errorMsg],
           }),
         }));
@@ -853,16 +811,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const activeSessionId = getAgentState(get(), currentAgentId).activeSessionId;
     if (activeSessionId) {
       set((state) => ({
-        ...updateAgentAndSession(state, currentAgentId, { sending: false }, activeSessionId, {
+        ...updateSessionState(state, currentAgentId, activeSessionId, {
+          pendingSend: false,
           streamingMessageId: null,
           streamBuffer: "",
           thinkingMessageId: null,
           isInThinkPhase: false,
         }),
-      }));
-    } else {
-      set((state) => ({
-        ...updateAgentState(state, currentAgentId, { sending: false }),
       }));
     }
   },
@@ -905,9 +860,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 streamBuffer: "",
                 thinkingMessageId: null,
                 isInThinkPhase: false,
+                pendingSend: false,
               })
             : {}),
-          ...(state.currentAgentId === agentId ? { sending: false } : {}),
         };
       });
     } else {
@@ -1010,11 +965,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (resp.ok) {
         if (sessionId) {
           set((state) => ({
-            ...updateAgentAndSession(state, agentId, { sending: true }, sessionId, { iterationLimitPaused: null }),
-          }));
-        } else {
-          set((state) => ({
-            ...updateAgentState(state, agentId, { sending: true }),
+            ...updateSessionState(state, agentId, sessionId, { pendingSend: true, iterationLimitPaused: null }),
           }));
         }
       }
@@ -1097,11 +1048,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     limit: number = 50,
     direction: string = "backward",
   ) => {
-    // Skip loading if this session is currently streaming or agent is actively sending
-    const agentState = getAgentState(get(), agentId);
+    // Skip loading if this session is currently streaming or pending send
     const sessionState = getSessionState(get(), agentId, sessionId);
-    if (sessionState.streamingMessageId != null || (agentState.activeSessionId === sessionId && agentState.sending)) {
-      console.log(`[ChatStore] Skipping loadSessionMessages — session ${sessionId} is active (streaming=${sessionState.streamingMessageId != null}, sending=${agentState.sending})`);
+    if (sessionState.streamingMessageId != null || isSessionSending(sessionState)) {
+      console.log(`[ChatStore] Skipping loadSessionMessages — session ${sessionId} is active (streaming=${sessionState.streamingMessageId != null}, pendingSend=${sessionState.pendingSend}, status=${sessionState.sessionStatus?.status})`);
       return;
     }
 
@@ -1247,6 +1197,14 @@ function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: strin
   if (!firstUserMsg || !firstUserMsg.content) return;
   const sessionId = useSessionStore.getState().currentSessionId;
   if (!sessionId) return;
+
+  // Don't overwrite an existing title — historical sessions should keep
+  // their original title. Only set title for brand-new sessions.
+  const existingSession = useSessionStore.getState().sessions.find(
+    (s) => s.session_id === sessionId,
+  );
+  if (existingSession?.title && existingSession.title.trim() !== "") return;
+
   const title = makeSessionTitle(firstUserMsg.content);
 
   useSessionStore.getState().updateSessionTitle(sessionId, title);
@@ -1314,7 +1272,7 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
 const CONTENT_EVENT_TYPES = new Set([
   "reasoning_started", "chunk", "tool_call", "tool_result",
   "done", "error", "tool_approval_needed", "iteration_limit_paused",
-  "context_usage", "session_state_changed",
+  "context_usage", "session_state_changed", "interrupted",
 ]);
 
 function handleMessageEvent(
@@ -1606,19 +1564,37 @@ function handleMessageEvent(
 
         if (content) {
           if (ss.streamingMessageId) {
+            // Streaming message exists — chunk events have been filling it.
+            // Only fill content if it's still empty (e.g. no chunk arrived yet).
             const idx = messages.findIndex((m) => m.id === ss.streamingMessageId);
             if (idx >= 0 && !messages[idx].content) {
               messages[idx] = { ...messages[idx], content };
             }
           } else {
-            const assistantMsgId = `msg-assistant-${Date.now()}`;
-            const assistantMsg: ChatMessage = {
-              id: assistantMsgId,
-              type: "assistant",
-              content,
-              timestamp: Date.now(),
-            };
-            messages = [...messages, assistantMsg];
+            // streamingMessageId was cleared (e.g. by session_state_changed racing
+            // ahead of done, or by sendMessage reset). Avoid creating a DUPLICATE
+            // assistant message — look for an existing assistant message at the end
+            // that might be the chunk-filled one with the same content.
+            const lastMsg = messages[messages.length - 1];
+            if (lastMsg?.type === "assistant" && lastMsg?.content === content) {
+              // Chunk already created this message — just mark it as finalized
+              messages[messages.length - 1] = { ...lastMsg, endTime: Date.now() };
+            } else if (lastMsg?.type === "assistant" && !lastMsg?.endTime) {
+              // Last assistant message exists but content differs — update it
+              if (!lastMsg.content) {
+                messages[messages.length - 1] = { ...lastMsg, content };
+              }
+            } else {
+              // No existing assistant message at all — create one
+              const assistantMsgId = `msg-assistant-${Date.now()}`;
+              const assistantMsg: ChatMessage = {
+                id: assistantMsgId,
+                type: "assistant",
+                content,
+                timestamp: Date.now(),
+              };
+              messages = [...messages, assistantMsg];
+            }
           }
         }
 
@@ -1646,7 +1622,7 @@ function handleMessageEvent(
         }
 
         return {
-          ...updateAgentAndSession(state, agentId, { sending: false }, sid!, {
+          ...updateSessionState(state, agentId, sid!, {
             messages,
             streamingMessageId: null,
             tokenUsage: usage ?? ss.tokenUsage,
@@ -1655,6 +1631,7 @@ function handleMessageEvent(
             thinkingMessageId: null,
             isInThinkPhase: false,
             isReasoning: false,
+            pendingSend: false,
           }),
         };
       });
@@ -1688,7 +1665,8 @@ function handleMessageEvent(
 
     case "error": {
       if (!sid) break;
-      const errorMsg = data.message as string;
+      // Gateway透传后Runtime原始字段名是content，旧IPC路径重写为message
+      const errorMsg = (data.message ?? data.content) as string;
       console.error("[ChatStore] Server error:", errorMsg);
       if (errorMsg && errorMsg.includes("cannot switch model")) {
         const errorAgentId = data.agentId as string | undefined;
@@ -1703,15 +1681,55 @@ function handleMessageEvent(
         timestamp: Date.now(),
       };
       set((state) => ({
-        ...updateAgentAndSession(state, agentId, { sending: false }, sid!, {
+        ...updateSessionState(state, agentId, sid!, {
           messages: [...getSessionState(state, agentId, sid!).messages, errMsg],
           streamingMessageId: null,
           streamBuffer: "",
           thinkingMessageId: null,
           isInThinkPhase: false,
           isReasoning: false,
+          pendingSend: false,
         }),
       }));
+      break;
+    }
+
+    case "interrupted": {
+      if (!sid) break;
+      const interruptedContent = data.content as string | undefined;
+      set((state) => {
+        const ss = getSessionState(state, agentId, sid!);
+        let messages = [...ss.messages];
+        // If we have a streaming message, finalize it with current content
+        if (ss.streamingMessageId) {
+          messages = messages.map((msg) =>
+            msg.id === ss.streamingMessageId
+              ? { ...msg, endTime: Date.now() }
+              : msg,
+          );
+        } else if (interruptedContent) {
+          // No streaming message — add a new assistant message with the partial content
+          const assistantMsgId = `msg-assistant-${Date.now()}`;
+          const assistantMsg: ChatMessage = {
+            id: assistantMsgId,
+            type: "assistant",
+            content: interruptedContent,
+            timestamp: Date.now(),
+          };
+          messages = [...messages, assistantMsg];
+        }
+        return {
+          ...updateSessionState(state, agentId, sid!, {
+            messages,
+            streamingMessageId: null,
+            streamBuffer: "",
+            thinkingMessageId: null,
+            isInThinkPhase: false,
+            isReasoning: false,
+            pendingSend: false,
+          }),
+        };
+      });
       break;
     }
 
@@ -1764,8 +1782,7 @@ function handleMessageEvent(
         const status = data.status as SessionStatus | undefined;
         if (status) {
           set((state) => {
-            const agentPatch: Partial<AgentState> = {};
-            const sessionPatch: Partial<SessionChatState> = { sessionStatus: status };
+            const sessionPatch: Partial<SessionChatState> = { sessionStatus: status, pendingSend: false };
 
             // When status transitions FROM Streaming, clear transient streaming state
             const prev = getSessionState(state, agentId, sid);
@@ -1782,17 +1799,7 @@ function handleMessageEvent(
               sessionPatch.iterationLimitPaused = null;
             }
 
-            // Derive `sending` from the updated sessionStatus
-            const updatedAgent = {
-              ...getAgentState(state, agentId),
-              sessionStates: {
-                ...getAgentState(state, agentId).sessionStates,
-                [sid]: { ...(state.agentStates[agentId]?.sessionStates[sid] ?? DEFAULT_SESSION_STATE), ...sessionPatch, lastAccessed: Date.now() },
-              },
-            };
-            agentPatch.sending = deriveSendingFromStatus(updatedAgent);
-
-            return { agentStates: { ...state.agentStates, [agentId]: { ...updatedAgent, ...agentPatch } } };
+            return updateSessionState(state, agentId, sid, sessionPatch);
           });
         }
       }

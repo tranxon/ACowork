@@ -55,8 +55,14 @@ export function ChatPanel() {
   const isLoadingSession = sessionState?.isLoadingSession ?? false;
   const loadError = sessionState?.loadError ?? null;
 
-  // Agent-level state (model, sending)
-  const sending = agentState?.sending ?? false;
+  // Derive sending from current session: pendingSend (optimistic) OR sessionStatus (backend truth).
+  // This is per-session — no cross-session state leakage.
+  const sending = sessionState
+    ? (sessionState.pendingSend
+      || sessionState.sessionStatus?.status === "streaming"
+      || sessionState.sessionStatus?.status === "waiting_approval"
+      || sessionState.sessionStatus?.status === "paused")
+    : false;
   const currentModel = agentState?.model ?? useChatStore.getState().currentModel;
   const currentProvider = agentState?.provider ?? useChatStore.getState().currentProvider;
 
@@ -340,13 +346,17 @@ export function ChatPanel() {
     // in-flight messages.
     if (currentSessionId === lastLoadedSessionId) return;
 
-    // CRITICAL: If the session already has messages AND the agent is actively streaming
-    // (sending=true or streamingMessageId is set), skip loadSessionMessages.
-    // Loading from the backend would overwrite in-memory streaming messages with
-    // only-persisted messages, causing thinking/chat bubbles to disappear.
+    // CRITICAL: If the session already has messages AND the session is actively streaming
+    // (streamingMessageId is set, or sessionStatus is streaming/waiting_approval/paused),
+    // skip loadSessionMessages. Loading from the backend would overwrite in-memory
+    // streaming messages with only-persisted messages, causing thinking/chat bubbles to disappear.
     const agent = useChatStore.getState().agentStates[selectedAgentId];
     const sessState = agent?.sessionStates[currentSessionId];
-    if (sessState && sessState.messages.length > 0 && (agent?.sending || sessState.streamingMessageId)) {
+    const isSessionStreaming = sessState?.streamingMessageId != null
+      || sessState?.sessionStatus?.status === "streaming"
+      || sessState?.sessionStatus?.status === "waiting_approval"
+      || sessState?.sessionStatus?.status === "paused";
+    if (sessState && sessState.messages.length > 0 && isSessionStreaming) {
       lastLoadedSessionId = currentSessionId;
       return;
     }

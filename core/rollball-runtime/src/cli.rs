@@ -1346,6 +1346,43 @@ async fn process_gateway_recv(
                                 return LoopAction::Continue;
                             }
                         };
+
+                        // Evict idle sessions before activating — amortized cleanup
+                        // that runs on every session switch without a separate timer.
+                        session_manager.evict_idle_sessions(std::time::Duration::from_secs(300)).await;
+
+                        // Lazy resume: if the session is not in memory (e.g. a historical
+                        // session that only exists on disk, or one that was just evicted),
+                        // load its JSONL and create a SessionTask so subsequent messages
+                        // can be routed to it.
+                        if session_manager.get_session(&session_id).is_none() {
+                            let work_dir_path = std::path::Path::new(work_dir);
+                            match crate::conversation::ConversationSession::resume(work_dir_path, &session_id) {
+                                Ok(conv) => {
+                                    match session_manager.create_session_with_id_and_conversation(
+                                        session_id.clone(),
+                                        Some(conv),
+                                    ).await {
+                                        Ok(_) => {
+                                            tracing::info!(session_id = %session_id, "Lazy-resumed session from disk on activate");
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(session_id = %session_id, error = %e, "Failed to create session task for lazy-resumed session");
+                                            let data = serde_json::json!({ "error": format!("Failed to activate session: {}", e) });
+                                            send_session_response(grpc_client, &request_id, data).await;
+                                            return LoopAction::Continue;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(session_id = %session_id, error = %e, "Session JSONL not found on disk, cannot activate");
+                                    let data = serde_json::json!({ "error": format!("Session not found: {}", session_id) });
+                                    send_session_response(grpc_client, &request_id, data).await;
+                                    return LoopAction::Continue;
+                                }
+                            }
+                        }
+
                         // In multi-session mode, activation updates current_session_id for routing
                         session_manager.set_current_session_id(session_id.clone());
                         let data = serde_json::json!({
