@@ -226,7 +226,7 @@ async fn sa_02_sessions_do_not_block_each_other() {
 
     let tools: Vec<Arc<dyn Tool>> = vec![slow_tool];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     // Create sessions A and B
     let session_a = manager.create_session().await.unwrap();
@@ -276,7 +276,7 @@ async fn sa_03_session_manager_lifecycle() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     // Create 10 sessions
     let mut session_ids = Vec::new();
@@ -323,7 +323,7 @@ async fn sa_06_concurrent_sessions_have_different_ids() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_a = manager.create_session().await.unwrap();
     let session_b = manager.create_session().await.unwrap();
@@ -386,7 +386,7 @@ async fn conc_01_shared_tool_concurrent_calls() {
 
     let tools: Vec<Arc<dyn Tool>> = vec![echo_tool];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_a = manager.create_session().await.unwrap();
     let session_b = manager.create_session().await.unwrap();
@@ -429,11 +429,11 @@ async fn budget_01_per_session_token_isolation() {
 
     // Session A: very limited budget (100 tokens daily)
     let config_a = make_session_config(limited_budget(100));
-    let mut manager_a = SessionManager::new(core_a, config_a);
+    let mut manager_a = SessionManager::new(core_a, config_a, String::new());
 
     // Session B: unlimited budget
     let config_b = make_session_config(test_budget());
-    let mut manager_b = SessionManager::new(core_b, config_b);
+    let mut manager_b = SessionManager::new(core_b, config_b, String::new());
 
     let session_a = manager_a.create_session().await.unwrap();
     let session_b = manager_b.create_session().await.unwrap();
@@ -498,7 +498,7 @@ async fn edge_02_session_panic_isolation() {
 
     let tools: Vec<Arc<dyn Tool>> = vec![panic_tool];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_a = manager.create_session().await.unwrap();
     let session_b = manager.create_session().await.unwrap();
@@ -541,7 +541,7 @@ async fn edge_04_empty_message_handling() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_id = manager.create_session().await.unwrap();
 
@@ -586,7 +586,7 @@ async fn test_rapid_session_creation_and_destruction() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     // Rapidly create 20 sessions
     let mut ids = Vec::new();
@@ -625,7 +625,7 @@ async fn test_create_session_with_id() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let custom_id = "my-custom-session-123".to_string();
     let result = manager.create_session_with_id(custom_id.clone()).await;
@@ -643,7 +643,7 @@ async fn test_destroy_nonexistent_session() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let result = manager.destroy_session("nonexistent").await;
     assert!(result.is_err(), "Destroying non-existent session should return error");
@@ -658,7 +658,7 @@ async fn test_send_to_nonexistent_session() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let manager = SessionManager::new(core, make_session_config(test_budget()));
+    let manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let result = manager.send_to_session("nonexistent", SessionMessage::ChatMessage {
         content: "hello".to_string(),
@@ -677,7 +677,7 @@ async fn test_session_handle_is_alive() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_id = manager.create_session().await.unwrap();
     let handle = manager.get_session(&session_id).unwrap();
@@ -701,7 +701,7 @@ async fn test_reap_finished_sessions() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_id = manager.create_session().await.unwrap();
 

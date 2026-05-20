@@ -152,11 +152,11 @@ function GatewayTab() {
           <span
             className={cn(
               "h-2 w-2 rounded-full",
-              status === "connected" ? "bg-green-500" : status === "error" ? "bg-red-500" : "bg-zinc-400",
+              status === "connected" ? "bg-[var(--color-accent)]" : status === "error" ? "bg-red-500" : "bg-zinc-400",
             )}
           />
           <span className={cn(
-            status === "connected" ? "text-green-600 dark:text-green-400" :
+            status === "connected" ? "text-[var(--color-accent)]" :
             status === "error" ? "text-red-600 dark:text-red-400" :
             "text-zinc-500"
           )}>
@@ -674,7 +674,7 @@ function ProvidersTab() {
                           >
                             <Star className="h-3.5 w-3.5" />
                           </button>
-                          <span className="text-xs text-green-600 dark:text-green-400">Active</span>
+                          <span className="text-xs" style={{ color: "var(--color-accent)" }}>Active</span>
                           <span className="text-xs text-zinc-400">Key: {keyEntry.key_preview}</span>
                           <button
                             onClick={() => handleEdit(keyEntry.provider)}

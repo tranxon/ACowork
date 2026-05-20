@@ -19,7 +19,7 @@ use rollball_grafeo::grafeo::GrafeoStore;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
-use crate::agent::loop_::ChunkEvent;
+use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use crate::agent::loop_::ApprovalHandle;
 use crate::config::RuntimeConfig;
 use crate::debug::controller::DebugController;
@@ -55,10 +55,14 @@ pub struct AgentCore {
     /// System prompt override (from Gateway config).
     /// None = use manifest-compiled system prompt.
     pub(crate) system_prompt_override: Option<String>,
+    /// Session ID of the owning session (set by SessionTask at creation).
+    /// Used to annotate all ChunkEvents with their origin session, eliminating
+    /// the need for external relay-side injection (which had a race condition).
+    pub(crate) session_id: Option<String>,
     /// Optional streaming chunk sender (like ZeroClaw's on_delta).
     /// When set, each StreamEvent::Content delta is forwarded here
     /// so the caller can relay chunks to Gateway via StreamChunk.
-    pub(crate) on_chunk: Option<mpsc::Sender<ChunkEvent>>,
+    pub(crate) on_chunk: Option<mpsc::Sender<crate::agent::loop_::SessionChunkEvent>>,
     /// Grafeo memory store (shared across all sessions of this agent).
     /// Opened at agent startup from `{work_dir}/memory/private.grafeo`.
     /// None if initialization failed (memory features degraded gracefully).
@@ -113,7 +117,7 @@ impl AgentCore {
         manifest: rollball_core::AgentManifest,
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
-        on_chunk: Option<mpsc::Sender<ChunkEvent>>,
+        on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
     ) -> Self {
         let shell_approval_threshold = ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
             .unwrap_or_default();
@@ -126,6 +130,7 @@ impl AgentCore {
             max_output_tokens_limit: 32_768,
             temperature_override: None,
             system_prompt_override: None,
+            session_id: None,
             on_chunk,
             memory_store: None,
             debug_ctrl: None,
@@ -170,8 +175,35 @@ impl AgentCore {
     }
 
     /// Access the streaming chunk sender.
-    pub fn on_chunk(&self) -> Option<&mpsc::Sender<ChunkEvent>> {
+    pub fn on_chunk(&self) -> Option<&mpsc::Sender<SessionChunkEvent>> {
         self.on_chunk.as_ref()
+    }
+
+    /// Wrap a ChunkEvent into a SessionChunkEvent using this core's session_id.
+    ///
+    /// Returns None if session_id is not set (should not happen in Gateway mode).
+    /// This is the single point where session_id is attached to events, replacing
+    /// the old watch-channel relay injection that had a race condition.
+    pub fn make_chunk_event(&self, event: ChunkEvent) -> Option<SessionChunkEvent> {
+        self.session_id.as_ref().map(|sid| SessionChunkEvent {
+            session_id: sid.clone(),
+            event,
+        })
+    }
+
+    /// Try-send a ChunkEvent via the on_chunk channel, wrapped with session_id.
+    ///
+    /// Convenience method used by AgentLoop emit sites. Returns true if sent,
+    /// false if channel full/closed or session_id missing.
+    pub fn try_send_chunk(&self, event: ChunkEvent) -> bool {
+        if let Some(wrapped) = self.make_chunk_event(event) {
+            self.on_chunk.as_ref()
+                .map(|tx| tx.try_send(wrapped).is_ok())
+                .unwrap_or(false)
+        } else {
+            tracing::debug!("Cannot send chunk event: session_id not set on AgentCore");
+            false
+        }
     }
 
     /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
@@ -326,9 +358,9 @@ impl AgentCore {
     ///
     /// Heavy fields (provider, tools, memory_store) are Arc-cloned (refcount increment),
     /// while value fields (config, manifest, capabilities) are deep-cloned.
-    /// The `on_chunk` channel is replaced with the caller-provided one,
-    /// since each session needs its own streaming channel.
-    pub(crate) fn clone_for_session(&self, on_chunk: Option<mpsc::Sender<ChunkEvent>>) -> Self {
+    /// The `on_chunk` channel and `session_id` are replaced with the caller-provided ones,
+    /// since each session needs its own streaming channel and identity.
+    pub(crate) fn clone_for_session(&self, on_chunk: Option<mpsc::Sender<SessionChunkEvent>>, session_id: String) -> Self {
         Self {
             config: self.config.clone(),
             manifest: self.manifest.clone(),
@@ -338,6 +370,7 @@ impl AgentCore {
             max_output_tokens_limit: self.max_output_tokens_limit,
             temperature_override: self.temperature_override,
             system_prompt_override: self.system_prompt_override.clone(),
+            session_id: Some(session_id),
             on_chunk,
             memory_store: self.memory_store.clone(),
             debug_ctrl: self.debug_ctrl.clone(),
@@ -447,5 +480,99 @@ impl AgentCore {
                 );
                 self.config.history_max_tokens
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RuntimeConfig;
+    use rollball_core::providers::mock::MockProvider;
+
+    fn make_core_with_channel(
+        session_id: Option<&str>,
+    ) -> (AgentCore, mpsc::Receiver<crate::agent::loop_::SessionChunkEvent>) {
+        let (tx, rx) = mpsc::channel(16);
+        let manifest = rollball_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.core"
+            version = "1.0.0"
+            name = "Test Agent"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+            [llm]
+            provider = "mock"
+            model = "mock-model"
+            "#
+        ).unwrap();
+        let config = RuntimeConfig::default();
+        let provider = Arc::new(MockProvider::single_text("OK"));
+        let mut core = AgentCore::new(config, manifest, provider, vec![], Some(tx));
+        core.session_id = session_id.map(|s| s.to_string());
+        (core, rx)
+    }
+
+    #[test]
+    fn test_try_send_chunk_normal() {
+        let (core, mut rx) = make_core_with_channel(Some("s1"));
+        assert!(core.try_send_chunk(crate::agent::loop_::ChunkEvent::ReasoningStarted));
+        let evt = rx.try_recv().unwrap();
+        assert_eq!(evt.session_id, "s1");
+        assert!(matches!(evt.event, crate::agent::loop_::ChunkEvent::ReasoningStarted));
+    }
+
+    #[test]
+    fn test_try_send_chunk_no_session_id() {
+        let (core, _rx) = make_core_with_channel(None);
+        // session_id is None — make_chunk_event returns None, try_send_chunk returns false
+        assert!(!core.try_send_chunk(crate::agent::loop_::ChunkEvent::ReasoningStarted));
+    }
+
+    #[test]
+    fn test_try_send_chunk_channel_full() {
+        // Channel capacity = 1 (small), fill it then try_send_chunk should fail
+        let (tx, mut rx) = mpsc::channel(1);
+        let manifest = rollball_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.full"
+            version = "1.0.0"
+            name = "Test Agent"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+            [llm]
+            provider = "mock"
+            model = "mock-model"
+            "#
+        ).unwrap();
+        let config = RuntimeConfig::default();
+        let provider = Arc::new(MockProvider::single_text("OK"));
+        let mut core = AgentCore::new(config, manifest, provider, vec![], Some(tx));
+        core.session_id = Some("s1".to_string());
+
+        // Fill the channel
+        assert!(core.try_send_chunk(crate::agent::loop_::ChunkEvent::ReasoningStarted));
+        // Second send should fail (channel full)
+        assert!(!core.try_send_chunk(crate::agent::loop_::ChunkEvent::Delta("x".to_string())));
+
+        // Drain and retry should work
+        let _ = rx.try_recv().unwrap();
+        assert!(core.try_send_chunk(crate::agent::loop_::ChunkEvent::Delta("y".to_string())));
+    }
+
+    #[test]
+    fn test_make_chunk_event_with_session_id() {
+        let (core, _rx) = make_core_with_channel(Some("abc"));
+        let wrapped = core.make_chunk_event(crate::agent::loop_::ChunkEvent::ReasoningStarted);
+        assert!(wrapped.is_some());
+        assert_eq!(wrapped.unwrap().session_id, "abc");
+    }
+
+    #[test]
+    fn test_make_chunk_event_without_session_id() {
+        let (core, _rx) = make_core_with_channel(None);
+        let wrapped = core.make_chunk_event(crate::agent::loop_::ChunkEvent::ReasoningStarted);
+        assert!(wrapped.is_none());
     }
 }

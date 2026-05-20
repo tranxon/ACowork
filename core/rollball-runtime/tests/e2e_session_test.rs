@@ -14,7 +14,7 @@ use rollball_core::providers::traits::{FunctionCall, ToolCall};
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use rollball_core::Budget;
 use rollball_runtime::agent::agent_core::AgentCore;
-use rollball_runtime::agent::loop_::ChunkEvent;
+use rollball_runtime::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use rollball_runtime::agent::session::session_manager::{
     SessionManager, SessionManagerConfig,
 };
@@ -106,7 +106,7 @@ fn make_small_history_config() -> SessionManagerConfig {
 
 /// Build a SessionManagerConfig with a chunk sender for streaming tests.
 fn make_streaming_config(
-    chunk_tx: tokio::sync::mpsc::Sender<ChunkEvent>,
+    chunk_tx: tokio::sync::mpsc::Sender<SessionChunkEvent>,
 ) -> SessionManagerConfig {
     SessionManagerConfig {
         inbound_channel_capacity: 64,
@@ -156,9 +156,9 @@ async fn e2e_01_three_session_concurrent_conversation() {
     let core_b = make_core(provider_b, vec![]);
     let core_c = make_core(provider_c, vec![]);
 
-    let mut manager_a = SessionManager::new(core_a, make_session_config(test_budget()));
-    let mut manager_b = SessionManager::new(core_b, make_session_config(test_budget()));
-    let mut manager_c = SessionManager::new(core_c, make_session_config(test_budget()));
+    let mut manager_a = SessionManager::new(core_a, make_session_config(test_budget()), String::new());
+    let mut manager_b = SessionManager::new(core_b, make_session_config(test_budget()), String::new());
+    let mut manager_c = SessionManager::new(core_c, make_session_config(test_budget()), String::new());
 
     let session_a = manager_a.create_session().await.unwrap();
     let session_b = manager_b.create_session().await.unwrap();
@@ -256,7 +256,7 @@ async fn e2e_01_real_three_session_concurrent_with_minimax() {
         None,
     ));
 
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_a = manager.create_session().await.unwrap();
     let session_b = manager.create_session().await.unwrap();
@@ -326,7 +326,7 @@ async fn e2e_02_long_conversation_trim_chain() {
     ]));
 
     let core = make_core(provider, vec![]);
-    let mut manager = SessionManager::new(core, make_small_history_config());
+    let mut manager = SessionManager::new(core, make_small_history_config(), String::new());
 
     let session_id = manager.create_session().await.unwrap();
 
@@ -361,17 +361,17 @@ async fn e2e_02_long_conversation_trim_chain() {
 
 #[tokio::test]
 async fn e2e_03_session_switch_no_interrupt() {
-    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<ChunkEvent>(256);
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<SessionChunkEvent>(256);
 
     // Provider for session A returns text immediately
     let provider_a = Arc::new(MockProvider::single_text("Session A response"));
     let core_a = make_core(provider_a, vec![]);
-    let mut manager_a = SessionManager::new(core_a, make_streaming_config(chunk_tx.clone()));
+    let mut manager_a = SessionManager::new(core_a, make_streaming_config(chunk_tx.clone()), String::new());
 
     // Provider for session B
     let provider_b = Arc::new(MockProvider::single_text("Session B response"));
     let core_b = make_core(provider_b, vec![]);
-    let mut manager_b = SessionManager::new(core_b, make_streaming_config(chunk_tx));
+    let mut manager_b = SessionManager::new(core_b, make_streaming_config(chunk_tx), String::new());
 
     let session_a = manager_a.create_session().await.unwrap();
     let session_b = manager_b.create_session().await.unwrap();
@@ -395,7 +395,7 @@ async fn e2e_03_session_switch_no_interrupt() {
         .unwrap();
 
     // Collect chunk events with timeout
-    let mut events: Vec<ChunkEvent> = Vec::new();
+    let mut events: Vec<SessionChunkEvent> = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     loop {
@@ -442,7 +442,7 @@ async fn e2e_03_session_switch_no_interrupt() {
 async fn e2e_04_complete_lifecycle() {
     let provider = Arc::new(MockProvider::single_text("Lifecycle response"));
     let core = make_core(provider, vec![]);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     // Step 1: Create session
     let session_id = manager.create_session().await.unwrap();
@@ -513,9 +513,7 @@ async fn e2e_04_complete_lifecycle_with_jsonl() {
     .unwrap();
 
     let config = make_session_config(test_budget());
-    let mut manager = SessionManager::new(core, config);
-
-    // Create session with conversation persistence
+    let mut manager = SessionManager::new(core, config, String::new());
     manager
         .create_session_with_id_and_conversation(session_id.clone(), Some(conversation))
         .await
@@ -566,17 +564,17 @@ async fn e2e_04_complete_lifecycle_with_jsonl() {
 
 #[tokio::test]
 async fn lifecycle_02_streaming_no_cross_contamination() {
-    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<ChunkEvent>(256);
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<SessionChunkEvent>(256);
 
     // Session A provider
     let provider_a = Arc::new(MockProvider::single_text("Response from A only"));
     let core_a = make_core(provider_a, vec![]);
-    let mut manager_a = SessionManager::new(core_a, make_streaming_config(chunk_tx.clone()));
+    let mut manager_a = SessionManager::new(core_a, make_streaming_config(chunk_tx.clone()), String::new());
 
     // Session B provider
     let provider_b = Arc::new(MockProvider::single_text("Response from B only"));
     let core_b = make_core(provider_b, vec![]);
-    let mut manager_b = SessionManager::new(core_b, make_streaming_config(chunk_tx));
+    let mut manager_b = SessionManager::new(core_b, make_streaming_config(chunk_tx), String::new());
 
     let session_a = manager_a.create_session().await.unwrap();
     let session_b = manager_b.create_session().await.unwrap();
@@ -606,7 +604,7 @@ async fn lifecycle_02_streaming_no_cross_contamination() {
             break;
         }
         match tokio::time::timeout(Duration::from_secs(3), chunk_rx.recv()).await {
-            Ok(Some(ChunkEvent::Done { .. })) => {
+            Ok(Some(evt)) if matches!(evt.event, ChunkEvent::Done { .. }) => {
                 done_count += 1;
             }
             Ok(Some(_)) => {}
@@ -640,7 +638,7 @@ async fn edge_01_session_count_limit() {
     let core = make_core(provider, vec![]);
 
     let (config, max_sessions) = make_limited_session_config(5);
-    let mut manager = SessionManager::new(core, config);
+    let mut manager = SessionManager::new(core, config, String::new());
 
     // Create sessions up to the limit
     let mut session_ids = Vec::new();
@@ -681,7 +679,7 @@ async fn edge_01_session_count_limit() {
 async fn edge_03_extra_long_message() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let core = make_core(provider, vec![]);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_id = manager.create_session().await.unwrap();
 
@@ -732,7 +730,7 @@ async fn edge_03_extra_long_message_jsonl() {
     )
     .unwrap();
 
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
     manager
         .create_session_with_id_and_conversation(session_id.clone(), Some(conversation))
         .await
@@ -859,7 +857,7 @@ async fn e2e_concurrent_sessions_with_tool_calls() {
 
     let tools: Vec<Arc<dyn Tool>> = vec![echo_tool];
     let core = make_core(provider, tools);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let session_a = manager.create_session().await.unwrap();
     let session_b = manager.create_session().await.unwrap();
@@ -930,7 +928,7 @@ async fn e2e_multi_turn_conversation_jsonl() {
     )
     .unwrap();
 
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
     manager
         .create_session_with_id_and_conversation(session_id.clone(), Some(conversation))
         .await
@@ -1006,7 +1004,7 @@ async fn e2e_session_title_set_from_first_message() {
     )
     .unwrap();
 
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
     manager
         .create_session_with_id_and_conversation(session_id.clone(), Some(conversation))
         .await
@@ -1067,7 +1065,7 @@ async fn e2e_destroy_session_file_persists() {
     )
     .unwrap();
 
-    let mut manager = SessionManager::new(core, make_session_config(test_budget()));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
     manager
         .create_session_with_id_and_conversation(session_id.clone(), Some(conversation))
         .await
@@ -1124,7 +1122,7 @@ async fn e2e_conversation_resume() {
     )
     .unwrap();
 
-    let mut manager1 = SessionManager::new(core1, make_session_config(test_budget()));
+    let mut manager1 = SessionManager::new(core1, make_session_config(test_budget()), String::new());
     manager1
         .create_session_with_id_and_conversation(session_id.to_string(), Some(conversation1))
         .await
@@ -1149,7 +1147,7 @@ async fn e2e_conversation_resume() {
     let provider2 = Arc::new(MockProvider::single_text("Second response"));
     let core2 = make_core(provider2, vec![]);
 
-    let mut manager2 = SessionManager::new(core2, make_session_config(test_budget()));
+    let mut manager2 = SessionManager::new(core2, make_session_config(test_budget()), String::new());
     manager2
         .create_session_with_id_and_conversation(session_id.to_string(), Some(conversation2))
         .await

@@ -68,9 +68,7 @@ impl AgentLoop {
         // Notify frontend that the LLM request has been dispatched and we are
         // waiting for the first token. The frontend shows a pulsing "..."
         // indicator until the first content / reasoning / tool_call chunk arrives.
-        if let Some(ref tx) = self.core.on_chunk {
-            let _ = tx.try_send(ChunkEvent::ReasoningStarted);
-        }
+        let _ = self.core.try_send_chunk(ChunkEvent::ReasoningStarted);
         let stream = self.core.provider.chat_stream(chat_request.clone()).await?;
         let mut stream = Box::into_pin(stream);
         let mut accumulated_content = String::new();
@@ -95,11 +93,9 @@ impl AgentLoop {
                 tracing::info!("LLM stream interrupted by user — aborting");
 
                 // Notify frontend via chunk channel
-                if let Some(ref tx) = self.core.on_chunk {
-                    let _ = tx.try_send(ChunkEvent::Interrupted {
-                        content: accumulated_content.clone(),
-                    });
-                }
+                let _ = self.core.try_send_chunk(ChunkEvent::Interrupted {
+                    content: accumulated_content.clone(),
+                });
 
                 // Return partial response with whatever content was accumulated
                 return Ok(ChatResponse {
@@ -126,16 +122,10 @@ impl AgentLoop {
 
                     // Forward delta to on_chunk channel (like ZeroClaw's on_delta)
                     // so the caller can relay streaming chunks to Gateway
-                    if let Some(ref tx) = self.core.on_chunk {
-                        // Use try_send to avoid blocking the LLM stream
-                        if tx
-                            .try_send(ChunkEvent::Delta(chunk.clone()))
-                            .is_err()
-                        {
-                            tracing::debug!(
-                                "on_chunk channel full or closed, dropping delta"
-                            );
-                        }
+                    if !self.core.try_send_chunk(ChunkEvent::Delta(chunk.clone())) {
+                        tracing::debug!(
+                            "on_chunk channel full or closed, dropping delta"
+                        );
                     }
                 }
                 StreamEvent::ReasoningContent(chunk) => {
@@ -146,11 +136,7 @@ impl AgentLoop {
                     reasoning_in_progress = true;
                     accumulated_reasoning_content.push_str(&chunk);
                     // Forward reasoning delta to on_chunk channel for real-time streaming
-                    if let Some(ref tx) = self.core.on_chunk
-                        && tx
-                            .try_send(ChunkEvent::ReasoningDelta(chunk.clone()))
-                            .is_err()
-                    {
+                    if !self.core.try_send_chunk(ChunkEvent::ReasoningDelta(chunk.clone())) {
                         tracing::debug!(
                             "on_chunk channel full or closed, dropping reasoning delta"
                         );

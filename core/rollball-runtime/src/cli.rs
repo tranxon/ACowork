@@ -479,7 +479,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     // Tool events (ToolCall/ToolResult) are also routed through on_chunk
     // for ordering guarantee with content chunks.
     let (chunk_tx, chunk_rx) = if grpc_client.is_some() {
-        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::ChunkEvent>(256);
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::SessionChunkEvent>(256);
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -574,7 +574,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             override_model,
         };
 
-        let mut session_manager = SessionManager::new(core, session_manager_config);
+        let mut session_manager = SessionManager::new(core, session_manager_config, String::new());
 
         // Create initial session with the resumed/created conversation
         let initial_session_id = if let Some(conv) = conversation_session {
@@ -584,13 +584,8 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         } else {
             session_manager.create_session().await?
         };
+        session_manager.set_current_session_id(initial_session_id.clone());
         tracing::info!(initial_session_id = %initial_session_id, "Initial session created");
-
-        // Watch channel for sharing current session ID with the chunk relay task.
-        // The relay reads the latest session_id before forwarding each event,
-        // so all ChunkEvent params include the originating session.
-        let (session_id_watch_tx, session_id_watch_rx) =
-            tokio::sync::watch::channel(initial_session_id.clone());
 
         // Step 9.5: Apply workspace context and runtime overrides from AgentHelloResult
         //
@@ -660,76 +655,40 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         let agent_id_for_relay = agent_id.clone();
         let chunk_relay = if let Some(mut chunk_rx) = chunk_rx {
             let outbound_tx = client.outbound_sender();
-            let mut session_id_rx = session_id_watch_rx.clone();
             Some(tokio::spawn(async move {
                 tracing::info!("Chunk relay started (shared gRPC connection)");
 
-                while let Some(event) = chunk_rx.recv().await {
-                    // Read the latest session_id for injecting into event params
-                    let relay_session_id = session_id_rx.borrow().clone();
+                while let Some(session_event) = chunk_rx.recv().await {
+                    let sid = &session_event.session_id;
+                    let agent_id = &agent_id_for_relay;
 
-                    match event {
+                    match session_event.event {
                         crate::agent::loop_::ChunkEvent::ReasoningStarted => {
-                            let mut params = serde_json::json!({});
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::StreamChunk(
-                                    rollball_core::proto::StreamChunk {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_reasoning_started".to_string(),
-                                        params_json: params.to_string(),
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("ReasoningStarted relay send failed — main connection may be closed");
-                            }
+                            let params = serde_json::json!({
+                                "session_id": sid,
+                            });
+                            relay_stream_chunk(&outbound_tx, "agent_reasoning_started", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::Delta(delta) => {
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "content": delta,
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::StreamChunk(
-                                    rollball_core::proto::StreamChunk {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_chunk".to_string(),
-                                        params_json: params.to_string(),
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("Chunk relay send failed — main connection may be closed");
-                            }
+                            relay_stream_chunk(&outbound_tx, "agent_chunk", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::ReasoningDelta(delta) => {
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "reasoning_content": delta,
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::StreamChunk(
-                                    rollball_core::proto::StreamChunk {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_chunk".to_string(),
-                                        params_json: params.to_string(),
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("Reasoning chunk relay send failed — main connection may be closed");
-                            }
+                            relay_stream_chunk(&outbound_tx, "agent_chunk", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::ContextUsage(ctx_info) => {
                             let msg = rollball_core::proto::ClientMessage {
                                 request_id: 0,
                                 payload: Some(rollball_core::proto::client_message::Payload::ContextUsageReport(
                                     rollball_core::proto::ContextUsageReportRequest {
-                                        agent_id: agent_id_for_relay.clone(),
+                                        agent_id: agent_id.clone(),
                                         context: Some((&ctx_info).into()),
                                     },
                                 )),
@@ -741,161 +700,68 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                         crate::agent::loop_::ChunkEvent::ToolCall { name, args, id } => {
                             let parsed_args: serde_json::Value = serde_json::from_str(&args)
                                 .unwrap_or_else(|_| serde_json::json!({ "raw": args }));
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "name": name,
                                 "params": parsed_args,
                                 "tool_call_id": id,
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
-                                    rollball_core::proto::IntentSendRequest {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_tool_call".to_string(),
-                                        params_json: params.to_string(),
-                                        r#async: false,
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("Tool call relay send failed — main connection may be closed");
-                            }
+                            relay_intent(&outbound_tx, "agent_tool_call", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::ToolResult { name, result, tool_call_id } => {
                             let parsed_result: serde_json::Value = serde_json::from_str(&result)
                                 .unwrap_or_else(|_| serde_json::json!({ "content": result }));
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "name": name,
                                 "result": parsed_result,
                                 "tool_call_id": tool_call_id,
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
-                                    rollball_core::proto::IntentSendRequest {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_tool_result".to_string(),
-                                        params_json: params.to_string(),
-                                        r#async: false,
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("Tool result relay send failed — main connection may be closed");
-                            }
+                            relay_intent(&outbound_tx, "agent_tool_result", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::IterationLimitPaused { iteration, max_iterations } => {
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "iteration": iteration,
                                 "max_iterations": max_iterations,
                                 "message": format!("Iteration limit reached ({}/{}). Click Continue to keep going.", iteration, max_iterations),
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
-                                    rollball_core::proto::IntentSendRequest {
-                                        target: "http-ws".to_string(),
-                                        action: "iteration_limit_paused".to_string(),
-                                        params_json: params.to_string(),
-                                        r#async: false,
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("Iteration limit paused relay send failed — main connection may be closed");
-                            }
+                            relay_intent(&outbound_tx, "iteration_limit_paused", &params).await;
                         }
-                        crate::agent::loop_::ChunkEvent::ToolApprovalNeeded { request_id, tool_name, action, risk_level, reason, session_id } => {
-                            let mut params = serde_json::json!({
+                        crate::agent::loop_::ChunkEvent::ToolApprovalNeeded { request_id, tool_name, action, risk_level, reason } => {
+                            let params = serde_json::json!({
                                 "request_id": request_id,
-                                "agent_id": agent_id_for_relay,
+                                "agent_id": agent_id,
                                 "tool_name": tool_name,
                                 "action": action,
                                 "risk_level": risk_level,
                                 "reason": reason,
+                                "session_id": sid,
                             });
-                            // Use event's session_id if present, otherwise relay's current session_id
-                            let sid = session_id.as_deref().unwrap_or(&relay_session_id);
-                            params["session_id"] = serde_json::json!(sid);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
-                                    rollball_core::proto::IntentSendRequest {
-                                        target: "http-api".to_string(),
-                                        action: "tool_approval_needed".to_string(),
-                                        params_json: params.to_string(),
-                                        r#async: false,
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("ToolApprovalNeeded relay send failed — main connection may be closed");
-                            }
+                            relay_intent(&outbound_tx, "tool_approval_needed", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::Done { content, message_id } => {
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "content": content,
                                 "message_id": message_id,
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
-                                    rollball_core::proto::IntentSendRequest {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_response".to_string(),
-                                        params_json: params.to_string(),
-                                        r#async: false,
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::error!("Done (agent_response) relay send failed — main connection may be closed");
-                            }
+                            relay_intent(&outbound_tx, "agent_response", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::Error { message, message_id } => {
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "content": message,
                                 "message_id": message_id,
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
-                                    rollball_core::proto::IntentSendRequest {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_error".to_string(),
-                                        params_json: params.to_string(),
-                                        r#async: false,
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::error!("Error relay send failed — main connection may be closed");
-                            }
+                            relay_intent(&outbound_tx, "agent_error", &params).await;
                         }
                         crate::agent::loop_::ChunkEvent::Interrupted { content } => {
-                            let mut params = serde_json::json!({
+                            let params = serde_json::json!({
                                 "content": content,
+                                "session_id": sid,
                             });
-                            params["session_id"] = serde_json::json!(relay_session_id);
-                            let msg = rollball_core::proto::ClientMessage {
-                                request_id: 0,
-                                payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
-                                    rollball_core::proto::IntentSendRequest {
-                                        target: "http-ws".to_string(),
-                                        action: "agent_interrupted".to_string(),
-                                        params_json: params.to_string(),
-                                        r#async: false,
-                                    },
-                                )),
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::warn!("Interrupted relay send failed — main connection may be closed");
-                            }
+                            relay_intent(&outbound_tx, "agent_interrupted", &params).await;
                         }
                     }
                 }
@@ -921,7 +787,6 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             log_reload_handle,
             skill_registry,
             initial_session_id,
-            session_id_watch_tx,
         ).await;
 
         // Chunk relay task will end when chunk_rx is dropped (all senders dropped)
@@ -1168,16 +1033,10 @@ async fn run_gateway_loop(
     version_for_reconnect: String,
     log_reload_handle: Option<LogReloadHandle>,
     skill_registry: crate::skills::parser::SkillRegistry,
-    initial_session_id: String,
-    session_id_watch_tx: tokio::sync::watch::Sender<String>,
+    _initial_session_id: String,
 ) -> Result<()> {
     // Retrieve the provider name for budget queries
     let budget_provider = session_manager.provider_name();
-
-    // Track the current session ID for backward compatibility.
-    // When a message does not specify session_id, it routes here.
-    // Initialize with the initial session created on startup.
-    let mut current_session_id = initial_session_id;
 
     tracing::info!("Gateway message loop started (pure routing mode)");
 
@@ -1194,11 +1053,9 @@ async fn run_gateway_loop(
                         &work_dir,
                         &agent_id_for_reconnect,
                         &version_for_reconnect,
-                        &mut current_session_id,
                         &skill_registry,
                         &budget_provider,
                         &log_reload_handle,
-                        &session_id_watch_tx,
                     ).await {
                         LoopAction::Continue => continue,
                         LoopAction::Break => break,
@@ -1234,11 +1091,9 @@ async fn run_gateway_loop(
                 &work_dir,
                 &agent_id_for_reconnect,
                 &version_for_reconnect,
-                &mut current_session_id,
                 &skill_registry,
                 &budget_provider,
                 &log_reload_handle,
-                &session_id_watch_tx,
             ).await {
                 LoopAction::Continue => continue,
                 LoopAction::Break => break,
@@ -1286,15 +1141,10 @@ async fn process_gateway_recv(
     work_dir: &str,
     agent_id_for_reconnect: &str,
     version_for_reconnect: &str,
-    current_session_id: &mut String,
     skill_registry: &crate::skills::parser::SkillRegistry,
     budget_provider: &str,
     log_reload_handle: &Option<LogReloadHandle>,
-    session_id_watch_tx: &tokio::sync::watch::Sender<String>,
 ) -> LoopAction {
-    // session_id_watch_tx is passed to handle_* sub-functions which update
-    // the watch channel when session changes. Currently these are reserved
-    // for refactoring; the inline code in this function also uses it directly.
     use rollball_core::protocol::GatewayResponse;
 
     match recv_result {
@@ -1306,11 +1156,15 @@ async fn process_gateway_recv(
                     tracing::info!("Received intent from {}: {}", from, action);
 
                     // Determine target session: explicit session_id param > current_session_id
-                    let target_session_id = params.get("session_id")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| current_session_id.clone());
+                    let target_session_id = match session_manager.resolve_target_session(
+                        params.get("session_id").and_then(|v| v.as_str())
+                    ) {
+                        Some(sid) => sid,
+                        None => {
+                            tracing::warn!("No target session resolved for action={}, skipping", action);
+                            return LoopAction::Continue;
+                        }
+                    };
 
                     // Handle model_switch: broadcast to all sessions AND
                     // update SessionManagerConfig so new sessions inherit the model.
@@ -1454,8 +1308,7 @@ async fn process_gateway_recv(
                                     let data = serde_json::json!({ "error": format!("Failed to create session: {}", e) });
                                     send_session_response(grpc_client, &request_id, data).await;
                                 } else {
-                                    *current_session_id = new_session_id.clone();
-                                    let _ = session_id_watch_tx.send(new_session_id.clone());
+                                    session_manager.set_current_session_id(new_session_id.clone());
                                     tracing::info!(new_session_id = %new_session_id, "Created new session via Gateway request");
                                     let data = serde_json::json!({ "session_id": new_session_id });
                                     send_session_response(grpc_client, &request_id, data).await;
@@ -1470,7 +1323,7 @@ async fn process_gateway_recv(
                         return LoopAction::Continue;
                     }
                     if action == "get_current_session_id" {
-                        handle_get_current_session_id(grpc_client, &params, current_session_id).await;
+                        handle_get_current_session_id(grpc_client, &params, session_manager.current_session_id()).await;
                         return LoopAction::Continue;
                     }
                     if action == "activate_session" {
@@ -1487,8 +1340,7 @@ async fn process_gateway_recv(
                             }
                         };
                         // In multi-session mode, activation updates current_session_id for routing
-                        *current_session_id = session_id.clone();
-                        let _ = session_id_watch_tx.send(session_id.clone());
+                        session_manager.set_current_session_id(session_id.clone());
                         let data = serde_json::json!({
                             "session_id": session_id,
                             "activated": true,
@@ -1551,7 +1403,7 @@ async fn process_gateway_recv(
                         }
 
                         // Destroy the session task
-                        let is_current = *current_session_id == session_id;
+                        let is_current = session_manager.current_session_id() == session_id;
                         if let Err(e) = session_manager.destroy_session(&session_id).await {
                             tracing::warn!("Failed to destroy session {}: {}", session_id, e);
                         }
@@ -1571,8 +1423,7 @@ async fn process_gateway_recv(
                                     ).await {
                                         tracing::error!("Failed to create replacement session: {}", e);
                                     } else {
-                                        *current_session_id = new_session_id.clone();
-                                        let _ = session_id_watch_tx.send(new_session_id.clone());
+                                        session_manager.set_current_session_id(new_session_id.clone());
                                         tracing::info!(new_session_id = %new_session_id, "Switched to new session after deletion");
                                     }
                                 }
@@ -1585,7 +1436,7 @@ async fn process_gateway_recv(
                         let data = serde_json::json!({
                             "deleted": true,
                             "session_id": session_id,
-                            "new_session_id": if is_current { current_session_id.clone() } else { String::new() },
+                            "new_session_id": if is_current { session_manager.current_session_id().to_string() } else { String::new() },
                         });
                         send_session_response(grpc_client, &request_id, data).await;
                         return LoopAction::Continue;
@@ -2369,68 +2220,6 @@ async fn handle_get_session_messages(
     }
 }
 
-/// Handle "create_session" action from Gateway (S1.14)
-///
-/// Creates a new ConversationSession and **switches the AgentLoop's active
-/// conversation** to it via `switch_conversation`. This is the only correct
-/// way to activate a new session — creating a ConversationSession without
-/// calling switch_conversation would cause messages to still be written to
-/// the old JSONL file (P0 bug fixed in ADR-session-fix).
-#[allow(dead_code)]
-// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
-async fn handle_create_session(
-    work_dir: &str,
-    agent_id: &str,
-    agent_loop: &mut crate::agent::loop_::AgentLoop,
-    current_session_id: &mut String,
-    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
-    params: &serde_json::Value,
-    session_id_watch_tx: &tokio::sync::watch::Sender<String>,
-) {
-    let request_id = params.get("request_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let new_session_id = crate::conversation::generate_session_id();
-
-    match crate::conversation::ConversationSession::new(
-        std::path::Path::new(work_dir),
-        &new_session_id,
-        agent_id,
-    ) {
-        Ok(new_session) => {
-            let old_session_id = agent_loop.current_session_id().map(|s| s.to_string());
-
-            // P0 FIX: Switch the AgentLoop's active conversation to the new session.
-            // Before this fix, the new_session was dropped here (bound as `_session`),
-            // leaving AgentLoop.conversation pointing to the OLD session — causing
-            // all subsequent messages to be appended to the wrong JSONL file.
-            agent_loop.switch_conversation(new_session);
-
-            tracing::info!(
-                new_session_id = %new_session_id,
-                old_session_id = ?old_session_id,
-                "Created and activated new conversation session via Gateway request"
-            );
-            *current_session_id = new_session_id.clone();
-            let _ = session_id_watch_tx.send(new_session_id.clone());
-
-            let data = serde_json::json!({
-                "session_id": new_session_id,
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-        }
-        Err(e) => {
-            tracing::error!("Failed to create new session: {}", e);
-            let data = serde_json::json!({
-                "error": format!("Failed to create session: {}", e),
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-        }
-    }
-}
-
 /// Handle "get_current_session_id" action from Gateway (S1.14)
 ///
 /// Returns the currently active session ID.
@@ -2456,221 +2245,62 @@ async fn handle_get_current_session_id(
     send_session_response(grpc_client, &request_id, data).await;
 }
 
-/// Handle "activate_session" action from Gateway (S1.14)
-///
-/// Resumes an existing ConversationSession from its JSONL file and switches
-/// the AgentLoop's active conversation to it. This is the Runtime-side
-/// implementation of the session switch protocol:
-///
-/// 1. Frontend calls POST /api/agents/{id}/sessions/{session_id}/activate
-/// 2. Gateway forwards "activate_session" IntentReceived to Runtime
-/// 3. Runtime resumes the JSONL file → creates ConversationSession
-/// 4. Runtime calls agent_loop.switch_conversation() to activate it
-/// 5. All subsequent messages are written to the new (resumed) JSONL file
-///
-/// Without this, switching sessions on the frontend only updates UI state —
-/// the Runtime keeps writing to whatever session it had active, causing the
-/// "messages in wrong session" bug.
-#[allow(dead_code)]
-// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
-async fn handle_activate_session(
-    work_dir: &str,
-    agent_loop: &mut crate::agent::loop_::AgentLoop,
-    current_session_id: &mut String,
-    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
-    params: &serde_json::Value,
-    session_id_watch_tx: &tokio::sync::watch::Sender<String>,
-) {
-    let request_id = params.get("request_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
-        Some(sid) if !sid.is_empty() => sid.to_string(),
-        _ => {
-            let data = serde_json::json!({
-                "error": "Missing or empty session_id parameter",
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-            return;
-        }
-    };
-
-    // Resume the existing session's JSONL file
-    match crate::conversation::ConversationSession::resume(
-        std::path::Path::new(work_dir),
-        &session_id,
-    ) {
-        Ok(resumed_session) => {
-            let old_session_id = agent_loop.current_session_id().map(|s| s.to_string());
-
-            // Switch the AgentLoop's active conversation
-            agent_loop.switch_conversation(resumed_session);
-
-            tracing::info!(
-                activated_session_id = %session_id,
-                old_session_id = ?old_session_id,
-                "Activated existing conversation session via Gateway request"
-            );
-            *current_session_id = session_id.clone();
-            let _ = session_id_watch_tx.send(session_id.clone());
-
-            let data = serde_json::json!({
-                "session_id": session_id,
-                "activated": true,
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-        }
-        Err(e) => {
-            tracing::error!(session_id = %session_id, error = %e, "Failed to resume session for activation");
-            let data = serde_json::json!({
-                "error": format!("Failed to activate session: {}", e),
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-        }
-    }
-}
-
-/// Handle "update_session_title" action from Gateway (S1.14)
-///
-/// Force-updates the title of the currently active ConversationSession.
-/// Unlike `set_title` (which only sets once from the first user message),
-/// this always writes the title — used by the HTTP API for manual/programmatic
-/// title updates that persist in the JSONL metadata.
-#[allow(dead_code)]
-// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
-async fn handle_update_session_title(
-    agent_loop: &mut crate::agent::loop_::AgentLoop,
-    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
-    params: &serde_json::Value,
-) {
-    let request_id = params.get("request_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let title = match params.get("title").and_then(|v| v.as_str()) {
-        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => {
-            let data = serde_json::json!({
-                "error": "Missing or empty title parameter",
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-            return;
-        }
-    };
-
-    match agent_loop.update_session_title(&title) {
-        Some(true) => {
-            let session_id = agent_loop.current_session_id().map(|s| s.to_string()).unwrap_or_default();
-            let data = serde_json::json!({
-                "session_id": session_id,
-                "title": title,
-                "updated": true,
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-        }
-        Some(false) => {
-            // Title unchanged — no-op
-            let session_id = agent_loop.current_session_id().map(|s| s.to_string()).unwrap_or_default();
-            let data = serde_json::json!({
-                "session_id": session_id,
-                "title": title,
-                "updated": false,
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-        }
-        None => {
-            tracing::warn!("update_session_title called but no active session");
-            let data = serde_json::json!({
-                "error": "No active session to update",
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-        }
-    }
-}
-
-/// Handle "delete_session" action from Gateway
-///
-/// Deletes the session's JSONL file. If the deleted session is the currently
-/// active one, creates a new session and switches to it automatically.
-#[allow(dead_code)]
-// Reserved for future refactoring: logic currently inlined in the Gateway message loop above.
-async fn handle_delete_session(
-    work_dir: &str,
-    agent_loop: &mut crate::agent::loop_::AgentLoop,
-    current_session_id: &mut String,
-    agent_id: &str,
-    grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
-    params: &serde_json::Value,
-    session_id_watch_tx: &tokio::sync::watch::Sender<String>,
-) {
-    let request_id = params.get("request_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
-        Some(sid) if !sid.is_empty() => sid.to_string(),
-        _ => {
-            let data = serde_json::json!({
-                "error": "Missing or empty session_id parameter",
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-            return;
-        }
-    };
-
-    let conversations_dir = std::path::Path::new(work_dir).join("conversations");
-    let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
-
-    // Delete the JSONL file
-    if file_path.exists() {
-        if let Err(e) = std::fs::remove_file(&file_path) {
-            tracing::error!(session_id = %session_id, error = %e, "Failed to delete session file");
-            let data = serde_json::json!({
-                "error": format!("Failed to delete session: {}", e),
-            });
-            send_session_response(grpc_client, &request_id, data).await;
-            return;
-        }
-        tracing::info!(session_id = %session_id, "Deleted session JSONL file");
-    }
-
-    // If the deleted session was the currently active one, create a new session
-    let is_current = *current_session_id == session_id;
-    if is_current {
-        let new_session_id = crate::conversation::generate_session_id();
-        match crate::conversation::ConversationSession::new(
-            std::path::Path::new(work_dir),
-            &new_session_id,
-            agent_id,
-        ) {
-            Ok(new_session) => {
-                agent_loop.switch_conversation(new_session);
-                *current_session_id = new_session_id.clone();
-                let _ = session_id_watch_tx.send(new_session_id.clone());
-                tracing::info!(new_session_id = %new_session_id, "Switched to new session after deletion");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create new session after deletion");
-            }
-        }
-    }
-
-    let data = serde_json::json!({
-        "deleted": true,
-        "session_id": session_id,
-        "new_session_id": if is_current { current_session_id.clone() } else { String::new() },
-    });
-    send_session_response(grpc_client, &request_id, data).await;
-}
-
 /// Send a session response back to Gateway via IntentSend (S1.14)
 ///
 /// Wraps the response data with the request_id and sends it
 /// as an IntentSend with action "session_response" targeting "http-api".
+/// Relay a StreamChunk message to Gateway (used by chunk relay task).
+///
+/// StreamChunk is the lightweight path for real-time streaming deltas
+/// (agent_reasoning_started, agent_chunk). These go directly to the
+/// WebSocket bridge without requiring an IntentSend round-trip.
+async fn relay_stream_chunk(
+    outbound_tx: &tokio::sync::mpsc::Sender<rollball_core::proto::ClientMessage>,
+    action: &str,
+    params: &serde_json::Value,
+) {
+    let msg = rollball_core::proto::ClientMessage {
+        request_id: 0,
+        payload: Some(rollball_core::proto::client_message::Payload::StreamChunk(
+            rollball_core::proto::StreamChunk {
+                target: "http-ws".to_string(),
+                action: action.to_string(),
+                params_json: params.to_string(),
+            },
+        )),
+    };
+    if outbound_tx.send(msg).await.is_err() {
+        tracing::debug!("{} relay send failed — main connection may be closed", action);
+    }
+}
+
+/// Relay an IntentSend message to Gateway (used by chunk relay task).
+///
+/// IntentSend is the full-round-trip path for discrete events
+/// (tool_call, tool_result, agent_response, etc.) that may require
+/// ack/nack handling downstream.
+async fn relay_intent(
+    outbound_tx: &tokio::sync::mpsc::Sender<rollball_core::proto::ClientMessage>,
+    action: &str,
+    params: &serde_json::Value,
+) {
+    let target = if action == "tool_approval_needed" { "http-api" } else { "http-ws" };
+    let msg = rollball_core::proto::ClientMessage {
+        request_id: 0,
+        payload: Some(rollball_core::proto::client_message::Payload::IntentSend(
+            rollball_core::proto::IntentSendRequest {
+                target: target.to_string(),
+                action: action.to_string(),
+                params_json: params.to_string(),
+                r#async: false,
+            },
+        )),
+    };
+    if outbound_tx.send(msg).await.is_err() {
+        tracing::debug!("{} relay send failed — main connection may be closed", action);
+    }
+}
+
 async fn send_session_response(
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     request_id: &str,

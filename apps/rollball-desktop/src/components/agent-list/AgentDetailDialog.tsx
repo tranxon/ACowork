@@ -98,7 +98,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
                   <span
                     className={cn(
                       "inline-block h-2 w-2 rounded-full",
-                      detail.running ? "bg-green-500" : "bg-zinc-300 dark:bg-zinc-600",
+                      detail.running ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
                     )}
                   />
                   {detail.running ? "Running" : "Stopped"}

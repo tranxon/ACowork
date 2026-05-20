@@ -15,7 +15,7 @@ use rollball_core::providers::traits::{FunctionCall, ToolCall};
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use rollball_core::Budget;
 use rollball_runtime::agent::agent_core::AgentCore;
-use rollball_runtime::agent::loop_::ChunkEvent;
+use rollball_runtime::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use rollball_runtime::agent::session::session_manager::{
     SessionManager, SessionManagerConfig,
 };
@@ -107,7 +107,7 @@ fn test_budget() -> Budget {
 fn make_core(
     provider: Arc<MockProvider>,
     tools: Vec<Arc<dyn Tool>>,
-    chunk_tx: Option<mpsc::Sender<ChunkEvent>>,
+    chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
 ) -> Arc<AgentCore> {
     Arc::new(AgentCore::new(
         test_config(),
@@ -118,7 +118,7 @@ fn make_core(
     ))
 }
 
-fn make_session_config(budget: Budget, chunk_tx: Option<mpsc::Sender<ChunkEvent>>) -> SessionManagerConfig {
+fn make_session_config(budget: Budget, chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>) -> SessionManagerConfig {
     SessionManagerConfig {
         inbound_channel_capacity: 64,
         system_prompt: "You are a test assistant.".to_string(),
@@ -179,11 +179,11 @@ async fn sa_04_gateway_routing_never_blocks() {
     // IMPORTANT: chunk_tx goes to SessionManagerConfig, NOT to AgentCore::new(),
     // because SessionTask.clone_for_session() replaces AgentCore's on_chunk
     // with the one from SessionManagerConfig.
-    let (chunk_tx, mut chunk_rx) = mpsc::channel::<ChunkEvent>(256);
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<SessionChunkEvent>(256);
 
     let tools: Vec<Arc<dyn Tool>> = vec![slow_tool];
     let core = make_core(provider, tools, None);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget(), Some(chunk_tx)));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget(), Some(chunk_tx)), String::new());
 
     let session_a = manager.create_session().await.unwrap();
     let session_b = manager.create_session().await.unwrap();
@@ -218,7 +218,7 @@ async fn sa_04_gateway_routing_never_blocks() {
     // Wait for Session B's Done chunk (should arrive well before Session A's 3s)
     let b_deadline = tokio::time::timeout(Duration::from_secs(1), async {
         while let Some(event) = chunk_rx.recv().await {
-            match &event {
+            match &event.event {
                 ChunkEvent::Done { message_id, .. } if message_id == "msg-sa04-b" => {
                     return true;
                 }
@@ -260,11 +260,11 @@ async fn ipc_01_gateway_disconnect_recovery() {
 
     // Phase 1: Normal operation with chunk channel
     // chunk_tx goes to SessionManagerConfig so SessionTask can send Done/Error events
-    let (chunk_tx, chunk_rx) = mpsc::channel::<ChunkEvent>(256);
+    let (chunk_tx, chunk_rx) = mpsc::channel::<SessionChunkEvent>(256);
 
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider.clone(), tools.clone(), None);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget(), Some(chunk_tx)));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget(), Some(chunk_tx)), String::new());
 
     let session_a = manager.create_session().await.unwrap();
     let session_b = manager.create_session().await.unwrap();
@@ -307,11 +307,11 @@ async fn ipc_01_gateway_disconnect_recovery() {
     );
 
     // Phase 3: Simulate Gateway reconnection with a new chunk channel
-    let (new_chunk_tx, mut new_chunk_rx) = mpsc::channel::<ChunkEvent>(256);
+    let (new_chunk_tx, mut new_chunk_rx) = mpsc::channel::<SessionChunkEvent>(256);
 
     // Create a new session with the new chunk channel
     let new_core = make_core(provider, tools, None);
-    let mut new_manager = SessionManager::new(new_core, make_session_config(test_budget(), Some(new_chunk_tx)));
+    let mut new_manager = SessionManager::new(new_core, make_session_config(test_budget(), Some(new_chunk_tx)), String::new());
 
     let session_c = new_manager.create_session().await.unwrap();
 
@@ -327,7 +327,7 @@ async fn ipc_01_gateway_disconnect_recovery() {
     // Verify the new session's response arrives on the new chunk channel
     let reconnect_result = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(event) = new_chunk_rx.recv().await {
-            match &event {
+            match &event.event {
                 ChunkEvent::Done { message_id, .. } if message_id == "msg-ipc01-3" => {
                     return true;
                 }
@@ -360,7 +360,7 @@ async fn ipc_02_provider_hot_update_broadcast() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools, None);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget(), None));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget(), None), String::new());
 
     // Create 3 sessions
     let session_a = manager.create_session().await.unwrap();
@@ -460,7 +460,7 @@ async fn ipc_03_message_to_nonexistent_session() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools, None);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget(), None));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget(), None), String::new());
 
     // Create a real session
     let session_real = manager.create_session().await.unwrap();
@@ -550,7 +550,7 @@ async fn ipc_03_message_to_nonexistent_session() {
 async fn lifecycle_01_create_session_while_receiving_messages() {
     // Use a chunk channel so we can observe when the session processes messages.
     // chunk_tx goes to SessionManagerConfig so SessionTask can forward events.
-    let (chunk_tx, mut chunk_rx) = mpsc::channel::<ChunkEvent>(256);
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<SessionChunkEvent>(256);
 
     let provider = Arc::new(MockProvider::new(vec![
         // First message response
@@ -565,7 +565,7 @@ async fn lifecycle_01_create_session_while_receiving_messages() {
 
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools, None);
-    let mut manager = SessionManager::new(core, make_session_config(test_budget(), Some(chunk_tx)));
+    let mut manager = SessionManager::new(core, make_session_config(test_budget(), Some(chunk_tx)), String::new());
 
     // Create session and immediately send two messages back-to-back
     let session_id = manager.create_session().await.unwrap();
@@ -594,7 +594,7 @@ async fn lifecycle_01_create_session_while_receiving_messages() {
 
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         while let Some(event) = chunk_rx.recv().await {
-            match &event {
+            match &event.event {
                 ChunkEvent::Done { message_id, .. } => {
                     if message_id == "msg-lifecycle-1" {
                         received_first = true;

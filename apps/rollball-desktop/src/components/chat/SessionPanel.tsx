@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import { useSessionStore } from "../../stores/sessionStore";
+import { useChatStore } from "../../stores/chatStore";
 import { MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 
@@ -35,6 +36,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
     createSession,
     deleteSession,
   } = useSessionStore();
+
   const [open, setOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -122,6 +124,10 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
             {sessions.map((session) => {
               const isActive = session.session_id === currentSessionId;
               const isDeleting = confirmDelete === session.session_id;
+              const isStreaming = (() => {
+                const agent = useChatStore.getState().agentStates[agentId];
+                return !!agent?.sending && agent.activeSessionId === session.session_id;
+              })();
               return (
                 <div
                   key={session.session_id}
@@ -133,7 +139,11 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                     className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
                   >
                     <div className="flex items-center gap-2">
-                      <MessageCircle className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      {isStreaming ? (
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-accent)]" />
+                      ) : (
+                        <MessageCircle className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      )}
                       <span className={cn("min-w-0 flex-1 truncate text-xs", isActive && "font-semibold text-[var(--color-accent)]", !isActive && "text-zinc-700 dark:text-zinc-300")}>
                         {session.title || "Untitled session"}
                       </span>
@@ -157,7 +167,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                           void handleDeleteSession(session.session_id);
                         }}
                         disabled={deletingId !== null}
-                        className="rounded bg-red-500 px-2 py-0.5 text-xs text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="rounded-md btn-accent px-2 py-0.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         删除
                       </button>
@@ -166,7 +176,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                           e.stopPropagation();
                           setConfirmDelete(null);
                         }}
-                        className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-500"
+                        className="rounded-md btn-solid px-2 py-0.5 text-xs"
                       >
                         取消
                       </button>

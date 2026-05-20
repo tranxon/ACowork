@@ -32,9 +32,24 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 
 export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps & { width: number }) {
   const { agents, selectedAgentId } = useAgentStore();
-  const tokenUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.tokenUsage ?? null) : null);
-  const contextUsage = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.contextUsage ?? null) : null);
-  const messages = useChatStore((s) => selectedAgentId ? (s.agentStates[selectedAgentId]?.messages ?? EMPTY_MESSAGES) : EMPTY_MESSAGES);
+  const tokenUsage = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.tokenUsage ?? null;
+  });
+  const contextUsage = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
+  });
+  const messages = useChatStore((s) => {
+    if (!selectedAgentId) return EMPTY_MESSAGES;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return EMPTY_MESSAGES;
+    return agent.sessionStates[agent.activeSessionId]?.messages ?? EMPTY_MESSAGES;
+  });
   const [activeTab, setActiveTab] = useState<PanelTab>(isDebugMode ? "debug" : "status");
 
   // ── Debug store (always called, conditionally used) ──────────────
@@ -392,7 +407,7 @@ export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps &
                       <span
                         className={cn(
                           "inline-block h-2 w-2 rounded-full",
-                          selectedAgent.running ? "bg-green-500" : "bg-zinc-300 dark:bg-zinc-600",
+                          selectedAgent.running ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
                         )}
                       />
                       <span className="text-zinc-700 dark:text-zinc-300">

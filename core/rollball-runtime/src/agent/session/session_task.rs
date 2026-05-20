@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::context::ContextBuilder;
 use crate::agent::inbound::InboundMessage;
-use crate::agent::loop_::{AgentLoop, ChunkEvent};
+use crate::agent::loop_::{AgentLoop, ChunkEvent, SessionChunkEvent};
 use crate::agent::session_state::SessionState;
 use crate::debug::controller::DebugController;
 
@@ -90,7 +90,7 @@ pub(crate) struct SessionTask {
     /// System prompt for context building
     system_prompt: String,
     /// Optional streaming chunk sender for forwarding responses to Gateway
-    chunk_tx: Option<mpsc::Sender<ChunkEvent>>,
+    chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
     /// Unique session identifier (used for logging and chunk tagging)
     session_id: String,
     /// Complete tool definitions (with input_schema) for ContextBuilder
@@ -134,7 +134,7 @@ impl SessionTask {
         session: SessionState,
         inbound_rx: mpsc::Receiver<SessionMessage>,
         system_prompt: String,
-        chunk_tx: Option<mpsc::Sender<ChunkEvent>>,
+        chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         session_id: String,
         tool_definitions: Vec<serde_json::Value>,
         identity_context: Option<String>,
@@ -148,7 +148,7 @@ impl SessionTask {
         let debug_ctrl = core.debug_ctrl().cloned();
         let rewind_notify = core.debug_rewind_notify().cloned();
         let resume_notify = core.debug_resume_notify().cloned();
-        let core_for_session = core.clone_for_session(chunk_tx.clone());
+        let core_for_session = core.clone_for_session(chunk_tx.clone(), session_id.clone());
         let (agent_loop, agent_inbound_tx) =
             AgentLoop::from_core_and_session(core_for_session, session);
 
@@ -264,9 +264,12 @@ impl SessionTask {
                                             "SessionTask processed chat message (replay)"
                                         );
                                         if let Some(ref tx) = chunk_tx {
-                                            let event = ChunkEvent::Done {
-                                                content: response,
-                                                message_id: msg_id.clone(),
+                                            let event = SessionChunkEvent {
+                                                session_id: session_id.clone(),
+                                                event: ChunkEvent::Done {
+                                                    content: response,
+                                                    message_id: msg_id.clone(),
+                                                },
                                             };
                                             if tx.send(event).await.is_err() {
                                                 tracing::warn!(
@@ -283,9 +286,12 @@ impl SessionTask {
                                             "SessionTask agent loop error (replay)"
                                         );
                                         if let Some(ref tx) = chunk_tx {
-                                            let event = ChunkEvent::Error {
-                                                message: format!("Error: {}", e),
-                                                message_id: msg_id.clone(),
+                                            let event = SessionChunkEvent {
+                                                session_id: session_id.clone(),
+                                                event: ChunkEvent::Error {
+                                                    message: format!("Error: {}", e),
+                                                    message_id: msg_id.clone(),
+                                                },
                                             };
                                             if tx.send(event).await.is_err() {
                                                 tracing::warn!(
@@ -392,9 +398,12 @@ impl SessionTask {
                                 "SessionTask processed chat message"
                             );
                             if let Some(ref tx) = chunk_tx {
-                                let event = ChunkEvent::Done {
-                                    content: response,
-                                    message_id,
+                                let event = SessionChunkEvent {
+                                    session_id: session_id.clone(),
+                                    event: ChunkEvent::Done {
+                                        content: response,
+                                        message_id,
+                                    },
                                 };
                                 if tx.send(event).await.is_err() {
                                     tracing::warn!(
@@ -411,9 +420,12 @@ impl SessionTask {
                                 "SessionTask agent loop error"
                             );
                             if let Some(ref tx) = chunk_tx {
-                                let event = ChunkEvent::Error {
-                                    message: format!("Error: {}", e),
-                                    message_id,
+                                let event = SessionChunkEvent {
+                                    session_id: session_id.clone(),
+                                    event: ChunkEvent::Error {
+                                        message: format!("Error: {}", e),
+                                        message_id,
+                                    },
                                 };
                                 if tx.send(event).await.is_err() {
                                     tracing::warn!(

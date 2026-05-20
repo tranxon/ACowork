@@ -7,8 +7,8 @@ interface PermissionStore {
   pendingRequests: ToolApprovalNeededEvent[];
   // Current displayed approval request (modal)
   currentRequest: ToolApprovalNeededEvent | null;
-  // Session-level allowed tools
-  sessionAllowed: Set<string>;
+  // Session-level allowed tools — scoped per session to prevent cross-session bleeding
+  sessionAllowed: Record<string, Set<string>>;
 
   loading: boolean;
   // Last approval error (set when Gateway returns non-2xx)
@@ -23,21 +23,26 @@ interface PermissionStore {
   dismissCurrent: () => void;
   clearApprovalError: () => void;
   clearAll: () => void;
+  /** Check if a tool is session-allowed for a specific session */
+  isSessionAllowed: (toolName: string, sessionId?: string | null) => boolean;
 }
 
 export const usePermissionStore = create<PermissionStore>((set, get) => ({
   pendingRequests: [],
   currentRequest: null,
-  sessionAllowed: new Set(),
+  sessionAllowed: {},
   loading: false,
   approvalError: null,
 
+  isSessionAllowed: (toolName: string, sessionId?: string | null) => {
+    if (!sessionId) return false;
+    return get().sessionAllowed[sessionId]?.has(toolName) ?? false;
+  },
+
   showApprovalDialog: (event) => {
-    const { sessionAllowed } = get();
-    // If tool is already session-approved, auto-approve without showing dialog
-    if (sessionAllowed.has(event.tool_name)) {
-      // Send approval to Gateway API directly, then advance queue
-      // Use the event's session_id (originating session) not currentSessionId
+    // If tool is already session-approved for THIS session, auto-approve
+    const sessionId = event.session_id;
+    if (sessionId && get().sessionAllowed[sessionId]?.has(event.tool_name)) {
       void sendApprovalToGateway(event.agent_id, event.request_id, "allow", event.session_id);
       set((s) => {
         const next = s.pendingRequests[0] || null;
@@ -54,7 +59,6 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
       if (s.currentRequest === null) {
         return { currentRequest: event, pendingRequests: s.pendingRequests };
       }
-      // Queue if another dialog is showing
       return { pendingRequests: [...s.pendingRequests, event] };
     });
   },
@@ -64,33 +68,33 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
 
     const current = get().currentRequest;
 
-    if (action === "allow_all_session") {
-      if (current) {
+    if (action === "allow_all_session" && current) {
+      const sessionId = current.session_id;
+      if (sessionId) {
         set((s) => {
-          const newSet = new Set(s.sessionAllowed);
+          const existing = s.sessionAllowed[sessionId] ?? new Set<string>();
+          const newSet = new Set(existing);
           newSet.add(current.tool_name);
-          return { sessionAllowed: newSet };
+          return {
+            sessionAllowed: { ...s.sessionAllowed, [sessionId]: newSet },
+          };
         });
       }
     }
 
-    // Send approval decision to Gateway API and await response
     const agentId = current?.agent_id;
     if (agentId) {
-      // Use the event's session_id (originating session) not currentSessionId
       const sessionId = current?.session_id;
       const result = await sendApprovalToGateway(agentId, requestId, action, sessionId);
       if (!result.ok) {
-        // Gateway returned error (e.g. 404 = approval already timed out)
         const errorMsg = result.status === 404
           ? "审批请求已过期（Runtime 已超时拒绝），操作未生效"
           : `审批发送失败 (HTTP ${result.status})`;
         set({ loading: false, approvalError: errorMsg });
-        return; // Keep modal visible so user sees the error
+        return;
       }
     }
 
-    // Success — advance to next pending request or clear
     set((s) => {
       const next = s.pendingRequests[0] || null;
       return {
@@ -118,14 +122,11 @@ export const usePermissionStore = create<PermissionStore>((set, get) => ({
     set({
       pendingRequests: [],
       currentRequest: null,
-      sessionAllowed: new Set(),
+      sessionAllowed: {},
       approvalError: null,
     }),
 }));
 
-/// Send tool approval decision to Gateway HTTP API.
-/// This resolves the oneshot channel on the Gateway side,
-/// which unblocks the gRPC dispatch handler waiting for the Runtime.
 async function sendApprovalToGateway(
   agentId: string,
   requestId: string,

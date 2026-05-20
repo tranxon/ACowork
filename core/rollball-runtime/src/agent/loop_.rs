@@ -74,6 +74,20 @@ impl ApprovalHandle {
     }
 }
 
+/// A ChunkEvent annotated with the session that produced it.
+///
+/// Every event emitted by a SessionTask carries its `session_id` at the
+/// *source*, eliminating the need for external relay-side injection via
+/// a watch channel (which had a race condition when sessions switched
+/// between event production and relay processing).
+#[derive(Debug, Clone)]
+pub struct SessionChunkEvent {
+    /// The session that produced this event.
+    pub session_id: String,
+    /// The actual chunk event.
+    pub event: ChunkEvent,
+}
+
 /// Streaming chunk event emitted during LLM response generation.
 ///
 /// Adapted from ZeroClaw's DraftEvent, simplified for RollBall's IPC architecture.
@@ -122,8 +136,6 @@ pub enum ChunkEvent {
         risk_level: String,
         /// Human-readable reason for the risk assessment
         reason: String,
-        /// Session ID that originated this approval request (for multi-session routing)
-        session_id: Option<String>,
     },
     /// Agent response interrupted by user stop signal
     Interrupted {
@@ -190,7 +202,7 @@ impl AgentLoop {
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
         budget: rollball_core::Budget,
-        on_chunk: Option<mpsc::Sender<ChunkEvent>>,
+        on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
         conversation: Option<ConversationSession>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
@@ -541,6 +553,11 @@ impl AgentLoop {
 
     /// Switch to a new conversation session.
     ///
+    /// **Legacy: In Gateway multi-session mode, each session runs in its own
+    /// SessionTask/AgentLoop, so this method is not used.** It remains for
+    /// potential future CLI standalone mode where a single AgentLoop switches
+    /// between conversations.
+    ///
     /// This is the **single canonical way** to change the active conversation
     /// on an AgentLoop. It:
     /// 1. Closes the old session (triggers distillation)
@@ -554,6 +571,7 @@ impl AgentLoop {
     /// `conversation` field was never updated, so all subsequent messages were
     /// still written to the old JSONL file. This was the P0 root cause of
     /// messages appearing in wrong sessions (see ADR-session-fix).
+    #[allow(dead_code)]
     pub fn switch_conversation(
         &mut self,
         new_session: ConversationSession,
@@ -749,12 +767,10 @@ impl AgentLoop {
                 );
 
                 // Notify Gateway/Desktop App that iteration limit was reached
-                if let Some(ref tx) = self.core.on_chunk {
-                    let _ = tx.try_send(ChunkEvent::IterationLimitPaused {
-                        iteration,
-                        max_iterations: self.core.config.max_iterations,
-                    });
-                }
+                let _ = self.core.try_send_chunk(ChunkEvent::IterationLimitPaused {
+                    iteration,
+                    max_iterations: self.core.config.max_iterations,
+                });
 
                 // Wait for ContinueExecution or Interrupt from inbound queue
                 loop {
@@ -1073,7 +1089,7 @@ impl AgentLoop {
                     has_usage = true,
                     "ContextUsage: checking preconditions"
                 );
-                if let (Some(chunk_tx), Some(caps)) = (&self.core.on_chunk, model_caps) {
+                if let Some(caps) = model_caps {
                     let ctx_usage = crate::agent::context::compute_context_usage(caps, usage, self.core.max_output_tokens_limit);
                     tracing::debug!(
                         context_window = ctx_usage.context_window,
@@ -1081,14 +1097,14 @@ impl AgentLoop {
                         usage_percent = ctx_usage.usage_percent,
                         "ContextUsage: sending report"
                     );
-                    let _ = chunk_tx.send(
-                        crate::agent::loop_::ChunkEvent::ContextUsage(ctx_usage)
-                    ).await;
+                    if !self.core.try_send_chunk(ChunkEvent::ContextUsage(ctx_usage)) {
+                        tracing::debug!("ContextUsage: on_chunk channel full/closed or session_id missing");
+                    }
                 } else {
                     tracing::warn!(
                         has_chunk_tx = self.core.on_chunk.is_some(),
                         has_model_caps = model_caps.is_some(),
-                        "ContextUsage: NOT sent — missing on_chunk channel or model capabilities"
+                        "ContextUsage: NOT sent — missing model capabilities"
                     );
                 }
             }
@@ -1184,16 +1200,13 @@ impl AgentLoop {
             }
 
             // Emit ToolCall events via chunk channel (ensures ordering with content chunks)
-            if let Some(ref tx) = self.core.on_chunk {
-                for tc in &deduped_calls {
-                    let event = ChunkEvent::ToolCall {
-                        name: tc.function.name.clone(),
-                        args: tc.function.arguments.clone(),
-                        id: tc.id.clone(),
-                    };
-                    if tx.try_send(event).is_err() {
-                        tracing::debug!("on_chunk channel full or closed, dropping ToolCall event");
-                    }
+            for tc in &deduped_calls {
+                if !self.core.try_send_chunk(ChunkEvent::ToolCall {
+                    name: tc.function.name.clone(),
+                    args: tc.function.arguments.clone(),
+                    id: tc.id.clone(),
+                }) {
+                    tracing::debug!("on_chunk channel full or closed, dropping ToolCall event");
                 }
             }
 
@@ -1237,11 +1250,9 @@ impl AgentLoop {
                 }
 
                 // Notify frontend via chunk channel
-                if let Some(ref tx) = self.core.on_chunk {
-                    let _ = tx.try_send(ChunkEvent::Interrupted {
-                        content: content.clone(),
-                    });
-                }
+                let _ = self.core.try_send_chunk(ChunkEvent::Interrupted {
+                    content: content.clone(),
+                });
 
                 // Debug: push step event and auto-pause if stepping
                 self.push_debug_step(
@@ -1293,16 +1304,13 @@ impl AgentLoop {
             }
 
             // Emit ToolResult events via chunk channel (ensures ordering with content chunks)
-            if let Some(ref tx) = self.core.on_chunk {
-                for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
-                    let event = ChunkEvent::ToolResult {
-                        name: tc.function.name.clone(),
-                        result: result_content.clone(),
-                        tool_call_id: tc.id.clone(),
-                    };
-                    if tx.try_send(event).is_err() {
-                        tracing::debug!("on_chunk channel full or closed, dropping ToolResult event");
-                    }
+            for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
+                if !self.core.try_send_chunk(ChunkEvent::ToolResult {
+                    name: tc.function.name.clone(),
+                    result: result_content.clone(),
+                    tool_call_id: tc.id.clone(),
+                }) {
+                    tracing::debug!("on_chunk channel full or closed, dropping ToolResult event");
                 }
             }
 
@@ -1727,16 +1735,13 @@ impl AgentLoop {
 
     /// Send ToolApprovalNeeded chunk event to Gateway (via on_chunk channel).
     fn send_tool_approval_needed(&self, request_id: &str, req: &ApprovalRequest) {
-        if let Some(ref tx) = self.core.on_chunk {
-            let _ = tx.try_send(ChunkEvent::ToolApprovalNeeded {
-                request_id: request_id.to_string(),
-                tool_name: req.tool_name.clone(),
-                action: req.action.clone(),
-                risk_level: req.risk_level.label().to_string(),
-                reason: req.reason.clone(),
-                session_id: self.current_session_id().map(|s| s.to_string()),
-            });
-        }
+        let _ = self.core.try_send_chunk(ChunkEvent::ToolApprovalNeeded {
+            request_id: request_id.to_string(),
+            tool_name: req.tool_name.clone(),
+            action: req.action.clone(),
+            risk_level: req.risk_level.label().to_string(),
+            reason: req.reason.clone(),
+        });
     }
 
     /// Handle an approval request received on the approval_rx channel.

@@ -36,20 +36,32 @@ let lastLoadedSessionId: string | null = null;
 export function ChatPanel() {
   const { agents, selectedAgentId, startAgent } = useAgentStore();
 
-  // Per-agent state selectors — read from agentStates[selectedAgentId]
+  // Per-agent + per-session state selectors
+  // Two-level mapping: agentStates[agentId].sessionStates[sessionId]
   const agentState = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId] : null);
-  const messages = agentState?.messages ?? [];
-  const streamingMessageId = agentState?.streamingMessageId ?? null;
-  const thinkingMessageId = agentState?.thinkingMessageId ?? null;
-  const contextUsage = agentState?.contextUsage ?? null;
-  const iterationLimitPaused = agentState?.iterationLimitPaused ?? null;
-  const pendingApproval = agentState?.pendingApproval ?? null;
-  const isReasoning = agentState?.isReasoning ?? false;
+  const sessionState = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId] ?? null;
+  });
+  const messages = sessionState?.messages ?? [];
+  const streamingMessageId = sessionState?.streamingMessageId ?? null;
+  const thinkingMessageId = sessionState?.thinkingMessageId ?? null;
+  const contextUsage = sessionState?.contextUsage ?? null;
+  const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
+  const pendingApproval = sessionState?.pendingApproval ?? null;
+  const isReasoning = sessionState?.isReasoning ?? false;
+  const isLoadingSession = sessionState?.isLoadingSession ?? false;
+  const loadError = sessionState?.loadError ?? null;
+
+  // Agent-level state (model, sending)
+  const sending = agentState?.sending ?? false;
+  const currentModel = agentState?.model ?? useChatStore.getState().currentModel;
+  const currentProvider = agentState?.provider ?? useChatStore.getState().currentProvider;
 
   // Global state and actions
-  const { sending, wsMap, connectStream, sendMessage, sendInterrupt, currentModel, currentProvider, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution, resolveApproval } = useChatStore();
-  const isLoadingSession = agentState?.isLoadingSession ?? false;
-  const loadError = agentState?.loadError ?? null;
+  const { wsMap, connectStream, sendMessage, sendInterrupt, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution, resolveApproval } = useChatStore();
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
@@ -232,8 +244,10 @@ export function ChatPanel() {
 
       if (!isSameAgentRemount) {
         // Only load session messages on first switch to this agent if no messages yet.
-        // Per-agent state preserves messages across remounts, so skip reload if already loaded.
-        const agentMessages = useChatStore.getState().agentStates[selectedAgentId]?.messages;
+        // Per-session state preserves messages across remounts, so skip reload if already loaded.
+        const agent = useChatStore.getState().agentStates[selectedAgentId];
+        const activeSessId = agent?.activeSessionId;
+        const agentMessages = activeSessId ? agent?.sessionStates[activeSessId]?.messages : undefined;
         if (!agentMessages || agentMessages.length === 0) {
           // 3. Fetch sessions and 4. restore previously selected session (or latest)
           const initSession = async () => {
@@ -267,10 +281,12 @@ export function ChatPanel() {
               ? sessions.find((s) => s.session_id === rememberedSessionId) ?? sessions[0]
               : sessions[0];
             if (targetSession) {
+              // switchSession first (clears old messages), then loadSessionMessages
+              // so that messages are not cleared after loading.
+              await useSessionStore.getState().switchSession(targetSession.session_id, selectedAgentId);
               await useChatStore
                 .getState()
                 .loadSessionMessages(selectedAgentId, targetSession.session_id);
-              await useSessionStore.getState().switchSession(targetSession.session_id, selectedAgentId);
             }
             isInitialLoadRef.current = false;
           };
@@ -323,6 +339,18 @@ export function ChatPanel() {
     // while WebSocket was still streaming), skip reload to avoid overwriting
     // in-flight messages.
     if (currentSessionId === lastLoadedSessionId) return;
+
+    // CRITICAL: If the session already has messages AND the agent is actively streaming
+    // (sending=true or streamingMessageId is set), skip loadSessionMessages.
+    // Loading from the backend would overwrite in-memory streaming messages with
+    // only-persisted messages, causing thinking/chat bubbles to disappear.
+    const agent = useChatStore.getState().agentStates[selectedAgentId];
+    const sessState = agent?.sessionStates[currentSessionId];
+    if (sessState && sessState.messages.length > 0 && (agent?.sending || sessState.streamingMessageId)) {
+      lastLoadedSessionId = currentSessionId;
+      return;
+    }
+
     lastLoadedSessionId = currentSessionId;
 
     // Mark as initial load to trigger scroll-to-bottom after messages are loaded
@@ -383,8 +411,10 @@ export function ChatPanel() {
     if (!container || !selectedAgentId) return;
 
     const { isLoadingMore } = useChatStore.getState();
-    const agentState = useChatStore.getState().agentStates[selectedAgentId];
-    const hasMoreMessages = agentState?.hasMoreMessages ?? false;
+    const agent = useChatStore.getState().agentStates[selectedAgentId];
+    const activeSessId = agent?.activeSessionId;
+    const sessState = activeSessId ? agent?.sessionStates[activeSessId] : undefined;
+    const hasMoreMessages = sessState?.hasMoreMessages ?? false;
     const currentSessionId = useSessionStore.getState().currentSessionId;
     if (isLoadingMore || !hasMoreMessages || !currentSessionId) return;
 

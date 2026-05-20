@@ -84,33 +84,30 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   switchSession: async (sessionId: string, agentId?: string) => {
-    // Cancel any in-flight session message loading before switching
+    // No-op if switching to the already-active session
+    if (sessionId === useSessionStore.getState().currentSessionId) return;
+
+    // ① IMMEDIATELY set currentSessionId — closes the WS event vulnerability window.
+    //    WS events will now be filtered/routed to the new session.
+    set({ currentSessionId: sessionId });
+
+    // ② Notify chatStore to activate this session (manages session-level state isolation)
+    if (agentId) {
+      useChatStore.getState().activateSession(agentId, sessionId);
+    }
+
+    // ③ Cancel any in-flight session message loading
     useChatStore.getState().abortSessionLoad();
 
-    // Clear the current agent's transient state (streaming, approvals, etc.)
-    // so content from the old session doesn't leak into the new session's view.
-    // The new session's messages will be loaded by ChatPanel's useEffect.
+    // ④ Notify Runtime to switch its active ConversationSession (best-effort, non-blocking)
     if (agentId) {
-      useChatStore.getState().clearMessages(agentId);
-    }
-
-    // Notify Runtime to switch its active ConversationSession (S1.14)
-    if (agentId) {
-      try {
-        const resp = await fetch(
-          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/activate`,
-          { method: "POST" },
-        );
-        if (!resp.ok) {
-          console.warn(`[SessionStore] activate_session failed: HTTP ${resp.status}`);
-          // Continue with local state update anyway — best-effort
-        }
-      } catch (e) {
+      fetch(
+        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/activate`,
+        { method: "POST" },
+      ).catch((e) => {
         console.warn("[SessionStore] activate_session failed:", e);
-        // Continue with local state update — best-effort
-      }
+      });
     }
-    set({ currentSessionId: sessionId });
   },
 
   saveSessionForAgent: (agentId: string, sessionId: string) => {
@@ -141,8 +138,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessions: [newSession, ...state.sessions],
         currentSessionId: data.session_id,
       }));
-      // Clear chatStore messages immediately so old session's content doesn't leak
-      useChatStore.getState().clearMessages(agentId);
+      // Activate the new session in chatStore (creates session state entry)
+      useChatStore.getState().activateSession(agentId, data.session_id);
     } catch (e) {
       console.error("[SessionStore] Failed to create session:", e);
     }
@@ -169,13 +166,17 @@ export const useSessionStore = create<SessionState>((set) => ({
         currentSessionId: newCurrentId,
       });
 
-      // If the deleted session was current, clear chat and update agent map
+      // If the deleted session was current, activate the new current session
       if (isCurrent) {
-        useChatStore.getState().clearMessages(agentId);
         if (newCurrentId) {
+          useChatStore.getState().activateSession(agentId, newCurrentId);
           useSessionStore.getState().saveSessionForAgent(agentId, newCurrentId);
+        } else {
+          useChatStore.getState().clearMessages(agentId);
         }
       }
+      // Remove deleted session's cached state from chatStore
+      useChatStore.getState().removeSessionState(agentId, sessionId);
 
       // Invalidate session title so it gets re-fetched
       set((state) => ({

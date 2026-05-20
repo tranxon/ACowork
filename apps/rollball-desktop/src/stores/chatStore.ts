@@ -9,9 +9,7 @@ import { getGatewayUrl } from "../lib/config";
 
 // ── Sender info helpers ────────────────────────────────────────────────
 
-/** Fill senderDisplayName / senderRole for messages from the agent */
 function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; senderRole?: string } {
-  // Priority: agentProfileStore custom name > agent display_name > agent name
   const agentProfile = useAgentProfileStore.getState().getProfile(agentId);
   const agents = useAgentStore.getState().agents;
   const agent = agents.find((a) => a.agent_id === agentId);
@@ -21,7 +19,6 @@ function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; send
   };
 }
 
-/** Fill senderDisplayName for user messages */
 function getUserSenderInfo(): { senderDisplayName?: string } {
   try {
     const profile = useUserProfileStore.getState().profile;
@@ -32,9 +29,11 @@ function getUserSenderInfo(): { senderDisplayName?: string } {
 }
 
 // ---------------------------------------------------------------------------
-// Per-agent chat state — each agent owns an independent instance
+// Per-session chat state — each session owns an independent instance
 // ---------------------------------------------------------------------------
-interface AgentChatState {
+
+/** State for a single conversation session within an agent. */
+interface SessionChatState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
   streamBuffer: string;
@@ -46,17 +45,15 @@ interface AgentChatState {
   hasMoreMessages: boolean;
   messageCursor: string | null;
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
-  /** Pending high-risk tool approval request shown inline in chat */
   pendingApproval: ToolApprovalNeededEvent | null;
-  /** Whether initial session messages are being loaded for this agent */
   isLoadingSession: boolean;
-  /** Error message when session message loading fails (null = no error) */
   loadError: string | null;
-  /** LLM reasoning in progress — frontend shows pulsing "..." indicator */
   isReasoning: boolean;
+  /** Last accessed timestamp — used for LRU eviction */
+  lastAccessed: number;
 }
 
-const DEFAULT_AGENT_STATE: AgentChatState = {
+const DEFAULT_SESSION_STATE: SessionChatState = {
   messages: [],
   streamingMessageId: null,
   streamBuffer: "",
@@ -72,19 +69,75 @@ const DEFAULT_AGENT_STATE: AgentChatState = {
   isLoadingSession: false,
   loadError: null,
   isReasoning: false,
+  lastAccessed: 0,
 };
 
-/** Get the chat state for a specific agent (returns default if not yet initialized) */
-function getAgentState(state: ChatStore, agentId: string): AgentChatState {
+// ---------------------------------------------------------------------------
+// Per-agent state — owns session states, WebSocket, model info
+// ---------------------------------------------------------------------------
+
+/** State for a single agent — contains all session states + agent-level resources. */
+interface AgentState {
+  /** Per-session chat states — the core of session isolation */
+  sessionStates: Record<string, SessionChatState>;
+  /** Currently active session ID for this agent */
+  activeSessionId: string | null;
+  /** Per-agent model info */
+  model: string | null;
+  provider: string | null;
+  /** Whether this agent is currently sending a message */
+  sending: boolean;
+  /** Reconnect attempts counter */
+  reconnectAttempts: number;
+  /** Reconnect timer reference */
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  /** Last loaded session ID — prevents redundant reload */
+  lastLoadedSessionId: string | null;
+  /** Session init in progress */
+  isSessionInitLoading: boolean;
+}
+
+const DEFAULT_AGENT_STATE: AgentState = {
+  sessionStates: {},
+  activeSessionId: null,
+  model: null,
+  provider: null,
+  sending: false,
+  reconnectAttempts: 0,
+  reconnectTimer: null,
+  lastLoadedSessionId: null,
+  isSessionInitLoading: false,
+};
+
+const MAX_CACHED_SESSIONS = 5;
+
+// ---------------------------------------------------------------------------
+// Helper functions for state access
+// ---------------------------------------------------------------------------
+
+function getAgentState(state: ChatStore, agentId: string): AgentState {
   return state.agentStates[agentId] ?? DEFAULT_AGENT_STATE;
+}
+
+function getSessionState(state: ChatStore, agentId: string, sessionId: string): SessionChatState {
+  const agent = state.agentStates[agentId];
+  if (!agent) return DEFAULT_SESSION_STATE;
+  return agent.sessionStates[sessionId] ?? DEFAULT_SESSION_STATE;
+}
+
+/** Get the active session's state for an agent (for backward-compatible reads) */
+function getActiveSessionState(state: ChatStore, agentId: string): SessionChatState {
+  const agent = getAgentState(state, agentId);
+  if (!agent.activeSessionId) return DEFAULT_SESSION_STATE;
+  return agent.sessionStates[agent.activeSessionId] ?? DEFAULT_SESSION_STATE;
 }
 
 /** Produce a new agentStates patch that merges `patch` into the agent's current state */
 function updateAgentState(
   state: ChatStore,
   agentId: string,
-  patch: Partial<AgentChatState>,
-): { agentStates: Record<string, AgentChatState> } {
+  patch: Partial<AgentState>,
+): { agentStates: Record<string, AgentState> } {
   const current = getAgentState(state, agentId);
   return {
     agentStates: {
@@ -94,20 +147,104 @@ function updateAgentState(
   };
 }
 
+/** Produce a new agentStates patch that merges `patch` into a specific session's state */
+function updateSessionState(
+  state: ChatStore,
+  agentId: string,
+  sessionId: string,
+  patch: Partial<SessionChatState>,
+): { agentStates: Record<string, AgentState> } {
+  const agent = getAgentState(state, agentId);
+  const currentSession = agent.sessionStates[sessionId] ?? DEFAULT_SESSION_STATE;
+  return {
+    agentStates: {
+      ...state.agentStates,
+      [agentId]: {
+        ...agent,
+        sessionStates: {
+          ...agent.sessionStates,
+          [sessionId]: { ...currentSession, ...patch, lastAccessed: Date.now() },
+        },
+      },
+    },
+  };
+}
+
+/** Produce a new agentStates patch that merges BOTH agent-level and session-level patches.
+ *  This MUST be used whenever both updateAgentState and updateSessionState would be spread
+ *  together — spreading them separately causes the second `agentStates` key to overwrite
+ *  the first, silently losing the agent-level patch (e.g. `sending: false`). */
+function updateAgentAndSession(
+  state: ChatStore,
+  agentId: string,
+  agentPatch: Partial<AgentState>,
+  sessionId: string,
+  sessionPatch: Partial<SessionChatState>,
+): { agentStates: Record<string, AgentState> } {
+  const agent = getAgentState(state, agentId);
+  const session = agent.sessionStates[sessionId] ?? DEFAULT_SESSION_STATE;
+  return {
+    agentStates: {
+      ...state.agentStates,
+      [agentId]: {
+        ...agent,
+        ...agentPatch,
+        sessionStates: {
+          ...agent.sessionStates,
+          [sessionId]: { ...session, ...sessionPatch, lastAccessed: Date.now() },
+        },
+      },
+    },
+  };
+}
+
+/** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS */
+function evictStaleSessions(
+  state: ChatStore,
+  agentId: string,
+  protectSessionId?: string,
+): { agentStates: Record<string, AgentState> } {
+  const agent = getAgentState(state, agentId);
+  const sessionIds = Object.keys(agent.sessionStates);
+  if (sessionIds.length <= MAX_CACHED_SESSIONS) return { agentStates: state.agentStates };
+
+  // Sort by lastAccessed ascending (oldest first)
+  const sorted = sessionIds.sort((a, b) =>
+    (agent.sessionStates[a]?.lastAccessed ?? 0) - (agent.sessionStates[b]?.lastAccessed ?? 0)
+  );
+
+  const toEvict = sorted
+    .filter((id) => id !== agent.activeSessionId && id !== protectSessionId)
+    .slice(0, sessionIds.length - MAX_CACHED_SESSIONS);
+
+  if (toEvict.length === 0) return { agentStates: state.agentStates };
+
+  const newSessionStates = { ...agent.sessionStates };
+  for (const id of toEvict) {
+    delete newSessionStates[id];
+  }
+
+  return {
+    agentStates: {
+      ...state.agentStates,
+      [agentId]: { ...agent, sessionStates: newSessionStates },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // ChatStore — global fields + per-agent agentStates
 // ---------------------------------------------------------------------------
-interface ChatStore {
-  /** Per-agent chat states — the core of the per-agent model */
-  agentStates: Record<string, AgentChatState>;
 
-  // ---- Global (non-per-agent) fields ----
-  sending: boolean;
+interface ChatStore {
+  agentStates: Record<string, AgentState>;
+
+  // ---- Global fields (not per-agent) ----
   /** Per-agent WebSocket connections: agentId → WebSocket */
   wsMap: Record<string, WebSocket>;
-  /** Current active model for the selected agent */
+  /** Current active model (derived from agentStates[activeAgent].model, kept for compat) */
   currentModel: string | null;
-  /** Current active provider for the selected agent */
+  /** Current active provider (derived from agentStates[activeAgent].provider, kept for compat) */
   currentProvider: string | null;
   /** Per-agent model memory: agent_id → { model, provider } */
   agentModels: Record<string, { model: string; provider: string }>;
@@ -120,37 +257,30 @@ interface ChatStore {
   loadSequence: number;
   /** AbortController for cancelling in-flight loadSessionMessages requests */
   abortController: AbortController | null;
+  /** Tracks which session titles have already been persisted to backend */
+  persistedTitles: Set<string>;
 
   // ---- Actions ----
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string, command?: string) => Promise<void>;
   stopCurrentMessage: () => Promise<void>;
-  /** Send interrupt without changing `sending` — keeps UI as Stop button.
-   *  Used when the user queues a message then hits Stop — the loop is
-   *  interrupted but the agent continues processing in the next turn. */
   sendInterrupt: () => void;
-  /** Disconnect a specific agent's WebSocket, or all if no agentId provided */
   disconnectStream: (agentId?: string) => void;
-  /** Clear messages and streaming state for a specific agent (or currentAgentId) */
+  /** Clear session state for a specific agent's active session */
   clearMessages: (agentId?: string) => void;
-  /** Trim messages to the specified count (for debug rewind).
-   *  Keeps the first `count` messages, discards the rest. */
+  /** Clear a specific session's state */
+  clearSessionState: (agentId: string, sessionId: string) => void;
+  /** Remove a session's cached state (e.g. on session delete) */
+  removeSessionState: (agentId: string, sessionId: string) => void;
   trimMessagesTo: (agentId: string, count: number) => void;
   setCurrentModel: (model: string, provider: string, agentId: string) => void;
   setAvailableModels: (models: { name: string; provider: string }[]) => void;
-  /** Get the WebSocket for a specific agent */
   getWs: (agentId: string) => WebSocket | undefined;
-  /** Load provider for a specific agent from per-agent cache */
   loadAgentProvider: (agentId: string) => string | null;
-  /** Continue agent execution after iteration limit pause */
   continueExecution: (agentId: string) => Promise<void>;
-  /** Clear the inline tool approval bar after user decision */
   resolveApproval: (agentId: string) => void;
-  /** Load model for a specific agent from Gateway API, returns the model name */
   loadAgentModel: (agentId: string) => Promise<string | null>;
-  /** Load conversation history for a specific agent from Gateway API */
   loadConversationHistory: (agentId: string) => Promise<void>;
-  /** Load paginated messages for a specific session */
   loadSessionMessages: (
     agentId: string,
     sessionId: string,
@@ -158,64 +288,73 @@ interface ChatStore {
     limit?: number,
     direction?: string,
   ) => Promise<void>;
-  /** Abort any in-flight loadSessionMessages request */
   abortSessionLoad: () => void;
-  /** Load more older messages (triggered by scroll to top) */
   loadMoreMessages: (agentId: string, sessionId: string) => Promise<void>;
+  /** Activate a session — sets activeSessionId and triggers cleanup */
+  activateSession: (agentId: string, sessionId: string) => void;
+  /** Get the active session ID for an agent */
+  getActiveSessionId: (agentId: string) => string | null;
 }
 
-/** Derive WebSocket URL from Gateway HTTP base URL */
 function toWsUrl(httpUrl: string, agentId: string): string {
   return `${httpUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/agents/${agentId}/stream`;
 }
 
-/** Per-agent reconnect state — tracked outside zustand to avoid re-render loops */
-const reconnectState: Record<string, { timer: ReturnType<typeof setTimeout> | null; attempts: number }> = {};
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
 function scheduleReconnect(agentId: string, gatewayUrl: string) {
-  if (!reconnectState[agentId]) {
-    reconnectState[agentId] = { timer: null, attempts: 0 };
-  }
-  const rs = reconnectState[agentId];
-  if (rs.timer) return; // already scheduled
-  if (rs.attempts >= MAX_RECONNECT_ATTEMPTS) {
+  const store = useChatStore.getState();
+  const agent = getAgentState(store, agentId);
+  if (agent.reconnectTimer) return;
+  if (agent.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
     console.warn(`[ChatStore] Max reconnect attempts reached for agent ${agentId}, giving up`);
     return;
   }
-  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.5, rs.attempts), RECONNECT_MAX_MS);
-  rs.attempts++;
-  console.log(`[ChatStore] Reconnecting agent ${agentId} in ${Math.round(delay)}ms (attempt ${rs.attempts}/${MAX_RECONNECT_ATTEMPTS})`);
-  rs.timer = setTimeout(() => {
-    rs.timer = null;
-    const store = useChatStore.getState();
-    // Only reconnect if this agent has no active ws
-    if (!store.wsMap[agentId]) {
-      store.connectStream(agentId, gatewayUrl);
+  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.5, agent.reconnectAttempts), RECONNECT_MAX_MS);
+  const newAttempts = agent.reconnectAttempts + 1;
+  console.log(`[ChatStore] Reconnecting agent ${agentId} in ${Math.round(delay)}ms (attempt ${newAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+  const timer = setTimeout(() => {
+    // Clear timer ref first
+    useChatStore.setState((state) => updateAgentState(state, agentId, { reconnectTimer: null }));
+    const currentStore = useChatStore.getState();
+    if (!currentStore.wsMap[agentId]) {
+      currentStore.connectStream(agentId, gatewayUrl);
     }
   }, delay);
+  useChatStore.setState((state) =>
+    updateAgentState(state, agentId, { reconnectTimer: timer, reconnectAttempts: newAttempts })
+  );
 }
 
 function resetReconnect(agentId: string) {
-  const rs = reconnectState[agentId];
-  if (rs?.timer) {
-    clearTimeout(rs.timer);
-    rs.timer = null;
+  const store = useChatStore.getState();
+  const agent = getAgentState(store, agentId);
+  if (agent.reconnectTimer) {
+    clearTimeout(agent.reconnectTimer);
   }
-  if (rs) rs.attempts = 0;
+  useChatStore.setState((state) =>
+    updateAgentState(state, agentId, { reconnectTimer: null, reconnectAttempts: 0 })
+  );
 }
 
 function resetAllReconnects() {
-  for (const agentId of Object.keys(reconnectState)) {
-    resetReconnect(agentId);
+  const store = useChatStore.getState();
+  for (const agentId of Object.keys(store.agentStates)) {
+    const agent = store.agentStates[agentId];
+    if (agent.reconnectTimer) clearTimeout(agent.reconnectTimer);
   }
+  // Batch reset all agents' reconnect state
+  const newAgentStates: Record<string, AgentState> = {};
+  for (const [id, agent] of Object.entries(store.agentStates)) {
+    newAgentStates[id] = { ...agent, reconnectTimer: null, reconnectAttempts: 0 };
+  }
+  useChatStore.setState({ agentStates: newAgentStates });
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   agentStates: {},
-  sending: false,
   wsMap: {},
   currentModel: null,
   currentProvider: null,
@@ -225,24 +364,123 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   isLoadingMore: false,
   loadSequence: 0,
   abortController: null,
+  persistedTitles: new Set(),
 
   getWs: (agentId: string) => get().wsMap[agentId],
 
-  connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
-    // Update currentAgentId for stop functionality
-    set({ currentAgentId: agentId });
+  getActiveSessionId: (agentId: string) => {
+    return getAgentState(get(), agentId).activeSessionId;
+  },
 
-    // Cancel any pending reconnect for this agent
+  activateSession: (agentId: string, sessionId: string) => {
+    set((state) => {
+      const agent = getAgentState(state, agentId);
+      // No-op if already active
+      if (agent.activeSessionId === sessionId) return {};
+
+      const patches: Partial<AgentState> = { activeSessionId: sessionId };
+
+      let newSessionStates = { ...agent.sessionStates };
+
+      // NOTE: We do NOT clear the old session's transient state (streaming, thinking, etc.)
+      // because the agent may still be writing WS events to it. Clearing would orphan
+      // in-flight messages — the next chunk would create a new message instead of appending.
+      // Transient state is cleared only by explicit actions: clearMessages, clearSessionState,
+      // or when the "done"/"error" event naturally concludes the stream.
+
+      // Ensure the new session has a state entry
+      if (!newSessionStates[sessionId]) {
+        newSessionStates[sessionId] = { ...DEFAULT_SESSION_STATE, lastAccessed: Date.now() };
+      } else {
+        newSessionStates[sessionId] = {
+          ...newSessionStates[sessionId],
+          lastAccessed: Date.now(),
+        };
+      }
+
+      patches.sessionStates = newSessionStates;
+
+      // Evict stale sessions
+      const evictResult = evictStaleSessions(
+        { ...state, agentStates: { ...state.agentStates, [agentId]: { ...agent, ...patches } } },
+        agentId,
+        sessionId,
+      );
+
+      return {
+        ...evictResult,
+        // Update currentModel/currentProvider from the new session's agent
+        currentModel: evictResult.agentStates[agentId]?.model ?? state.currentModel,
+        currentProvider: evictResult.agentStates[agentId]?.provider ?? state.currentProvider,
+      };
+    });
+  },
+
+  clearMessages: (agentId?: string) => {
+    const targetId = agentId ?? get().currentAgentId;
+    if (!targetId) return;
+    const sessionId = getAgentState(get(), targetId).activeSessionId;
+    if (!sessionId) return;
+    set((state) => ({
+      ...updateSessionState(state, targetId, sessionId, {
+        messages: [],
+        streamingMessageId: null,
+        streamBuffer: "",
+        thinkingMessageId: null,
+        isInThinkPhase: false,
+        tokenUsage: null,
+        contextUsage: null,
+        hasMoreMessages: false,
+        messageCursor: null,
+        iterationLimitPaused: null,
+        pendingApproval: null,
+        currentTurnId: null,
+        loadError: null,
+      }),
+      ...(state.currentAgentId === targetId ? { sending: false } : {}),
+    }));
+  },
+
+  clearSessionState: (agentId: string, sessionId: string) => {
+    set((state) => ({
+      ...updateSessionState(state, agentId, sessionId, {
+        messages: [],
+        streamingMessageId: null,
+        streamBuffer: "",
+        thinkingMessageId: null,
+        isInThinkPhase: false,
+        tokenUsage: null,
+        contextUsage: null,
+        hasMoreMessages: false,
+        messageCursor: null,
+        iterationLimitPaused: null,
+        pendingApproval: null,
+        currentTurnId: null,
+        loadError: null,
+        isReasoning: false,
+      }),
+    }));
+  },
+
+  removeSessionState: (agentId: string, sessionId: string) => {
+    set((state) => {
+      const agent = getAgentState(state, agentId);
+      const newSessionStates = { ...agent.sessionStates };
+      delete newSessionStates[sessionId];
+      return updateAgentState(state, agentId, { sessionStates: newSessionStates });
+    });
+  },
+
+  connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
+    set({ currentAgentId: agentId });
     resetReconnect(agentId);
 
-    // If this agent already has an OPEN ws, reuse it
     const existing = get().wsMap[agentId];
     if (existing && existing.readyState === WebSocket.OPEN) {
       console.log("[ChatStore] Reusing existing WebSocket for agent:", agentId);
       return;
     }
 
-    // Close any stale connection for this specific agent only
     if (existing) {
       existing.onopen = null;
       existing.onmessage = null;
@@ -268,14 +506,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.onopen = () => {
       console.log("[ChatStore] WebSocket connected for agent:", agentId);
-      resetReconnect(agentId); // successful connection resets retry counter
-      // Re-set wsMap entry to trigger React re-render with OPEN readyState
+      resetReconnect(agentId);
       set((state) => ({ wsMap: { ...state.wsMap, [agentId]: ws } }));
     };
 
     ws.onmessage = (event) => {
-      // Process ALL incoming messages regardless of which agent is currently displayed.
-      // Per-agent state ensures each agent's data stays independent.
       try {
         const data = JSON.parse(event.data);
         handleMessageEvent(data, set, get, agentId);
@@ -285,7 +520,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     };
 
     ws.onclose = () => {
-      // Defensive check: ignore stale callbacks from a replaced WebSocket
       if (get().wsMap[agentId] !== ws) {
         console.log("[ChatStore] Stale WebSocket closed, ignoring");
         return;
@@ -294,53 +528,70 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => {
         const newMap = { ...state.wsMap };
         delete newMap[agentId];
+        // Clear streaming state for the active session of this agent
+        const agent = getAgentState(state, agentId);
+        const sessionId = agent.activeSessionId;
+        const sessionPatch = sessionId
+          ? updateSessionState(state, agentId, sessionId, {
+              streamingMessageId: null,
+              streamBuffer: "",
+              thinkingMessageId: null,
+              isInThinkPhase: false,
+              isReasoning: false,
+            })
+          : {};
         return {
           wsMap: newMap,
-          // Clear streaming state for the agent that lost its connection
-          ...updateAgentState(state, agentId, {
-            streamingMessageId: null,
-            streamBuffer: "",
-            thinkingMessageId: null,
-            isInThinkPhase: false,
-            isReasoning: false,
-          }),
-          // Only clear global sending if this was the active agent
-          ...(state.currentAgentId === agentId ? { sending: false } : {}),
+          ...sessionPatch,
+          ...(state.currentAgentId === agentId
+            ? { sending: false }
+            : {}),
         };
       });
       scheduleReconnect(agentId, gatewayUrl);
     };
 
     ws.onerror = (err) => {
-      // Defensive check: ignore stale callbacks from a replaced WebSocket
       if (get().wsMap[agentId] !== ws) {
         console.log("[ChatStore] Stale WebSocket error, ignoring");
         return;
       }
       console.warn("[ChatStore] WebSocket error:", err);
-      // Don't remove from wsMap here — onclose will fire after onerror
     };
 
     set((state) => ({
       wsMap: { ...state.wsMap, [agentId]: ws },
       currentAgentId: agentId,
-      sending: false,
       ...updateAgentState(state, agentId, {
-        streamingMessageId: null,
-        streamBuffer: "",
-        thinkingMessageId: null,
-        isInThinkPhase: false,
-        isReasoning: false,
-        tokenUsage: null,
-        contextUsage: null,
+        sending: false,
+        // Clear streaming on the active session
+        ...(state.agentStates[agentId]?.activeSessionId
+          ? {}
+          : {}),
       }),
     }));
+    // Clear active session's streaming state
+    const activeSessionId = getAgentState(get(), agentId).activeSessionId;
+    if (activeSessionId) {
+      set((state) => ({
+        ...updateSessionState(state, agentId, activeSessionId, {
+          streamingMessageId: null,
+          streamBuffer: "",
+          thinkingMessageId: null,
+          isInThinkPhase: false,
+          isReasoning: false,
+          tokenUsage: null,
+          contextUsage: null,
+        }),
+      }));
+    }
   },
 
   sendMessage: async (content: string, agentId: string, command?: string) => {
     const ws = get().wsMap[agentId];
+    const sessionId = useSessionStore.getState().currentSessionId;
 
-    // Add user message to the agent's per-agent state
+    // Add user message to the active session's state
     const userMsg: ChatMessage = {
       id: `msg-user-${Date.now()}`,
       type: "user",
@@ -348,20 +599,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       timestamp: Date.now(),
       ...getUserSenderInfo(),
     };
-    set((state) => ({
-      sending: true,
-      ...updateAgentState(state, agentId, {
-        messages: [...getAgentState(state, agentId).messages, userMsg],
-        currentTurnId: null, // Reset turn tracking for new conversation turn
-      }),
-    }));
+
+    if (sessionId) {
+      set((state) => ({
+        ...updateAgentAndSession(state, agentId, { sending: true }, sessionId, {
+          messages: [...getSessionState(state, agentId, sessionId).messages, userMsg],
+          currentTurnId: null,
+        }),
+      }));
+    } else {
+      set((state) => ({
+        ...updateAgentState(state, agentId, { sending: true }),
+      }));
+    }
 
     // Update session title immediately when first message is sent
-    updateSessionTitleFromMessages(get().agentStates[agentId]?.messages ?? [], agentId);
+    const activeState = getActiveSessionState(get(), agentId);
+    updateSessionTitleFromMessages(activeState.messages, agentId);
 
-    // Helper: send via WebSocket and set up streaming state
     const sendViaWs = (socket: WebSocket) => {
-      const sessionId = useSessionStore.getState().currentSessionId;
       socket.send(JSON.stringify({
         type: "message",
         content,
@@ -369,26 +625,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ...(sessionId ? { session_id: sessionId } : {}),
       }));
 
-      // Reset streaming state for this agent — messages will be created on first chunk
-      set((state) => updateAgentState(state, agentId, {
-        streamBuffer: "",
-        streamingMessageId: null,
-        thinkingMessageId: null,
-        isInThinkPhase: false,
-        isReasoning: false,
-      }));
+      // Reset streaming state for the active session
+      if (sessionId) {
+        set((state) => ({
+          ...updateSessionState(state, agentId, sessionId, {
+            streamBuffer: "",
+            streamingMessageId: null,
+            thinkingMessageId: null,
+            isInThinkPhase: false,
+            isReasoning: false,
+          }),
+        }));
+      }
     };
 
-    // If WebSocket exists, try to use it
     if (ws) {
       if (ws.readyState === WebSocket.OPEN) {
-        // Already connected — send immediately
         sendViaWs(ws);
         return;
       }
-
       if (ws.readyState === WebSocket.CONNECTING) {
-        // Wait for connection to open (max 2 seconds)
         const connected = await new Promise<boolean>((resolve) => {
           const timeout = setTimeout(() => resolve(false), 2000);
           const onOpen = () => {
@@ -406,36 +662,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ws.addEventListener("open", onOpen);
           ws.addEventListener("error", onError);
         });
-
         if (connected) {
           sendViaWs(ws);
           return;
         }
-        // Connection timed out or failed — fall through to HTTP
       }
     }
 
     // Fallback: send via Tauri HTTP command
     try {
-      const sessionId = useSessionStore.getState().currentSessionId;
       const result = await invoke<{ message_id: string; status: string }>(
         "send_message",
         { agentId, content, command, sessionId },
       );
       console.log("[ChatStore] Message sent via HTTP:", result);
-      // Show a system message since we can't stream the response
       const replyMsg: ChatMessage = {
         id: `msg-assistant-${Date.now()}`,
         type: "system",
         content: "Message sent. Waiting for agent response... (streaming not available)",
         timestamp: Date.now(),
       };
-      set((state) => ({
-        ...updateAgentState(state, agentId, {
-          messages: [...getAgentState(state, agentId).messages, replyMsg],
-        }),
-        sending: false,
-      }));
+      if (sessionId) {
+        set((state) => ({
+          ...updateAgentAndSession(state, agentId, { sending: false }, sessionId, {
+            messages: [...getSessionState(state, agentId, sessionId).messages, replyMsg],
+          }),
+        }));
+      }
     } catch (error) {
       console.error("[ChatStore] HTTP message send failed:", error);
       const errorMsg: ChatMessage = {
@@ -444,12 +697,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         content: `Failed to send message: Agent may not be connected yet. Please wait and try again.`,
         timestamp: Date.now(),
       };
-      set((state) => ({
-        ...updateAgentState(state, agentId, {
-          messages: [...getAgentState(state, agentId).messages, errorMsg],
-        }),
-        sending: false,
-      }));
+      if (sessionId) {
+        set((state) => ({
+          ...updateAgentAndSession(state, agentId, { sending: false }, sessionId, {
+            messages: [...getSessionState(state, agentId, sessionId).messages, errorMsg],
+          }),
+        }));
+      }
     }
   },
 
@@ -462,9 +716,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     console.log("[ChatStore] Stopping current message for agent:", currentAgentId);
 
-    // Send stop command via WebSocket if available.
-    // This sends an Interrupt signal (soft stop) — the agent's inference
-    // is cancelled but the agent process stays alive.
     const ws = get().wsMap[currentAgentId];
     if (ws && ws.readyState === WebSocket.OPEN) {
       const sessionId = useSessionStore.getState().currentSessionId;
@@ -473,24 +724,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         agentId: currentAgentId,
         ...(sessionId ? { session_id: sessionId } : {}),
       }));
-    } else {
-      console.warn("[ChatStore] WebSocket not available for stop, skipping");
     }
 
-    // Update UI state immediately
-    set((state) => ({
-      sending: false,
-      ...updateAgentState(state, currentAgentId, {
-        streamingMessageId: null,
-        streamBuffer: "",
-        thinkingMessageId: null,
-        isInThinkPhase: false,
-      }),
-    }));
+    const activeSessionId = getAgentState(get(), currentAgentId).activeSessionId;
+    if (activeSessionId) {
+      set((state) => ({
+        ...updateAgentAndSession(state, currentAgentId, { sending: false }, activeSessionId, {
+          streamingMessageId: null,
+          streamBuffer: "",
+          thinkingMessageId: null,
+          isInThinkPhase: false,
+        }),
+      }));
+    } else {
+      set((state) => ({
+        ...updateAgentState(state, currentAgentId, { sending: false }),
+      }));
+    }
   },
 
-  // Lightweight interrupt — only sends WebSocket stop without touching `sending`.
-  // The `done` event from WebSocket will set `sending: false` naturally.
   sendInterrupt: () => {
     const { currentAgentId } = get();
     if (!currentAgentId) return;
@@ -507,7 +759,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   disconnectStream: (agentId?: string) => {
     if (agentId) {
-      // Disconnect a specific agent's WebSocket
       resetReconnect(agentId);
       const ws = get().wsMap[agentId];
       if (ws) {
@@ -520,19 +771,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => {
         const newMap = { ...state.wsMap };
         delete newMap[agentId];
+        const agent = getAgentState(state, agentId);
+        const sessionId = agent.activeSessionId;
         return {
           wsMap: newMap,
-          ...updateAgentState(state, agentId, {
-            streamingMessageId: null,
-            streamBuffer: "",
-            thinkingMessageId: null,
-            isInThinkPhase: false,
-          }),
+          ...(sessionId
+            ? updateSessionState(state, agentId, sessionId, {
+                streamingMessageId: null,
+                streamBuffer: "",
+                thinkingMessageId: null,
+                isInThinkPhase: false,
+              })
+            : {}),
           ...(state.currentAgentId === agentId ? { sending: false } : {}),
         };
       });
     } else {
-      // Disconnect all agents' WebSockets
       resetAllReconnects();
       const allWs = get().wsMap;
       for (const id of Object.keys(allWs)) {
@@ -543,57 +797,36 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ws.onerror = null;
         ws.close();
       }
-      // Clear streaming state for all agents
-      const clearedAgentStates: Record<string, AgentChatState> = {};
-      for (const id of Object.keys(get().agentStates)) {
-        clearedAgentStates[id] = {
-          ...get().agentStates[id],
-          streamingMessageId: null,
-          streamBuffer: "",
-          thinkingMessageId: null,
-          isInThinkPhase: false,
-        };
+      // Clear streaming state for all agents' active sessions
+      const clearedAgentStates: Record<string, AgentState> = {};
+      for (const [id, agent] of Object.entries(get().agentStates)) {
+        const newSessionStates = { ...agent.sessionStates };
+        if (agent.activeSessionId && newSessionStates[agent.activeSessionId]) {
+          newSessionStates[agent.activeSessionId] = {
+            ...newSessionStates[agent.activeSessionId],
+            streamingMessageId: null,
+            streamBuffer: "",
+            thinkingMessageId: null,
+            isInThinkPhase: false,
+          };
+        }
+        clearedAgentStates[id] = { ...agent, sessionStates: newSessionStates };
       }
       set({
         wsMap: {},
-        sending: false,
         agentStates: clearedAgentStates,
       });
     }
   },
 
-  clearMessages: (agentId?: string) => {
-    const targetId = agentId ?? get().currentAgentId;
-    if (!targetId) return;
-    set((state) => ({
-      ...updateAgentState(state, targetId, {
-        messages: [],
-        streamingMessageId: null,
-        streamBuffer: "",
-        thinkingMessageId: null,
-        isInThinkPhase: false,
-        tokenUsage: null,
-        contextUsage: null,
-        hasMoreMessages: false,
-        messageCursor: null,
-        iterationLimitPaused: null,
-        pendingApproval: null,
-        currentTurnId: null,
-        loadError: null,
-      }),
-      // Only clear global sending if this is the active agent
-      ...(state.currentAgentId === targetId ? { sending: false } : {}),
-    }));
-  },
-
   trimMessagesTo: (agentId: string, count: number) => {
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
+    if (!sessionId) return;
     set((state) => {
-      const agentState = getAgentState(state, agentId);
-      if (agentState.messages.length <= count) return {}; // nothing to trim
-      return updateAgentState(state, agentId, {
-        messages: agentState.messages.slice(0, count),
-        // Reset pagination state after rewind so stale cursors don't
-        // trigger unnecessary loadMoreMessages requests.
+      const session = getSessionState(state, agentId, sessionId);
+      if (session.messages.length <= count) return {};
+      return updateSessionState(state, agentId, sessionId, {
+        messages: session.messages.slice(0, count),
         hasMoreMessages: false,
         messageCursor: null,
       });
@@ -601,29 +834,38 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   setCurrentModel: (model: string, provider: string, agentId: string) => {
-    // Optimistically update UI only — don't cache until confirmed by backend
     const prevModel = get().currentModel;
     const prevProvider = get().currentProvider;
-    set({ currentModel: model, currentProvider: provider });
-    // Send model_switch message to Agent via WebSocket when user changes model
+    // Update both global (compat) and per-agent
+    set((state) => ({
+      currentModel: model,
+      currentProvider: provider,
+      ...updateAgentState(state, agentId, { model, provider }),
+      agentModels: {
+        ...state.agentModels,
+        [agentId]: { model, provider },
+      },
+    }));
     const ws = get().wsMap[agentId];
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "model_switch", model, provider, agentId, _prevModel: prevModel }));
     } else {
-      // No WebSocket — revert immediately
-      set({ currentModel: prevModel, currentProvider: prevProvider });
+      // No WebSocket — revert
+      set((state) => ({
+        currentModel: prevModel,
+        currentProvider: prevProvider,
+        ...updateAgentState(state, agentId, { model: prevModel, provider: prevProvider }),
+      }));
     }
   },
   setAvailableModels: (models: { name: string; provider: string }[]) => {
     set((state) => {
-      // Check if current model+provider combo exists in new list
       const currentModelExists = state.currentModel && state.currentProvider
         ? models.some(m => m.name === state.currentModel && m.provider === state.currentProvider)
         : false;
 
       return {
         availableModels: models,
-        // Only fallback to first model if current selection doesn't exist in new list
         currentModel: currentModelExists ? state.currentModel : (models[0]?.name ?? null),
         currentProvider: currentModelExists ? state.currentProvider : (models[0]?.provider ?? null),
       };
@@ -642,17 +884,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         body: JSON.stringify({ ...(sessionId ? { session_id: sessionId } : {}) }),
       });
       if (resp.ok) {
-        set((state) => ({
-          sending: true,
-          ...updateAgentState(state, agentId, { iterationLimitPaused: null }),
-        }));
+        if (sessionId) {
+          set((state) => ({
+            ...updateAgentAndSession(state, agentId, { sending: true }, sessionId, { iterationLimitPaused: null }),
+          }));
+        } else {
+          set((state) => ({
+            ...updateAgentState(state, agentId, { sending: true }),
+          }));
+        }
       }
     } catch (error) {
       console.error("[ChatStore] Failed to send continue signal:", error);
     }
   },
   resolveApproval: (agentId: string) => {
-    set((state) => updateAgentState(state, agentId, { pendingApproval: null }));
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
+    if (!sessionId) return;
+    set((state) => updateSessionState(state, agentId, sessionId, { pendingApproval: null }));
   },
   loadAgentModel: async (agentId: string): Promise<string | null> => {
     try {
@@ -661,10 +910,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const data = await resp.json() as { provider: string; model: string; available_models: string[] };
       if (data.model) {
         set((state) => {
-          // The backend now returns the saved provider from .agent_model.json,
-          // so data.provider is the correct per-agent provider.
-          // Only fall back to the cached provider if the backend didn't return one
-          // (shouldn't happen with the fix, but kept for robustness).
           const cached = state.agentModels[agentId];
           let provider = data.provider;
           if (!provider && cached && cached.model === data.model && cached.provider) {
@@ -673,6 +918,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             currentModel: data.model,
             currentProvider: provider,
+            ...updateAgentState(state, agentId, { model: data.model, provider }),
             agentModels: {
               ...state.agentModels,
               [agentId]: { model: data.model, provider },
@@ -693,7 +939,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       if (!data.messages || data.messages.length === 0) return;
 
-      // Convert Episode messages to ChatMessage format
       const historyMessages: ChatMessage[] = data.messages.map((msg) => ({
         id: `history-${msg.turn_index}-${msg.role}-${msg.timestamp}`,
         type: (msg.role === "user"
@@ -704,13 +949,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               ? "thought"
               : "system") as ChatMessage["type"],
         content: msg.content,
-        timestamp: msg.timestamp * 1000, // Convert seconds to milliseconds
+        timestamp: msg.timestamp * 1000,
       }));
 
-      set((state) => updateAgentState(state, agentId, { messages: historyMessages }));
+      // Use session_id from response if available, else fall back to active session
+      const sessionId = data.session_id ?? getAgentState(get(), agentId).activeSessionId;
+      if (sessionId) {
+        set((state) => updateSessionState(state, agentId, sessionId, { messages: historyMessages }));
+      }
     } catch (e) {
       console.error("[ChatStore] Failed to load conversation history:", e);
-      set((state) => updateAgentState(state, agentId, { messages: [] }));
+      const sessionId = getAgentState(get(), agentId).activeSessionId;
+      if (sessionId) {
+        set((state) => updateSessionState(state, agentId, sessionId, { messages: [] }));
+      }
     }
   },
 
@@ -721,18 +973,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     limit: number = 50,
     direction: string = "backward",
   ) => {
-    // Skip loading if this agent is currently streaming — don't overwrite live data
+    // Skip loading if this session is currently streaming or agent is actively sending
     const agentState = getAgentState(get(), agentId);
-    if (agentState.streamingMessageId != null) {
-      console.log(`[ChatStore] Skipping loadSessionMessages — agent ${agentId} is streaming`);
+    const sessionState = getSessionState(get(), agentId, sessionId);
+    if (sessionState.streamingMessageId != null || (agentState.activeSessionId === sessionId && agentState.sending)) {
+      console.log(`[ChatStore] Skipping loadSessionMessages — session ${sessionId} is active (streaming=${sessionState.streamingMessageId != null}, sending=${agentState.sending})`);
       return;
     }
 
-    // Increment loadSequence — stale responses with old sequence will be discarded
     const seq = get().loadSequence + 1;
     set({ loadSequence: seq });
 
-    // Abort any in-flight request before starting a new one
     const oldController = get().abortController;
     if (oldController) {
       oldController.abort();
@@ -742,7 +993,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     if (!cursor) {
       set((state) => ({
-        ...updateAgentState(state, agentId, { isLoadingSession: true, loadError: null }),
+        ...updateSessionState(state, agentId, sessionId, { isLoadingSession: true, loadError: null }),
       }));
     }
 
@@ -757,7 +1008,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         { signal: controller.signal },
       );
 
-      // Discard stale response: if loadSequence has changed, this response is outdated
       if (get().loadSequence !== seq) {
         console.log(`[ChatStore] Discarding stale loadSessionMessages response (seq ${seq} vs current ${get().loadSequence})`);
         return;
@@ -767,7 +1017,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       const data = (await resp.json()) as PaginatedMessages;
 
-      // Check again after await — another request may have started
       if (get().loadSequence !== seq) {
         console.log(`[ChatStore] Discarding stale response after json parse (seq ${seq} vs current ${get().loadSequence})`);
         return;
@@ -778,19 +1027,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const converted = (data.messages ?? []).map((e) => convertConversationEntry(e, agentId));
 
       set((state) => {
-        // Discard if sequence changed while we were building state
         if (state.loadSequence !== seq) {
           console.log(`[ChatStore] Discarding state update — sequence changed`);
           return {};
         }
 
         if (cursor) {
-          // Loading more: prepend older messages
-          const existingIds = new Set(getAgentState(state, agentId).messages.map((m) => m.id));
+          const existingIds = new Set(getSessionState(state, agentId, sessionId).messages.map((m) => m.id));
           const newMessages = converted.filter((m) => !existingIds.has(m.id));
           return {
-            ...updateAgentState(state, agentId, {
-              messages: [...newMessages, ...getAgentState(state, agentId).messages],
+            ...updateSessionState(state, agentId, sessionId, {
+              messages: [...newMessages, ...getSessionState(state, agentId, sessionId).messages],
               hasMoreMessages: data.has_more,
               messageCursor: data.cursor,
               isLoadingSession: false,
@@ -800,9 +1047,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           };
         }
 
-        // Initial load: replace messages for this agent
         return {
-          ...updateAgentState(state, agentId, {
+          ...updateSessionState(state, agentId, sessionId, {
             messages: converted,
             hasMoreMessages: data.has_more,
             messageCursor: data.cursor,
@@ -813,23 +1059,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         };
       });
     } catch (e: unknown) {
-      // Discard errors from stale/aborted requests
       if (get().loadSequence !== seq) {
         console.log(`[ChatStore] Discarding stale error response (seq ${seq})`);
         return;
       }
-      // AbortError is expected — don't log as error
       if (e instanceof DOMException && e.name === "AbortError") {
         console.log(`[ChatStore] loadSessionMessages aborted (seq ${seq})`);
         set((state) => ({
-          ...updateAgentState(state, agentId, { isLoadingSession: false }),
+          ...updateSessionState(state, agentId, sessionId, { isLoadingSession: false }),
           isLoadingMore: false,
         }));
         return;
       }
       console.error("[ChatStore] Failed to load session messages:", e);
       set((state) => ({
-        ...updateAgentState(state, agentId, {
+        ...updateSessionState(state, agentId, sessionId, {
           messages: [],
           hasMoreMessages: false,
           messageCursor: null,
@@ -839,7 +1083,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         isLoadingMore: false,
       }));
     } finally {
-      // Clear the controller if it's still the one we created
       const currentController = get().abortController;
       if (currentController === controller) {
         set({ abortController: null });
@@ -853,38 +1096,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       controller.abort();
       set({ abortController: null });
     }
-    // Also bump loadSequence so pending responses are discarded
     set((state) => ({ loadSequence: state.loadSequence + 1 }));
   },
 
   loadMoreMessages: async (agentId: string, sessionId: string) => {
     const { isLoadingMore } = get();
-    const agentState = getAgentState(get(), agentId);
-    if (isLoadingMore || !agentState.hasMoreMessages || !agentState.messageCursor) return;
+    const sessionState = getSessionState(get(), agentId, sessionId);
+    if (isLoadingMore || !sessionState.hasMoreMessages || !sessionState.messageCursor) return;
     set({ isLoadingMore: true });
     try {
-      await get().loadSessionMessages(agentId, sessionId, agentState.messageCursor, 50, "backward");
+      await get().loadSessionMessages(agentId, sessionId, sessionState.messageCursor, 50, "backward");
     } finally {
-      // Safety net: reset isLoadingMore even if loadSessionMessages
-      // returns early due to streaming state or stale sequence.
       set({ isLoadingMore: false });
     }
   },
 }));
 
-/** Compute session title from first user message (mirrors backend set_title logic) */
+// ── Session title persistence ─────────────────────────────────────────
+
 function makeSessionTitle(content: string): string {
   return content.replace(/\n/g, " ").trim().substring(0, 30);
 }
 
-/** Tracks which session titles have already been persisted to backend,
- *  preventing redundant PUT API calls that trigger unnecessary metadata rewrites. */
-const persistedTitles: Set<string> = new Set();
-
-/** Find first user message and update session title if not yet set.
- *  Updates both local state (sessionStore) AND backend JSONL metadata.
- *  Avoids redundant API calls — the backend's `set_title` already writes the
- *  title after the first user message via AgentLoop. */
 function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: string) {
   const firstUserMsg = messages.find((m) => m.type === "user");
   if (!firstUserMsg || !firstUserMsg.content) return;
@@ -892,15 +1125,17 @@ function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: strin
   if (!sessionId) return;
   const title = makeSessionTitle(firstUserMsg.content);
 
-  // Update local sessionStore
   useSessionStore.getState().updateSessionTitle(sessionId, title);
 
-  // Skip backend API if title was already persisted for this session
   const cacheKey = `${sessionId}::${title}`;
+  const persistedTitles = useChatStore.getState().persistedTitles;
   if (persistedTitles.has(cacheKey)) return;
-  persistedTitles.add(cacheKey);
 
-  // Persist to backend (best-effort, non-blocking)
+  // Add to persisted set
+  const newSet = new Set(persistedTitles);
+  newSet.add(cacheKey);
+  useChatStore.setState({ persistedTitles: newSet });
+
   if (agentId) {
     fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/title`, {
       method: "PUT",
@@ -912,7 +1147,8 @@ function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: strin
   }
 }
 
-/** Convert a ConversationEntry from Gateway to UI ChatMessage */
+// ── Conversation entry conversion ─────────────────────────────────────
+
 function convertConversationEntry(entry: ConversationEntry, agentId: string): ChatMessage {
   const base: ChatMessage = {
     id: entry.id,
@@ -921,7 +1157,6 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
     timestamp: new Date(entry.ts).getTime(),
   };
 
-  // Fill sender info based on role
   if (entry.role === "user") {
     const userInfo = getUserSenderInfo();
     base.senderDisplayName = userInfo.senderDisplayName;
@@ -950,7 +1185,14 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
   return base;
 }
 
-/** Handle incoming WebSocket events — operates on per-agent state via agentId */
+// ── WebSocket event handler — routes by event.session_id ──────────────
+
+const CONTENT_EVENT_TYPES = new Set([
+  "reasoning_started", "chunk", "tool_call", "tool_result",
+  "done", "error", "tool_approval_needed", "iteration_limit_paused",
+  "context_usage",
+]);
+
 function handleMessageEvent(
   data: Record<string, unknown>,
   set: (fn: Partial<ChatStore> | ((state: ChatStore) => Partial<ChatStore>)) => void,
@@ -959,62 +1201,62 @@ function handleMessageEvent(
 ) {
   const eventType = data.type as string;
 
-  // Session filtering: skip content events that belong to a different session.
-  // Structural events (connected, ack) are always processed.
-  // Events without session_id are allowed through for backward compatibility.
-  const contentEventTypes = new Set([
-    "reasoning_started", "chunk", "tool_call", "tool_result",
-    "done", "error", "tool_approval_needed", "iteration_limit_paused",
-    "context_usage",
-  ]);
-  if (contentEventTypes.has(eventType)) {
+  // For content events: route to the session specified by event.session_id
+  // If no session_id in event, fall back to the agent's active session.
+  // This is the core fix: events go directly to their owning session,
+  // NOT filtered by currentSessionId. Background sessions receive their
+  // events correctly; non-active sessions just don't get rendered.
+  let sid: string | null = null;
+
+  if (CONTENT_EVENT_TYPES.has(eventType)) {
     const eventSessionId = data.session_id as string | undefined;
-    if (eventSessionId !== undefined && eventSessionId !== null) {
-      const currentSessionId = useSessionStore.getState().currentSessionId;
-      if (eventSessionId !== currentSessionId) {
-        // Event belongs to a different session — skip it
-        return;
-      }
+    if (eventSessionId != null) {
+      sid = eventSessionId;
+    } else {
+      // Backward compat: no session_id → use active session
+      sid = getAgentState(get(), agentId).activeSessionId;
+    }
+    if (!sid) return;
+
+    // Ensure the session state entry exists
+    const agent = getAgentState(get(), agentId);
+    if (!agent.sessionStates[sid]) {
+      set((state) => ({
+        ...updateSessionState(state, agentId, sid!, { lastAccessed: Date.now() }),
+      }));
     }
   }
 
   switch (eventType) {
     case "connected":
-      // Initial connection acknowledgment
       break;
 
     case "ack":
-      // Message received acknowledgment
       break;
 
     case "reasoning_started":
-      // LLM reasoning phase started — show pulsing "..." indicator.
-      // Cleared on first chunk / tool_call / done / error.
-      set((state) => updateAgentState(state, agentId, { isReasoning: true }));
+      if (sid) {
+        set((state) => updateSessionState(state, agentId, sid, { isReasoning: true }));
+      }
       break;
 
     case "chunk": {
-      // Streaming text chunk — split think/reply at store level
-      // Clear reasoning indicator on first token arrival
-      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
-      // Fallback to `content` field for backward compatibility with older Gateway versions
+      if (!sid) break;
       const delta = (data.delta ?? data.content) as string;
       const reasoningDelta = data.reasoning_content as string | undefined;
 
       set((state) => {
-        const as = getAgentState(state, agentId);
+        const ss = getSessionState(state, agentId, sid!);
 
-        // DeepSeek-style reasoning_content (independent field, not wrapped in <think>)
-        // NOTE: Do NOT set isInThinkPhase here — that flag is exclusively for <think> tag state machine.
-        // Do NOT set streamingMessageId — so when regular content arrives, it creates a new assistant message.
         if (reasoningDelta) {
-          if (as.thinkingMessageId) {
-            return updateAgentState(state, agentId, {
-              messages: as.messages.map((msg) =>
-                msg.id === as.thinkingMessageId
+          if (ss.thinkingMessageId) {
+            return updateSessionState(state, agentId, sid!, {
+              messages: ss.messages.map((msg) =>
+                msg.id === ss.thinkingMessageId
                   ? { ...msg, content: msg.content + reasoningDelta }
                   : msg,
               ),
+              isReasoning: false,
             });
           } else {
             const thinkMsgId = `msg-think-${Date.now()}`;
@@ -1026,45 +1268,40 @@ function handleMessageEvent(
               startTime: Date.now(),
               ...getAgentSenderInfo(agentId),
             };
-            return updateAgentState(state, agentId, {
-              messages: [...as.messages, thinkMsg],
+            return updateSessionState(state, agentId, sid!, {
+              messages: [...ss.messages, thinkMsg],
               thinkingMessageId: thinkMsgId,
+              isReasoning: false,
             });
           }
         }
 
-        // If we had an active reasoning_content think message and now receive a regular delta,
-        // finalize the think message by setting endTime to stop the timer.
-        let messages = as.messages;
-        if (as.thinkingMessageId && delta) {
+        let messages = ss.messages;
+        if (ss.thinkingMessageId && delta) {
           const now = Date.now();
           messages = messages.map((msg) =>
-            msg.id === as.thinkingMessageId
+            msg.id === ss.thinkingMessageId
               ? { ...msg, endTime: now }
               : msg,
           );
         }
 
-        const newBuffer = as.streamBuffer + delta;
+        const newBuffer = ss.streamBuffer + delta;
 
-        // Already in think phase — check for </think> close
-        if (as.isInThinkPhase && as.thinkingMessageId) {
-          const closeIdx = newBuffer.indexOf("</think>");
+        if (ss.isInThinkPhase && ss.thinkingMessageId) {
+          const closeIdx = newBuffer.indexOf("</thinking>");
           if (closeIdx >= 0) {
-            // Think phase ends — extract think content and reply content
-            const thinkStart = newBuffer.indexOf("<think>");
-            const thinkContent = newBuffer.substring(thinkStart + 7, closeIdx);
-            const replyContent = newBuffer.substring(closeIdx + 8).trimStart();
+            const thinkStart = newBuffer.indexOf("<thinking>");
+            const thinkContent = newBuffer.substring(thinkStart + 10, closeIdx);
+            const replyContent = newBuffer.substring(closeIdx + 11).trimStart();
 
-            // Finalize think message (set endTime to stop the timer)
             const now = Date.now();
             const finalMessages = messages.map((msg) =>
-              msg.id === as.thinkingMessageId
+              msg.id === ss.thinkingMessageId
                 ? { ...msg, content: thinkContent, endTime: now }
                 : msg,
             );
 
-            // Create assistant message for reply
             const assistantMsgId = `msg-assistant-${Date.now()}`;
             const assistantMsg: ChatMessage = {
               id: assistantMsgId,
@@ -1074,29 +1311,29 @@ function handleMessageEvent(
               ...getAgentSenderInfo(agentId),
             };
 
-            return updateAgentState(state, agentId, {
+            return updateSessionState(state, agentId, sid!, {
               messages: [...finalMessages, assistantMsg],
               streamBuffer: "",
               isInThinkPhase: false,
               thinkingMessageId: null,
               streamingMessageId: assistantMsgId,
+              isReasoning: false,
             });
           } else {
-            // Still in think phase — append to think message
-            const thinkStart = newBuffer.indexOf("<thinking");
+            const thinkStart = newBuffer.indexOf("<thinking>");
             const thinkContent = newBuffer.substring(thinkStart + 10);
-            return updateAgentState(state, agentId, {
-              messages: as.messages.map((msg) =>
-                msg.id === as.thinkingMessageId
+            return updateSessionState(state, agentId, sid!, {
+              messages: ss.messages.map((msg) =>
+                msg.id === ss.thinkingMessageId
                   ? { ...msg, content: thinkContent }
                   : msg,
               ),
               streamBuffer: newBuffer,
+              isReasoning: false,
             });
           }
         }
 
-        // Not in think phase — check if entering
         const trimmed = newBuffer.trimStart();
         const THINK_OPEN = "<thinking>";
 
@@ -1111,32 +1348,32 @@ function handleMessageEvent(
             startTime: Date.now(),
             ...getAgentSenderInfo(agentId),
           };
-          return updateAgentState(state, agentId, {
-            messages: [...as.messages, thinkMsg],
+          return updateSessionState(state, agentId, sid!, {
+            messages: [...ss.messages, thinkMsg],
             streamBuffer: newBuffer,
             isInThinkPhase: true,
             thinkingMessageId: thinkMsgId,
             streamingMessageId: thinkMsgId,
+            isReasoning: false,
           });
         }
 
-        // If buffer is non-empty and definitely not starting with <thinking>,
-        // create or append to assistant message
         if (trimmed.length > 0) {
           const definitelyNotThink =
             trimmed[0] !== "<" ||
             (trimmed.length >= THINK_OPEN.length && !trimmed.startsWith(THINK_OPEN));
 
           if (definitelyNotThink) {
-            if (as.streamingMessageId && !as.isInThinkPhase) {
-              return updateAgentState(state, agentId, {
+            if (ss.streamingMessageId && !ss.isInThinkPhase) {
+              return updateSessionState(state, agentId, sid!, {
                 messages: messages.map((msg) =>
-                  msg.id === as.streamingMessageId
+                  msg.id === ss.streamingMessageId
                     ? { ...msg, content: msg.content + delta }
                     : msg,
                 ),
                 streamBuffer: newBuffer,
                 thinkingMessageId: null,
+                isReasoning: false,
               });
             } else {
               const assistantMsgId = `msg-assistant-${Date.now()}`;
@@ -1146,34 +1383,30 @@ function handleMessageEvent(
                 content: newBuffer,
                 timestamp: Date.now(),
               };
-              return updateAgentState(state, agentId, {
+              return updateSessionState(state, agentId, sid!, {
                 messages: [...messages, assistantMsg],
                 streamBuffer: newBuffer,
                 streamingMessageId: assistantMsgId,
                 thinkingMessageId: null,
+                isReasoning: false,
               });
             }
           }
         }
 
-        // Buffer is empty or starts with `<` but too short to tell — keep buffering
-        return updateAgentState(state, agentId, { streamBuffer: newBuffer });
+        return updateSessionState(state, agentId, sid!, { streamBuffer: newBuffer, isReasoning: false });
       });
       break;
     }
 
     case "tool_call": {
-      // Clear reasoning indicator
-      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
+      if (!sid) break;
       const toolName = data.name as string;
       const params = data.params as Record<string, unknown>;
 
-      // Generate or reuse turnId: group tools that happen after a think/assistant message
-      const state = get();
-      const as = getAgentState(state, agentId);
-      let turnId = as.currentTurnId;
-
-      // If no current turnId, create one
+      const currentState = get();
+      const ss = getSessionState(currentState, agentId, sid);
+      let turnId = ss.currentTurnId;
       if (!turnId) {
         turnId = `turn-${Date.now()}`;
       }
@@ -1188,28 +1421,27 @@ function handleMessageEvent(
         turnId,
         startTime: Date.now(),
       };
+
       set((state) => {
-        const as = getAgentState(state, agentId);
-        // Finalize any active think message (set endTime to stop the timer)
-        let messages = as.messages;
-        if (as.thinkingMessageId) {
+        const ss = getSessionState(state, agentId, sid!);
+        let messages = ss.messages;
+        if (ss.thinkingMessageId) {
           const now = Date.now();
           messages = messages.map((msg) =>
-            msg.id === as.thinkingMessageId
+            msg.id === ss.thinkingMessageId
               ? { ...msg, endTime: now }
               : msg,
           );
         }
         return {
-          ...updateAgentState(state, agentId, {
+          ...updateSessionState(state, agentId, sid!, {
             messages: [...messages, toolMsg],
-            // End current streaming phase: thinking/reply ends when tools start executing.
-            // This ensures the next iteration's content creates new messages.
             streamingMessageId: null,
             thinkingMessageId: null,
             isInThinkPhase: false,
             streamBuffer: "",
             currentTurnId: turnId,
+            isReasoning: false,
           }),
         };
       });
@@ -1217,10 +1449,11 @@ function handleMessageEvent(
     }
 
     case "tool_result": {
+      if (!sid) break;
       const toolName = data.name as string;
       const result = data.result as Record<string, unknown>;
-      const state = get();
-      const as = getAgentState(state, agentId);
+      const currentState = get();
+      const ss = getSessionState(currentState, agentId, sid);
 
       const resultMsg: ChatMessage = {
         id: `msg-result-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1230,36 +1463,30 @@ function handleMessageEvent(
         toolName,
         toolData: result,
         toolStatus: "success",
-        turnId: as.currentTurnId || undefined,
+        turnId: ss.currentTurnId || undefined,
       };
-      set((state) => updateAgentState(state, agentId, {
-        messages: [...getAgentState(state, agentId).messages, resultMsg],
+      set((state) => updateSessionState(state, agentId, sid!, {
+        messages: [...getSessionState(state, agentId, sid!).messages, resultMsg],
       }));
       break;
     }
 
     case "done": {
-      // Streaming complete — or non-streaming response with full content
-      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
+      if (!sid) break;
       const usage = data.usage as TokenUsage | undefined;
       const content = data.content as string | undefined;
       const reasoningContent = data.reasoning_content as string | undefined;
       set((state) => {
-        const as = getAgentState(state, agentId);
-        let messages = [...as.messages];
+        const ss = getSessionState(state, agentId, sid!);
+        let messages = [...ss.messages];
 
-        // If there's a streaming message with empty content (non-streaming mode),
-        // fill in the content from the done event.
         if (content) {
-          if (as.streamingMessageId) {
-            const idx = messages.findIndex((m) => m.id === as.streamingMessageId);
+          if (ss.streamingMessageId) {
+            const idx = messages.findIndex((m) => m.id === ss.streamingMessageId);
             if (idx >= 0 && !messages[idx].content) {
               messages[idx] = { ...messages[idx], content };
             }
           } else {
-            // Fallback: create a new assistant message if no streaming message exists.
-            // This handles the case where sendViaWs no longer pre-creates an empty
-            // placeholder and no chunk arrived to create one.
             const assistantMsgId = `msg-assistant-${Date.now()}`;
             const assistantMsg: ChatMessage = {
               id: assistantMsgId,
@@ -1271,9 +1498,7 @@ function handleMessageEvent(
           }
         }
 
-        // If there's reasoning_content in done event (DeepSeek non-streaming),
-        // create a think message with endTime (thinking is already complete)
-        if (reasoningContent && !as.thinkingMessageId) {
+        if (reasoningContent && !ss.thinkingMessageId) {
           const thinkMsgId = `msg-think-${Date.now()}`;
           const now = Date.now();
           const thinkMsg: ChatMessage = {
@@ -1287,43 +1512,38 @@ function handleMessageEvent(
           messages = [...messages, thinkMsg];
         }
 
-        // Set endTime on the currently streaming think message (if any)
-        // This stops the ThinkBlock timer when the LLM call finishes.
-        if (as.thinkingMessageId) {
+        if (ss.thinkingMessageId) {
           const endTime = Date.now();
           messages = messages.map((msg) =>
-            msg.id === as.thinkingMessageId && !msg.endTime
+            msg.id === ss.thinkingMessageId && !msg.endTime
               ? { ...msg, endTime }
               : msg,
           );
         }
 
         return {
-          sending: false,
-          ...updateAgentState(state, agentId, {
+          ...updateAgentAndSession(state, agentId, { sending: false }, sid!, {
             messages,
             streamingMessageId: null,
-            tokenUsage: usage ?? as.tokenUsage,
+            tokenUsage: usage ?? ss.tokenUsage,
             currentTurnId: null,
             streamBuffer: "",
             thinkingMessageId: null,
             isInThinkPhase: false,
+            isReasoning: false,
           }),
         };
       });
-      // Update session title from first user message (only if not yet set)
-      const doneAgentState = getAgentState(get(), agentId);
-      updateSessionTitleFromMessages(doneAgentState.messages, agentId);
+      const doneSessionState = getSessionState(get(), agentId, sid);
+      updateSessionTitleFromMessages(doneSessionState.messages, agentId);
       break;
     }
 
     case "model_confirmed": {
-      // Gateway confirms the model switch was forwarded to the Agent Runtime
       const confirmedModel = data.model as string;
       const confirmedProvider = data.provider as string | undefined;
       const confirmedAgentId = data.agentId as string | undefined;
       console.log("[ChatStore] Model switch confirmed:", confirmedModel, confirmedProvider);
-      // Now persist to agentModels cache (model + provider)
       if (confirmedAgentId && confirmedModel) {
         set((state) => ({
           agentModels: {
@@ -1333,24 +1553,25 @@ function handleMessageEvent(
               provider: confirmedProvider ?? state.currentProvider ?? "",
             },
           },
+          ...updateAgentState(state, confirmedAgentId, {
+            model: confirmedModel,
+            provider: confirmedProvider ?? getAgentState(state, confirmedAgentId).provider ?? "",
+          }),
         }));
       }
       break;
     }
 
     case "error": {
-      set((state) => updateAgentState(state, agentId, { isReasoning: false }));
+      if (!sid) break;
       const errorMsg = data.message as string;
       console.error("[ChatStore] Server error:", errorMsg);
-      // If model_switch failed, revert the optimistic currentModel update
       if (errorMsg && errorMsg.includes("cannot switch model")) {
-        // Revert: reload the model from the backend
         const errorAgentId = data.agentId as string | undefined;
         if (errorAgentId) {
           get().loadAgentModel(errorAgentId);
         }
       }
-      // Add system error message to the agent's per-agent state
       const errMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
         type: "system",
@@ -1358,28 +1579,27 @@ function handleMessageEvent(
         timestamp: Date.now(),
       };
       set((state) => ({
-        sending: false,
-        ...updateAgentState(state, agentId, {
-          messages: [...getAgentState(state, agentId).messages, errMsg],
+        ...updateAgentAndSession(state, agentId, { sending: false }, sid!, {
+          messages: [...getSessionState(state, agentId, sid!).messages, errMsg],
           streamingMessageId: null,
           streamBuffer: "",
           thinkingMessageId: null,
           isInThinkPhase: false,
+          isReasoning: false,
         }),
       }));
       break;
     }
 
     case "tool_approval_needed":
-      // Set per-agent inline approval state for ChatPanel rendering
-      // (no longer uses permissionStore queue — approval is inline in tool_call row)
-      set((state) => updateAgentState(state, agentId, {
-        pendingApproval: data as unknown as ToolApprovalNeededEvent,
-      }));
+      if (sid) {
+        set((state) => updateSessionState(state, agentId, sid, {
+          pendingApproval: data as unknown as ToolApprovalNeededEvent,
+        }));
+      }
       break;
 
     case "memory_updated":
-      // Trigger refresh of memory data if panel is open
       console.log("[WS] Memory updated event:", data);
       break;
 
@@ -1388,25 +1608,29 @@ function handleMessageEvent(
       break;
 
     case "context_usage": {
-      const usage = data as unknown as ContextUsageInfo;
-      console.log("[ChatStore] context_usage RECEIVED for agent:", agentId, usage);
-      set((state) => updateAgentState(state, agentId, { contextUsage: usage }));
+      if (sid) {
+        const usage = data as unknown as ContextUsageInfo;
+        console.log("[ChatStore] context_usage RECEIVED for agent:", agentId, usage);
+        set((state) => updateSessionState(state, agentId, sid, { contextUsage: usage }));
+      }
       break;
     }
 
     case "iteration_limit_paused": {
-      const { iteration, max_iterations, message } = data as {
-        iteration: number;
-        max_iterations: number;
-        message: string;
-      };
-      set((state) => updateAgentState(state, agentId, {
-        iterationLimitPaused: {
-          iteration,
-          maxIterations: max_iterations,
-          message,
-        },
-      }));
+      if (sid) {
+        const { iteration, max_iterations, message } = data as {
+          iteration: number;
+          max_iterations: number;
+          message: string;
+        };
+        set((state) => updateSessionState(state, agentId, sid, {
+          iterationLimitPaused: {
+            iteration,
+            maxIterations: max_iterations,
+            message,
+          },
+        }));
+      }
       break;
     }
 
