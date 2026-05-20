@@ -254,6 +254,7 @@ impl SessionManager {
             agent_inbound_tx,
             join_handle,
             status_rx,
+            last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
         };
 
         self.sessions.insert(session_id.clone(), handle);
@@ -681,6 +682,46 @@ impl SessionManager {
                     Some(self.current_session_id.clone())
                 }
             })
+    }
+
+    /// Evict idle sessions from memory.
+    ///
+    /// A session is evicted when ALL of the following conditions are met:
+    /// 1. Its status is `Idle` (not Streaming/WaitingApproval/Paused)
+    /// 2. It has been idle for longer than `idle_timeout`
+    /// 3. It is NOT the current active session
+    ///
+    /// Eviction destroys the in-memory SessionTask but leaves the JSONL
+    /// file on disk. The session can be re-activated later via lazy resume
+    /// in the `activate_session` handler.
+    pub async fn evict_idle_sessions(&mut self, idle_timeout: std::time::Duration) {
+        let current = self.current_session_id.clone();
+        let mut to_evict = Vec::new();
+
+        for (session_id, handle) in &self.sessions {
+            if *session_id == current {
+                continue;
+            }
+            if handle.status() != SessionStatus::Idle {
+                continue;
+            }
+            let elapsed = handle.last_active_at().elapsed();
+            if elapsed >= idle_timeout {
+                to_evict.push(session_id.clone());
+            }
+        }
+
+        if to_evict.is_empty() {
+            return;
+        }
+
+        for session_id in &to_evict {
+            if let Some(handle) = self.sessions.remove(session_id) {
+                let _ = handle.inbound_tx.send(SessionMessage::Stop).await;
+                tracing::info!(session_id = %session_id, "Evicted idle session from memory (idle > {:?})", idle_timeout);
+            }
+        }
+        tracing::info!(evicted = to_evict.len(), "Idle session eviction complete");
     }
 }
 

@@ -124,18 +124,15 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
             {sessions.map((session) => {
               const isActive = session.session_id === currentSessionId;
               const isDeleting = confirmDelete === session.session_id;
-              // ADR-014: Derive streaming status from sessionStatus (source of truth)
-              // Falls back to agent.sending for backward compat during transition
+              // ADR-014: Derive streaming status from sessionStatus + pendingSend (source of truth)
               const isStreaming = (() => {
                 const agent = useChatStore.getState().agentStates[agentId];
                 const sessionState = agent?.sessionStates[session.session_id];
-                if (sessionState?.sessionStatus) {
-                  return sessionState.sessionStatus.status === "streaming"
-                    || sessionState.sessionStatus.status === "waiting_approval"
-                    || sessionState.sessionStatus.status === "paused";
-                }
-                // Fallback: agent-level sending for the active session
-                return !!agent?.sending && agent.activeSessionId === session.session_id;
+                if (!sessionState) return false;
+                return sessionState.pendingSend
+                  || sessionState.sessionStatus?.status === "streaming"
+                  || sessionState.sessionStatus?.status === "waiting_approval"
+                  || sessionState.sessionStatus?.status === "paused";
               })();
               return (
                 <div

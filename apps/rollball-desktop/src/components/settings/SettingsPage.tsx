@@ -1441,7 +1441,7 @@ function AppearanceTab() {
         confirmLabel="Reset"
         destructive
         onConfirm={() => {
-          setTheme("system"); setFontSize(0.875); setContentWidth(90); setOpacity(1.0); setAccentColor("#00C375");
+          setTheme("system"); setFontSize(0.875); setContentWidth(90); setOpacity(1.0); setAccentColor("#3b82f6");
           setShowResetConfirm(false);
         }}
         onCancel={() => setShowResetConfirm(false)}

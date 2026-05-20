@@ -133,53 +133,20 @@ pub async fn handle_intent_send(
             let event_type = crate::http::routes::BridgeEventType::from_action(action)
                 .unwrap_or_else(crate::http::routes::BridgeEventType::default_for_unknown);
 
-            // Transform payload to match frontend WebSocket protocol expectations:
-            //   chunk  → { "delta": "..." }
-            //   done   → { "content": "..." }
-            //   error  → { "message": "..." }
-            //   tool_call / tool_result → pass through as-is
-            let payload = match event_type {
-                crate::http::routes::BridgeEventType::Chunk => {
-                    let delta = params.get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let mut payload = serde_json::json!({ "delta": delta });
-                    // Preserve reasoning_content for thinking mode (e.g. DeepSeek)
-                    if let Some(reasoning) = params.get("reasoning_content").and_then(|v| v.as_str()) {
-                        payload["reasoning_content"] = serde_json::Value::String(reasoning.to_string());
-                    }
-                    // Preserve session_id for multi-session routing
-                    if let Some(sid) = params.get("session_id") {
-                        payload["session_id"] = sid.clone();
-                    }
-                    payload
+            // Transparent passthrough: Gateway is a dumb pipe, not a protocol
+            // translator. Only the Chunk event needs a minimal rename (content→delta)
+            // to match the frontend's long-established streaming protocol.
+            // All other events pass through Runtime's original params verbatim —
+            // the frontend reads fields directly (data.content, data.message, etc.).
+            let mut payload = params.clone();
+            if event_type == crate::http::routes::BridgeEventType::Chunk {
+                // Rename "content" → "delta" for the streaming text protocol.
+                // All other fields (reasoning_content, session_id, etc.) are
+                // preserved from the original Runtime params.
+                if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
+                    payload["delta"] = serde_json::Value::String(content.to_string());
                 }
-                crate::http::routes::BridgeEventType::Done => {
-                    // Include the full response content for 'done' events
-                    let content = params.get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let mut payload = serde_json::json!({ "content": content });
-                    // Preserve session_id for multi-session routing
-                    if let Some(sid) = params.get("session_id") {
-                        payload["session_id"] = sid.clone();
-                    }
-                    payload
-                }
-                crate::http::routes::BridgeEventType::Error => {
-                    let msg = params.get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown error");
-                    let mut payload = serde_json::json!({ "message": msg });
-                    // Preserve session_id for multi-session routing
-                    if let Some(sid) = params.get("session_id") {
-                        payload["session_id"] = sid.clone();
-                    }
-                    payload
-                }
-                // tool_call / tool_result — pass through params as-is (already includes session_id)
-                _ => params.clone(),
-            };
+            }
 
             let event = crate::http::routes::BridgeEvent {
                 agent_id: from.clone(),

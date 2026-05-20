@@ -3,6 +3,9 @@
 //! Provides a typed interface for sending messages to a session and
 //! checking whether the session task is still alive.
 
+use std::sync::Mutex;
+use std::time::Instant;
+
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -36,6 +39,10 @@ pub struct SessionHandle {
     /// the SessionHandle exposes this Receiver so SessionManager
     /// can read the current status without locking.
     pub(crate) status_rx: watch::Receiver<SessionStatus>,
+    /// Timestamp of the last activity (message send, status change, etc.).
+    /// Used by `SessionManager::evict_idle_sessions` to decide when a
+    /// session can be safely released from memory.
+    pub(crate) last_active_at: Mutex<Instant>,
 }
 
 impl SessionHandle {
@@ -44,6 +51,7 @@ impl SessionHandle {
     /// Returns an error if the session task has stopped and the channel
     /// is closed, or if the channel is full.
     pub fn send(&self, msg: SessionMessage) -> Result<(), Box<tokio::sync::mpsc::error::TrySendError<SessionMessage>>> {
+        self.touch();
         self.inbound_tx.try_send(msg).map_err(Box::new)
     }
 
@@ -57,7 +65,8 @@ impl SessionHandle {
     pub fn send_inbound(
         &self,
         msg: InboundMessage,
-    ) -> Result<(), Box<tokio::sync::mpsc::error::TrySendError<InboundMessage>>> {
+    ) -> Result<(), Box<tokio::sync::mpsc::error::TrySendError<InboundMessage> > > {
+        self.touch();
         self.agent_inbound_tx.try_send(msg).map_err(Box::new)
     }
 
@@ -75,5 +84,15 @@ impl SessionHandle {
     /// The value is always the most recent status written by the AgentLoop.
     pub fn status(&self) -> SessionStatus {
         self.status_rx.borrow().clone()
+    }
+
+    /// Update `last_active_at` to now. Called automatically on `send`/`send_inbound`.
+    pub fn touch(&self) {
+        *self.last_active_at.lock().expect("last_active_at mutex poisoned") = Instant::now();
+    }
+
+    /// Read the last active timestamp.
+    pub fn last_active_at(&self) -> Instant {
+        *self.last_active_at.lock().expect("last_active_at mutex poisoned")
     }
 }

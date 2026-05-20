@@ -206,20 +206,16 @@ pub async fn dispatch_grpc_request(
                 let event_type = crate::http::routes::BridgeEventType::from_action(&req.action)
                     .unwrap_or_else(crate::http::routes::BridgeEventType::default_for_unknown);
 
-                // Transform payload to match frontend WebSocket protocol
-                let payload = match event_type {
-                    crate::http::routes::BridgeEventType::Chunk => {
-                        let delta = params.get("content")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let mut p = serde_json::json!({ "delta": delta });
-                        if let Some(reasoning) = params.get("reasoning_content").and_then(|v| v.as_str()) {
-                            p["reasoning_content"] = serde_json::Value::String(reasoning.to_string());
-                        }
-                        p
+                // Transparent passthrough: Gateway is a dumb pipe, not a protocol
+                // translator. Only the Chunk event needs a minimal rename (content→delta)
+                // to match the frontend's long-established streaming protocol.
+                // All other events pass through Runtime's original params verbatim.
+                let mut payload = params;
+                if event_type == crate::http::routes::BridgeEventType::Chunk {
+                    if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
+                        payload["delta"] = serde_json::Value::String(content.to_string());
                     }
-                    _ => params,
-                };
+                }
 
                 if let Some(tx) = bridge_tx {
                     let event = BridgeEvent {

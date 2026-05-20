@@ -44,6 +44,8 @@ pub enum BridgeEventType {
     Done,
     /// Error response
     Error,
+    /// Agent response interrupted by user stop signal
+    Interrupted,
     /// Memory store updated (node added/removed/consolidated)
     MemoryUpdated,
     /// Skill execution event
@@ -56,6 +58,10 @@ pub enum BridgeEventType {
     ReasoningStarted,
     /// Session lifecycle status changed (ADR-014)
     SessionStateChanged,
+    /// Unknown/unrecognized action — payload is forwarded as-is so the
+    /// frontend can decide what to do. This avoids silently treating new
+    /// Runtime event types as "done" (which would break streaming state).
+    Unknown,
 }
 
 impl BridgeEventType {
@@ -68,6 +74,7 @@ impl BridgeEventType {
             "agent_tool_call" => Some(Self::ToolCall),
             "agent_tool_result" => Some(Self::ToolResult),
             "agent_error" => Some(Self::Error),
+            "agent_interrupted" => Some(Self::Interrupted),
             "tool_approval_needed" => Some(Self::ToolApprovalNeeded),
             "memory_updated" => Some(Self::MemoryUpdated),
             "skill_executed" => Some(Self::SkillExecuted),
@@ -79,9 +86,12 @@ impl BridgeEventType {
         }
     }
 
-    /// Default event type for unrecognized actions
+    /// Fallback event type for unrecognized actions.
+    ///
+    /// Returns `Unknown` instead of silently degrading to `Done`, which would
+    /// cause the frontend to incorrectly end a streaming session.
     pub fn default_for_unknown() -> Self {
-        Self::Done
+        Self::Unknown
     }
 
     /// Get the serialized string value (matches frontend WebSocket protocol)
@@ -93,12 +103,14 @@ impl BridgeEventType {
             Self::ToolApprovalNeeded => "tool_approval_needed",
             Self::Done => "done",
             Self::Error => "error",
+            Self::Interrupted => "interrupted",
             Self::MemoryUpdated => "memory_updated",
             Self::SkillExecuted => "skill_executed",
             Self::IterationLimitPaused => "iteration_limit_paused",
             Self::ContextUsage => "context_usage",
             Self::ReasoningStarted => "reasoning_started",
             Self::SessionStateChanged => "session_state_changed",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -522,6 +534,7 @@ mod tests {
         assert_eq!(BridgeEventType::from_action("agent_tool_call"), Some(BridgeEventType::ToolCall));
         assert_eq!(BridgeEventType::from_action("agent_tool_result"), Some(BridgeEventType::ToolResult));
         assert_eq!(BridgeEventType::from_action("agent_error"), Some(BridgeEventType::Error));
+        assert_eq!(BridgeEventType::from_action("agent_interrupted"), Some(BridgeEventType::Interrupted));
         assert_eq!(BridgeEventType::from_action("tool_approval_needed"), Some(BridgeEventType::ToolApprovalNeeded));
         assert_eq!(BridgeEventType::from_action("memory_updated"), Some(BridgeEventType::MemoryUpdated));
         assert_eq!(BridgeEventType::from_action("skill_executed"), Some(BridgeEventType::SkillExecuted));
@@ -533,11 +546,21 @@ mod tests {
         assert_eq!(BridgeEventType::Chunk.as_str(), "chunk");
         assert_eq!(BridgeEventType::Done.as_str(), "done");
         assert_eq!(BridgeEventType::Error.as_str(), "error");
+        assert_eq!(BridgeEventType::Interrupted.as_str(), "interrupted");
         assert_eq!(BridgeEventType::ToolCall.as_str(), "tool_call");
         assert_eq!(BridgeEventType::ToolResult.as_str(), "tool_result");
         assert_eq!(BridgeEventType::ToolApprovalNeeded.as_str(), "tool_approval_needed");
         assert_eq!(BridgeEventType::MemoryUpdated.as_str(), "memory_updated");
         assert_eq!(BridgeEventType::SkillExecuted.as_str(), "skill_executed");
+        assert_eq!(BridgeEventType::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn test_default_for_unknown_is_not_done() {
+        // Unknown actions must NOT be silently treated as "done" —
+        // that would break streaming state in the frontend.
+        assert_ne!(BridgeEventType::default_for_unknown(), BridgeEventType::Done);
+        assert_eq!(BridgeEventType::default_for_unknown(), BridgeEventType::Unknown);
     }
 
     #[test]
