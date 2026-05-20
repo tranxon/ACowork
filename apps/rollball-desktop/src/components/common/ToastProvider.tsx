@@ -55,11 +55,11 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
     return () => clearTimeout(timer);
   }, [autoDismissMs, onDismiss]);
 
-  const borderColor: Record<ToastType, string> = {
-    success: "border-l-green-500",
-    error: "border-l-red-500",
-    warning: "border-l-yellow-500",
-    info: "border-l-blue-500",
+  const style: Record<ToastType, string> = {
+    success: "text-green-600 dark:text-green-400",
+    error: "text-red-500 dark:text-red-400",
+    warning: "text-yellow-500 dark:text-yellow-400",
+    info: "text-blue-500 dark:text-blue-400",
   };
 
   const iconMap: Record<ToastType, string> = {
@@ -72,13 +72,13 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
   return (
     <div
       className={cn(
-        "flex w-80 items-start gap-2 rounded-md border border-zinc-200 border-l-4 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800",
-        borderColor[toast.type],
+        "flex items-start gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2.5 shadow-lg w-fit max-w-xs dark:border-zinc-700 dark:bg-zinc-800",
+        style[toast.type],
       )}
       role="alert"
     >
-      <span className="shrink-0 text-sm">{iconMap[toast.type]}</span>
-      <p className="flex-1 text-sm text-zinc-700 dark:text-zinc-300">{toast.message}</p>
+      <span className="shrink-0 text-sm leading-5">{iconMap[toast.type]}</span>
+      <p className="flex-1 text-sm leading-5 text-zinc-700 dark:text-zinc-300">{toast.message}</p>
       {toast.action && (
         <button
           onClick={toast.action.onClick}

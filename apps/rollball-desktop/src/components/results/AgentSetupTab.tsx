@@ -3,6 +3,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { getGatewayUrl } from "../../lib/config";
+import { ConfirmDialog } from "../common/ConfirmDialog";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -31,6 +32,7 @@ export function AgentSetupTab() {
   const [_configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [iconOpen, setIconOpen] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // Tools configuration
   const [availableTools, setAvailableTools] = useState<AvailableTool[]>([]);
@@ -343,12 +345,25 @@ export function AgentSetupTab() {
           {configSaving ? "Applying..." : "Apply to Runtime"}
         </button>
         <button
-          onClick={() => resetProfile(selectedAgentId)}
+          onClick={() => setShowResetConfirm(true)}
           className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium"
         >
           Reset to defaults
         </button>
       </div>
+
+      <ConfirmDialog
+        open={showResetConfirm}
+        title="Reset Agent Setup"
+        message="确定要重置 Agent 设置为默认值吗？包括名称、描述、提示词角色、头像图标、Shell 审批阈值和工具配置。"
+        confirmLabel="Reset"
+        destructive
+        onConfirm={() => {
+          resetProfile(selectedAgentId);
+          setShowResetConfirm(false);
+        }}
+        onCancel={() => setShowResetConfirm(false)}
+      />
     </div>
   );
 }
