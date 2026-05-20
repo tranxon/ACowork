@@ -4,6 +4,7 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import type { GatewayConfig, VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, AgentListResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { ConfirmDialog } from "../common/ConfirmDialog";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
@@ -1288,6 +1289,7 @@ function ProvidersTab() {
 /** Appearance settings */
 function AppearanceTab() {
   const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, setAccentColor } = useSettingsStore();
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // Content width options: 40-100%, step 10
   const contentWidths = [
@@ -1426,11 +1428,24 @@ function AppearanceTab() {
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
       <button
-        onClick={() => { setTheme("system"); setFontSize(0.875); setContentWidth(90); setOpacity(1.0); setAccentColor("#00C375"); }}
+        onClick={() => setShowResetConfirm(true)}
         className="rounded-lg btn-solid px-3 py-1.5 text-xs"
       >
         Reset to defaults
       </button>
+
+      <ConfirmDialog
+        open={showResetConfirm}
+        title="Reset Appearance"
+        message="确定要重置所有外观设置为默认值吗？包括主题、字体大小、内容宽度、透明度和高亮色。"
+        confirmLabel="Reset"
+        destructive
+        onConfirm={() => {
+          setTheme("system"); setFontSize(0.875); setContentWidth(90); setOpacity(1.0); setAccentColor("#00C375");
+          setShowResetConfirm(false);
+        }}
+        onCancel={() => setShowResetConfirm(false)}
+      />
     </div>
     </div>
   );

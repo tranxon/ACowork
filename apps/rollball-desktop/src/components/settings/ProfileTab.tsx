@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { cn } from "../../lib/utils";
+import { ConfirmDialog } from "../common/ConfirmDialog";
 
 // ── Component ───────────────────────────────────────────────────────────
 
@@ -9,6 +10,7 @@ export function ProfileTab() {
   const { profile, setProfile, resetProfile } = useUserProfileStore();
   const [nameValue, setNameValue] = useState(profile.displayName);
   const [iconOpen, setIconOpen] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   return (
     <div className="max-w-lg space-y-4">
@@ -112,14 +114,25 @@ export function ProfileTab() {
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <button
-          onClick={() => {
-            resetProfile();
-            setNameValue("我");
-          }}
+          onClick={() => setShowResetConfirm(true)}
           className="rounded-lg btn-solid px-3 py-1.5 text-xs"
         >
           Reset to defaults
         </button>
+
+        <ConfirmDialog
+          open={showResetConfirm}
+          title="Reset Profile"
+          message="确定要重置个人资料到默认值吗？"
+          confirmLabel="Reset"
+          destructive
+          onConfirm={() => {
+            resetProfile();
+            setNameValue("我");
+            setShowResetConfirm(false);
+          }}
+          onCancel={() => setShowResetConfirm(false)}
+        />
       </div>
     </div>
   );

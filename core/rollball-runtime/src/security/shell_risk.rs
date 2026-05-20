@@ -98,15 +98,20 @@ const LOW_RISK_COMMANDS: &[&str] = &[
     "get-help", "help", "man",
 ];
 
-/// Medium-risk commands (can download or execute code).
+/// Medium-risk commands (can download or execute code, or delete files).
 const MEDIUM_RISK_COMMANDS: &[&str] = &[
-    // Unix
+    // Unix — network download
     "curl", "wget", "fetch",
+    // Unix — script/bytecode interpreters
     "python", "python3", "node", "ruby", "perl", "php",
+    // Unix — shells (spawning a shell may execute arbitrary commands)
     "bash", "sh", "zsh", "fish", "dash", "ksh", "csh",
+    // Unix — build/package managers (can download + run code)
     "java", "javac",
     "docker", "podman",
     "pip", "pip3", "npm", "yarn", "cargo",
+    // Unix — destructive file operations
+    "rm", "rmdir", "unlink",
     // PowerShell — download / execution / remote access
     "invoke-webrequest", "iwr",
     "invoke-restmethod", "irm",
@@ -119,6 +124,59 @@ const MEDIUM_RISK_COMMANDS: &[&str] = &[
     "register-scheduledtask",
     "new-scheduledtask",
     "start-job", "sajb",
+];
+
+/// High-risk commands — operations that can affect system integrity,
+/// security boundaries, or running processes. These are above Medium
+/// (download/execute/delete) but below Blocked (clearly destructive).
+///
+/// When the user sets approval threshold to "High", only these commands
+/// (plus sudo/eval/pipe-to-shell patterns) require user confirmation.
+const HIGH_RISK_COMMANDS: &[&str] = &[
+    // Unix — process termination
+    "kill", "killall", "pkill", "pkillall",
+    // Unix — permission / ownership changes
+    "chmod", "chown", "chgrp",
+    // Unix — system power control
+    "shutdown", "reboot", "halt", "poweroff", "init",
+    // Unix — raw disk I/O
+    "dd",
+    // Unix — disk partitioning / formatting
+    "fdisk", "parted", "gdisk", "gparted",
+    // Unix — filesystem mounting
+    "mount", "umount",
+    // Unix — user / group management
+    "useradd", "userdel", "usermod",
+    "groupadd", "groupdel", "groupmod",
+    "passwd", "visudo",
+    // Unix — firewall / network configuration
+    "iptables", "nft", "ip6tables",
+    // Unix — service management
+    "systemctl", "service",
+    // Unix — scheduled tasks
+    "crontab",
+    // Unix — network interface control
+    "ifconfig", "route", "ip",
+    // PowerShell — process termination
+    "stop-process", "spps", "kill",
+    // PowerShell — service control (stop/disable/restart/modify)
+    "stop-service", "spsv",
+    "restart-service",
+    "set-service",
+    "disable-service",
+    // PowerShell — system power control
+    "stop-computer",
+    "restart-computer",
+    // PowerShell — ACL / permission modification
+    "set-acl",
+    // PowerShell — execution policy (any change is security-sensitive)
+    "set-executionpolicy",
+    // PowerShell — firewall rules
+    "set-netfirewallrule",
+    "new-netfirewallrule",
+    "remove-netfirewallrule",
+    // PowerShell — domain join/leave
+    "add-computer", "remove-computer",
 ];
 
 /// Blocked command patterns.
@@ -176,11 +234,21 @@ const BLOCKED_PATTERNS: &[&str] = &[
 ];
 
 /// Assess the base risk level of a shell command (without provenance).
+///
+/// For compound commands joined by `&&` / `;`, each sub-command is analyzed
+/// independently and the **highest** risk across all sub-commands is returned.
+/// This prevents evasion via `cd /safe/path && rm -rf .` where the safe first
+/// command would otherwise mask the destructive second one.
 pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
     let trimmed = command.trim();
     let trimmed_lower = trimmed.to_lowercase();
 
-    // Check blocked patterns first (case-insensitive comparison)
+    // Split into individual sub-commands by chain separators (&&, ;)
+    let sub_commands = split_command_chain(trimmed);
+
+    // ── Phase 1: Check blocked patterns on the FULL command AND each sub-command ──
+    // This catches `cd /safe && rm -rf /` where the full command wouldn't
+    // match "rm -rf /" at the start but a sub-command would.
     for pattern in BLOCKED_PATTERNS {
         if trimmed_lower.contains(pattern) {
             return ShellRiskAssessment {
@@ -192,22 +260,24 @@ pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
             };
         }
     }
-
-    // Extract the primary command
-    let (primary_cmd, is_sudo) = extract_primary_command(trimmed);
-
-    // sudo elevates risk
-    if is_sudo {
-        return ShellRiskAssessment {
-            risk: ShellRisk::High,
-            base_risk: ShellRisk::High,
-            reason: "Command uses sudo (privilege escalation)".to_string(),
-            executable_paths: extract_executable_paths(trimmed),
-            provenance_elevated: false,
-        };
+    // Also check blocked patterns against each sub-command individually
+    for sub in &sub_commands {
+        let sub_lower = sub.trim().to_lowercase();
+        for pattern in BLOCKED_PATTERNS {
+            if sub_lower.contains(pattern) {
+                return ShellRiskAssessment {
+                    risk: ShellRisk::Blocked,
+                    base_risk: ShellRisk::Blocked,
+                    reason: format!("Blocked pattern in sub-command: {}", pattern),
+                    executable_paths: extract_executable_paths(trimmed),
+                    provenance_elevated: false,
+                };
+            }
+        }
     }
 
-    // Check for eval/exec/source — always High
+    // ── Phase 2: Check commands that affect the whole chain ──
+    // (eval/exec/source, pipe-to-shell — these apply to the full command string)
     if is_shell_eval_command(trimmed) {
         return ShellRiskAssessment {
             risk: ShellRisk::High,
@@ -218,7 +288,6 @@ pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
         };
     }
 
-    // Check if piping to shell (e.g., "curl ... | sh")
     if is_pipe_to_shell(trimmed) {
         return ShellRiskAssessment {
             risk: ShellRisk::High,
@@ -229,22 +298,98 @@ pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
         };
     }
 
-    // Check command against whitelists/blacklists
-    let base_risk = classify_command(&primary_cmd);
+    // ── Phase 3: Analyze EACH sub-command and take the highest risk ──
+    let mut max_risk = ShellRisk::Low;
+    let mut max_reason = String::new();
 
-    let reason = match base_risk {
-        ShellRisk::Low => format!("Low-risk command: {}", primary_cmd),
-        ShellRisk::Medium => format!("Medium-risk command: {} (can download/execute code)", primary_cmd),
-        ShellRisk::High => format!("High-risk command: {}", primary_cmd),
-        ShellRisk::Blocked => format!("Blocked command: {}", primary_cmd),
-    };
+    for sub in &sub_commands {
+        let sub_trimmed = sub.trim();
+        if sub_trimmed.is_empty() {
+            continue;
+        }
+
+        let (primary_cmd, is_sudo) = extract_primary_command(sub_trimmed);
+
+        let sub_risk = if is_sudo {
+            let r = ShellRisk::High;
+            max_reason = "Command uses sudo (privilege escalation)".to_string();
+            r
+        } else {
+            let r = classify_command(&primary_cmd);
+            if risk_ordinal(r) > risk_ordinal(max_risk) {
+                max_reason = match r {
+                    ShellRisk::Low => format!("Low-risk sub-command: {}", primary_cmd),
+                    ShellRisk::Medium => format!("Medium-risk sub-command: {} (can delete/modify files)", primary_cmd),
+                    ShellRisk::High => format!("High-risk sub-command: {}", primary_cmd),
+                    ShellRisk::Blocked => format!("Blocked sub-command: {}", primary_cmd),
+                };
+            }
+            r
+        };
+
+        if risk_ordinal(sub_risk) > risk_ordinal(max_risk) {
+            max_risk = sub_risk;
+        }
+    }
+
+    // Still fall back to the first command's name if no other reason was set
+    if max_reason.is_empty() {
+        if let Some(first) = sub_commands.first() {
+            let (primary_cmd, _) = extract_primary_command(first.trim());
+            max_reason = match max_risk {
+                ShellRisk::Low => format!("Low-risk command: {}", primary_cmd),
+                ShellRisk::Medium => format!("Medium-risk command: {} (can download/execute code)", primary_cmd),
+                ShellRisk::High => format!("High-risk command: {}", primary_cmd),
+                ShellRisk::Blocked => format!("Blocked command: {}", primary_cmd),
+            };
+        }
+    }
 
     ShellRiskAssessment {
-        risk: base_risk,
-        base_risk,
-        reason,
+        risk: max_risk,
+        base_risk: max_risk,
+        reason: max_reason,
         executable_paths: extract_executable_paths(trimmed),
         provenance_elevated: false,
+    }
+}
+
+/// Ordinal for ShellRisk comparison.
+fn risk_ordinal(r: ShellRisk) -> u8 {
+    match r {
+        ShellRisk::Low => 0,
+        ShellRisk::Medium => 1,
+        ShellRisk::High => 2,
+        ShellRisk::Blocked => 3,
+    }
+}
+
+/// Split a shell command on `&&` and `;` separators to obtain individual
+/// sub-commands for independent risk analysis.
+///
+/// This prevents evasion where a safe first command (e.g. `cd /tmp`)
+/// masks a destructive second command (e.g. `rm -rf .`).
+///
+/// Note: `||` is NOT split because its semantics differ from `&&`/`;` —
+/// the second command only runs if the first fails, which is less likely
+/// to be used as an evasion pattern while also being a legitimate shell idiom
+/// (e.g. `command_not_found || echo "ok"`). The blocked-pattern check on the
+/// full command string still catches blocked patterns in `||` chains.
+fn split_command_chain(command: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    for seg in command.split("&&") {
+        for sub in seg.split(';') {
+            let trimmed = sub.trim();
+            if !trimmed.is_empty() {
+                result.push(sub);
+            }
+        }
+    }
+    // If no separators found, treat as single command
+    if result.is_empty() {
+        vec![command]
+    } else {
+        result
     }
 }
 
@@ -282,6 +427,11 @@ fn classify_command(cmd: &str) -> ShellRisk {
     // Check medium-risk list
     if MEDIUM_RISK_COMMANDS.iter().any(|c| *c == cmd_lower) {
         return ShellRisk::Medium;
+    }
+
+    // Check high-risk list
+    if HIGH_RISK_COMMANDS.iter().any(|c| *c == cmd_lower) {
+        return ShellRisk::High;
     }
 
     // Path-like execution (e.g., ./payload.sh, /tmp/run.sh, .\script.ps1, C:\program.exe)

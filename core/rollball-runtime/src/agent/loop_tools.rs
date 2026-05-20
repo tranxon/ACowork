@@ -61,6 +61,12 @@ impl AgentLoop {
         let approval_gate = self.core.approval_gate.clone();
         let shell_threshold = *self.core.shell_approval_threshold();
         let use_gateway_approval = self.core.approval_handle.is_some();
+        tracing::info!(
+            use_gateway_approval,
+            has_approval_gate = approval_gate.is_some(),
+            threshold = ?shell_threshold,
+            "Shell approval gate status"
+        );
 
         // Spawn each tool as an independent task
         let handles: Vec<tokio::task::JoinHandle<()>> = all_indices
@@ -354,8 +360,8 @@ async fn check_shell_approval(
     // Blocked commands: always reject without asking
     if assessment.risk == ShellRisk::Blocked {
         return Some(format!(
-            "Error: Shell command execution was blocked for safety reasons. {}",
-            assessment.reason
+            "Error: Shell command was blocked for safety reasons. Command: {}\nReason: {}",
+            command, assessment.reason
         ));
     }
 
@@ -387,8 +393,9 @@ async fn check_shell_approval(
         crate::security::approval_gate::ApprovalResponse::Rejected => {
             tracing::info!(command = %command, "Shell command rejected by user");
             Some(format!(
-                "Error: Shell command execution was rejected by the user based on risk assessment. \
-                 Risk level: {}, Reason: {}",
+                "Error: Shell command was rejected by the user based on risk assessment.\n\
+                 Command: {}\nRisk level: {}\nReason: {}",
+                command,
                 assessment.risk.label(),
                 assessment.reason
             ))
@@ -464,8 +471,8 @@ async fn check_shell_approval_handle(
     // Blocked commands: always reject without asking
     if assessment.risk == ShellRisk::Blocked {
         return Some(format!(
-            "Error: Shell command execution was blocked for safety reasons. {}",
-            assessment.reason
+            "Error: Shell command was blocked for safety reasons. Command: {}\nReason: {}",
+            command, assessment.reason
         ));
     }
 
@@ -495,8 +502,9 @@ async fn check_shell_approval_handle(
     } else {
         tracing::info!(command = %command, "Shell command rejected by user");
         Some(format!(
-            "Error: Shell command execution was rejected by the user based on risk assessment. \
-             Risk level: {}, Reason: {}",
+            "Error: Shell command was rejected by the user based on risk assessment.\n\
+             Command: {}\nRisk level: {}\nReason: {}",
+            command,
             assessment.risk.label(),
             assessment.reason
         ))
