@@ -215,13 +215,18 @@ impl GatewayClient {
     // ── Chat ───────────────────────────────────────────────────────────
 
     /// `POST /api/agents/:id/message`
-    pub async fn send_message(&self, agent_id: &str, content: &str, session_id: Option<&str>, command: Option<&str>) -> Result<SendMessageResponse> {
+    pub async fn send_message(&self, agent_id: &str, content: &str, session_id: Option<&str>, command: Option<&str>, document_ids: Option<&[String]>) -> Result<SendMessageResponse> {
         let mut body = serde_json::json!({ "content": content });
         if let Some(sid) = session_id {
             body["session_id"] = serde_json::json!(sid);
         }
         if let Some(cmd) = command {
             body["command"] = serde_json::json!(cmd);
+        }
+        if let Some(ids) = document_ids {
+            if !ids.is_empty() {
+                body["document_ids"] = serde_json::json!(ids);
+            }
         }
         let resp = self
             .client
@@ -238,6 +243,33 @@ impl GatewayClient {
         format!("{}/api/agents/{}/stream", self.base_url, agent_id)
             .replace("http://", "ws://")
             .replace("https://", "wss://")
+    }
+
+    // ── Documents ──────────────────────────────────────────────────────
+
+    /// `POST /api/sessions/:session_id/documents` — multipart upload
+    pub async fn upload_document(&self, session_id: &str, file_path: &str) -> Result<DocumentUploadResponse> {
+        let file_name = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document.bin");
+
+        let file_bytes = tokio::fs::read(file_path).await?;
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string())
+            .mime_str("application/octet-stream")?;
+
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("filename", file_name.to_string());
+
+        let resp = self
+            .client
+            .post(format!("{}/api/sessions/{}/documents", self.base_url, session_id))
+            .multipart(form)
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
     }
 
     // ── Vault ──────────────────────────────────────────────────────────
@@ -539,4 +571,15 @@ pub struct ModelModalities {
 
 fn default_true() -> bool {
     true
+}
+
+// ── Document upload ───────────────────────────────────────────────────
+
+/// Response from `POST /api/sessions/{sid}/documents`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentUploadResponse {
+    pub document_id: String,
+    pub filename: String,
+    pub format: String,
+    pub size_bytes: u64,
 }

@@ -14,7 +14,7 @@ import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 import { toolbarButton, toolbarButtonActive } from "../../lib/ui-styles";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil, Paperclip } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry, ModelInfo } from "../../lib/types";
@@ -26,6 +26,7 @@ import { SkillsPanel } from "../skills/SkillsPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
+import { DocumentChip } from "./DocumentChip";
 
 // Module-level: persists across ChatPanel mount/unmount cycles
 // so nav-back (Settings→Chat) doesn't trigger full reinit
@@ -74,6 +75,15 @@ export function ChatPanel() {
   const { activeSkill, clearActiveSkill } = useSkillStore();
   const [inputValue, setInputValue] = useState("");
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
+  /** Pending file uploads: chips shown above the textarea */
+  const [pendingFiles, setPendingFiles] = useState<Array<{
+    tempId: string;
+    filename: string;
+    format: string;
+    size: number;
+    status: "uploading" | "success" | "error";
+    documentId?: string;
+  }>>([]);
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -112,6 +122,10 @@ export function ChatPanel() {
         exploreBuffer.push(msg);
       } else if (msg.type === 'thought') {
         exploreBuffer.push(msg);
+      } else if (msg.type === 'document_upload' || msg.type === 'system') {
+        // Document upload and system messages: flush explore, pass through as-is
+        flushExplore();
+        grouped.push(msg);
       } else if (msg.type === 'assistant') {
         // Streaming: if content starts with a think tag but no closing tag yet,
         // treat entire content as thinking
@@ -443,12 +457,20 @@ export function ChatPanel() {
   const handleSend = () => {
     const content = inputValue.trim();
     if (!content || sending || !selectedAgentId) return;
+
+    // Collect successfully uploaded document IDs
+    const documentIds = pendingFiles
+      .filter((f) => f.status === "success" && f.documentId)
+      .map((f) => f.documentId!);
+
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
-    void sendMessage(content, selectedAgentId, activeSkill?.name).then(() => {
+    void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined).then(() => {
       clearActiveSkill();
     });
     setInputValue("");
+    // Clear pending files after send
+    setPendingFiles([]);
   };
 
   // Stop button dual-action:
@@ -482,6 +504,69 @@ export function ChatPanel() {
   const handleEditQueued = (index: number) => {
     setInputValue(queuedMessages[index]);
     setQueuedMessages(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // File upload handler: open file dialog, then upload via Tauri command
+  const handleFileUpload = async () => {
+    // Import dialog dynamically to avoid build issues
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: "Select a document",
+      filters: [{
+        name: "Documents",
+        extensions: ["pdf", "docx", "pptx", "xlsx"],
+      }],
+      multiple: false,
+    });
+
+    if (!selected || !currentSessionId || !selectedAgentId) return;
+
+    const filePath = selected as string;
+    if (!filePath) return;
+
+    const filename = filePath.replace(/^.*[\\/]/, "");
+    const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+    if (!["pdf", "docx", "pptx", "xlsx"].includes(ext)) return;
+
+    // Add pending chip with uploading status
+    const tempId = `file-${Date.now()}`;
+    setPendingFiles(prev => [...prev, {
+      tempId,
+      filename,
+      format: ext,
+      size: 0,
+      status: "uploading",
+    }]);
+
+    try {
+      const result = await invoke<{
+        document_id: string;
+        filename: string;
+        format: string;
+        size_bytes: number;
+      }>("upload_document", {
+        sessionId: currentSessionId,
+        filePath,
+      });
+
+      // Update chip to success
+      setPendingFiles(prev => prev.map((f) =>
+        f.tempId === tempId
+          ? { ...f, status: "success", documentId: result.document_id, size: result.size_bytes }
+          : f
+      ));
+    } catch (err) {
+      console.error("[ChatPanel] Document upload failed:", err);
+      // Update chip to error
+      setPendingFiles(prev => prev.map((f) =>
+        f.tempId === tempId ? { ...f, status: "error" } : f
+      ));
+    }
+  };
+
+  // Remove a pending file chip
+  const handleRemoveFile = (tempId: string) => {
+    setPendingFiles(prev => prev.filter((f) => f.tempId !== tempId));
   };
 
   // Tool approval: send decision to Gateway API directly, then clear inline state
@@ -755,8 +840,8 @@ export function ChatPanel() {
       {/* Queued messages box — separate box above the input area,
           flush against input, slightly narrower for layered depth */}
       {queuedMessages.length > 0 && (
-        <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-700 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
-          <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-700">
+        <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
             <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
               消息队列 ({queuedMessages.length})
             </span>
@@ -796,7 +881,7 @@ export function ChatPanel() {
       )}
 
       {/* Unified input container with toolbar */}
-      <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50">
+      <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-[#FAFAFA] dark:bg-zinc-900">
         {/* Active skill badge */}
         {activeSkill && (
           <div className="flex items-center gap-1 px-3 pt-2">
@@ -811,6 +896,22 @@ export function ChatPanel() {
                 <X size={12} />
               </button>
             </span>
+          </div>
+        )}
+
+        {/* Pending file chips */}
+        {pendingFiles.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+            {pendingFiles.map((file) => (
+              <DocumentChip
+                key={file.tempId}
+                filename={file.filename}
+                format={file.format}
+                size={file.size > 0 ? file.size : undefined}
+                status={file.status}
+                onRemove={() => handleRemoveFile(file.tempId)}
+              />
+            ))}
           </div>
         )}
         {/* Textarea area — borderless, transparent background */}
@@ -856,6 +957,23 @@ export function ChatPanel() {
             <WorkspaceSelector />
             {/* Skills dropdown */}
             <SkillsPanel />
+            {/* File upload button */}
+            <div className="group relative">
+              <button
+                className={toolbarButton}
+                onClick={handleFileUpload}
+                disabled={!currentSessionId || !selectedAgentId}
+                aria-label="上传文件"
+              >
+                <Paperclip size={16} />
+              </button>
+              {/* Tooltip */}
+              <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
+                <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
+                  上传文件 (PDF/DOCX/PPTX/XLSX)
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Right: send/stop button */}
@@ -1152,6 +1270,21 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
           <div className="rounded bg-zinc-100 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400 select-text">
             {message.content}
           </div>
+        </div>
+      </MessageContentWrapper>
+    );
+  }
+
+  if (message.type === "document_upload") {
+    return (
+      <MessageContentWrapper>
+        <div className="flex justify-center">
+          <DocumentChip
+            filename={message.documentFormat ? `${message.content.replace(/^Uploaded file: /, "").replace(/ \(.*\)$/, "")}.${message.documentFormat}` : message.content}
+            format={message.documentFormat ?? "unknown"}
+            size={message.documentSize}
+            status="success"
+          />
         </div>
       </MessageContentWrapper>
     );

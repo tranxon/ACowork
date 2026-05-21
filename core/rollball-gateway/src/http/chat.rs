@@ -58,6 +58,9 @@ pub struct SendMessageRequest {
     /// Skill command selected by the user (e.g. "/commit", "/review-pr")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Document IDs to attach to this message (previously uploaded via /api/sessions/{sid}/documents)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_ids: Option<Vec<String>>,
 }
 
 /// Response for send message
@@ -127,6 +130,9 @@ struct WsClientMessage {
     /// Skill command selected by the user (e.g. "/commit", "/review-pr")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command: Option<String>,
+    /// Document IDs to attach to this message
+    #[serde(default)]
+    document_ids: Option<Vec<String>>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -193,6 +199,15 @@ pub async fn send_message(
                 // Explicit session_id pass-through for multi-session routing (P0 fix)
                 if let Some(ref sid) = body.session_id {
                     params["session_id"] = serde_json::json!(sid);
+
+                    // Resolve document references if document_ids was provided
+                    if let Some(ref doc_ids) = body.document_ids {
+                        if !doc_ids.is_empty() {
+                            if let Some(docs) = resolve_document_refs(&state, sid, doc_ids).await {
+                                params["documents"] = docs;
+                            }
+                        }
+                    }
                 }
                 let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
                     from: "http-api".to_string(),
@@ -728,6 +743,15 @@ async fn handle_ws_text(
             // Explicit session_id pass-through for multi-session routing (P0 fix)
             if let Some(ref sid) = client_msg.session_id {
                 params["session_id"] = serde_json::json!(sid);
+
+                // Resolve document references if document_ids was provided
+                if let Some(ref doc_ids) = client_msg.document_ids {
+                    if !doc_ids.is_empty() {
+                        if let Some(docs) = resolve_document_refs(&state, sid, doc_ids).await {
+                            params["documents"] = docs;
+                        }
+                    }
+                }
             }
             let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
                 from: "http-ws".to_string(),
@@ -1278,6 +1302,31 @@ pub async fn delete_session(
         return Err(ApiError::internal(error));
     }
 
+    // Clean up the session's documents directory on Gateway side.
+    // Documents are stored at {data_dir}/sessions/{session_id}/documents/.
+    // This is best-effort: ignoring errors because documents may not exist.
+    {
+        let data_dir = {
+            let gw = state.gateway_state.read().await;
+            gw.vault.dir().to_path_buf()
+        };
+        let docs_dir = data_dir.join("sessions").join(&session_id).join("documents");
+        if docs_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&docs_dir) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to clean up session documents directory"
+                );
+            } else {
+                tracing::info!(
+                    session_id = %session_id,
+                    "Cleaned up session documents directory"
+                );
+            }
+        }
+    }
+
     Ok(Json(data))
 }
 
@@ -1485,5 +1534,63 @@ async fn push_llm_config_on_switch(
                 "No IPC session found for agent, cannot push LLMConfigDelivery on model_switch"
             );
         }
+    }
+}
+
+// ── Document resolution helper ───────────────────────────────────────
+
+/// Resolve document IDs to their metadata (filename, abs_path, format, size).
+///
+/// Reads the `.meta.json` files stored alongside the uploaded documents.
+/// Returns `None` if the session documents directory doesn't exist.
+async fn resolve_document_refs(
+    state: &AppState,
+    session_id: &str,
+    doc_ids: &[String],
+) -> Option<serde_json::Value> {
+    let data_dir = {
+        let gw = state.gateway_state.read().await;
+        gw.vault.dir().to_path_buf()
+    };
+    let docs_dir = data_dir.join("sessions").join(session_id).join("documents");
+
+    if !docs_dir.exists() {
+        return None;
+    }
+
+    let mut docs = Vec::new();
+    for doc_id in doc_ids {
+        let entries = match std::fs::read_dir(&docs_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem != doc_id {
+                continue;
+            }
+            let meta_path = path.with_extension("meta.json");
+            if let Ok(meta_bytes) = std::fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_bytes) {
+                    docs.push(serde_json::json!({
+                        "id": doc_id,
+                        "filename": meta.get("filename").and_then(|v| v.as_str()).unwrap_or(""),
+                        "abs_path": meta.get("abs_path").and_then(|v| v.as_str()).unwrap_or(""),
+                        "format": meta.get("format").and_then(|v| v.as_str()).unwrap_or(""),
+                        "size": meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                    }));
+                }
+            }
+            break;
+        }
+    }
+
+    if docs.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Array(docs))
     }
 }

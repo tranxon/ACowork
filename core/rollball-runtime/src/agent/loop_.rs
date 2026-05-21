@@ -167,6 +167,8 @@ pub enum ChunkEvent {
         options: Vec<QuestionOption>,
         /// Optional title/header for the question card
         title: Option<String>,
+        /// Optional timeout in seconds (None = use default)
+        timeout_seconds: Option<u32>,
     },
     /// Session lifecycle status changed (ADR-014).
     /// Emitted whenever SessionState::status transitions, so the frontend
@@ -447,6 +449,31 @@ impl AgentLoop {
                 error = %e,
                 "Failed to record conversation turn to Grafeo memory (non-fatal)"
             );
+        }
+    }
+
+    /// Write document upload entries to the conversation JSONL.
+    ///
+    /// Each document is persisted as a `ConversationEntry` with `role: "system"`
+    /// and `metadata.type: "document_upload"` so that the Desktop App can render
+    /// document chips when loading historical sessions.
+    pub fn write_document_entries(&self, documents: &[serde_json::Value]) {
+        if let Some(ref conversation) = self.session.conversation {
+            for doc in documents {
+                let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("");
+                let size = doc.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                let content = format!("Uploaded file: {} ({}, {} bytes)", filename, format, size);
+                let metadata = serde_json::json!({
+                    "type": "document_upload",
+                    "document_id": doc.get("id"),
+                    "filename": filename,
+                    "format": format,
+                    "size_bytes": size,
+                    "path": doc.get("abs_path"),
+                });
+                conversation.append_message("system", &content, Some(metadata));
+            }
         }
     }
 
@@ -1943,6 +1970,7 @@ impl AgentLoop {
             question: parsed.question.clone(),
             options: parsed.options,
             title: parsed.title.clone(),
+            timeout_seconds: parsed.timeout_seconds,
         });
 
         // Transition to WaitingApproval
@@ -1950,8 +1978,8 @@ impl AgentLoop {
             request_id: request_id.clone(),
         });
 
-        // Wait for the user's answer
-        let answer = self.await_question_answer(&request_id).await;
+        // Wait for the user's answer (with optional timeout)
+        let answer = self.await_question_answer(&request_id, parsed.timeout_seconds).await;
 
         // Transition back to Streaming (the loop will continue)
         self.transition_status(SessionStatus::Streaming { message_id: None });
@@ -1968,14 +1996,21 @@ impl AgentLoop {
 
     /// Await user's answer to an ask_user_question prompt.
     ///
-    /// Blocks the main loop on `inbound_rx` without timeout until the
-    /// matching `InboundMessage::QuestionAnswer` arrives. Non-matching
-    /// messages are buffered in `deferred_inbound` for later processing.
-    async fn await_question_answer(&mut self, request_id: &str) -> String {
-        loop {
-            tokio::select! {
-                msg = self.inbound_rx.recv() => {
-                    match msg {
+    /// Blocks the main loop on `inbound_rx` until the matching
+    /// `InboundMessage::QuestionAnswer` arrives or the optional timeout expires.
+    /// Non-matching messages are buffered in `deferred_inbound` for later processing.
+    async fn await_question_answer(&mut self, request_id: &str, timeout_seconds: Option<u32>) -> String {
+        /// Default timeout when none specified
+        const DEFAULT_TIMEOUT_SECS: u32 = 300;
+        let timeout_duration = std::time::Duration::from_secs(
+            timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS) as u64
+        );
+
+        let timeout_future = tokio::time::timeout(timeout_duration, async {
+            loop {
+                tokio::select! {
+                    msg = self.inbound_rx.recv() => {
+                        match msg {
                         Some(InboundMessage::QuestionAnswer {
                             request_id: rid,
                             answer,
@@ -2035,6 +2070,20 @@ impl AgentLoop {
                         }
                     }
                 }
+            }
+        }
+    });
+        let result = timeout_future.await;
+
+        match result {
+            Ok(answer) => answer,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    timeout_secs = %timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS),
+                    "Question answer timed out"
+                );
+                "[Timeout: user did not respond]".to_string()
             }
         }
     }

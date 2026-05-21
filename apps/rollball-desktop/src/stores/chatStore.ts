@@ -252,7 +252,7 @@ interface ChatStore {
 
   // ---- Actions ----
   connectStream: (agentId: string, gatewayUrl: string) => void;
-  sendMessage: (content: string, agentId: string, command?: string) => Promise<void>;
+  sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[]) => Promise<void>;
   stopCurrentMessage: () => Promise<void>;
   sendInterrupt: () => void;
   disconnectStream: (agentId?: string) => void;
@@ -688,7 +688,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string, agentId: string, command?: string) => {
+  sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[]) => {
     const ws = get().wsMap[agentId];
     const sessionId = useSessionStore.getState().currentSessionId;
 
@@ -721,6 +721,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         content,
         command,
         ...(sessionId ? { session_id: sessionId } : {}),
+        ...(documentIds && documentIds.length > 0 ? { document_ids: documentIds } : {}),
       }));
 
       // Reset streaming state for the active session
@@ -771,7 +772,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const result = await invoke<{ message_id: string; status: string }>(
         "send_message",
-        { agentId, content, command, sessionId },
+        { agentId, content, command, sessionId, documentIds },
       );
       console.log("[ChatStore] Message sent via HTTP:", result);
       const replyMsg: ChatMessage = {
@@ -1273,6 +1274,16 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
 
   const meta = entry.metadata;
   if (!meta) return base;
+
+  // document_upload entries: extract fields from metadata
+  if (meta.type === "document_upload") {
+    base.type = "document_upload";
+    base.documentId = meta.document_id as string | undefined;
+    base.documentFormat = meta.format as string | undefined;
+    base.documentSize = meta.size_bytes as number | undefined;
+    base.documentPath = meta.path as string | undefined;
+    return base;
+  }
 
   if (entry.role === "tool_call" || entry.role === "tool_result") {
     base.toolName = meta.tool_name as string | undefined;

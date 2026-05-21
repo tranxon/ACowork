@@ -50,6 +50,9 @@ pub struct AskQuestionParams {
     /// Short title/header for the question card (optional)
     #[serde(default)]
     pub title: Option<String>,
+    /// Seconds to wait for the user's response (default: 300)
+    #[serde(default)]
+    pub timeout_seconds: Option<u32>,
 }
 
 /// Result returned from the user's response (received via IPC from Gateway)
@@ -115,6 +118,10 @@ impl AskUserQuestionTool {
                     "title": {
                         "type": "string",
                         "description": "Optional short title/header for the question card"
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Seconds to wait for the user's response (default: 300, max: 3600)"
                     }
                 },
                 "required": ["question", "options"]
@@ -203,10 +210,17 @@ impl AskUserQuestionTool {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        let timeout_seconds = params
+            .get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .map(|t| t as u32)
+            .filter(|t| *t > 0);
+
         Ok(AskQuestionParams {
             question,
             options,
             title,
+            timeout_seconds,
         })
     }
 }

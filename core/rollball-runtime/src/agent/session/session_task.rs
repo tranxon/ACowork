@@ -27,6 +27,9 @@ pub enum SessionMessage {
         /// Skill instructions to inject into the system prompt (from command-based skill selection).
         /// When set, the instructions are injected via ContextBuilder rather than prepended to user content.
         skill_instructions: Option<String>,
+        /// Optional document references uploaded with this message.
+        /// Each entry: { "id", "filename", "abs_path", "format", "size" }
+        documents: Option<Vec<serde_json::Value>>,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -319,7 +322,7 @@ impl SessionTask {
             // Note: msg is now Option<SessionMessage> directly (no
             // Ok/Err wrapper from the old timeout pattern).
             match msg {
-                Some(SessionMessage::ChatMessage { content, message_id, skill_instructions }) => {
+                Some(SessionMessage::ChatMessage { content, message_id, skill_instructions, documents }) => {
                     if content.trim().is_empty() {
                         tracing::warn!(
                             session_id = %session_id,
@@ -332,6 +335,14 @@ impl SessionTask {
                     // resume is pressed after the agent loop exits
                     // (e.g. after a rewind issued post-completion).
                     last_user_message = Some((content.clone(), message_id.clone()));
+
+                    // Persist document upload records to the conversation JSONL
+                    // before running the agent loop, so they appear in session history.
+                    if let Some(ref docs) = documents {
+                        if !docs.is_empty() {
+                            agent_loop.write_document_entries(docs);
+                        }
+                    }
 
                     // Apply skill instructions to ContextBuilder (system prompt injection).
                     // This replaces the old behavior of prepending skill text to the user message,

@@ -10,6 +10,7 @@ pub mod agents;
 pub mod agent_config;
 pub mod approval;
 pub mod question;
+pub mod documents;
 pub mod chat;
 pub mod vault_api;
 pub mod config_api;

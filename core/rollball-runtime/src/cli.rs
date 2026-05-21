@@ -2114,7 +2114,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                         }
 
 
-                        crate::agent::loop_::ChunkEvent::AskQuestion { request_id, question, options, title } => {
+                        crate::agent::loop_::ChunkEvent::AskQuestion { request_id, question, options, title, timeout_seconds } => {
 
 
                             let params = serde_json::json!({
@@ -2130,6 +2130,9 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 
 
                                 "title": title,
+
+
+                                "timeout_seconds": timeout_seconds,
 
 
                                 "agent_id": agent_id,
@@ -4366,6 +4369,13 @@ async fn process_gateway_recv(
                         .unwrap_or_else(|| format!("msg-{}", chrono::Utc::now().timestamp_millis()));
 
 
+                    // Extract document references if present (for doc_reader integration)
+                    let documents: Option<Vec<serde_json::Value>> = params
+                        .get("documents")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.clone());
+
+
                     // Pure routing: send to session's inbound channel, immediately return
 
 
@@ -4379,6 +4389,9 @@ async fn process_gateway_recv(
 
 
                         skill_instructions,
+
+
+                        documents,
 
 
                     }) {

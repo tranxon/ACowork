@@ -203,7 +203,7 @@ export interface SendMessageResponse {
 export type GatewayStatus = "connected" | "disconnected" | "error";
 
 /** Chat message types */
-export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought";
+export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "document_upload";
 
 /** Chat message in the UI */
 export interface ChatMessage {
@@ -233,6 +233,14 @@ export interface ChatMessage {
   startTime?: number;
   /** Timestamp when this message ended (set by done event, fixes perpetual timer) */
   endTime?: number;
+  /** For document_upload: document ID */
+  documentId?: string;
+  /** For document_upload: document format (pdf, docx, pptx, xlsx) */
+  documentFormat?: string;
+  /** For document_upload: file size in bytes */
+  documentSize?: number;
+  /** For document_upload: absolute path */
+  documentPath?: string;
 }
 
 /** Token usage stats */
@@ -502,6 +510,16 @@ export interface ConversationEntry {
   role: "user" | "assistant" | "think" | "thought" | "tool_call" | "tool_result" | "system";
   content: string;
   metadata?: Record<string, unknown>;
+}
+
+/** Metadata for document upload entries in conversation history */
+export interface DocumentUploadMeta {
+  type: "document_upload";
+  document_id: string;
+  filename: string;
+  format: "pdf" | "docx" | "pptx" | "xlsx";
+  size_bytes: number;
+  path: string;
 }
 
 /** Paginated messages response from Gateway */

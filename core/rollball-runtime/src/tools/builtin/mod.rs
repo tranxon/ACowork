@@ -14,6 +14,7 @@
 //! | file_read | filesystem:read:<path> |
 //! | file_write | filesystem:write:<path> |
 //! | file_edit | filesystem:write:<path> |
+//! | doc_reader | filesystem:read:<path> |
 //! | glob_search | filesystem:read:<path> |
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
@@ -29,6 +30,7 @@ pub mod shell;
 pub mod file_read;
 pub mod file_write;
 pub mod file_edit;
+pub mod doc_reader;
 pub mod glob_search;
 pub mod content_search;
 pub mod intent_send;
@@ -80,6 +82,7 @@ pub fn all_builtin_tools(
         Arc::new(file_read::FileReadTool::new(current_dir)),
         Arc::new(file_write::FileWriteTool::new(current_dir)),
         Arc::new(file_edit::FileEditTool::new(current_dir)),
+        Arc::new(doc_reader::DocReaderTool::new(current_dir)),
         Arc::new(glob_search::GlobSearchTool::new(resolver)),
         Arc::new(content_search::ContentSearchTool::new(resolver)),
         Arc::new(intent_send::IntentSendTool::new()),

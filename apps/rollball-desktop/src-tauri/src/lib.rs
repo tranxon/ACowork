@@ -41,6 +41,7 @@ pub fn run() {
             commands::agent::stop_agent,
             commands::agent::clone_agent,
             commands::chat::send_message,
+            commands::chat::upload_document,
             commands::vault::list_keys,
             commands::vault::add_key,
             commands::vault::remove_key,
