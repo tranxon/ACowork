@@ -345,66 +345,35 @@ impl SessionTask {
                         }
                     }
 
-                    // Auto-extract document content using doc_reader and inject into the user message.
-                    // This ensures the LLM sees the actual document text in context.
+                    // Build enriched user message: pass document absolute paths as references
+                    // for the LLM to call the `doc_reader` tool on demand.
                     let mut enriched_content = content.clone();
                     if let Some(ref docs) = documents {
                         if !docs.is_empty() {
-                            let mut doc_sections: Vec<String> = Vec::new();
+                            let mut doc_refs: Vec<String> = Vec::new();
                             for doc in docs {
                                 let abs_path = doc.get("abs_path").and_then(|v| v.as_str()).unwrap_or("");
                                 let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("document");
-                                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("");
-                                if abs_path.is_empty() || format.is_empty() {
+                                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                if abs_path.is_empty() {
                                     continue;
                                 }
-                                let path = std::path::Path::new(abs_path);
-                                let opts = crate::tools::builtin::doc_reader::ExtractOptions::default();
-                                let text = match format {
-                                    "pdf" => crate::tools::builtin::doc_reader::pdf::extract_text(path, &opts),
-                                    "docx" => crate::tools::builtin::doc_reader::docx::extract_text(path, &opts),
-                                    "pptx" => crate::tools::builtin::doc_reader::pptx::extract_text(path, &opts),
-                                    "xlsx" => crate::tools::builtin::doc_reader::xlsx::extract_text(path, &opts),
-                                    _ => continue,
-                                };
-                                match text {
-                                    Ok(extracted) => {
-                                        doc_sections.push(format!(
-                                            "--- Document: {} ---\n{}",
-                                            filename,
-                                            extracted
-                                        ));
-                                        tracing::info!(
-                                            session_id = %session_id,
-                                            filename = %filename,
-                                            extracted_len = extracted.len(),
-                                            "Document content extracted and injected into context"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            session_id = %session_id,
-                                            filename = %filename,
-                                            error = %e,
-                                            "Failed to extract document content (non-fatal)"
-                                        );
-                                        doc_sections.push(format!(
-                                            "--- Document: {} ---\n[Error: {}]",
-                                            filename, e
-                                        ));
-                                    }
-                                }
+                                doc_refs.push(format!(
+                                    "- {} (.{}, path: {})",
+                                    filename, format, abs_path
+                                ));
                             }
-                            if !doc_sections.is_empty() {
+                            if !doc_refs.is_empty() {
                                 let prefix = if content.trim().is_empty() {
                                     String::new()
                                 } else {
                                     format!("{}\n\n", content)
                                 };
                                 enriched_content = format!(
-                                    "{}The user has uploaded the following documents. Please analyze their contents:\n\n{}",
+                                    "{}The user uploaded the following documents. \
+                                     Use the `doc_reader` tool to read their contents:\n{}",
                                     prefix,
-                                    doc_sections.join("\n\n")
+                                    doc_refs.join("\n")
                                 );
                             }
                         }
