@@ -33,6 +33,9 @@ type = "MemoryWrite"
 name = "file_read"
 
 [[tools]]
+name = "doc_reader"
+
+[[tools]]
 name = "file_write"
 
 [[tools]]

@@ -1018,6 +1018,12 @@ fn builtin_tool_metadata() -> Vec<AvailableTool> {
         always_on: false,
         },
         AvailableTool {
+            name: "doc_reader".into(),
+            description: "Read and extract text from documents (PDF, DOCX, PPTX, XLSX)".into(),
+            required_permissions: vec!["filesystem:read:<path>".into()],
+            always_on: false,
+        },
+        AvailableTool {
             name: "glob_search".into(),
             description: "Search for files matching glob patterns".into(),
             required_permissions: vec!["filesystem:read:<path>".into()],
