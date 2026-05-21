@@ -323,7 +323,8 @@ impl SessionTask {
             // Ok/Err wrapper from the old timeout pattern).
             match msg {
                 Some(SessionMessage::ChatMessage { content, message_id, skill_instructions, documents }) => {
-                    if content.trim().is_empty() {
+                    let has_documents = documents.as_ref().map_or(false, |d| !d.is_empty());
+                    if content.trim().is_empty() && !has_documents {
                         tracing::warn!(
                             session_id = %session_id,
                             "SessionTask received empty chat message, ignoring"
@@ -341,6 +342,71 @@ impl SessionTask {
                     if let Some(ref docs) = documents {
                         if !docs.is_empty() {
                             agent_loop.write_document_entries(docs);
+                        }
+                    }
+
+                    // Auto-extract document content using doc_reader and inject into the user message.
+                    // This ensures the LLM sees the actual document text in context.
+                    let mut enriched_content = content.clone();
+                    if let Some(ref docs) = documents {
+                        if !docs.is_empty() {
+                            let mut doc_sections: Vec<String> = Vec::new();
+                            for doc in docs {
+                                let abs_path = doc.get("abs_path").and_then(|v| v.as_str()).unwrap_or("");
+                                let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("document");
+                                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("");
+                                if abs_path.is_empty() || format.is_empty() {
+                                    continue;
+                                }
+                                let path = std::path::Path::new(abs_path);
+                                let opts = crate::tools::builtin::doc_reader::ExtractOptions::default();
+                                let text = match format {
+                                    "pdf" => crate::tools::builtin::doc_reader::pdf::extract_text(path, &opts),
+                                    "docx" => crate::tools::builtin::doc_reader::docx::extract_text(path, &opts),
+                                    "pptx" => crate::tools::builtin::doc_reader::pptx::extract_text(path, &opts),
+                                    "xlsx" => crate::tools::builtin::doc_reader::xlsx::extract_text(path, &opts),
+                                    _ => continue,
+                                };
+                                match text {
+                                    Ok(extracted) => {
+                                        doc_sections.push(format!(
+                                            "--- Document: {} ---\n{}",
+                                            filename,
+                                            extracted
+                                        ));
+                                        tracing::info!(
+                                            session_id = %session_id,
+                                            filename = %filename,
+                                            extracted_len = extracted.len(),
+                                            "Document content extracted and injected into context"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            filename = %filename,
+                                            error = %e,
+                                            "Failed to extract document content (non-fatal)"
+                                        );
+                                        doc_sections.push(format!(
+                                            "--- Document: {} ---\n[Error: {}]",
+                                            filename, e
+                                        ));
+                                    }
+                                }
+                            }
+                            if !doc_sections.is_empty() {
+                                let prefix = if content.trim().is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("{}\n\n", content)
+                                };
+                                enriched_content = format!(
+                                    "{}The user has uploaded the following documents. Please analyze their contents:\n\n{}",
+                                    prefix,
+                                    doc_sections.join("\n\n")
+                                );
+                            }
                         }
                     }
 
@@ -407,7 +473,7 @@ impl SessionTask {
                         }
                     }
 
-                    match agent_loop.run(&content, &mut context_builder).await {
+                    match agent_loop.run(&enriched_content, &mut context_builder).await {
                         Ok(response) => {
                             tracing::info!(
                                 session_id = %session_id,
