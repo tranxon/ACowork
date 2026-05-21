@@ -50,12 +50,18 @@ export function DocumentChip({
   onRemove,
   className,
 }: DocumentChipProps) {
+  const borderClass = status === "uploading"
+    ? "border-blue-400 dark:border-blue-500 animate-pulse"
+    : status === "error"
+      ? "border-red-400 dark:border-red-500 bg-red-50 dark:bg-red-900/20"
+      : "border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800";
+
   return (
     <div
       className={cn(
         "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs",
-        "border-zinc-200 bg-zinc-50 text-zinc-700",
-        "dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+        "text-zinc-700 dark:text-zinc-300",
+        borderClass,
         className,
       )}
     >
@@ -78,7 +84,10 @@ export function DocumentChip({
         <Check className="h-3 w-3 shrink-0 text-green-500" />
       )}
       {status === "error" && (
-        <AlertCircle className="h-3 w-3 shrink-0 text-red-500" />
+        <>
+          <AlertCircle className="h-3 w-3 shrink-0 text-red-500" />
+          <span className="text-red-500 dark:text-red-400">上传失败</span>
+        </>
       )}
 
       {/* Remove button (only when onRemove is provided) */}

@@ -456,7 +456,11 @@ export function ChatPanel() {
 
   const handleSend = () => {
     const content = inputValue.trim();
-    if (!content || sending || !selectedAgentId) return;
+    const hasSuccessfulFiles = pendingFiles.some((f) => f.status === "success");
+    const hasUploadingFiles = pendingFiles.some((f) => f.status === "uploading");
+
+    // Block send: no content AND no files, or files still uploading
+    if ((!content && !hasSuccessfulFiles) || sending || !selectedAgentId || hasUploadingFiles) return;
 
     // Collect successfully uploaded document IDs
     const documentIds = pendingFiles
@@ -935,6 +939,7 @@ export function ChatPanel() {
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
+              // Let handleSend() itself decide whether to proceed
               handleSend();
             }
           }}
@@ -987,7 +992,13 @@ export function ChatPanel() {
                     : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
                 }`}
                 onClick={sending ? handleStop : handleSend}
-                disabled={!sending && (inputDisabled || !inputValue.trim())}
+                disabled={
+                  sending
+                    ? false
+                    : (inputDisabled
+                      || (!inputValue.trim() && !pendingFiles.some(f => f.status === "success"))
+                      || pendingFiles.some(f => f.status === "uploading"))
+                }
                 aria-label={sending ? (inputValue.trim() ? "Add to queue" : queuedMessages.length > 0 ? "Send queued & stop" : "Stop") : "Send message"}
               >
                 {sending ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
