@@ -8,6 +8,11 @@ use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 use std::sync::Arc;
+
+use crate::tools::path_utils;
+
+// Re-export for backward compatibility — existing tests import from wrappers
+pub use crate::tools::workspace_resolver::{WorkspaceAccess, WorkspaceDir};
 use std::time::Instant;
 
 /// Rate-limited tool wrapper
@@ -65,20 +70,6 @@ impl Tool for RateLimitedTool {
         }
         self.inner.execute(params).await
     }
-}
-
-/// Workspace directory entry
-#[derive(Clone, Debug)]
-pub struct WorkspaceDir {
-    pub path: String,
-    pub access: WorkspaceAccess,
-}
-
-/// Access level for a workspace directory
-#[derive(Clone, Debug, PartialEq)]
-pub enum WorkspaceAccess {
-    ReadOnly,
-    ReadWrite,
 }
 
 /// Path-guarded tool wrapper
@@ -145,8 +136,8 @@ impl PathGuardedTool {
                 .unwrap_or_else(|| allowed.to_path_buf());
 
             // Convert to string and normalize separators for cross-platform comparison
-            let target_str = Self::normalize_separators(&normalized.to_string_lossy());
-            let allowed_str = Self::normalize_separators(&allowed_normalized.to_string_lossy());
+            let target_str = path_utils::normalize_separators(&normalized.to_string_lossy());
+            let allowed_str = path_utils::normalize_separators(&allowed_normalized.to_string_lossy());
 
             tracing::debug!(
                 target_path = %target_str,
@@ -179,11 +170,6 @@ impl PathGuardedTool {
                 "Path '{}' is outside all allowed workspace directories",
                 path
             ))
-    }
-
-    /// Normalize path separators to forward slashes for consistent comparison
-    fn normalize_separators(path: &str) -> String {
-        path.replace('\\', "/")
     }
 
     /// Normalize a path by resolving ".." components without touching the filesystem.

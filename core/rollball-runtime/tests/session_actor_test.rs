@@ -658,7 +658,7 @@ async fn test_send_to_nonexistent_session() {
     let provider = Arc::new(MockProvider::single_text("OK"));
     let tools: Vec<Arc<dyn Tool>> = vec![];
     let core = make_core(provider, tools);
-    let manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
+    let mut manager = SessionManager::new(core, make_session_config(test_budget()), String::new());
 
     let result = manager.send_to_session("nonexistent", SessionMessage::ChatMessage {
         content: "hello".to_string(),

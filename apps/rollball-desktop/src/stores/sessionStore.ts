@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { SessionInfo, SessionStatus } from "../lib/types";
+import { isSessionActive } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { useChatStore } from "./chatStore";
 
@@ -12,9 +13,14 @@ interface SessionState {
   sessionTitles: Record<string, string | null>;
   /** Remembers the last selected session per agent, survives component remount */
   agentSessionMap: Record<string, string>;
+  /** Pagination state */
+  totalCount: number;
+  currentPage: number;
+  pageSize: number;
+  totalPages: number;
 
   // Actions
-  fetchSessions: (agentId: string) => Promise<void>;
+  fetchSessions: (agentId: string, page?: number) => Promise<void>;
   fetchLatestSessionTitle: (agentId: string) => Promise<string | null>;
   switchSession: (sessionId: string, agentId?: string) => Promise<void>;
   saveSessionForAgent: (agentId: string, sessionId: string) => void;
@@ -30,22 +36,28 @@ interface SessionState {
 /** Tracks the latest fetch request to discard stale responses on agent switch */
 let fetchSessionId = 0;
 
-export const useSessionStore = create<SessionState>((set) => ({
+export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   currentSessionId: null,
   isLoading: false,
   isSessionPanelOpen: false,
   sessionTitles: {},
   agentSessionMap: {},
+  totalCount: 0,
+  currentPage: 1,
+  pageSize: 20,
+  totalPages: 0,
 
-  fetchSessions: async (agentId: string) => {
+  fetchSessions: async (agentId: string, page?: number) => {
     // Cancel any in-flight fetch by bumping the id
     const requestId = ++fetchSessionId;
+    const currentPage = page ?? get().currentPage;
+    const pageSize = get().pageSize;
     set({ isLoading: true });
     try {
-      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions`);
+      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions?page=${currentPage}&size=${pageSize}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = (await resp.json()) as { sessions: SessionInfo[] };
+      const data = (await resp.json()) as { sessions: SessionInfo[]; total_count: number; total_pages: number };
       const sessions = (data.sessions ?? []).sort(
         (a, b) =>
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -57,6 +69,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessions,
         isLoading: false,
         sessionTitles: { ...state.sessionTitles, [agentId]: title },
+        totalCount: data.total_count ?? 0,
+        currentPage: currentPage,
+        totalPages: data.total_pages ?? 1,
       }));
 
       // ADR-014: Pull repair — use backend sessionStatus to correct frontend state
@@ -66,8 +81,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       for (const session of sessions) {
         if (session.status) {
           const sessionState = chatStore.getSessionState(agentId, session.session_id);
-          if (sessionState?.sessionStatus) {
-            const prevStatus = JSON.stringify(sessionState.sessionStatus);
+          // Fix: also repair when frontend has no sessionStatus (e.g. crash restart)
+          // Backend active status (streaming/waiting_approval/paused) must always be synced
+          const frontendStatus = sessionState?.sessionStatus;
+          if (!frontendStatus) {
+            // No frontend status — if backend says active, must create/repair
+            if (isSessionActive(session.status)) {
+              mismatches.set(session.session_id, session.status);
+            }
+          } else {
+            const prevStatus = JSON.stringify(frontendStatus);
             const newStatus = JSON.stringify(session.status);
             if (prevStatus !== newStatus) {
               mismatches.set(session.session_id, session.status);
@@ -242,6 +265,9 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessionTitles: {},
       agentSessionMap: state.agentSessionMap,
       isSessionPanelOpen: false,
+      totalCount: 0,
+      currentPage: 1,
+      totalPages: 0,
     }));
   },
 }));

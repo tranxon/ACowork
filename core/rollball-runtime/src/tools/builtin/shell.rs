@@ -13,6 +13,8 @@ use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 use std::path::Path;
 
+use crate::tools::output;
+
 /// A concrete shell executor registered as a tool.
 ///
 /// Different instances represent different shells (bash, powershell, etc.)
@@ -249,6 +251,11 @@ impl Tool for ShellTool {
                 } else {
                     format!("STDOUT:\n{stdout}\nSTDERR:\n{stderr}")
                 };
+
+                // Guard against unbounded shell output (e.g. `cat` on a
+                // multi-GB file or `dir /s` in a large tree) that would
+                // exhaust the LLM token budget and crash the session task.
+                let (content, _truncated) = output::truncate_output(&content);
 
                 Ok(ToolResult {
                     ok: output.status.success(),

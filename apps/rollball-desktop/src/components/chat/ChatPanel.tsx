@@ -14,10 +14,10 @@ import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 import { toolbarButton, toolbarButtonActive } from "../../lib/ui-styles";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Layers, Cpu, Loader, Pencil } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage, ContextUsageInfo, VaultKeyEntry, ModelInfo } from "../../lib/types";
+import type { ChatMessage, VaultKeyEntry, ModelInfo } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { ExploreBlock } from "./ExploreBlock";
 import { SessionTabBar } from "./SessionTabBar";
@@ -48,7 +48,6 @@ export function ChatPanel() {
   const messages = sessionState?.messages ?? [];
   const streamingMessageId = sessionState?.streamingMessageId ?? null;
   const thinkingMessageId = sessionState?.thinkingMessageId ?? null;
-  const contextUsage = sessionState?.contextUsage ?? null;
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
   const pendingApproval = sessionState?.pendingApproval ?? null;
   const isReasoning = sessionState?.isReasoning ?? false;
@@ -723,21 +722,14 @@ export function ChatPanel() {
         </div>
       </div>
 
-      {/* Queued messages box — separate standalone box above the input area */}
+      {/* Queued messages box — separate box above the input area,
+          flush against input, slightly narrower for layered depth */}
       {queuedMessages.length > 0 && (
-        <div className="mx-4 mb-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
-          <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-700">
+        <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-700 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-700">
             <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
               消息队列 ({queuedMessages.length})
             </span>
-            <button
-              type="button"
-              onClick={() => setQueuedMessages([])}
-              className="rounded-sm p-0.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:text-zinc-300 dark:hover:bg-zinc-700"
-              aria-label="Clear all queued messages"
-            >
-              <X size={12} />
-            </button>
           </div>
           <div className="max-h-[7.5rem] overflow-y-auto">
             {queuedMessages.map((msg, i) => (
@@ -807,7 +799,8 @@ export function ChatPanel() {
                   : "Type a message... (Enter to send, Shift+Enter for new line)"
           }
           disabled={inputDisabled}
-          className="w-full resize-none border-0 bg-transparent p-3 pb-2 text-xs outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+          className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+          style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -835,10 +828,7 @@ export function ChatPanel() {
             <SkillsPanel />
           </div>
 
-          {/* Right: context usage + send/stop button */}
-          <div className="flex items-center gap-1.5">
-            {/* Context usage tooltip */}
-            {contextUsage && <ContextUsageTooltip usage={contextUsage} />}
+          {/* Right: send/stop button */}
 
             {/* Send/Stop button with tooltip above */}
             <div className="group relative">
@@ -869,82 +859,6 @@ export function ChatPanel() {
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-/** Format token count for display (e.g. 1.2K, 128K, 200K) */
-function formatTokenCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toString();
-}
-
-/** Context usage tooltip — icon button in input toolbar, shows usage on hover */
-function ContextUsageTooltip({ usage }: { usage: ContextUsageInfo }) {
-  const percent = usage.usage_percent;
-  const total = formatTokenCount(usage.total_tokens);
-  const usable = formatTokenCount(usage.usable_context);
-
-  // Hover state -- button shows accent color only on hover
-  const [hovered, setHovered] = useState(false);
-
-  // Color coding for tooltip internals -- urgency-based
-  const urgencyColor = "var(--color-accent)";
-
-  const barColor = "var(--color-accent)";
-
-  return (
-    <div className="group relative">
-      {/* Icon button */}
-      <button
-        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors text-zinc-400 dark:text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
-        style={hovered ? { color: "var(--color-accent)" } : undefined}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        aria-label="Context usage"
-      >
-        <Layers size={14} />
-        <span className="font-medium">{percent}%</span>
-      </button>
-
-      {/* Tooltip popup — appears on hover */}
-      <div className="absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 dark:border-zinc-700/50 dark:bg-zinc-800">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">Context Usage</span>
-          <span className="text-xs font-medium" style={{ color: urgencyColor }}>
-            {percent}%
-          </span>
-        </div>
-
-        {/* Stats */}
-        <div className="space-y-2 mb-3">
-          <div className="flex justify-between text-xs">
-            <span className="text-zinc-500 dark:text-zinc-400">Used</span>
-            <span className="text-zinc-700 font-mono dark:text-zinc-200">{total} tokens</span>
-          </div>
-          <div className="flex justify-between text-xs">
-            <span className="text-zinc-500 dark:text-zinc-400">Available</span>
-            <span className="text-zinc-700 font-mono dark:text-zinc-200">{usable} tokens</span>
-          </div>
-          <div className="flex justify-between text-xs">
-            <span className="text-zinc-500 dark:text-zinc-400">Context Window</span>
-            <span className="text-zinc-700 font-mono dark:text-zinc-200">{formatTokenCount(usage.context_window)}</span>
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700">
-          <div
-            className="h-full rounded-full transition-all duration-300" style={{ backgroundColor: barColor, width: `${percent}%` }}
-          />
-        </div>
-
-        {/* Arrow pointer */}
-        <div className="absolute -bottom-1 right-6 w-2 h-2 rotate-45 bg-white border-r border-b border-zinc-200/80 dark:bg-zinc-800 dark:border-zinc-700/50" />
-      </div>
     </div>
   );
 }

@@ -378,17 +378,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   // ADR-014: Update session status from backend (Pull repair)
+  // Also creates SessionChatState entry if not cached (e.g. crash restart)
   updateSessionStatus: (agentId: string, sessionId: string, status: SessionStatus) => {
     set((state) => {
-      const session = getAgentState(state, agentId).sessionStates[sessionId];
-      if (!session) return {}; // Session not cached, skip
-
+      const agent = getAgentState(state, agentId);
+      const session = agent.sessionStates[sessionId];
+      if (!session) {
+        // Crash restart: create entry with backend status
+        const updatedSessions = { ...agent.sessionStates, [sessionId]: { ...DEFAULT_SESSION_STATE, sessionStatus: status, pendingSend: false, lastAccessed: Date.now() } };
+        const updatedAgent = { ...agent, sessionStates: updatedSessions };
+        return { agentStates: { ...state.agentStates, [agentId]: updatedAgent } };
+      }
       // Clear pendingSend when backend status arrives
       return updateSessionState(state, agentId, sessionId, { sessionStatus: status, pendingSend: false });
     });
   },
 
   // ADR-014: Batch update — single set() call, O(1) re-render regardless of session count
+  // Also creates SessionChatState entries for sessions not yet cached (e.g. crash restart)
   batchUpdateSessionStatuses: (agentId: string, statuses: Map<string, SessionStatus>) => {
     if (statuses.size === 0) return;
     set((state) => {
@@ -399,6 +406,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (session) {
           // Clear pendingSend when backend status arrives
           updatedSessions[sessionId] = { ...session, sessionStatus: status, pendingSend: false, lastAccessed: Date.now() };
+        } else {
+          // Crash restart: session not cached yet — create entry with backend status
+          updatedSessions[sessionId] = {
+            ...DEFAULT_SESSION_STATE,
+            sessionStatus: status,
+            pendingSend: false,
+            lastAccessed: Date.now(),
+          };
         }
       }
       const updatedAgent = { ...agent, sessionStates: updatedSessions };

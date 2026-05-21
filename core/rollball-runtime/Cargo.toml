@@ -59,6 +59,9 @@ notify.workspace = true
 # ripgrep-based file traversal (gitignore-aware)
 ignore.workspace = true
 
+# Glob pattern matching (used by glob_search tool, transitive via ignore)
+globset.workspace = true
+
 # Debug protocol WebSocket server
 tokio-tungstenite.workspace = true
 

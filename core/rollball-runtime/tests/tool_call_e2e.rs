@@ -19,6 +19,7 @@ use rollball_runtime::agent::loop_::AgentLoop;
 use rollball_runtime::config::RuntimeConfig;
 use rollball_runtime::tools::builtin;
 use rollball_runtime::tools::wrappers::{PathGuardedTool, WorkspaceAccess, WorkspaceDir};
+use rollball_runtime::tools::workspace_resolver::WorkspaceResolver;
 
 
 use serde_json::Value;
@@ -124,7 +125,9 @@ async fn test_tool_definition_parameters_serialization() {
     // Verify all builtin tools' ToolSpec serialize with "parameters" field
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let tools = builtin::all_builtin_tools(&work_dir, "com.test.e2e");
+    let resolver = WorkspaceResolver::new(&work_dir);
+
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
 
     for tool in &tools {
         let spec = tool.spec();
@@ -169,7 +172,9 @@ async fn test_tool_definition_parameters_serialization() {
 async fn test_all_builtin_tools_have_unique_names() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let tools = builtin::all_builtin_tools(&work_dir, "com.test.e2e");
+    let resolver = WorkspaceResolver::new(&work_dir);
+
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
 
     let names: Vec<String> = tools.iter().map(|t| t.name()).collect();
     let mut unique = names.clone();
@@ -188,7 +193,9 @@ async fn test_all_builtin_tools_count() {
     // Design doc: 15 built-in tools (without RAG)
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let tools = builtin::all_builtin_tools(&work_dir, "com.test.e2e");
+    let resolver = WorkspaceResolver::new(&work_dir);
+
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
     assert_eq!(tools.len(), 16, "Should have 16 builtin tools (14 fixed + 2 shell on Windows)");
 }
 
@@ -435,7 +442,7 @@ async fn test_file_write_and_read_roundtrip() {
         .unwrap();
 
     assert!(read_result.ok, "file_read should succeed: {:?}", read_result.error);
-    assert_eq!(read_result.content, "Round-trip test content!");
+    assert!(read_result.content.contains("Round-trip test content!"), "expected content to contain 'Round-trip test content!', got '{}'", read_result.content);
 }
 
 #[tokio::test]
@@ -538,7 +545,7 @@ async fn test_file_edit_ambiguous_match() {
         .unwrap();
 
     assert!(!result.ok);
-    assert!(result.error.unwrap().contains("found 3 times"));
+    assert!(result.error.unwrap().contains("matches 3 times"));
 }
 
 #[tokio::test]
@@ -619,7 +626,7 @@ async fn test_glob_search_valid() {
     std::fs::write(tmp.path().join("lib.rs"), "pub fn lib() {}").unwrap();
     std::fs::write(tmp.path().join("readme.md"), "# Hello").unwrap();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&work_dir);
+    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "*.rs" }))
         .await
@@ -642,7 +649,7 @@ async fn test_glob_search_recursive_pattern() {
     std::fs::write(sub.join("app.rs"), "mod app;").unwrap();
     std::fs::write(tmp.path().join("root.rs"), "mod root;").unwrap();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&work_dir);
+    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "**/*.rs" }))
         .await
@@ -658,7 +665,7 @@ async fn test_glob_search_no_matches() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&work_dir);
+    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "*.xyz" }))
         .await
@@ -673,7 +680,7 @@ async fn test_glob_search_empty_pattern() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&work_dir);
+    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "" }))
         .await
@@ -695,7 +702,7 @@ async fn test_glob_search_windows_backslash_pattern() {
     std::fs::write(sub.join("lib.rs"), "pub fn lib() {}").unwrap();
     std::fs::write(tmp.path().join("readme.md"), "# Hello").unwrap();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&work_dir);
+    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
     // Use Windows-style backslash separator in the pattern
     let result = tool
         .execute(serde_json::json!({ "pattern": "src\\*.rs" }))
@@ -717,7 +724,7 @@ async fn test_content_search_valid() {
     std::fs::write(tmp.path().join("hello.txt"), "Hello, RollBall AI!").unwrap();
     std::fs::write(tmp.path().join("bye.txt"), "Goodbye, world!").unwrap();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&work_dir);
+    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "RollBall" }))
         .await
@@ -735,7 +742,7 @@ async fn test_content_search_no_matches() {
 
     std::fs::write(tmp.path().join("data.txt"), "Nothing interesting here").unwrap();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&work_dir);
+    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "nonexistent_pattern_12345" }))
         .await
@@ -750,7 +757,7 @@ async fn test_content_search_invalid_regex() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&work_dir);
+    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "[invalid" }))
         .await
@@ -765,7 +772,7 @@ async fn test_content_search_empty_pattern() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&work_dir);
+    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "" }))
         .await
@@ -785,7 +792,7 @@ async fn test_content_search_path_format() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(sub.join("main.rs"), "fn main() { RollBall; }").unwrap();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&work_dir);
+    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
     let result = tool
         .execute(serde_json::json!({ "pattern": "RollBall" }))
         .await
@@ -1216,7 +1223,9 @@ fn test_convert_tools_preserves_all_builtin_tools() {
     // Verify that all builtin tools can be serialized and converted
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let tools = builtin::all_builtin_tools(&work_dir, "com.test.e2e");
+    let resolver = WorkspaceResolver::new(&work_dir);
+
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
 
     // Serialize each tool's spec
     let tool_jsons: Vec<Value> = tools

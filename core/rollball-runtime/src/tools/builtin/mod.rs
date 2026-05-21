@@ -36,6 +36,8 @@ pub mod rag_query;
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
 
+use crate::tools::workspace_resolver::WorkspaceResolver;
+
 /// Create the standard built-in tools (without RAG).
 ///
 /// Shell tools are registered dynamically based on platform detection:
@@ -43,12 +45,15 @@ use std::sync::Arc;
 /// - Linux/macOS: Single "shell" tool using system shell
 ///
 /// # Arguments
-/// * `work_dir` - Working directory for filesystem/shell tools
+/// * `resolver` - Workspace directory resolver (single source of truth)
 /// * `agent_id` - Agent ID for memory isolation and identity management
 pub fn all_builtin_tools(
-    work_dir: &str,
+    resolver: &WorkspaceResolver,
     agent_id: &str,
 ) -> Vec<Arc<dyn Tool>> {
+    let work_dir = resolver.agent_home();
+    let current_dir = resolver.current_dir();
+
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
         .into_iter()
@@ -59,7 +64,7 @@ pub fn all_builtin_tools(
                 &s.binary,
                 &s.path,
                 &s.arg,
-                work_dir,
+                current_dir,
             )) as Arc<dyn Tool>
         })
         .collect();
@@ -70,11 +75,11 @@ pub fn all_builtin_tools(
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::new()),
         Arc::new(web_search::WebSearchTool::new()),
-        Arc::new(file_read::FileReadTool::new(work_dir)),
-        Arc::new(file_write::FileWriteTool::new(work_dir)),
-        Arc::new(file_edit::FileEditTool::new(work_dir)),
-        Arc::new(glob_search::GlobSearchTool::new(work_dir)),
-        Arc::new(content_search::ContentSearchTool::new(work_dir)),
+        Arc::new(file_read::FileReadTool::new(current_dir)),
+        Arc::new(file_write::FileWriteTool::new(current_dir)),
+        Arc::new(file_edit::FileEditTool::new(current_dir)),
+        Arc::new(glob_search::GlobSearchTool::new(resolver)),
+        Arc::new(content_search::ContentSearchTool::new(resolver)),
         Arc::new(intent_send::IntentSendTool::new()),
     ];
 

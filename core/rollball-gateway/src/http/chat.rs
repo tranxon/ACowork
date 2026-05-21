@@ -945,6 +945,17 @@ fn default_direction() -> String {
 pub struct SessionsListResponse {
     /// List of session summaries
     pub sessions: Vec<SessionInfoResponse>,
+    /// Total number of sessions
+    pub total_count: usize,
+    /// Total number of pages
+    pub total_pages: usize,
+}
+
+/// Query parameters for session list pagination
+#[derive(Deserialize)]
+pub struct SessionListQuery {
+    pub page: Option<u32>,
+    pub size: Option<u32>,
 }
 
 /// Single session info in the response
@@ -1003,6 +1014,7 @@ pub struct SessionCreatedResponse {
 pub async fn list_sessions(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
+    Query(query): Query<SessionListQuery>,
 ) -> Result<Json<SessionsListResponse>, (StatusCode, Json<ApiError>)> {
     // Verify agent exists and is running
     {
@@ -1018,7 +1030,11 @@ pub async fn list_sessions(
         }
     }
 
-    let data = forward_session_query(&state, &agent_id, "list_sessions", serde_json::json!({})).await?;
+    let params = serde_json::json!({
+        "page": query.page,
+        "size": query.size,
+    });
+    let data = forward_session_query(&state, &agent_id, "list_sessions", params).await?;
 
     let sessions: Vec<SessionInfoResponse> = data.get("sessions")
         .and_then(|v| serde_json::from_value::<Vec<rollball_core::protocol::SessionInfoDto>>(v.clone()).ok())
@@ -1033,7 +1049,16 @@ pub async fn list_sessions(
         })
         .collect();
 
-    Ok(Json(SessionsListResponse { sessions }))
+    let total_count = data.get("total_count")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(sessions.len());
+    let total_pages = data.get("total_pages")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(1);
+
+    Ok(Json(SessionsListResponse { sessions, total_count, total_pages }))
 }
 
 /// `GET /api/agents/{id}/sessions/{session_id}/messages` — get paginated session messages (S1.14)

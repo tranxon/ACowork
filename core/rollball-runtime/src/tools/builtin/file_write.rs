@@ -31,7 +31,7 @@ impl Tool for FileWriteTool {
     fn spec(&self) -> ToolSpec { Self::spec_value() }
 
     async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
-        let path = params["path"].as_str().unwrap_or("");
+        let path = params["path"].as_str().unwrap_or("").trim_start_matches('/');
         let content = params["content"].as_str().unwrap_or("");
         if path.is_empty() { return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing 'path'".to_string()), token_usage: None }); }
 

@@ -30,14 +30,14 @@ interface SessionListDropdownProps {
 }
 
 function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
-  const { sessions, fetchSessions, switchSession, createSession, deleteSession } = useSessionStore();
+  const { sessions, fetchSessions, switchSession, deleteSession, totalCount, currentPage, totalPages, pageSize } = useSessionStore();
   const openSessionIds = useChatStore((s) => s.agentStates[agentId]?.openSessionIds ?? []);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    void fetchSessions(agentId);
+    void fetchSessions(agentId, 1);
   }, [agentId, fetchSessions]);
 
   // Close on outside click
@@ -72,16 +72,29 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
     }
   };
 
-  const handleNew = () => {
-    createSession(agentId);
-    onClose();
+  const handlePageChange = (page: number) => {
+    void fetchSessions(agentId, page);
   };
+
+  const start = (currentPage - 1) * pageSize + 1;
+  const end = Math.min(currentPage * pageSize, totalCount);
 
   return (
     <div
       ref={ref}
       className="absolute left-0 top-full mt-1 w-72 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800 z-50"
     >
+      {/* Header with total count */}
+      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+        <span>
+          {totalCount > 0 ? (
+            <>Showing {start}–{end} of {totalCount}</>
+          ) : (
+            <>No sessions</>
+          )}
+        </span>
+      </div>
+
       <div className="max-h-80 overflow-y-auto py-1">
         {sessions.length === 0 && (
           <div className="px-3 py-4 text-center text-xs text-zinc-400 dark:text-zinc-500">
@@ -155,15 +168,28 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
         })}
       </div>
 
-      <div className="border-t border-zinc-200 p-2 dark:border-zinc-700">
-        <button
-          onClick={handleNew}
-          className="mx-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          New Conversation
-        </button>
-      </div>
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between border-t border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+          <button
+            onClick={() => handlePageChange(currentPage - 1)}
+            disabled={currentPage <= 1}
+            className="inline-flex items-center rounded p-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" />
+          </button>
+          <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+            Page {currentPage} of {totalPages}
+          </span>
+          <button
+            onClick={() => handlePageChange(currentPage + 1)}
+            disabled={currentPage >= totalPages}
+            className="inline-flex items-center rounded p-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          >
+            <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -300,7 +326,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   if (!agent) return null;
 
   return (
-    <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-0.5">
+    <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-0.5 border-b border-zinc-200 dark:border-zinc-700">
       {/* Left scroll arrow */}
       {canScrollLeft && (
         <button
@@ -329,10 +355,10 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               data-session-id={sessionId}
               onClick={() => handleTabClick(sessionId)}
               className={cn(
-                "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0",
+                "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0 border-b-2",
                 isActive
-                  ? "bg-transparent text-[var(--color-accent)] rounded-t-lg border-b-2 border-[var(--color-accent)]"
-                  : "bg-transparent text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 border-r border-zinc-200 dark:border-zinc-700",
+                  ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+                  : "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300",
                 isProcessing && !isActive && "text-[var(--color-accent)]",
               )}
               title={getTitle(sessionId)}

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
-import type { ChatMessage } from "../../lib/types";
+import type { ChatMessage, SessionStatus } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import {
   Bug,
@@ -43,6 +43,12 @@ export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps &
     const agent = s.agentStates[selectedAgentId];
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
+  });
+  const sessionStatus: SessionStatus | null = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.sessionStatus ?? null;
   });
   const messages = useChatStore((s) => {
     if (!selectedAgentId) return EMPTY_MESSAGES;
@@ -386,10 +392,51 @@ export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps &
               Session Stats
             </h3>
             <div className="rounded-md bg-white p-3 text-xs dark:bg-zinc-800">
+              {/* Context usage progress bar */}
+              {contextUsage ? (
+                <div className="mb-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-zinc-500">Context Usage</span>
+                    <span className="font-mono font-medium" style={{ color: "var(--color-accent)" }}>
+                      {contextUsage.usage_percent}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700 mb-1.5">
+                    <div
+                      className="h-full rounded-full transition-all duration-300"
+                      style={{ backgroundColor: "var(--color-accent)", width: `${contextUsage.usage_percent}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-zinc-400 dark:text-zinc-500">
+                    <span>{formatTokenCount(contextUsage.total_tokens)} used</span>
+                    <span>{formatTokenCount(contextUsage.usable_context)} / {formatTokenCount(contextUsage.context_window)} available</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="mb-3 text-zinc-400 dark:text-zinc-500 italic">No context data yet</div>
+              )}
+              {/* Divider */}
+              {contextUsage && <div className="border-t border-zinc-100 dark:border-zinc-700/50 mb-2" />}
               <StatRow label="Prompt tokens" value={(tokenUsage?.prompt_tokens ?? contextUsage?.input_tokens)?.toLocaleString()} />
               <StatRow label="Completion tokens" value={(tokenUsage?.completion_tokens ?? contextUsage?.output_tokens)?.toLocaleString()} />
               <StatRow label="Total tokens" value={(tokenUsage?.total_tokens ?? contextUsage?.total_tokens)?.toLocaleString()} />
               <StatRow label="Iterations" value={iterations ? String(iterations) : undefined} />
+              <div className="flex justify-between py-1">
+                <span className="text-zinc-500">Session Status</span>
+                <span className="flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300">
+                  <span
+                    className={cn(
+                      "inline-block h-2 w-2 rounded-full",
+                      sessionStatus?.status === "streaming" && "bg-[var(--color-accent)]",
+                      sessionStatus?.status === "idle" && "bg-zinc-300 dark:bg-zinc-600",
+                      sessionStatus?.status === "paused" && "bg-amber-400",
+                      sessionStatus?.status === "waiting_approval" && "bg-yellow-400",
+                      !sessionStatus && "bg-zinc-300 dark:bg-zinc-600",
+                    )}
+                  />
+                  {sessionStatus ? sessionStatus.status.replace(/_/g, " ") : "\u2014"}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -439,6 +486,12 @@ export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps &
       {activeTab === "setup" && <AgentSetupTab />}
     </div>
   );
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toString();
 }
 
 function StatRow({ label, value }: { label: string; value?: string }) {

@@ -115,6 +115,7 @@ notify = "8"
 
 # ripgrep-based file traversal (gitignore-aware)
 ignore = "0.4"
+globset = "0.4"
 
 # Interactive CLI
 dialoguer = "0.11"

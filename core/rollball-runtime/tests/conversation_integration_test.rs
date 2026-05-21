@@ -727,8 +727,8 @@ async fn test_t49_session_id_special_characters() {
     writeln!(normal_file).unwrap();
 
     // Scanning should work without panic
-    let handle = rollball_runtime::conversation::scan_sessions_async(conv_dir);
-    let sessions = handle.await.unwrap();
+    let handle = rollball_runtime::conversation::scan_sessions_async(conv_dir, None, None);
+    let (sessions, _total) = handle.await.unwrap();
 
     assert!(
         !sessions.is_empty(),

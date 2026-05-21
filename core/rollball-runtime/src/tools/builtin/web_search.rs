@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 
+use crate::tools::output;
+
 pub struct WebSearchTool { client: reqwest::Client }
 
 impl WebSearchTool {
@@ -38,7 +40,9 @@ impl Tool for WebSearchTool {
                 if results.is_empty() {
                     Ok(ToolResult { ok: true, content: "No results found".to_string(), error: None, token_usage: None })
                 } else {
-                    Ok(ToolResult { ok: true, content: results.join("\n\n"), error: None, token_usage: None })
+                    let joined = results.join("\n\n");
+                    let (content, _truncated) = output::truncate_output(&joined);
+                    Ok(ToolResult { ok: true, content, error: None, token_usage: None })
                 }
             }
             Err(e) => Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Search failed: {e}")), token_usage: None }),
@@ -61,7 +65,8 @@ fn extract_ddg_results(html: &str) -> Vec<String> {
         .collect();
 
     for (i, title) in titles.iter().enumerate().take(5) {
-        let snippet = snippets.get(i).cloned().unwrap_or_default();
+        let raw_snippet = snippets.get(i).cloned().unwrap_or_default();
+        let snippet = output::truncate_line(&raw_snippet);
         results.push(format!("{}. {title}\n   {snippet}", i + 1));
     }
 

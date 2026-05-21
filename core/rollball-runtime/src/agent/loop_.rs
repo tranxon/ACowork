@@ -1479,11 +1479,17 @@ impl AgentLoop {
     /// Non-Interrupt messages drained during this poll are buffered in
     /// `session.deferred_inbound` and re-injected by `drain_inbound_queue()`
     /// at the start of the next loop iteration. No message is silently lost.
+    ///
+    /// ALL `Interrupt` messages are consumed (not just the first one) to
+    /// prevent residual interrupts from poisoning subsequent `run_inner()`
+    /// calls when the user clicks Stop rapidly.
     pub(crate) fn poll_interrupt(&mut self) -> bool {
+        let mut interrupted = false;
         while let Ok(msg) = self.inbound_rx.try_recv() {
             match msg {
                 InboundMessage::Interrupt { .. } => {
-                    return true;
+                    interrupted = true;
+                    // Consume and continue — drain all pending interrupts
                 }
                 other => {
                     // Buffer non-Interrupt messages for re-injection at the
@@ -1498,7 +1504,7 @@ impl AgentLoop {
                 }
             }
         }
-        false
+        interrupted
     }
 
     /// Drain inbound message queue (non-blocking).
@@ -1508,7 +1514,14 @@ impl AgentLoop {
     /// Injects external messages (user, system, intent) into history
     /// before each loop iteration. Applies size limits to prevent
     /// token explosion from oversized payloads.
+    ///
+    /// Returns `true` if at least one interrupt signal was found
+    /// (the caller should stop the current agent loop).  ALL interrupt
+    /// messages are consumed (not just the first one) to prevent
+    /// residual interrupts from poisoning subsequent `run_inner()` calls.
     fn drain_inbound_queue(&mut self) -> bool {
+        let mut interrupted = false;
+
         // ── Step 1: process messages deferred from poll_interrupt() ──
         for msg in self.session.deferred_inbound.drain(..) {
             let (msg, _truncated) = msg.enforce_size_limit();
@@ -1536,8 +1549,10 @@ impl AgentLoop {
                     ));
                 }
                 InboundMessage::Interrupt { reason } => {
-                    tracing::info!(reason = %reason, "Received deferred interrupt signal");
-                    return true;
+                    tracing::info!(reason = %reason, "Received deferred interrupt signal (consumed)");
+                    interrupted = true;
+                    // Consume and continue — more interrupts (or other messages)
+                    // may be queued in the live channel.
                 }
                 InboundMessage::ContinueExecution { .. } => {
                     tracing::debug!("Ignoring deferred ContinueExecution");
@@ -1579,8 +1594,11 @@ impl AgentLoop {
                     ));
                 }
                 InboundMessage::Interrupt { reason } => {
-                    tracing::info!(reason = %reason, "Received interrupt signal");
-                    return true; // Signal to stop the agent loop
+                    tracing::info!(reason = %reason, "Received interrupt signal (consumed)");
+                    interrupted = true;
+                    // Consume and continue — multiple interrupts may be queued
+                    // from rapid Stop button clicks.  We must drain ALL of them
+                    // so subsequent run_inner() calls aren't poisoned.
                 }
                 InboundMessage::ContinueExecution { .. } => {
                     // Continue is only meaningful during iteration limit pause;
@@ -1593,7 +1611,7 @@ impl AgentLoop {
                 }
             }
         }
-        false
+        interrupted
     }
 
     // ── LLM streaming methods extracted to loop_llm.rs ──

@@ -649,11 +649,13 @@ pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
 /// and builds a `Vec<SessionInfo>`. Results are sorted newest-first.
 pub fn scan_sessions_async(
     conversations_dir: PathBuf,
-) -> tokio::task::JoinHandle<Vec<SessionInfo>> {
+    page: Option<u32>,
+    size: Option<u32>,
+) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize)> {
     tokio::task::spawn_blocking(move || {
         let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(&conversations_dir) {
             Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
-            Err(_) => return Vec::new(),
+            Err(_) => return (Vec::new(), 0),
         };
 
         // Sort descending by filename
@@ -663,8 +665,16 @@ pub fn scan_sessions_async(
                 .cmp(&a.file_name().to_string_lossy())
         });
 
+        let total = entries.len();
+        let page = page.unwrap_or(1).max(1) as usize;
+        let size = size.unwrap_or(20).max(1) as usize;
+        let start = (page - 1) * size;
+        let end = start + size;
+
+        let entries_page = entries.into_iter().skip(start).take(end);
+
         let mut sessions = Vec::new();
-        for entry in entries {
+        for entry in entries_page {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
                 && let Ok(meta) = read_session_metadata(&path)
@@ -678,7 +688,7 @@ pub fn scan_sessions_async(
                 });
             }
         }
-        sessions
+        (sessions, total)
     })
 }
 
@@ -1193,8 +1203,8 @@ mod tests {
         writeln!(file, "BROKEN METADATA LINE").unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let sessions = rt.block_on(async {
-            scan_sessions_async(conv_dir).await.unwrap()
+        let (sessions, total) = rt.block_on(async {
+            scan_sessions_async(conv_dir, None, None).await.unwrap()
         });
 
         assert_eq!(sessions.len(), 2, "Should find both valid and corrupted sessions");

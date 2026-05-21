@@ -243,7 +243,7 @@ impl SessionManager {
         let (status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
         task.set_status_tx(status_tx);
 
-        // Spawn the session task with panic isolation
+        // Spawn the session task with panic isolation.
         let join_handle = tokio::spawn(async move {
             task.run().await;
         });
@@ -372,20 +372,36 @@ impl SessionManager {
     /// Send a message to a specific session.
     ///
     /// Returns an error if the session does not exist or the channel is closed.
+    /// When the channel is closed (e.g. the SessionTask panicked or was evicted
+    /// without cleanup), the dead handle is auto-removed so subsequent calls
+    /// get a clean "Session not found" instead of "channel closed".
     pub fn send_to_session(
-        &self,
+        &mut self,
         session_id: &str,
         msg: SessionMessage,
     ) -> Result<()> {
         let handle = self.sessions.get(session_id).ok_or_else(|| {
             RuntimeError::Config(format!("Session not found: {}", session_id))
         })?;
-        handle.send(msg).map_err(|_| {
-            RuntimeError::Config(format!(
-                "Failed to send message to session {}: channel closed",
+
+        if let Err(_send_err) = handle.send(msg) {
+            // Channel closed — the SessionTask has died (panic / eviction race).
+            // Auto-remove the stale handle so the next attempt gets a clean
+            // "Session not found" error instead of "channel closed".
+            let was_finished = handle.join_handle.is_finished();
+            self.sessions.remove(session_id);
+            tracing::warn!(
+                session_id = %session_id,
+                task_finished = was_finished,
+                "Session channel closed — auto-removing dead session handle"
+            );
+            Err(RuntimeError::Config(format!(
+                "Session not found: {}",
                 session_id
-            ))
-        })
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// Broadcast a message to all active sessions.

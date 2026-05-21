@@ -167,8 +167,8 @@ async fn test_t05_scan_sessions_async_many_files() {
     }
 
     let start = std::time::Instant::now();
-    let handle = scan_sessions_async(conv_dir);
-    let sessions = handle.await.unwrap();
+    let handle = scan_sessions_async(conv_dir, None, Some(200));
+    let (sessions, _total) = handle.await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(sessions.len(), 120, "Should find all 120 sessions");

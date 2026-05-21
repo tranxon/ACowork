@@ -1,20 +1,23 @@
-//! Glob search tool — search files by pattern using ripgrep's ignore crate
+//! Glob search tool — search files by pattern using globset for matching
 
 use async_trait::async_trait;
-use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 use std::path::Path;
 
+use crate::tools::output;
+use crate::tools::path_utils;
+use crate::tools::workspace_resolver::WorkspaceResolver;
+
 pub struct GlobSearchTool {
-    work_dir: String,
+    resolver: WorkspaceResolver,
 }
 
 impl GlobSearchTool {
-    pub fn new(work_dir: &str) -> Self {
+    pub fn new(resolver: &WorkspaceResolver) -> Self {
         Self {
-            work_dir: work_dir.to_string(),
+            resolver: resolver.clone(),
         }
     }
 
@@ -43,7 +46,9 @@ impl Tool for GlobSearchTool {
         let pattern = params["pattern"]
             .as_str()
             .unwrap_or("")
-            .replace('\\', "/");
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_string();
 
         if pattern.is_empty() {
             return Ok(ToolResult {
@@ -54,20 +59,8 @@ impl Tool for GlobSearchTool {
             });
         }
 
-        let base = Path::new(&self.work_dir);
-
-        // Build glob override so WalkBuilder only yields matching files
-        let mut override_builder = OverrideBuilder::new(base);
-        if let Err(e) = override_builder.add(&pattern) {
-            return Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some(format!("Invalid glob pattern: {e}")),
-                token_usage: None,
-            });
-        }
-        let overrides = match override_builder.build() {
-            Ok(o) => o,
+        let glob_set = match path_utils::build_glob_set(&pattern, false) {
+            Ok(gs) => gs,
             Err(e) => {
                 return Ok(ToolResult {
                     ok: false,
@@ -79,26 +72,48 @@ impl Tool for GlobSearchTool {
         };
 
         let mut results = Vec::new();
-        let walker = WalkBuilder::new(base)
-            .overrides(overrides)
-            .hidden(true) // respect hidden files setting (default)
-            .git_ignore(true) // respect .gitignore
-            .git_global(true) // respect global gitignore
-            .git_exclude(true) // respect .git/info/exclude
+        let mut truncated = false;
+
+        // Search current workspace only (respecting workspace setting)
+        let search_base = Path::new(self.resolver.current_dir());
+        if !search_base.exists() {
+            return Ok(ToolResult {
+                ok: true,
+                content: "No files matched the pattern".to_string(),
+                error: None,
+                token_usage: None,
+            });
+        }
+
+        let walker = WalkBuilder::new(search_base)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
             .build();
 
         for entry in walker {
             match entry {
                 Ok(e) => {
-                    // Only collect files, skip directories
-                    if e.file_type().is_some_and(|ft| ft.is_file())
-                        && let Ok(rel) = e.path().strip_prefix(base)
-                    {
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        results.push(rel_str);
+                    if e.file_type().is_some_and(|ft| ft.is_file()) {
+                        let path = e.path();
+                        let rel_str =
+                            path_utils::normalize_separators(&path_utils::relative_path(path, search_base));
+                        if glob_set.is_match(&rel_str) {
+                            if results.len() >= output::MAX_RESULT_COUNT {
+                                truncated = true;
+                                break;
+                            }
+                            if !results.iter().any(|r: &String| r.eq_ignore_ascii_case(&rel_str)) {
+                                results.push(rel_str);
+                            }
+                        }
                     }
                 }
                 Err(_) => continue,
+            }
+            if truncated {
+                break;
             }
         }
 
@@ -110,9 +125,21 @@ impl Tool for GlobSearchTool {
                 token_usage: None,
             })
         } else {
+            let content = results.join("\n");
+            let mut content = if truncated {
+                format!(
+                    "{content}\n\n[Results truncated: showing first {} results]",
+                    output::MAX_RESULT_COUNT
+                )
+            } else {
+                content
+            };
+            content.push_str(&format!("\n\nTotal: {} files", results.len()));
+
+            let (content, _truncated) = output::truncate_output(&content);
             Ok(ToolResult {
                 ok: true,
-                content: results.join("\n"),
+                content,
                 error: None,
                 token_usage: None,
             })
