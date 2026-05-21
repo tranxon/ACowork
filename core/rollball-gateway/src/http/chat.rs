@@ -1308,7 +1308,9 @@ pub async fn delete_session(
     {
         let data_dir = {
             let gw = state.gateway_state.read().await;
-            gw.vault.dir().to_path_buf()
+            gw.config.as_ref()
+                .map(|c| std::path::PathBuf::from(&c.data_dir))
+                .unwrap_or_else(|| std::path::PathBuf::from("./data"))
         };
         let docs_dir = data_dir.join("sessions").join(&session_id).join("documents");
         if docs_dir.exists() {
@@ -1550,7 +1552,9 @@ async fn resolve_document_refs(
 ) -> Option<serde_json::Value> {
     let data_dir = {
         let gw = state.gateway_state.read().await;
-        gw.vault.dir().to_path_buf()
+        gw.config.as_ref()
+            .map(|c| std::path::PathBuf::from(&c.data_dir))
+            .unwrap_or_else(|| std::path::PathBuf::from("./data"))
     };
     let docs_dir = data_dir.join("sessions").join(session_id).join("documents");
 

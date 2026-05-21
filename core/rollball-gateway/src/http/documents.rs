@@ -121,12 +121,12 @@ fn doc_id_from_filename(filename: &str) -> String {
 
 /// Extract the Gateway data_dir from AppState.
 fn get_data_dir(state: &AppState) -> PathBuf {
-    // The vault dir is the data_dir root
     state
         .gateway_state
         .try_read()
-        .map(|gw| gw.vault.dir().to_path_buf())
-        .unwrap_or_else(|_| PathBuf::from("."))
+        .ok()
+        .and_then(|gw| gw.config.as_ref().map(|c| PathBuf::from(&c.data_dir)))
+        .unwrap_or_else(|| PathBuf::from("./data"))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────

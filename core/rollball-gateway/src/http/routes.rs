@@ -368,9 +368,11 @@ pub async fn health_check(
     // 4. Disk space check on data directory
     {
         let gw = state.gateway_state.read().await;
-        // Use the vault directory as a proxy for data dir health
-        let data_dir = gw.vault.dir();
-        match fs2::available_space(data_dir) {
+        // Use the data directory for disk space check
+        let data_dir = gw.config.as_ref()
+            .map(|c| std::path::PathBuf::from(&c.data_dir))
+            .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+        match fs2::available_space(&data_dir) {
             Ok(available) => {
                 if available < MIN_DISK_SPACE_BYTES {
                     has_degraded = true;
