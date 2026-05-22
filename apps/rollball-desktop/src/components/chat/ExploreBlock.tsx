@@ -77,7 +77,7 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
       {/* Header: clickable toggle */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-fit items-center gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-zinc-500 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
+        className="flex w-fit items-center gap-2 rounded-lg bg-zinc-50 px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
@@ -101,7 +101,7 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
           className="ml-2 mt-1 overflow-y-auto rounded-lg border-l-2 border-zinc-300 bg-zinc-50 pl-3 pr-2 py-2 dark:border-zinc-600 dark:bg-zinc-800/30"
           style={{ maxHeight: "240px" }}
         >
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-0.5">
             {buildPairedItems(items).map((paired, idx) => (
               <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} />
             ))}
@@ -225,7 +225,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
           <span className="shrink-0 font-medium text-zinc-700 dark:text-zinc-300">{toolName}</span>
           {summary && (
-            <span className="min-w-0 flex-1 truncate text-zinc-500 dark:text-zinc-400">
+            <span className="min-w-0 flex-1 truncate ml-1 text-left text-zinc-500 dark:text-zinc-400">
               {summary}
             </span>
           )}
@@ -265,7 +265,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         </button>
       </div>
       {showDetails && (
-        <div className="mt-1 ml-5 space-y-1">
+        <div className="mt-0.5 ml-5 space-y-0.5">
           {/* Call params */}
           <pre className="overflow-x-auto rounded bg-zinc-100 p-2 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
             {call.content}
