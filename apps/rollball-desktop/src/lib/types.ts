@@ -109,6 +109,9 @@ export interface ModelCapabilitiesInfo {
   knowledge_cutoff?: string;
 }
 
+/** Per-model capabilities map (model ID → capabilities), matching vault structure */
+export type ModelCapabilitiesMap = Record<string, ModelCapabilitiesInfo>;
+
 /** Vault key entry (masked) */
 export interface VaultKeyEntry {
   provider: string;
@@ -119,8 +122,8 @@ export interface VaultKeyEntry {
   default_model?: string;
   /** Selected models list (may be empty) */
   models?: string[];
-  /** Model capabilities (from models.dev or user input) */
-  model_capabilities?: ModelCapabilitiesInfo;
+  /** Per-model capabilities map (model ID → capabilities) */
+  model_capabilities?: ModelCapabilitiesMap;
 }
 
 /** Gateway config response */

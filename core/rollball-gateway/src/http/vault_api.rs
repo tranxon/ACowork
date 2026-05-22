@@ -12,6 +12,7 @@ use axum::{
     routing::{delete, get},
     Router,
 };
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};
@@ -40,9 +41,9 @@ pub struct VaultKeyEntryResponse {
     /// Selected models list (may be empty)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
-    /// User-overridden model capabilities (if any)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_capabilities: Option<StoredModelCapabilities>,
+    /// User-overridden model capabilities per model name
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
 }
 
 /// Add key request (supports full provider configuration)
@@ -61,10 +62,10 @@ pub struct AddKeyRequest {
     /// models[0] is the default/active model. Takes precedence over default_model.
     #[serde(default)]
     pub models: Vec<String>,
-    /// Optional user-overridden model capabilities.
-    /// When present, takes precedence over models.dev / offline data.
+    /// Per-model capabilities.
+    /// Each key is a model ID matching the `models` list.
     #[serde(default)]
-    pub model_capabilities: Option<StoredModelCapabilities>,
+    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
 }
 
 /// Update key request (supports partial updates — key is optional)
@@ -85,10 +86,10 @@ pub struct UpdateKeyRequest {
     /// models[0] is the default/active model. Takes precedence over default_model.
     #[serde(default)]
     pub models: Vec<String>,
-    /// Optional user-overridden model capabilities.
-    /// When present, takes precedence over models.dev / offline data.
+    /// Per-model capabilities (partial update).
+    /// When present, each model entry replaces the existing one.
     #[serde(default)]
-    pub model_capabilities: Option<StoredModelCapabilities>,
+    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
 }
 
 /// Generic message response
@@ -116,7 +117,7 @@ pub async fn list_keys(
                 entry.models.clone(),
                 entry.model_capabilities.clone(),
             ),
-            Err(_) => (None, None, Vec::new(), None),
+            Err(_) => (None, None, Vec::new(), std::collections::HashMap::new()),
         };
         VaultKeyEntryResponse {
             provider: k.provider.clone(),
@@ -152,14 +153,7 @@ pub async fn add_key(
     if body.key.is_empty() {
         return Err(ApiError::bad_request("key must not be empty"));
     }
-    // Validate model capabilities if provided
-    if let Some(ref caps) = body.model_capabilities
-        && caps.context_window == 0 && caps.max_output_tokens == 0
-    {
-        return Err(ApiError::bad_request(
-            "model_capabilities must have at least one of context_window or max_output_tokens > 0"
-        ));
-    }
+    // Per-model capabilities map; individual validation is done per-entry downstream
 
     let mut gw = state.gateway_state.write().await;
     // Resolve models: prefer `models` field; fallback to `default_model` for backward compat
@@ -175,7 +169,7 @@ pub async fn add_key(
         body.base_url.as_deref(),
         &resolved_models,
         &body.key,
-        body.model_capabilities.as_ref(),
+        &body.model_capabilities,
     ).map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
 
@@ -221,14 +215,7 @@ pub async fn update_key(
         ));
     }
 
-    // Validate model capabilities if provided
-    if let Some(ref caps) = body.model_capabilities
-        && caps.context_window == 0 && caps.max_output_tokens == 0
-    {
-        return Err(ApiError::bad_request(
-            "model_capabilities must have at least one of context_window or max_output_tokens > 0"
-        ));
-    }
+    // Per-model capabilities map; individual validation downstream
 
     let mut gw = state.gateway_state.write().await;
 
@@ -273,13 +260,13 @@ pub async fn update_key(
     };
 
     // Resolve capabilities: use provided value, or preserve existing if not specified
-    let resolved_capabilities = if body.model_capabilities.is_some() {
+    let resolved_capabilities = if !body.model_capabilities.is_empty() {
         body.model_capabilities.clone()
     } else {
         // Preserve existing capabilities from Vault if not specified in update request
         match gw.vault.get_provider(&provider) {
             Ok(entry) => entry.model_capabilities.clone(),
-            Err(_) => None,
+            Err(_) => std::collections::HashMap::new(),
         }
     };
 
@@ -290,7 +277,7 @@ pub async fn update_key(
         resolved_base_url.as_deref(),
         &resolved_models,
         &api_key,
-        resolved_capabilities.as_ref(),
+        &resolved_capabilities,
     ).map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
 

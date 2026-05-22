@@ -12,6 +12,7 @@ use crate::error::GatewayError;
 use rollball_core::providers::vault_key_candidates;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Model capabilities stored alongside a provider entry
 ///
@@ -96,10 +97,11 @@ pub struct ProviderEntry {
     /// `models[0]` is the default/active model, consistent with `default_model`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
-    /// User-overridden model capabilities (optional).
+    /// User-overridden model capabilities per model name (optional).
+    /// Keyed by model name, e.g. { "MiniMax-M2.7": { ... }, "MiniMax-Text-02": { ... } }.
     /// When present, takes precedence over models.dev / offline data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_capabilities: Option<StoredModelCapabilities>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
 }
 
 /// Key entry for HTTP API listing (masked preview)
@@ -163,7 +165,7 @@ impl VaultFacade {
     /// Stores the full provider configuration as JSON:
     /// `{ "api_key": "...", "base_url": "...", "models": ["..."] }`
     pub fn store_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
-        self.store_provider(provider, None, &[], api_key, None)
+        self.store_provider(provider, None, &[], api_key, &std::collections::HashMap::new())
     }
 
     /// Store a full provider entry with optional base_url, models list, and capabilities
@@ -173,7 +175,7 @@ impl VaultFacade {
         base_url: Option<&str>,
         models: &[String],
         api_key: &str,
-        capabilities: Option<&StoredModelCapabilities>,
+        capabilities: &std::collections::HashMap<String, StoredModelCapabilities>,
     ) -> Result<(), GatewayError> {
         let default_model = models.first().cloned();
         let entry = ProviderEntry {
@@ -181,7 +183,7 @@ impl VaultFacade {
             base_url: base_url.map(|s| s.to_string()),
             default_model,
             models: models.to_vec(),
-            model_capabilities: capabilities.cloned(),
+            model_capabilities: capabilities.clone(),
         };
         let json = serde_json::to_string(&entry)
             .map_err(|e| GatewayError::Vault(format!("Failed to serialize provider entry: {}", e)))?;
@@ -216,7 +218,7 @@ impl VaultFacade {
                         base_url: None,
                         default_model: None,
                         models: Vec::new(),
-                        model_capabilities: None,
+                        model_capabilities: HashMap::new(),
                     });
                 }
                 Err(_) => continue, // Try next candidate
@@ -381,7 +383,7 @@ mod tests {
         let dir = temp_vault_dir("store_provider");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault.store_provider("deepseek", Some("https://api.deepseek.com/v1"), &["deepseek-chat".to_string()], "sk-abc", None).unwrap();
+        vault.store_provider("deepseek", Some("https://api.deepseek.com/v1"), &["deepseek-chat".to_string()], "sk-abc", &std::collections::HashMap::new()).unwrap();
         let entry = vault.get_provider("deepseek").unwrap();
         assert_eq!(entry.api_key, "sk-abc");
         assert_eq!(entry.base_url, Some("https://api.deepseek.com/v1".to_string()));
@@ -395,7 +397,7 @@ mod tests {
         let dir = temp_vault_dir("store_provider_min");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault.store_provider("openai", None, &[], "sk-test", None).unwrap();
+        vault.store_provider("openai", None, &[], "sk-test", &std::collections::HashMap::new()).unwrap();
         let entry = vault.get_provider("openai").unwrap();
         assert_eq!(entry.api_key, "sk-test");
         assert_eq!(entry.base_url, None);

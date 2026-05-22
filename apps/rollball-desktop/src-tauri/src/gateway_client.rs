@@ -9,6 +9,7 @@ use anyhow::Result;
 use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use rollball_core::defaults;
 
 /// Default Gateway base URL (from shared core constants)
@@ -292,7 +293,7 @@ impl GatewayClient {
         base_url: Option<&str>,
         default_model: Option<&str>,
         models: Option<&[String]>,
-        model_capabilities: Option<&ModelCapabilities>,
+        model_capabilities: &HashMap<String, ModelCapabilities>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::json!({ "provider": provider, "key": key });
         if let Some(url) = base_url {
@@ -308,12 +309,12 @@ impl GatewayClient {
         } else if let Some(model) = default_model {
             body["default_model"] = serde_json::Value::String(model.to_string());
         }
-        // Send model_capabilities if provided
-        if let Some(caps) = model_capabilities {
-            body["model_capabilities"] = serde_json::to_value(caps)
+        // Send model_capabilities if not empty
+        if !model_capabilities.is_empty() {
+            body["model_capabilities"] = serde_json::to_value(model_capabilities)
                 .unwrap_or_else(|e| {
                     eprintln!("serde_json::to_value failed for model_capabilities: {e}");
-                    serde_json::to_value(caps)
+                    serde_json::to_value(model_capabilities)
                         .expect("model_capabilities serialization failed twice")
                 });
         }
@@ -347,7 +348,7 @@ impl GatewayClient {
         base_url: Option<&str>,
         default_model: Option<&str>,
         models: Option<&[String]>,
-        model_capabilities: Option<&ModelCapabilities>,
+        model_capabilities: &HashMap<String, ModelCapabilities>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::Map::new();
         if let Some(k) = key {
@@ -371,14 +372,14 @@ impl GatewayClient {
         } else if let Some(model) = default_model {
             body.insert("default_model".to_string(), serde_json::Value::String(model.to_string()));
         }
-        // Send model_capabilities if provided
-        if let Some(caps) = model_capabilities {
+        // Send model_capabilities if not empty
+        if !model_capabilities.is_empty() {
             body.insert(
                 "model_capabilities".to_string(),
-                serde_json::to_value(caps)
+                serde_json::to_value(model_capabilities)
                     .unwrap_or_else(|e| {
                         eprintln!("serde_json::to_value failed for model_capabilities: {e}");
-                        serde_json::to_value(caps)
+                        serde_json::to_value(model_capabilities)
                             .expect("model_capabilities serialization failed twice")
                     }),
             );
@@ -503,9 +504,9 @@ pub struct VaultKeyEntry {
     /// Selected models list (may be empty)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
-    /// Model capabilities (from models.dev or user input)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_capabilities: Option<ModelCapabilities>,
+    /// Per-model capabilities
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_capabilities: HashMap<String, ModelCapabilities>,
 }
 
 /// Model capabilities info
