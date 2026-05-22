@@ -357,7 +357,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               className={cn(
                 "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0 border-b-2",
                 isActive
-                  ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+                  ? "border-[var(--color-accent)] text-zinc-700 dark:text-zinc-200 font-medium"
                   : "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300",
                 isProcessing && !isActive && "text-[var(--color-accent)]",
               )}
@@ -370,7 +370,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               {/* Title */}
               <span className={cn(
                 "min-w-0 flex-1 truncate",
-                isProcessing && isActive && "text-[var(--color-accent)]",
+                isProcessing && isActive && "text-zinc-700 dark:text-zinc-200",
               )} style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}>
                 {getTitle(sessionId)}
               </span>

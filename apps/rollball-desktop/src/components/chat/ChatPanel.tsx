@@ -2170,7 +2170,7 @@ function ModelMenu({
                     return modelName.length > prefix.length ? modelName : m.name;
                   })()}
                   </span>
-                  <span className="flex items-center gap-0.5">
+                  <span className="flex items-center gap-0.5 ml-2">
                     {m.tool_call && <Wrench size={10} className="text-zinc-400" />}
                     {m.reasoning && <Brain size={10} className="text-purple-400" />}
                     {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}

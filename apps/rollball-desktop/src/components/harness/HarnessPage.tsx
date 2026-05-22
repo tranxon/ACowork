@@ -28,7 +28,7 @@ export function HarnessPage() {
             className={cn(
               "border-b-2 px-3 py-2 text-sm font-medium transition-colors",
               activeTab === tab.id
-                ? "border-[var(--color-accent)] text-[var(--color-accent)] dark:border-[var(--color-accent)] dark:text-[var(--color-accent)]"
+                ? "border-[var(--color-accent)] text-zinc-700 dark:text-zinc-200"
                 : "border-transparent text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
             )}
           >

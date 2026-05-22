@@ -217,7 +217,7 @@ function StatCard({
   return (
     <div className="rounded border border-zinc-200 p-2 dark:border-zinc-700">
       <p className="text-[10px] text-zinc-500 dark:text-zinc-400">{label}</p>
-      <p className="mt-0.5 text-xs font-semibold text-[var(--color-accent)]">{value}</p>
+      <p className="mt-0.5 text-xs font-semibold text-zinc-700 dark:text-zinc-200">{value}</p>
     </div>
   );
 }
