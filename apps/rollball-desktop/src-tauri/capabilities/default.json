@@ -13,6 +13,7 @@
     "dialog:allow-save",
     "dialog:allow-message",
     "notification:default",
-    "store:default"
+    "store:default",
+    "fs:default"
   ]
 }

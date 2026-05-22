@@ -657,19 +657,22 @@ export function ChatPanel() {
       const filePath = selected as string;
       if (!filePath) return;
 
-      // Read file contents via Tauri asset protocol
-      const { convertFileSrc } = await import("@tauri-apps/api/core");
-      const assetUrl = convertFileSrc(filePath);
-      const resp = await fetch(assetUrl);
-      const blob = await resp.blob();
+      // Read file bytes via Tauri FS plugin (bypasses asset protocol scope limitations)
+      const filename = filePath.replace(/^.*[\\/]/, "");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const bytes = await readFile(filePath);
 
-      // Convert blob to base64 data URL
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = () => reject(new Error("Failed to read image file"));
-        reader.readAsDataURL(blob);
-      });
+      // Convert bytes to base64 data URL
+      const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+      const mimeMap: Record<string, string> = { png: "image/png", gif: "image/gif", webp: "image/webp", jpg: "image/jpeg", jpeg: "image/jpeg" };
+      const mime = mimeMap[ext] ?? "image/jpeg";
+      const chunks: string[] = [];
+      const CHUNK_SIZE = 8192;
+      for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+        chunks.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK_SIZE)));
+      }
+      const base64 = btoa(chunks.join(""));
+      const dataUrl = `data:${mime};base64,${base64}`;
 
       // Get image dimensions
       const dims = await new Promise<{ width: number; height: number }>((resolve, reject) => {
@@ -679,7 +682,6 @@ export function ChatPanel() {
         img.src = dataUrl;
       });
 
-      const filename = filePath.replace(/^.*[\\/]/, "");
       const tempId = `img-${Date.now()}`;
       setPendingImages(prev => [...prev, {
         tempId,
@@ -1121,7 +1123,7 @@ export function ChatPanel() {
                 disabled={!currentSessionId || !selectedAgentId}
                 aria-label="上传文件"
               >
-                <Paperclip size={16} />
+                <Paperclip size={14} />
               </button>
               {/* Tooltip */}
               <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
@@ -1138,7 +1140,7 @@ export function ChatPanel() {
                 disabled={!currentSessionId || !selectedAgentId}
                 aria-label="上传图片"
               >
-                <Image size={16} />
+                <Image size={14} />
               </button>
               {/* Tooltip */}
               <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
@@ -1451,6 +1453,38 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
                 startTime={message.startTime}
                 endTime={message.endTime}
               />
+            </div>
+          </div>
+        </div>
+      </MessageContentWrapper>
+    );
+  }
+
+  if (message.type === "error") {
+    return (
+      <MessageContentWrapper>
+        <div className="flex items-start gap-2">
+          <AgentAvatar
+            agentId={agentId}
+            displayName={liveAgentName}
+            iconId={agentIconId}
+            size={40}
+            className="shrink-0 mt-1"
+          />
+          <div className="min-w-0 flex-1 flex flex-col items-start">
+            <div className="flex items-center gap-1.5 mt-[5px]">
+              {liveAgentName && (
+                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
+              )}
+              {message.senderRole && (
+                <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
+              )}
+            </div>
+            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
+              <div className="flex items-start gap-2 min-w-0">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                <div className="min-w-0 whitespace-pre-wrap break-words">{message.content}</div>
+              </div>
             </div>
           </div>
         </div>

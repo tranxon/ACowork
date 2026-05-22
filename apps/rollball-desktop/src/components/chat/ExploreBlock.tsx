@@ -267,12 +267,12 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
       {showDetails && (
         <div className="mt-0.5 ml-5 space-y-0.5">
           {/* Call params */}
-          <pre className="overflow-x-auto rounded bg-zinc-100 p-2 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
+          <pre className="rounded bg-zinc-100 p-2 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 whitespace-pre-wrap break-all" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
             {call.content}
           </pre>
           {/* Result */}
           {result && (
-            <pre className={`overflow-x-auto rounded p-2 ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-[var(--color-accent)]/10 text-zinc-600 dark:bg-[var(--color-accent)]/10 dark:text-zinc-400"}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
+            <pre className={`rounded p-2 whitespace-pre-wrap break-all ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-[var(--color-accent)]/10 text-zinc-600 dark:bg-[var(--color-accent)]/10 dark:text-zinc-400"}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
               {result.content.length > 500 ? result.content.slice(0, 500) + "\n..." : result.content}
             </pre>
           )}
