@@ -11,6 +11,7 @@ Cargo.lock
 .vscode/
 .qoder/
 .idea/
+tests/
 *.swp
 *.swo
 *~
@@ -29,6 +30,7 @@ Thumbs.db
 .env
 .env.local
 .tmp/
+nul
 
 # Node.js
 **/node_modules/

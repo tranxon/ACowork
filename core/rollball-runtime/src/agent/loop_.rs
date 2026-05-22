@@ -477,6 +477,35 @@ impl AgentLoop {
         }
     }
 
+    /// Execute a built-in tool by name, simulating an LLM tool call.
+    ///
+    /// This enables the runtime to invoke tools directly without going through
+    /// the LLM. Use cases include pre-extracting user-uploaded document content
+    /// before the LLM sees the message, so the LLM doesn't need to call
+    /// `doc_reader` itself — saving a round-trip and eliminating uncertainty.
+    ///
+    /// Returns the tool's result content on success, or an error message on failure.
+    pub async fn execute_tool_by_name(
+        &self,
+        name: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<String, String> {
+        let tool = self
+            .core
+            .tools
+            .iter()
+            .find(|t| t.spec().name == name)
+            .ok_or_else(|| format!("Tool not found: {}", name))?;
+
+        match tool.execute(params).await {
+            Ok(result) if result.ok => Ok(result.content),
+            Ok(result) => Err(result
+                .error
+                .unwrap_or_else(|| "Unknown tool error".to_string())),
+            Err(e) => Err(format!("Tool execution error: {e}")),
+        }
+    }
+
     /// Update the title of the currently active conversation session.
     ///
     /// Returns `Some(true)` if the title was actually written (different from current),

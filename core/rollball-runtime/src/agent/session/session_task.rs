@@ -345,35 +345,59 @@ impl SessionTask {
                         }
                     }
 
-                    // Build enriched user message: pass document absolute paths as references
-                    // for the LLM to call the `doc_reader` tool on demand.
+                    // Build enriched user message: pre-extract user-uploaded document
+                    // content via doc_reader tool (simulating an LLM tool call) and
+                    // inject directly into context. This avoids an extra LLM round-trip
+                    // and eliminates the uncertainty of whether the LLM will call
+                    // doc_reader. The doc_reader tool remains available for
+                    // non-user-uploaded documents (e.g., files in workspace).
                     let mut enriched_content = content.clone();
                     if let Some(ref docs) = documents {
                         if !docs.is_empty() {
-                            let mut doc_refs: Vec<String> = Vec::new();
+                            let mut doc_blocks: Vec<String> = Vec::new();
                             for doc in docs {
                                 let abs_path = doc.get("abs_path").and_then(|v| v.as_str()).unwrap_or("");
                                 let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("document");
-                                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("unknown");
                                 if abs_path.is_empty() {
                                     continue;
                                 }
-                                doc_refs.push(format!(
-                                    "- {} (.{}, path: {})",
-                                    filename, format, abs_path
-                                ));
+                                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                let params = serde_json::json!({"path": abs_path, "include_tables": true});
+                                match agent_loop.execute_tool_by_name("doc_reader", params).await {
+                                    Ok(text) if !text.trim().is_empty() => {
+                                        doc_blocks.push(format!(
+                                            "<attached_document filename=\"{}\" format=\"{}\">\n{}\n</attached_document>",
+                                            filename, format, text
+                                        ));
+                                    }
+                                    Ok(_) => {
+                                        tracing::warn!(filename = %filename, "doc_reader returned empty content");
+                                        doc_blocks.push(format!(
+                                            "<attached_document filename=\"{}\" format=\"{}\">\n[Document is empty or contains no extractable text]\n</attached_document>",
+                                            filename, format
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(filename = %filename, error = %e, "Failed to extract document via doc_reader");
+                                        doc_blocks.push(format!(
+                                            "<attached_document filename=\"{}\" format=\"{}\">\n[Document extraction failed: {}]\n</attached_document>",
+                                            filename, format, e
+                                        ));
+                                    }
+                                }
                             }
-                            if !doc_refs.is_empty() {
+                            if !doc_blocks.is_empty() {
                                 let prefix = if content.trim().is_empty() {
                                     String::new()
                                 } else {
                                     format!("{}\n\n", content)
                                 };
                                 enriched_content = format!(
-                                    "{}The user uploaded the following documents. \
-                                     Use the `doc_reader` tool to read their contents:\n{}",
+                                    "{}The following documents were uploaded by the user. \
+                                     Their contents have been pre-extracted and included below. \
+                                     You do NOT need to use the `doc_reader` tool for these files.\n\n{}",
                                     prefix,
-                                    doc_refs.join("\n")
+                                    doc_blocks.join("\n\n")
                                 );
                             }
                         }

@@ -5,7 +5,7 @@
 //!
 //! | Format | Crate        | Strategy               |
 //! |--------|-------------|------------------------|
-//! | PDF    | `lopdf`      | Object stream decoding |
+//! | PDF    | `pdf-extract` | Font-rendered text extraction |
 //! | DOCX   | `zip`+`quick-xml` | XML text extraction |
 //! | PPTX   | `zip`+`quick-xml` | Slide text extraction |
 //! | XLSX   | `calamine`   | Sheet / row iteration  |

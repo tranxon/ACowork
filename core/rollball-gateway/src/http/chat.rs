@@ -1576,7 +1576,10 @@ async fn resolve_document_refs(
             if stem != doc_id {
                 continue;
             }
-            let meta_path = path.with_extension("meta.json");
+            // Match upload-side naming: {safe_name}.meta.json
+            // (e.g. 九年级春季学习计划.docx.meta.json, NOT 九年级春季学习计划.meta.json)
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let meta_path = docs_dir.join(format!("{}.meta.json", filename));
             if let Ok(meta_bytes) = std::fs::read_to_string(&meta_path) {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_bytes) {
                     docs.push(serde_json::json!({

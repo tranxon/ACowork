@@ -463,14 +463,22 @@ export function ChatPanel() {
     // Block send: no content AND no files, or files still uploading
     if ((!content && !hasSuccessfulFiles) || sending || !selectedAgentId || hasUploadingFiles) return;
 
-    // Collect successfully uploaded document IDs
+    // Collect successfully uploaded document IDs and metadata for optimistic bubbles
     const documentIds = pendingFiles
       .filter((f) => f.status === "success" && f.documentId)
       .map((f) => f.documentId!);
+    const documents = pendingFiles
+      .filter((f) => f.status === "success" && f.documentId)
+      .map((f) => ({
+        id: f.documentId!,
+        filename: f.filename,
+        format: f.format,
+        size: f.size,
+      }));
 
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
-    void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined).then(() => {
+    void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined, documents.length > 0 ? documents : undefined).then(() => {
       clearActiveSkill();
     });
     setInputValue("");
@@ -1214,9 +1222,25 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             {liveUserName && (
               <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
             )}
-            <div className="mt-[6px] max-w-[85%] rounded-lg rounded-br-sm bg-[var(--color-accent)]/15 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
-              {message.content}
-            </div>
+            {/* Document chips attached to this message */}
+            {message.documents && message.documents.length > 0 && (
+              <div className="mt-[6px] flex flex-wrap justify-end gap-1.5 max-w-[85%]">
+                {message.documents.map((doc, i) => (
+                  <DocumentChip
+                    key={`${doc.documentId ?? i}`}
+                    filename={doc.filename}
+                    format={doc.format}
+                    size={doc.size}
+                    status="success"
+                  />
+                ))}
+              </div>
+            )}
+            {message.content && (
+              <div className="mt-[6px] max-w-[85%] rounded-lg rounded-br-sm bg-[var(--color-accent)]/15 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
+                {message.content}
+              </div>
+            )}
           </div>
           <UserAvatar
             displayName={liveUserName}
@@ -1319,7 +1343,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
       <MessageContentWrapper>
         <div className="flex justify-center">
           <DocumentChip
-            filename={message.documentFormat ? `${message.content.replace(/^Uploaded file: /, "").replace(/ \(.*\)$/, "")}.${message.documentFormat}` : message.content}
+            filename={message.content.replace(/^Uploaded file: /, "").replace(/ \(.*, \d+ bytes\)$/, "")}
             format={message.documentFormat ?? "unknown"}
             size={message.documentSize}
             status="success"

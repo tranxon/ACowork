@@ -1,7 +1,9 @@
-//! PDF text extraction via `lopdf`.
+//! PDF text extraction via `pdf-extract`.
 //!
-//! Walks the PDF object tree, decodes text streams, and concatenates
-//! all text content in page order.
+//! Uses font-rendered text extraction (via `pdf` + `fontdue`), which
+//! handles Type1, CFF, TrueType, and CID-keyed fonts correctly —
+//! including academic papers with mathematical symbol fonts that
+//! confuse simpler decoders like `lopdf`.
 
 use std::path::Path;
 
@@ -12,9 +14,11 @@ const MAX_PAGES: usize = 200;
 
 /// Extract text content from a PDF file.
 pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String> {
-    let doc = lopdf::Document::load(path).map_err(|e| format!("Failed to open PDF: {e}"))?;
+    // pdf_extract returns one entry per page; empty pages are empty strings.
+    let pages: Vec<String> = pdf_extract::extract_text_by_pages(path)
+        .map_err(|e| format!("Failed to extract PDF text: {e}"))?;
 
-    let total_pages = doc.get_pages().len();
+    let total_pages = pages.len();
     if total_pages == 0 {
         return Ok("(empty PDF)".to_string());
     }
@@ -24,20 +28,17 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
     let max_pages = end.saturating_sub(start).saturating_add(1).min(MAX_PAGES);
 
     let mut output = String::new();
+    let mut count = 0;
 
-    for (i, page_id) in doc
-        .get_pages()
-        .iter()
-        .enumerate()
-        .skip(start.saturating_sub(1))
-        .take(max_pages)
-    {
-        let page_num = i + 1;
-        let text = match doc.extract_text(&[*page_id.0]) {
-            Ok(t) => t,
-            Err(_) => continue,
+    for page_num in start..=end {
+        if count >= max_pages {
+            break;
+        }
+        let idx = page_num.saturating_sub(1);
+        let text = match pages.get(idx) {
+            Some(t) => t.trim(),
+            None => continue,
         };
-        let text = text.trim();
         if text.is_empty() {
             continue;
         }
@@ -45,6 +46,7 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
         output.push_str(&format!("\n[Page {page_num}]\n"));
         output.push_str(text);
         output.push('\n');
+        count += 1;
     }
 
     if output.is_empty() {

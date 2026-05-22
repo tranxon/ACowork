@@ -241,6 +241,13 @@ export interface ChatMessage {
   documentSize?: number;
   /** For document_upload: absolute path */
   documentPath?: string;
+  /** Documents attached to a user message (rendered inline in the user bubble) */
+  documents?: Array<{
+    filename: string;
+    format: string;
+    size?: number;
+    documentId?: string;
+  }>;
 }
 
 /** Token usage stats */

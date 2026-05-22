@@ -101,8 +101,9 @@ fi
 echo ""
 
 # Step 4: Start Gateway
-echo -e "${YELLOW}[4/4] Starting Gateway in daemon mode...${NC}"
+echo -e "${YELLOW}[4/4] Starting Gateway in daemon mode (debug logging)...${NC}"
 export ROLLBALL_GATEWAY_DAEMON="true"
+export ROLLBALL_GATEWAY_LOG_LEVEL="debug"
 
 GATEWAY_EXE=""
 if [ "$OS" = "windows" ]; then

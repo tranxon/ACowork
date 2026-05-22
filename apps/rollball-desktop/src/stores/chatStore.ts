@@ -252,7 +252,7 @@ interface ChatStore {
 
   // ---- Actions ----
   connectStream: (agentId: string, gatewayUrl: string) => void;
-  sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[]) => Promise<void>;
+  sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{id: string; filename: string; format: string; size: number; path?: string}>) => Promise<void>;
   stopCurrentMessage: () => Promise<void>;
   sendInterrupt: () => void;
   disconnectStream: (agentId?: string) => void;
@@ -688,7 +688,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[]) => {
+  sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{id: string; filename: string; format: string; size: number; path?: string}>) => {
     const ws = get().wsMap[agentId];
     const sessionId = useSessionStore.getState().currentSessionId;
 
@@ -700,6 +700,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       timestamp: Date.now(),
       ...getUserSenderInfo(),
     };
+
+    // Attach document info to user message for inline rendering in the bubble
+    if (documents && documents.length > 0) {
+      userMsg.documents = documents.map((doc) => ({
+        filename: doc.filename,
+        format: doc.format,
+        size: doc.size,
+        documentId: doc.id,
+      }));
+    }
 
     if (sessionId) {
       set((state) => ({

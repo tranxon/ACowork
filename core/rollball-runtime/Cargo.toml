@@ -49,7 +49,7 @@ rand.workspace = true
 sha2.workspace = true
 zip.workspace = true
 # Document parsing (doc_reader tool)
-lopdf.workspace = true
+pdf-extract.workspace = true
 calamine.workspace = true
 quick-xml.workspace = true
 toml.workspace = true

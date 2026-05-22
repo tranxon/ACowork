@@ -82,8 +82,9 @@ if (Test-Path $offlineSrc) {
 Write-Host ""
 
 # Step 5: Start Gateway
-Write-Host "[5/5] Starting Gateway in daemon mode..." -ForegroundColor Yellow
+Write-Host "[5/5] Starting Gateway in daemon mode (debug logging)..." -ForegroundColor Yellow
 $env:ROLLBALL_GATEWAY_DAEMON = "true"
+$env:ROLLBALL_GATEWAY_LOG_LEVEL = "debug"
 
 # Start Gateway in background
 $gatewayExe = Join-Path $WorkspaceRoot "target\release\rollball-gateway.exe"
