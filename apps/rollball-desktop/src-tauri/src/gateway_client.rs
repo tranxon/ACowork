@@ -311,11 +311,11 @@ impl GatewayClient {
         // Send model_capabilities if provided
         if let Some(caps) = model_capabilities {
             body["model_capabilities"] = serde_json::to_value(caps)
-                .unwrap_or_else(|_| serde_json::json!({
-                    "context_window": caps.context_window,
-                    "max_output_tokens": caps.max_output_tokens,
-                    "supports_tool_calling": caps.supports_tool_calling,
-                }));
+                .unwrap_or_else(|e| {
+                    eprintln!("serde_json::to_value failed for model_capabilities: {e}");
+                    serde_json::to_value(caps)
+                        .expect("model_capabilities serialization failed twice")
+                });
         }
         let resp = self
             .client
@@ -376,11 +376,11 @@ impl GatewayClient {
             body.insert(
                 "model_capabilities".to_string(),
                 serde_json::to_value(caps)
-                    .unwrap_or_else(|_| serde_json::json!({
-                        "context_window": caps.context_window,
-                        "max_output_tokens": caps.max_output_tokens,
-                        "supports_tool_calling": caps.supports_tool_calling,
-                    })),
+                    .unwrap_or_else(|e| {
+                        eprintln!("serde_json::to_value failed for model_capabilities: {e}");
+                        serde_json::to_value(caps)
+                            .expect("model_capabilities serialization failed twice")
+                    }),
             );
         }
         let resp = self

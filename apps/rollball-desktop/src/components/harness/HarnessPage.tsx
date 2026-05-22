@@ -81,6 +81,7 @@ function ProvidersTab() {
   const [editAvailableModels, setEditAvailableModels] = useState<ModelInfo[]>([]);
   const [editModelsLoading, setEditModelsLoading] = useState(false);
   const [editModelSearchTerm, setEditModelSearchTerm] = useState("");
+  const [editModelCapabilityFilter, setEditModelCapabilityFilter] = useState<string[]>([]);
 
   // Edit dialog — model capabilities state
   const [editContextWindow, setEditContextWindow] = useState("");
@@ -293,6 +294,12 @@ function ProvidersTab() {
     const effectiveSupportsToolCalling = hasModelsDevData 
       ? (modelInfo?.tool_call ?? newSupportsToolCalling)
       : newSupportsToolCalling;
+    const effectiveReasoning = hasModelsDevData
+      ? (modelInfo?.reasoning ?? undefined)
+      : undefined;
+    const effectiveModalities = hasModelsDevData && modelInfo?.input_modalities?.length
+      ? { input: modelInfo.input_modalities }
+      : undefined;
     
     // Rust requires context_window to be present (u64, not Option)
     // Default to 128000 if not specified (safe default for most models)
@@ -306,6 +313,8 @@ function ProvidersTab() {
         context_window: ctxWindow,
         max_output_tokens: maxOutTokens,
         supports_tool_calling: effectiveSupportsToolCalling,
+        supports_reasoning: effectiveReasoning,
+        modalities: effectiveModalities,
       };
     }
     try {
@@ -326,6 +335,7 @@ function ProvidersTab() {
       setTestResult(null);
       await fetchKeys();
       await fetchConfig();
+      window.dispatchEvent(new CustomEvent('models-added'));
     } catch (e) {
       alert(`Failed to add key: ${e}`);
     }
@@ -366,6 +376,7 @@ function ProvidersTab() {
     setEditBaseUrl(keyEntry?.base_url ?? dynamicProvider?.api ?? "");
     setEditModels(keyEntry?.models?.length ? keyEntry.models : keyEntry?.default_model ? [keyEntry.default_model] : []);
     setEditModelSearchTerm("");
+    setEditModelCapabilityFilter([]);
     // Load existing capabilities from VaultKeyEntry
     setEditContextWindow(keyEntry?.model_capabilities?.context_window?.toString() ?? "");
     setEditMaxOutputTokens(keyEntry?.model_capabilities?.max_output_tokens?.toString() ?? "");
@@ -405,10 +416,15 @@ function ProvidersTab() {
           alert('Context Window and Max Output Tokens must be positive numbers');
           return;
         }
+        // Derive reasoning/modalities from editAvailableModels if available
+        const primaryModel = editModels[0];
+        const modelInfo = editAvailableModels.find(m => m.id === primaryModel);
         updatePayload.modelCapabilities = {
           context_window: cw || 0,
           max_output_tokens: mot || 0,
           supports_tool_calling: editSupportsToolCalling,
+          supports_reasoning: modelInfo?.reasoning ?? undefined,
+          modalities: modelInfo?.input_modalities?.length ? { input: modelInfo.input_modalities } : undefined,
         };
       }
       console.log("[handleEditSave] payload:", JSON.stringify(updatePayload));
@@ -417,6 +433,7 @@ function ProvidersTab() {
       setShowEditDialog(null);
       await fetchKeys();
       await fetchConfig();
+      window.dispatchEvent(new CustomEvent('models-added'));
     } catch (e) {
       console.error("[handleEditSave] error:", e);
       alert(`Failed to update key: ${e}`);
@@ -671,6 +688,21 @@ function ProvidersTab() {
                   >
                     🧠 Reasoning
                   </button>
+                  <button
+                    onClick={() => setModelCapabilityFilter(
+                      modelCapabilityFilter.includes('image') 
+                        ? modelCapabilityFilter.filter(f => f !== 'image')
+                        : [...modelCapabilityFilter, 'image']
+                    )}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-xs font-medium",
+                      modelCapabilityFilter.includes('image')
+                        ? "bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-300"
+                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                    )}
+                  >
+                    🖼️ Image
+                  </button>
                 </div>
                 
                 {/* Selected models as tags */}
@@ -708,6 +740,7 @@ function ProvidersTab() {
                           modelCapabilityFilter.every(filter => {
                             if (filter === 'tool_call') return m.tool_call === true;
                             if (filter === 'reasoning') return m.reasoning === true;
+                            if (filter === 'image') return m.input_modalities?.includes('image') ?? false;
                             return true;
                           });
                         
@@ -735,6 +768,7 @@ function ProvidersTab() {
                               )}
                               {m.reasoning && <span>🧠 reasoning</span>}
                               {m.tool_call && <span>🔧 tools</span>}
+                              {m.input_modalities?.includes('image') && <span>🖼️ image</span>}
                             </div>
                           </div>
                         </label>
@@ -924,6 +958,56 @@ function ProvidersTab() {
                 <label className="mb-1 block text-xs text-zinc-500">
                   Default Model {editModels.length > 0 && <span className="text-accent-green">({editModels.length} selected)</span>}
                 </label>
+                
+                {/* Capability filters */}
+                <div className="mb-2 flex gap-2">
+                  <button
+                    onClick={() => setEditModelCapabilityFilter(
+                      editModelCapabilityFilter.includes('tool_call') 
+                        ? editModelCapabilityFilter.filter(f => f !== 'tool_call')
+                        : [...editModelCapabilityFilter, 'tool_call']
+                    )}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-xs font-medium",
+                      editModelCapabilityFilter.includes('tool_call')
+                        ? "bg-accent-green/10 text-accent-green"
+                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                    )}
+                  >
+                    🔧 Tool Calling
+                  </button>
+                  <button
+                    onClick={() => setEditModelCapabilityFilter(
+                      editModelCapabilityFilter.includes('reasoning') 
+                        ? editModelCapabilityFilter.filter(f => f !== 'reasoning')
+                        : [...editModelCapabilityFilter, 'reasoning']
+                    )}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-xs font-medium",
+                      editModelCapabilityFilter.includes('reasoning')
+                        ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
+                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                    )}
+                  >
+                    🧠 Reasoning
+                  </button>
+                  <button
+                    onClick={() => setEditModelCapabilityFilter(
+                      editModelCapabilityFilter.includes('image') 
+                        ? editModelCapabilityFilter.filter(f => f !== 'image')
+                        : [...editModelCapabilityFilter, 'image']
+                    )}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-xs font-medium",
+                      editModelCapabilityFilter.includes('image')
+                        ? "bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-300"
+                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                    )}
+                  >
+                    🖼️ Image
+                  </button>
+                </div>
+
                 {editModels.length > 0 && (
                   <div className="mb-1 flex flex-wrap gap-1">
                     {editModels.map((m) => (
@@ -946,11 +1030,23 @@ function ProvidersTab() {
                     <div className="px-3 py-2 text-xs text-zinc-400">Loading models...</div>
                   ) : (
                     editAvailableModels
-                      .filter((m) =>
-                        !editModelSearchTerm ||
-                        m.id.toLowerCase().includes(editModelSearchTerm.toLowerCase()) ||
-                        m.name.toLowerCase().includes(editModelSearchTerm.toLowerCase())
-                      )
+                      .filter((m) => {
+                        // Filter by search term
+                        const matchesSearch = !editModelSearchTerm ||
+                          m.id.toLowerCase().includes(editModelSearchTerm.toLowerCase()) ||
+                          m.name.toLowerCase().includes(editModelSearchTerm.toLowerCase());
+
+                        // Filter by capabilities
+                        const matchesCapabilities = editModelCapabilityFilter.length === 0 ||
+                          editModelCapabilityFilter.every(filter => {
+                            if (filter === 'tool_call') return m.tool_call === true;
+                            if (filter === 'reasoning') return m.reasoning === true;
+                            if (filter === 'image') return m.input_modalities?.includes('image') ?? false;
+                            return true;
+                          });
+
+                        return matchesSearch && matchesCapabilities;
+                      })
                       .map((m) => (
                         <label
                           key={m.id}
@@ -973,6 +1069,7 @@ function ProvidersTab() {
                               )}
                               {m.reasoning && <span>🧠 reasoning</span>}
                               {m.tool_call && <span>🔧 tools</span>}
+                              {m.input_modalities?.includes('image') && <span>🖼️ image</span>}
                             </div>
                           </div>
                         </label>

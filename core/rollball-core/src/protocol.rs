@@ -139,6 +139,8 @@ pub struct ContextUsageInfo {
 pub enum ProtocolType {
     /// Anthropic Messages API (used by providers with npm: @ai-sdk/anthropic)
     Anthropic,
+    /// Google Gemini API (used by providers with npm: @ai-sdk/google)
+    Google,
     /// Ollama native API
     Ollama,
     /// OpenAI-compatible Chat Completions API (default for all other providers)
@@ -153,6 +155,7 @@ impl std::str::FromStr for ProtocolType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "anthropic" => Ok(ProtocolType::Anthropic),
+            "google" | "gemini" => Ok(ProtocolType::Google),
             "ollama" => Ok(ProtocolType::Ollama),
             "openai" | "openai-compatible" => Ok(ProtocolType::OpenAI),
             _ => Err(format!("Unknown protocol type: {}", s)),

@@ -775,7 +775,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     let mut gateway_max_output_tokens_limit: u64 = 32_768;
 
 
-    let (provider, mut resolved_model, available_models) = if let Some(ref cfg) = hello_config {
+    let (provider, mut resolved_model, available_models, protocol_type) = if let Some(ref cfg) = hello_config {
 
 
         // Gateway mode: config was bundled in AgentHelloResult
@@ -865,7 +865,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             let models = cfg.models.clone();
 
 
-            (p, resolved, models)
+            (p, resolved, models, cfg.protocol_type.clone())
 
 
         } else {
@@ -889,7 +889,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             let p = crate::providers::router::create_noop_provider();
 
 
-            (p, "no-model".to_string(), vec![])
+            (p, "no-model".to_string(), vec![], cfg.protocol_type.clone())
 
 
         }
@@ -928,7 +928,12 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         );
 
 
-        (p, loaded.manifest.llm.suggested_model.clone(), vec![])
+        (
+            p,
+            loaded.manifest.llm.suggested_model.clone(),
+            vec![],
+            crate::providers::router::infer_protocol_type(&loaded.manifest.llm.suggested_provider),
+        )
 
 
     };
@@ -1539,6 +1544,9 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 
 
             override_model,
+
+
+            protocol_type: protocol_type.clone(),
 
 
         };
@@ -2690,6 +2698,9 @@ fn resolve_api_key(manifest: &rollball_core::AgentManifest) -> Option<String> {
         rollball_core::ProtocolType::Anthropic => "ANTHROPIC_API_KEY",
 
 
+        rollball_core::ProtocolType::Google => "GOOGLE_API_KEY",
+
+
         rollball_core::ProtocolType::OpenAI => "OPENAI_API_KEY",
 
 
@@ -2762,7 +2773,7 @@ async fn run_chat_loop(
         }
 
 
-        match agent_loop.run(trimmed, context_builder).await {
+        match agent_loop.run(trimmed, context_builder, None).await {
 
 
             Ok(response) => {
@@ -4375,6 +4386,11 @@ async fn process_gateway_recv(
                         .and_then(|v| v.as_array())
                         .map(|arr| arr.clone());
 
+                    // Extract multimodal content_parts if present (e.g. text + image_url)
+                    let content_parts: Option<Vec<rollball_core::providers::traits::ContentPart>> = params
+                        .get("content_parts")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
 
                     // Pure routing: send to session's inbound channel, immediately return
 
@@ -4392,6 +4408,7 @@ async fn process_gateway_recv(
 
 
                         documents,
+                        content_parts,
 
 
                     }) {

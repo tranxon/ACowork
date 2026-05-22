@@ -6,8 +6,8 @@ pub mod aliases;
 pub mod error_patterns;
 
 pub use traits::{
-    ChatMessage, ChatRequest, ChatResponse, FunctionCall, MessageRole, Provider, ProviderError,
-    ProviderErrorType, StreamError, StreamEvent, ToolCall, UsageInfo,
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, ImageUrlPart, MessageRole,
+    Provider, ProviderError, ProviderErrorType, StreamError, StreamEvent, ToolCall, UsageInfo,
 };
 pub use mock::{MockProvider, MockResponse};
 pub use aliases::{canonical_provider_id, vault_key_candidates};

@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use rollball_core::protocol::ProtocolType;
 use rollball_core::providers::traits::{ChatMessage, MessageRole};
 
 // ── Tier classification ─────────────────────────────────────────────────
@@ -33,6 +34,49 @@ impl std::fmt::Display for TokenCountTier {
             TokenCountTier::Tier1Exact => write!(f, "Tier1(Exact)"),
             TokenCountTier::Tier2Approximate => write!(f, "Tier2(Approximate)"),
             TokenCountTier::Tier3Heuristic => write!(f, "Tier3(Heuristic)"),
+        }
+    }
+}
+
+// ── Image Token Estimation ──────────────────────────────────────────────
+
+/// Estimate token count for an image based on protocol type.
+///
+/// Different LLM providers use different image tokenization strategies.
+/// When width/height are unknown (None), a conservative default of 512×512 is used.
+pub fn estimate_image_tokens(
+    protocol_type: &ProtocolType,
+    width: Option<u32>,
+    height: Option<u32>,
+    detail: Option<&str>,
+) -> u64 {
+    // Default to 512×512 when dimensions are unknown (conservative estimate).
+    let w = width.unwrap_or(512) as u64;
+    let h = height.unwrap_or(512) as u64;
+
+    match protocol_type {
+        ProtocolType::OpenAI => {
+            // OpenAI: "low" detail uses fixed 85 tokens.
+            // "high"/"auto" tiles the image at 512×512.
+            if detail == Some("low") {
+                return 85;
+            }
+            let tiles_w = (w + 511) / 512;
+            let tiles_h = (h + 511) / 512;
+            85 + 170 * tiles_w * tiles_h
+        }
+        ProtocolType::Anthropic => {
+            // Anthropic: approximately 1 token per 750 pixels.
+            (w * h) / 750
+        }
+        ProtocolType::Google => {
+            // Google Gemini: approximately 1 token per 258 pixels.
+            (w * h) / 258
+        }
+        ProtocolType::Ollama => {
+            // Ollama models typically don't support vision.
+            // Use conservative estimate for any vision-capable Ollama models.
+            (w * h) / 258
         }
     }
 }
@@ -100,8 +144,14 @@ impl TokenCounter {
         }
     }
 
-    /// Count tokens for a full ChatMessage (including role, name, tool_calls overhead)
-    pub fn count_message(&self, message: &ChatMessage, model: &str) -> u64 {
+    /// Count tokens for a full ChatMessage (including role, name, tool_calls overhead).
+    /// When `protocol_type` is provided, image content parts are included in the count.
+    pub fn count_message(
+        &self,
+        message: &ChatMessage,
+        model: &str,
+        protocol_type: Option<&ProtocolType>,
+    ) -> u64 {
         let mut tokens = 0u64;
 
         // Role overhead: ~1 token for role marker
@@ -112,8 +162,29 @@ impl TokenCounter {
             tokens += self.count_text(name, model) + 1;
         }
 
-        // Content tokens
-        tokens += self.count_text(&message.content, model);
+        // Content tokens: prefer content_parts if available, else fall back to .content
+        if let Some(ref parts) = message.content_parts {
+            for part in parts {
+                match part {
+                    rollball_core::providers::traits::ContentPart::Text { text } => {
+                        tokens += self.count_text(text, model);
+                    }
+                    rollball_core::providers::traits::ContentPart::ImageUrl { image_url } => {
+                        if let Some(pt) = protocol_type {
+                            tokens += estimate_image_tokens(
+                                pt,
+                                image_url.width,
+                                image_url.height,
+                                image_url.detail.as_deref(),
+                            );
+                        }
+                        // If protocol_type is unknown, skip image tokens (best-effort)
+                    }
+                }
+            }
+        } else {
+            tokens += self.count_text(&message.content, model);
+        }
 
         // Tool calls overhead
         if let Some(ref tool_calls) = message.tool_calls {
@@ -144,12 +215,12 @@ impl TokenCounter {
                 if let Some(&cached) = self.system_prompt_cache.get(&cache_key) {
                     total += cached;
                 } else {
-                    let count = self.count_message(msg, model);
+                    let count = self.count_message(msg, model, None);
                     self.system_prompt_cache.insert(cache_key, count);
                     total += count;
                 }
             } else {
-                total += self.count_message(msg, model);
+                total += self.count_message(msg, model, None);
             }
         }
 
@@ -164,7 +235,7 @@ impl TokenCounter {
     ) -> u64 {
         let mut total = 0u64;
         for msg in new_messages {
-            total += self.count_message(msg, model);
+            total += self.count_message(msg, model, None);
         }
         total
     }
@@ -394,7 +465,7 @@ mod tests {
     fn test_count_message_basic() {
         let counter = TokenCounter::new();
         let msg = ChatMessage::user("Hello world");
-        let count = counter.count_message(&msg, "gpt-4");
+        let count = counter.count_message(&msg, "gpt-4", None);
         // content tokens + role overhead + boundary
         assert!(count >= 3, "Expected at least 3 tokens, got {count}");
     }
@@ -409,7 +480,7 @@ mod tests {
             ..Default::default()
         };
         let count_without_name = counter.count_text("Hello", "gpt-4") + 2; // role + boundary
-        let count_with_name = counter.count_message(&msg, "gpt-4");
+        let count_with_name = counter.count_message(&msg, "gpt-4", None);
         assert!(count_with_name > count_without_name, "Named message should have more tokens");
     }
 
@@ -424,7 +495,7 @@ mod tests {
                 arguments: r#"{"city":"Shanghai"}"#.to_string(),
             },
         }]);
-        let count = counter.count_message(&msg, "gpt-4");
+        let count = counter.count_message(&msg, "gpt-4", None);
         // Tool call overhead (4) + name + arguments + role + boundary
         assert!(count >= 6, "Expected at least 6 tokens for tool call message, got {count}");
     }

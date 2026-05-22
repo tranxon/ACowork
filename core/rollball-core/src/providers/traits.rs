@@ -275,13 +275,82 @@ pub enum MessageRole {
     Tool,
 }
 
+/// Content part for multimodal messages.
+///
+/// When a message contains only text, the `content` field (String) is used for
+/// backward compatibility. When a message contains multimodal parts (e.g. text
+/// + image), `content_parts` is populated and provider serialization layers
+/// should prefer it over the plain `content` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Plain text content
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image URL (data:image/...;base64,... or https://...)
+    #[serde(rename = "image_url")]
+    ImageUrl {
+        image_url: ImageUrlPart,
+    },
+}
+
+/// Image URL details for a ContentPart
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrlPart {
+    /// The image URL or data URI (e.g. "data:image/png;base64,...")
+    pub url: String,
+    /// Optional detail level: "auto", "low", "high" (OpenAI convention)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Image width in pixels (for token estimation).
+    /// When absent, a default of 512 is used for estimation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Image height in pixels (for token estimation).
+    /// When absent, a default of 512 is used for estimation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+impl ContentPart {
+    /// Create a text content part
+    pub fn text(text: impl Into<String>) -> Self {
+        ContentPart::Text { text: text.into() }
+    }
+
+    /// Create an image_url content part from a data URI or URL
+    pub fn image_url(url: impl Into<String>) -> Self {
+        ContentPart::ImageUrl {
+            image_url: ImageUrlPart { url: url.into(), detail: None, width: None, height: None },
+        }
+    }
+
+    /// Create an image_url content part with a detail level
+    pub fn image_url_with_detail(url: impl Into<String>, detail: impl Into<String>) -> Self {
+        ContentPart::ImageUrl {
+            image_url: ImageUrlPart {
+                url: url.into(),
+                detail: Some(detail.into()),
+                width: None,
+                height: None,
+            },
+        }
+    }
+}
+
 /// Chat message in conversation
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     #[serde(default)]
     pub role: MessageRole,
+    /// Plain text content — used when the message has no multimodal parts.
+    /// Providers should prefer `content_parts` over `content` when both are present.
     #[serde(default)]
     pub content: String,
+    /// Multimodal content parts — when present, providers should serialize
+    /// content as an array of ContentPart objects instead of a plain string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<ContentPart>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,6 +367,17 @@ impl ChatMessage {
     /// Create a user message
     pub fn user(content: impl Into<String>) -> Self {
         Self { role: MessageRole::User, content: content.into(), ..Default::default() }
+    }
+
+    /// Create a user message with multimodal content parts.
+    /// The `content` field is set to a human-readable summary for logging/debugging.
+    pub fn user_multimodal(text_content: impl Into<String>, parts: Vec<ContentPart>) -> Self {
+        Self {
+            role: MessageRole::User,
+            content: text_content.into(),
+            content_parts: Some(parts),
+            ..Default::default()
+        }
     }
 
     /// Create an assistant message

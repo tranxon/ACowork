@@ -544,12 +544,14 @@ fn cross_provider_lookup(
 ///
 /// Mapping rules:
 /// - npm contains "anthropic" → ProtocolType::Anthropic
+/// - npm contains "google"    → ProtocolType::Google
 /// - npm contains "ollama"    → ProtocolType::Ollama
 /// - everything else          → ProtocolType::OpenAI (default)
 fn derive_protocol_type(npm: Option<&str>) -> rollball_core::protocol::ProtocolType {
     use rollball_core::protocol::ProtocolType;
     match npm {
         Some(s) if s.contains("anthropic") => ProtocolType::Anthropic,
+        Some(s) if s.contains("google") => ProtocolType::Google,
         Some(s) if s.contains("ollama") => ProtocolType::Ollama,
         _ => ProtocolType::OpenAI,
     }

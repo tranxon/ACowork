@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
 
 use rollball_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, FunctionCall,
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall,
     MessageRole, Provider, StreamEvent, ToolCall, UsageInfo,
 };
 
@@ -90,8 +90,12 @@ struct StreamOptions {
 #[derive(Debug, Clone, Serialize)]
 struct NativeMessage {
     role: String,
+    /// Content — either a plain String or a multimodal JSON array of content parts.
+    /// Uses serde_json::Value for flexible serialization:
+    /// - String for plain text messages
+    /// - Array of content part objects for multimodal messages
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,6 +206,34 @@ struct StreamFunctionDelta {
 
 // ── Conversion helpers ──
 
+/// Convert a ChatMessage's content to the appropriate serde_json::Value.
+///
+/// When `content_parts` is present, produces a multimodal content array
+/// (e.g. `[{"type":"text","text":"..."}, {"type":"image_url","image_url":{...}}]`).
+/// Otherwise falls back to a plain String value from `content`.
+fn build_content_value(m: &ChatMessage) -> serde_json::Value {
+    if let Some(ref parts) = m.content_parts {
+        let arr: Vec<serde_json::Value> = parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::Text { text } => {
+                    serde_json::json!({ "type": "text", "text": text })
+                }
+                ContentPart::ImageUrl { image_url } => {
+                    let mut img = serde_json::json!({ "url": image_url.url });
+                    if let Some(ref detail) = image_url.detail {
+                        img["detail"] = serde_json::json!(detail);
+                    }
+                    serde_json::json!({ "type": "image_url", "image_url": img })
+                }
+            })
+            .collect();
+        serde_json::Value::Array(arr)
+    } else {
+        serde_json::Value::String(m.content.clone())
+    }
+}
+
 fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
     messages
         .iter()
@@ -216,6 +248,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
             // Handle tool messages — prefer dedicated tool_call_id field,
             // fall back to parsing from content JSON for backward compatibility
             if matches!(m.role, MessageRole::Tool) {
+                // Tool messages never carry multimodal parts — use plain content
                 let tool_call_id = m.tool_call_id.clone().or_else(|| {
                     serde_json::from_str::<serde_json::Value>(&m.content)
                         .ok()
@@ -223,12 +256,14 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                 });
                 let content = if m.tool_call_id.is_some() {
                     // tool_call_id is a separate field — content is the actual result
-                    Some(m.content.clone())
+                    Some(serde_json::Value::String(m.content.clone()))
                 } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
                     // Legacy format: content JSON contains tool_call_id and content
-                    Some(value.get("content").and_then(serde_json::Value::as_str).unwrap_or("").to_string())
+                    Some(serde_json::Value::String(
+                        value.get("content").and_then(serde_json::Value::as_str).unwrap_or("").to_string()
+                    ))
                 } else {
-                    Some(m.content.clone())
+                    Some(serde_json::Value::String(m.content.clone()))
                 };
                 return NativeMessage {
                     role: role.to_string(),
@@ -255,10 +290,10 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                     .collect();
                 return NativeMessage {
                     role: role.to_string(),
-                    content: if m.content.is_empty() {
+                    content: if m.content.is_empty() && m.content_parts.is_none() {
                         None
                     } else {
-                        Some(m.content.clone())
+                        Some(build_content_value(m))
                     },
                     reasoning_content: m.reasoning_content.clone(),
                     tool_call_id: None,
@@ -268,7 +303,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
 
             NativeMessage {
                 role: role.to_string(),
-                content: Some(m.content.clone()),
+                content: Some(build_content_value(m)),
                 reasoning_content: m.reasoning_content.clone(),
                 tool_call_id: None,
                 tool_calls: None,
@@ -771,6 +806,7 @@ mod tests {
             ChatMessage {
                 role: MessageRole::System,
                 content: "You are helpful.".to_string(),
+                content_parts: None,
                 reasoning_content: None,
                 name: None,
                 tool_call_id: None,
@@ -779,6 +815,7 @@ mod tests {
             ChatMessage {
                 role: MessageRole::User,
                 content: "Hello".to_string(),
+                content_parts: None,
                 reasoning_content: None,
                 name: None,
                 tool_call_id: None,
@@ -797,6 +834,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::Assistant,
             content: "".to_string(),
+            content_parts: None,
             reasoning_content: None,
             name: None,
             tool_call_id: None,

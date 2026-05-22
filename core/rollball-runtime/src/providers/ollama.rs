@@ -288,6 +288,7 @@ mod tests {
             ChatMessage {
                 role: MessageRole::User,
                 content: "Hello".to_string(),
+                content_parts: None,
                 reasoning_content: None,
                 name: None,
                 tool_call_id: None,

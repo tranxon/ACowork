@@ -49,6 +49,8 @@ pub struct SessionManagerConfig {
     pub identity_context: Option<String>,
     /// Model override from Gateway (takes precedence over manifest's suggested_model)
     pub override_model: Option<String>,
+    /// LLM protocol type derived from models.dev (used for image token estimation)
+    pub protocol_type: ProtocolType,
 }
 
 impl Default for SessionManagerConfig {
@@ -70,6 +72,7 @@ impl Default for SessionManagerConfig {
             full_tool_specs: Vec::new(),
             identity_context: None,
             override_model: None,
+            protocol_type: ProtocolType::default(),
         }
     }
 }
@@ -237,6 +240,7 @@ impl SessionManager {
             self.config.tool_definitions.clone(),
             self.config.identity_context.clone(),
             self.config.override_model.clone(),
+            self.config.protocol_type.clone(),
         );
 
         // ADR-014: Create watch channel for session status

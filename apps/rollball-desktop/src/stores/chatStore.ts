@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry } from "../lib/types";
 import { useSessionStore } from "./sessionStore";
 import { useAgentStore } from "./agentStore";
 import { useUserProfileStore } from "./userProfileStore";
@@ -238,7 +238,7 @@ interface ChatStore {
   currentProvider: string | null;
   /** Per-agent model memory: agent_id → { model, provider } */
   agentModels: Record<string, { model: string; provider: string }>;
-  availableModels: { name: string; provider: string }[];
+  availableModels: ModelEntry[];
   /** Current agent ID for stop functionality */
   currentAgentId: string | null;
   /** Whether more messages are being loaded */
@@ -252,7 +252,7 @@ interface ChatStore {
 
   // ---- Actions ----
   connectStream: (agentId: string, gatewayUrl: string) => void;
-  sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{id: string; filename: string; format: string; size: number; path?: string}>) => Promise<void>;
+  sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{id: string; filename: string; format: string; size: number; path?: string}>, imageParts?: Array<{url: string; width: number; height: number}>) => Promise<void>;
   stopCurrentMessage: () => Promise<void>;
   sendInterrupt: () => void;
   disconnectStream: (agentId?: string) => void;
@@ -264,7 +264,7 @@ interface ChatStore {
   removeSessionState: (agentId: string, sessionId: string) => void;
   trimMessagesTo: (agentId: string, count: number) => void;
   setCurrentModel: (model: string, provider: string, agentId: string) => void;
-  setAvailableModels: (models: { name: string; provider: string }[]) => void;
+  setAvailableModels: (models: ModelEntry[]) => void;
   getWs: (agentId: string) => WebSocket | undefined;
   loadAgentProvider: (agentId: string) => string | null;
   continueExecution: (agentId: string) => Promise<void>;
@@ -688,7 +688,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{id: string; filename: string; format: string; size: number; path?: string}>) => {
+  sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{id: string; filename: string; format: string; size: number; path?: string}>, imageParts?: Array<{url: string; width: number; height: number}>) => {
     const ws = get().wsMap[agentId];
     const sessionId = useSessionStore.getState().currentSessionId;
 
@@ -711,6 +711,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }));
     }
 
+    // Attach image info to user message for inline rendering
+    if (imageParts && imageParts.length > 0) {
+      userMsg.imageUrls = imageParts.map((img) => img.url);
+    }
+
     if (sessionId) {
       set((state) => ({
         ...updateSessionState(state, agentId, sessionId, {
@@ -725,6 +730,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const activeState = getActiveSessionState(get(), agentId);
     updateSessionTitleFromMessages(activeState.messages, agentId);
 
+    // Build multimodal content_parts when images are attached
+    const contentParts = imageParts && imageParts.length > 0
+      ? [
+          { type: "text", text: content },
+          ...imageParts.map((img) => ({
+            type: "image_url",
+            image_url: { url: img.url, width: img.width, height: img.height },
+          })),
+        ]
+      : undefined;
+
     const sendViaWs = (socket: WebSocket) => {
       socket.send(JSON.stringify({
         type: "message",
@@ -732,6 +748,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         command,
         ...(sessionId ? { session_id: sessionId } : {}),
         ...(documentIds && documentIds.length > 0 ? { document_ids: documentIds } : {}),
+        ...(contentParts ? { content_parts: contentParts } : {}),
       }));
 
       // Reset streaming state for the active session
@@ -782,7 +799,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const result = await invoke<{ message_id: string; status: string }>(
         "send_message",
-        { agentId, content, command, sessionId, documentIds },
+        { agentId, content, command, sessionId, documentIds, contentParts },
       );
       console.log("[ChatStore] Message sent via HTTP:", result);
       const replyMsg: ChatMessage = {
@@ -966,7 +983,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }));
     }
   },
-  setAvailableModels: (models: { name: string; provider: string }[]) => {
+  setAvailableModels: (models: ModelEntry[]) => {
     set((state) => {
       const currentModelExists = state.currentModel && state.currentProvider
         ? models.some(m => m.name === state.currentModel && m.provider === state.currentProvider)

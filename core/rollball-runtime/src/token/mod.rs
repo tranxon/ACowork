@@ -7,4 +7,4 @@
 
 pub mod counter;
 
-pub use counter::{TokenCounter, TokenCountTier, BudgetAllocation};
+pub use counter::{TokenCounter, TokenCountTier, BudgetAllocation, estimate_image_tokens};

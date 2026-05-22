@@ -18,8 +18,8 @@ use tokio::sync::mpsc;
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
 
 use rollball_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, FunctionCall, MessageRole, Provider, StreamEvent,
-    ToolCall, UsageInfo,
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageRole, Provider,
+    StreamEvent, ToolCall, UsageInfo,
 };
 
 // ── Provider struct ──────────────────────────────────────────────────────
@@ -194,6 +194,64 @@ struct ContentBlockStart {
 
 // ── Conversion helpers ──────────────────────────────────────────────────
 
+/// Build Anthropic content array from a ChatMessage.
+///
+/// When `content_parts` is present, each ContentPart is mapped to the
+/// corresponding Anthropic content block type:
+/// - `ContentPart::Text` → `{"type": "text", "text": "..."}`
+/// - `ContentPart::ImageUrl` → `{"type": "image", "source": {"type": "base64", ...}}`
+///
+/// When `content_parts` is None, falls back to a single text block from `content`.
+fn build_anthropic_content(msg: &ChatMessage) -> serde_json::Value {
+    if let Some(ref parts) = msg.content_parts {
+        let blocks: Vec<serde_json::Value> = parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::Text { text } => {
+                    serde_json::json!({ "type": "text", "text": text })
+                }
+                ContentPart::ImageUrl { image_url } => {
+                    // Anthropic expects: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
+                    // Parse the data URI to extract media_type and base64 data
+                    let (media_type, data) = parse_data_uri(&image_url.url);
+                    serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data
+                        }
+                    })
+                }
+            })
+            .collect();
+        serde_json::Value::Array(blocks)
+    } else {
+        serde_json::Value::Array(vec![serde_json::json!({
+            "type": "text",
+            "text": msg.content
+        })])
+    }
+}
+
+/// Parse a data URI into (media_type, base64_data).
+/// E.g. "data:image/png;base64,iVBOR..." → ("image/png", "iVBOR...")
+fn parse_data_uri(uri: &str) -> (&str, &str) {
+    if let Some(rest) = uri.strip_prefix("data:") {
+        if let Some(semi) = rest.find(';') {
+            let media_type = &rest[..semi];
+            let after_semi = &rest[semi + 1..];
+            if let Some(comma) = after_semi.find(',') {
+                if after_semi[..comma].contains("base64") {
+                    return (media_type, &after_semi[comma + 1..]);
+                }
+            }
+        }
+    }
+    // Fallback: treat as raw base64 with unknown media type
+    ("image/png", uri)
+}
+
 /// Convert our ChatMessage list to Anthropic format.
 /// Anthropic requires system messages to be passed separately,
 /// and tool messages to use `tool_result` content blocks.
@@ -210,10 +268,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
             MessageRole::User => {
                 converted.push(AnthropicMessage {
                     role: "user".to_string(),
-                    content: Some(serde_json::Value::Array(vec![serde_json::json!({
-                        "type": "text",
-                        "text": msg.content
-                    })])),
+                    content: Some(build_anthropic_content(msg)),
                 });
             }
             MessageRole::Assistant => {
@@ -821,6 +876,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::Tool,
             content: r#"{"tool_call_id":"toolu_123","content":"Sunny, 25°C"}"#.to_string(),
+            content_parts: None,
             reasoning_content: None,
             name: None,
             tool_call_id: None,
@@ -1079,6 +1135,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::User,
             content: "Hello world".to_string(),
+            content_parts: None,
             reasoning_content: None,
             name: None,
             tool_call_id: None,
@@ -1099,6 +1156,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: MessageRole::User,
             content: "你好世界".to_string(),
+            content_parts: None,
             reasoning_content: None,
             name: None,
             tool_call_id: None,
