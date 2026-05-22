@@ -931,11 +931,13 @@ pub async fn resolve_llm_config_for_agent(
 
             Some(ResolvedLlmConfig {
                 provider: effective_provider_name,
-                model,
+                model: model.clone(),
                 api_key: effective_entry.api_key,
                 base_url: effective_entry.base_url,
                 models: effective_models,
-                stored_capabilities: effective_entry.model_capabilities.map(rollball_core::protocol::ModelCapabilitiesInfo::from),
+                stored_capabilities: model.as_ref()
+                    .and_then(|m| effective_entry.model_capabilities.get(m))
+                    .map(|c| rollball_core::protocol::ModelCapabilitiesInfo::from(c.clone())),
             })
         }
         Err(e) => {

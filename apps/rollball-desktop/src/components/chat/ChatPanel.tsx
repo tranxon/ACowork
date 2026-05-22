@@ -17,7 +17,7 @@ import { toolbarButton, toolbarButtonActive } from "../../lib/ui-styles";
 import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil, Paperclip, Image, Brain } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage, VaultKeyEntry, ModelInfo, ModelEntry } from "../../lib/types";
+import type { ChatMessage, VaultKeyEntry, ModelInfo, ModelEntry, ModelCapabilitiesMap } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { ExploreBlock } from "./ExploreBlock";
 import { AskQuestionCard } from "./AskQuestionCard";
@@ -185,13 +185,13 @@ export function ChatPanel() {
   const loadModels = useCallback(async () => {
     try {
       const keys = await invoke<VaultKeyEntry[]>("list_keys");
-      console.log("[loadModels] keys:", keys.map(k => ({ p: k.provider, models: k.models, caps: k.model_capabilities })));
       const allModels: ModelEntry[] = [];
       for (const key of keys) {
         const provider = key.provider;
-        const caps = key.model_capabilities;
+        const capsMap = key.model_capabilities;
         if (key.models?.length) {
           for (const model of key.models) {
+            const caps = capsMap?.[model];
             allModels.push({
               name: model,
               provider,
@@ -201,6 +201,7 @@ export function ChatPanel() {
             });
           }
         } else if (key.default_model) {
+          const caps = capsMap?.[key.default_model];
           allModels.push({
             name: key.default_model,
             provider,
@@ -1695,25 +1696,24 @@ function AddModelDialog({
       const effectiveSupportsToolCalling = hasModelsDevData 
         ? (modelInfo?.tool_call ?? supportsToolCalling)
         : supportsToolCalling;
-      const effectiveReasoning = hasModelsDevData
-        ? (modelInfo?.reasoning ?? undefined)
-        : undefined;
-      const effectiveModalities = hasModelsDevData && modelInfo?.input_modalities?.length
-        ? { input: modelInfo.input_modalities }
-        : undefined;
       
       // Rust requires context_window to be present (u64, not Option)
       // Default to 128000 if not specified (safe default for most models)
       const ctxWindow = effectiveContextWindow ? parseInt(effectiveContextWindow) : 128000;
       const maxOutTokens = effectiveMaxOutputTokens ? parseInt(effectiveMaxOutputTokens) : 0;
       
-      const modelCapabilities = models.length > 0 ? {
-        context_window: ctxWindow,
-        max_output_tokens: maxOutTokens,
-        supports_tool_calling: effectiveSupportsToolCalling,
-        supports_reasoning: effectiveReasoning,
-        modalities: effectiveModalities,
-      } : undefined;
+      // Build per-model capabilities map
+      const modelCapabilities: ModelCapabilitiesMap = {};
+      for (const modelId of models) {
+        const mi = availableModels.find(m => m.id === modelId);
+        modelCapabilities[modelId] = {
+          context_window: mi?.context_window ?? ctxWindow,
+          max_output_tokens: mi?.max_tokens ?? maxOutTokens,
+          supports_tool_calling: mi?.tool_call ?? effectiveSupportsToolCalling,
+          supports_reasoning: mi?.reasoning ?? undefined,
+          modalities: mi?.input_modalities?.length ? { input: mi.input_modalities } : undefined,
+        };
+      }
       
       await invoke("add_key", {
         provider,

@@ -1491,20 +1491,12 @@ async fn push_llm_config_on_switch(
     };
 
     // Resolve model capabilities (user-overridden > models.dev / offline data)
-    let model_capabilities = if entry.model_capabilities.is_some() {
-        entry.model_capabilities.map(rollball_core::protocol::ModelCapabilitiesInfo::from)
-    } else {
-        crate::http::models_api::lookup_model_capabilities_with_cache(
-            &state.models_cache, provider_name, model,
-        ).await
-    };
-    tracing::info!(
-        agent = %agent_id,
-        provider = %provider_name,
-        model = %model,
-        has_capabilities = model_capabilities.is_some(),
-        "LLMConfigDelivery: resolved model capabilities"
-    );
+    let model_capabilities = entry.model_capabilities.get(model)
+        .map(|c| Some(rollball_core::protocol::ModelCapabilitiesInfo::from(c.clone())))
+        .unwrap_or_else(|| {
+            // Fall back to models.dev cache if not stored per-model
+            None
+        });
 
     // Derive protocol type from models.dev npm field (model-level > provider-level)
     let (protocol_type, api_override) =

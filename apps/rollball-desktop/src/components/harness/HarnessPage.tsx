@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry } from "../../lib/types";
+import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ModelCapabilitiesMap, ProviderListEntry } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
@@ -305,17 +305,20 @@ function ProvidersTab() {
     // Default to 128000 if not specified (safe default for most models)
     const ctxWindow = effectiveContextWindow ? parseInt(effectiveContextWindow) : 128000;
     
-    // Build model_capabilities if user selected models
-    let modelCapabilities: ModelCapabilitiesInfo | undefined;
+    // Build per-model capabilities map
+    const modelCapabilities: ModelCapabilitiesMap = {};
     if (newModels.length > 0) {
       const maxOutTokens = effectiveMaxOutputTokens ? parseInt(effectiveMaxOutputTokens) : 0;
-      modelCapabilities = {
-        context_window: ctxWindow,
-        max_output_tokens: maxOutTokens,
-        supports_tool_calling: effectiveSupportsToolCalling,
-        supports_reasoning: effectiveReasoning,
-        modalities: effectiveModalities,
-      };
+      for (const modelId of newModels) {
+        const mi = availableModels.find(m => m.id === modelId);
+        modelCapabilities[modelId] = {
+          context_window: mi?.context_window ?? ctxWindow,
+          max_output_tokens: mi?.max_tokens ?? maxOutTokens,
+          supports_tool_calling: mi?.tool_call ?? effectiveSupportsToolCalling,
+          supports_reasoning: mi?.reasoning ?? undefined,
+          modalities: mi?.input_modalities?.length ? { input: mi.input_modalities } : undefined,
+        };
+      }
     }
     try {
       await invoke("add_key", {
@@ -407,7 +410,7 @@ function ProvidersTab() {
       if (editKey && editKey !== keyEntry?.key_preview) {
         updatePayload.key = editKey;
       }
-      // Build model_capabilities if user provided values
+      // Build per-model capabilities map
       if (editContextWindow || editMaxOutputTokens) {
         const cw = Number(editContextWindow);
         const mot = Number(editMaxOutputTokens);
@@ -416,16 +419,18 @@ function ProvidersTab() {
           alert('Context Window and Max Output Tokens must be positive numbers');
           return;
         }
-        // Derive reasoning/modalities from editAvailableModels if available
-        const primaryModel = editModels[0];
-        const modelInfo = editAvailableModels.find(m => m.id === primaryModel);
-        updatePayload.modelCapabilities = {
-          context_window: cw || 0,
-          max_output_tokens: mot || 0,
-          supports_tool_calling: editSupportsToolCalling,
-          supports_reasoning: modelInfo?.reasoning ?? undefined,
-          modalities: modelInfo?.input_modalities?.length ? { input: modelInfo.input_modalities } : undefined,
-        };
+        const caps: ModelCapabilitiesMap = {};
+        for (const modelId of editModels) {
+          const modelInfo = editAvailableModels.find(m => m.id === modelId);
+          caps[modelId] = {
+            context_window: cw || 0,
+            max_output_tokens: mot || 0,
+            supports_tool_calling: editSupportsToolCalling,
+            supports_reasoning: modelInfo?.reasoning ?? undefined,
+            modalities: modelInfo?.input_modalities?.length ? { input: modelInfo.input_modalities } : undefined,
+          };
+        }
+        updatePayload.modelCapabilities = caps;
       }
       console.log("[handleEditSave] payload:", JSON.stringify(updatePayload));
       await invoke("update_key", updatePayload);
