@@ -206,7 +206,7 @@ export interface SendMessageResponse {
 export type GatewayStatus = "connected" | "disconnected" | "error";
 
 /** Chat message types */
-export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "document_upload";
+export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "document_upload" | "error";
 
 /** Chat message in the UI */
 export interface ChatMessage {

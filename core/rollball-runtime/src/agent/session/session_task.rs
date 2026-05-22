@@ -336,7 +336,8 @@ impl SessionTask {
             match msg {
                 Some(SessionMessage::ChatMessage { content, message_id, skill_instructions, documents, content_parts }) => {
                     let has_documents = documents.as_ref().map_or(false, |d| !d.is_empty());
-                    if content.trim().is_empty() && !has_documents {
+                    let has_content_parts = content_parts.as_ref().map_or(false, |p| !p.is_empty());
+                    if content.trim().is_empty() && !has_documents && !has_content_parts {
                         tracing::warn!(
                             session_id = %session_id,
                             "SessionTask received empty chat message, ignoring"

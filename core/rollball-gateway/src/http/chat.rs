@@ -180,7 +180,8 @@ pub async fn send_message(
     }
 
     // Validate content length
-    if body.content.is_empty() {
+    // Allow empty content when multimodal content_parts are provided (e.g. image-only message)
+    if body.content.is_empty() && body.content_parts.is_none() {
         return Err(ApiError::bad_request("content must not be empty"));
     }
     if body.content.len() > MAX_CONTENT_LENGTH {
@@ -724,7 +725,8 @@ async fn handle_ws_text(
     let content = client_msg.content.unwrap_or_default();
 
     // Validate content length for WebSocket messages too
-    if content.is_empty() {
+    // Allow empty content when multimodal content_parts are provided (e.g. image-only message)
+    if content.is_empty() && client_msg.content_parts.is_none() {
         let err = serde_json::json!({
             "type": "error",
             "message": "content must not be empty",

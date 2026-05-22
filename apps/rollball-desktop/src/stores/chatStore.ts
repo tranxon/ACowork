@@ -1737,9 +1737,10 @@ function handleMessageEvent(
       }
       const errMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
-        type: "system",
-        content: `Error: ${errorMsg}`,
+        type: "error",
+        content: errorMsg as string,
         timestamp: Date.now(),
+        ...getAgentSenderInfo(agentId),
       };
       set((state) => ({
         ...updateSessionState(state, agentId, sid!, {
