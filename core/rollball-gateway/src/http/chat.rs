@@ -61,6 +61,10 @@ pub struct SendMessageRequest {
     /// Document IDs to attach to this message (previously uploaded via /api/sessions/{sid}/documents)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document_ids: Option<Vec<String>>,
+    /// Multimodal content parts (e.g. text + image_url).
+    /// When present, providers serialize content as an array instead of a plain string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<serde_json::Value>>,
 }
 
 /// Response for send message
@@ -133,6 +137,10 @@ struct WsClientMessage {
     /// Document IDs to attach to this message
     #[serde(default)]
     document_ids: Option<Vec<String>>,
+    /// Multimodal content parts (e.g. text + image_url).
+    /// When present, providers serialize content as an array instead of a plain string.
+    #[serde(default)]
+    content_parts: Option<Vec<serde_json::Value>>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -208,6 +216,10 @@ pub async fn send_message(
                             }
                         }
                     }
+                }
+                // Pass through multimodal content_parts (e.g. text + image_url)
+                if let Some(ref parts) = body.content_parts {
+                    params["content_parts"] = serde_json::json!(parts);
                 }
                 let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
                     from: "http-api".to_string(),
@@ -752,6 +764,10 @@ async fn handle_ws_text(
                         }
                     }
                 }
+            }
+            // Pass through multimodal content_parts (e.g. text + image_url)
+            if let Some(ref parts) = client_msg.content_parts {
+                params["content_parts"] = serde_json::json!(parts);
             }
             let intent = rollball_core::protocol::GatewayResponse::IntentReceived {
                 from: "http-ws".to_string(),

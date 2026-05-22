@@ -30,6 +30,10 @@ pub enum SessionMessage {
         /// Optional document references uploaded with this message.
         /// Each entry: { "id", "filename", "abs_path", "format", "size" }
         documents: Option<Vec<serde_json::Value>>,
+        /// Optional multimodal content parts (e.g. text + image_url).
+        /// When present, the agent loop constructs a ChatMessage::user_multimodal()
+        /// instead of ChatMessage::user(), enabling image inputs to flow to the LLM.
+        content_parts: Option<Vec<rollball_core::providers::traits::ContentPart>>,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -102,6 +106,8 @@ pub(crate) struct SessionTask {
     identity_context: Option<String>,
     /// Model override from Gateway (takes precedence over manifest's suggested_model)
     override_model: Option<String>,
+    /// LLM protocol type (for image token estimation)
+    protocol_type: rollball_core::protocol::ProtocolType,
     /// Debug controller (shared across sessions, only in DevMode).
     /// Used to consume rewind_target / pending_patches / re_execute_pending
     /// before each agent_loop.run() invocation.
@@ -142,6 +148,7 @@ impl SessionTask {
         tool_definitions: Vec<serde_json::Value>,
         identity_context: Option<String>,
         override_model: Option<String>,
+        protocol_type: rollball_core::protocol::ProtocolType,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         // Build the AgentLoop eagerly so its inbound sender can be exposed.
         // Heavy fields (provider, tools) are Arc-cloned (refcount only).
@@ -165,6 +172,7 @@ impl SessionTask {
             tool_definitions,
             identity_context,
             override_model,
+            protocol_type,
             debug_ctrl,
             rewind_notify,
             resume_notify,
@@ -193,6 +201,7 @@ impl SessionTask {
             tool_definitions,
             identity_context,
             override_model,
+            protocol_type,
         } = self;
 
         // Build ContextBuilder with complete tool definitions and identity
@@ -206,6 +215,9 @@ impl SessionTask {
         if let Some(ref model) = override_model {
             context_builder = context_builder.with_override_model(model.clone());
         }
+
+        // Set protocol type for image token estimation in HistoryManager.
+        agent_loop.session.history_mut().set_protocol_type(protocol_type.clone());
 
         // Saved user message for debug resume re-execution.
         // When the user presses resume after the agent loop has exited
@@ -265,7 +277,7 @@ impl SessionTask {
                                     &mut agent_loop,
                                     &mut context_builder,
                                 ).await;
-                                match agent_loop.replay(content, &mut context_builder).await {
+                                match agent_loop.replay(content, &mut context_builder, None).await {
                                     Ok(response) => {
                                         tracing::info!(
                                             session_id = %session_id,
@@ -322,7 +334,7 @@ impl SessionTask {
             // Note: msg is now Option<SessionMessage> directly (no
             // Ok/Err wrapper from the old timeout pattern).
             match msg {
-                Some(SessionMessage::ChatMessage { content, message_id, skill_instructions, documents }) => {
+                Some(SessionMessage::ChatMessage { content, message_id, skill_instructions, documents, content_parts }) => {
                     let has_documents = documents.as_ref().map_or(false, |d| !d.is_empty());
                     if content.trim().is_empty() && !has_documents {
                         tracing::warn!(
@@ -466,7 +478,7 @@ impl SessionTask {
                         }
                     }
 
-                    match agent_loop.run(&enriched_content, &mut context_builder).await {
+                    match agent_loop.run(&enriched_content, &mut context_builder, content_parts).await {
                         Ok(response) => {
                             tracing::info!(
                                 session_id = %session_id,

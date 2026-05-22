@@ -1,7 +1,7 @@
 //! LLM Provider router and factory
 //!
 //! Creates the appropriate Provider based on protocol type.
-//! Supports OpenAI-compatible, Anthropic, and Ollama protocols.
+//! Supports OpenAI-compatible, Anthropic, Google Gemini, and Ollama protocols.
 //!
 //! DESIGN: Runtime always runs under Gateway. base_url and api_key are
 //! delivered via LLMConfigDelivery from Gateway (which has full models.dev
@@ -46,6 +46,18 @@ pub fn create_provider(
             Arc::new(provider)
         }
 
+        ProtocolType::Google => {
+            // Google Gemini uses OpenAI-compatible protocol via OpenAIProvider
+            // until a native GoogleProvider is implemented.
+            tracing::info!(provider = provider_name, "Using Google Gemini (OpenAI-compatible) provider");
+            let provider = if let Some(url) = base_url {
+                OpenAIProvider::with_base_url(Some(url), api_key)
+            } else {
+                OpenAIProvider::new(api_key)
+            };
+            Arc::new(provider)
+        }
+
         ProtocolType::Ollama => {
             let provider = if let Some(url) = base_url {
                 OllamaProvider::with_base_url(Some(url))
@@ -77,6 +89,7 @@ pub fn infer_protocol_type(provider_name: &str) -> ProtocolType {
     match provider_name {
         "anthropic" | "claude" | "minimax" | "minimax-cn" => ProtocolType::Anthropic,
         "ollama" => ProtocolType::Ollama,
+        "google" | "gemini" => ProtocolType::Google,
         _ => ProtocolType::OpenAI,
     }
 }

@@ -6,7 +6,8 @@
 
 use std::collections::HashSet;
 
-use rollball_core::providers::traits::{ChatMessage, MessageRole};
+use rollball_core::protocol::ProtocolType;
+use rollball_core::providers::traits::{ChatMessage, ContentPart, MessageRole};
 
 
 /// History manager for conversation
@@ -19,6 +20,9 @@ pub struct HistoryManager {
     keep_full_results: usize,
     /// Current estimated token count
     current_tokens: u64,
+    /// LLM protocol type for image token estimation.
+    /// Defaults to OpenAI; set via `set_protocol_type()` after construction.
+    protocol_type: ProtocolType,
 }
 
 impl HistoryManager {
@@ -29,7 +33,18 @@ impl HistoryManager {
             max_tokens,
             keep_full_results,
             current_tokens: 0,
+            protocol_type: ProtocolType::default(),
         }
+    }
+
+    /// Set the LLM protocol type for image token estimation.
+    pub fn set_protocol_type(&mut self, pt: ProtocolType) {
+        self.protocol_type = pt;
+    }
+
+    /// Get the current protocol type.
+    pub fn protocol_type(&self) -> &ProtocolType {
+        &self.protocol_type
     }
 
     /// Get reference to messages
@@ -49,7 +64,7 @@ impl HistoryManager {
 
     /// Append a message to history
     pub fn append(&mut self, message: ChatMessage) {
-        let tokens = estimate_tokens(&message.content);
+        let tokens = estimate_message_tokens(&message, &self.protocol_type);
         self.current_tokens += tokens;
         self.messages.push(message);
     }
@@ -57,7 +72,7 @@ impl HistoryManager {
     /// Append multiple messages
     pub fn extend(&mut self, messages: Vec<ChatMessage>) {
         for msg in &messages {
-            self.current_tokens += estimate_tokens(&msg.content);
+            self.current_tokens += estimate_message_tokens(msg, &self.protocol_type);
         }
         self.messages.extend(messages);
     }
@@ -92,7 +107,7 @@ impl HistoryManager {
         self.current_tokens = self
             .messages
             .iter()
-            .map(|m| estimate_tokens(&m.content))
+            .map(|m| estimate_message_tokens(m, &self.protocol_type))
             .sum();
         tracing::info!(
             target_len,
@@ -124,7 +139,7 @@ impl HistoryManager {
         while self.current_tokens > self.max_tokens && first_removable + removed < self.messages.len() - 1 {
             let idx = first_removable + removed;
             if idx < self.messages.len() {
-                let tokens = estimate_tokens(&self.messages[idx].content);
+                let tokens = estimate_text_tokens(&self.messages[idx].content);
                 self.current_tokens = self.current_tokens.saturating_sub(tokens);
                 removed += 1;
             } else {
@@ -176,8 +191,8 @@ impl HistoryManager {
                     format!("[folded] {content}")
                 };
 
-                let old_tokens = estimate_tokens(content);
-                let new_tokens = estimate_tokens(&summary);
+                let old_tokens = estimate_text_tokens(content);
+                let new_tokens = estimate_text_tokens(&summary);
                 self.current_tokens = self
                     .current_tokens
                     .saturating_sub(old_tokens)
@@ -259,7 +274,7 @@ impl HistoryManager {
         {
             let idx = first_removable + removed_count;
             if idx < self.messages.len() {
-                let tokens = estimate_tokens(&self.messages[idx].content);
+                let tokens = estimate_text_tokens(&self.messages[idx].content);
                 self.current_tokens = self.current_tokens.saturating_sub(tokens);
                 removed_messages.push(self.messages[idx].clone());
                 removed_count += 1;
@@ -302,7 +317,7 @@ impl HistoryManager {
         let mut i = 0;
         while removed < to_remove && i < self.messages.len() {
             if !matches!(self.messages[i].role, MessageRole::System) {
-                let tokens = estimate_tokens(&self.messages[i].content);
+                let tokens = estimate_text_tokens(&self.messages[i].content);
                 self.current_tokens = self.current_tokens.saturating_sub(tokens);
                 self.messages.remove(i);
                 removed += 1;
@@ -330,7 +345,7 @@ impl HistoryManager {
             }
 
             if msg.content.len() > max_chars {
-                let old_tokens = estimate_tokens(&msg.content);
+                let old_tokens = estimate_text_tokens(&msg.content);
                 let truncation_notice = format!(
                     "\n\n[...truncated: original {} chars, showing first {} chars]",
                     msg.content.len(),
@@ -338,7 +353,7 @@ impl HistoryManager {
                 );
                 msg.content.truncate(max_chars);
                 msg.content.push_str(&truncation_notice);
-                let new_tokens = estimate_tokens(&msg.content);
+                let new_tokens = estimate_text_tokens(&msg.content);
                 self.current_tokens = self
                     .current_tokens
                     .saturating_sub(old_tokens)
@@ -482,10 +497,39 @@ impl HistoryManager {
     }
 }
 
+/// Estimate token count for a full message, including both text content
+/// and image content parts (with protocol-specific image token estimation).
+fn estimate_message_tokens(message: &ChatMessage, protocol_type: &ProtocolType) -> u64 {
+    let mut tokens = 0u64;
+
+    // Count text from content_parts or fall back to .content field
+    if let Some(ref parts) = message.content_parts {
+        for part in parts {
+            match part {
+                ContentPart::Text { text } => {
+                    tokens += estimate_text_tokens(text);
+                }
+                ContentPart::ImageUrl { image_url } => {
+                    tokens += crate::token::estimate_image_tokens(
+                        protocol_type,
+                        image_url.width,
+                        image_url.height,
+                        image_url.detail.as_deref(),
+                    );
+                }
+            }
+        }
+    } else {
+        tokens += estimate_text_tokens(&message.content);
+    }
+
+    tokens
+}
+
 /// Estimate token count for a text string.
 /// Uses a heuristic that accounts for CJK characters (which tokenize ~2 tokens each)
 /// versus ASCII text (which tokenizes ~4 chars per token on average).
-fn estimate_tokens(text: &str) -> u64 {
+fn estimate_text_tokens(text: &str) -> u64 {
     if text.is_empty() {
         return 0;
     }

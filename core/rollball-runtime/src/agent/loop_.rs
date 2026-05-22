@@ -816,25 +816,29 @@ impl AgentLoop {
     /// or persisted to JSONL (it is assumed to already be present, e.g.
     /// after a debug rewind + resume).  Memory retrieval is still performed
     /// in case the context builder has been modified by pending patches.
-    pub async fn run(&mut self, user_message: &str, context_builder: &mut ContextBuilder) -> Result<String> {
-        self.run_inner(user_message, context_builder, false).await
+    pub async fn run(&mut self, user_message: &str, context_builder: &mut ContextBuilder, content_parts: Option<Vec<rollball_core::providers::traits::ContentPart>>) -> Result<String> {
+        self.run_inner(user_message, context_builder, false, content_parts).await
     }
 
     /// Re-run the agent loop after a debug resume (user message already in history).
     ///
     /// Same as [`run`] but skips the user-message append and JSONL persist steps.
-    pub async fn replay(&mut self, user_message: &str, context_builder: &mut ContextBuilder) -> Result<String> {
-        self.run_inner(user_message, context_builder, true).await
+    pub async fn replay(&mut self, user_message: &str, context_builder: &mut ContextBuilder, content_parts: Option<Vec<rollball_core::providers::traits::ContentPart>>) -> Result<String> {
+        self.run_inner(user_message, context_builder, true, content_parts).await
     }
 
     /// Core agent loop shared by [`run`] and [`replay`].
-    async fn run_inner(&mut self, user_message: &str, context_builder: &mut ContextBuilder, replay: bool) -> Result<String> {
+    async fn run_inner(&mut self, user_message: &str, context_builder: &mut ContextBuilder, replay: bool, content_parts: Option<Vec<rollball_core::providers::traits::ContentPart>>) -> Result<String> {
         // ADR-014: Idle → Streaming
         self.transition_status(SessionStatus::Streaming { message_id: None });
 
         if !replay {
             // Add user message to history
-            self.session.history.append(ChatMessage::user(user_message));
+            if let Some(parts) = content_parts {
+                self.session.history.append(ChatMessage::user_multimodal(user_message, parts));
+            } else {
+                self.session.history.append(ChatMessage::user(user_message));
+            }
 
             // Persist user message to JSONL
             if let Some(ref conversation) = self.session.conversation {

@@ -248,6 +248,8 @@ export interface ChatMessage {
     size?: number;
     documentId?: string;
   }>;
+  /** Image data URLs attached to a user message (rendered inline in the user bubble) */
+  imageUrls?: string[];
 }
 
 /** Token usage stats */
@@ -312,6 +314,18 @@ export interface ProviderModelsResponse {
   id: string;
   name: string;
   models: ModelInfo[];
+}
+
+/** Model entry with optional capability info for display */
+export interface ModelEntry {
+  name: string;
+  provider: string;
+  /** Whether the model supports tool/function calling */
+  tool_call?: boolean;
+  /** Whether the model supports reasoning/thinking */
+  reasoning?: boolean;
+  /** Input modalities (e.g. "text", "image") */
+  input_modalities?: string[];
 }
 
 /** Provider list entry from Gateway API */

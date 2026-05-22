@@ -37,6 +37,6 @@ pub use permission::{Permission, ShellApprovalThreshold};
 pub use identity::{Identity, IdentityCategory, IdentityEntry, IdentityQueryResult, IdentityStore, IdentitySubscription, PrivacyLevel};
 pub use budget::{Budget, UsageReport};
 pub use tools::{Tool, ToolSpec, ToolResult};
-pub use providers::{Provider, ChatMessage, ChatRequest, ChatResponse, StreamEvent, ProviderError, ProviderErrorType};
+pub use providers::{Provider, ChatMessage, ChatRequest, ChatResponse, ContentPart, ImageUrlPart, StreamEvent, ProviderError, ProviderErrorType};
 pub use error::RollballError;
 pub use packaging::{PackageOptions, should_exclude_path, PACKAGE_ALWAYS_EXCLUDE_DIRS, PACKAGE_EXCLUDE_PATTERNS, PACKAGE_DEFAULT_EXCLUDE_DIRS};

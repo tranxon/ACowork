@@ -14,10 +14,10 @@ import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 import { toolbarButton, toolbarButtonActive } from "../../lib/ui-styles";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil, Paperclip } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil, Paperclip, Image, Brain } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage, VaultKeyEntry, ModelInfo } from "../../lib/types";
+import type { ChatMessage, VaultKeyEntry, ModelInfo, ModelEntry } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { ExploreBlock } from "./ExploreBlock";
 import { AskQuestionCard } from "./AskQuestionCard";
@@ -84,6 +84,14 @@ export function ChatPanel() {
     status: "uploading" | "success" | "error";
     documentId?: string;
     errorMessage?: string;
+  }>>([]);
+  /** Pending image selections: thumbnails shown above the textarea */
+  const [pendingImages, setPendingImages] = useState<Array<{
+    tempId: string;
+    filename: string;
+    base64Url: string;
+    width: number;
+    height: number;
   }>>([]);
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -173,19 +181,33 @@ export function ChatPanel() {
     gap: 4,
   });
 
-  // Load available models from Vault keys
+  // Load available models from Vault keys (capabilities come from persisted model_capabilities)
   const loadModels = useCallback(async () => {
     try {
       const keys = await invoke<VaultKeyEntry[]>("list_keys");
-      const allModels: { name: string; provider: string }[] = [];
+      console.log("[loadModels] keys:", keys.map(k => ({ p: k.provider, models: k.models, caps: k.model_capabilities })));
+      const allModels: ModelEntry[] = [];
       for (const key of keys) {
         const provider = key.provider;
+        const caps = key.model_capabilities;
         if (key.models?.length) {
           for (const model of key.models) {
-            allModels.push({ name: model, provider });
+            allModels.push({
+              name: model,
+              provider,
+              tool_call: caps?.supports_tool_calling ?? undefined,
+              reasoning: caps?.supports_reasoning ?? undefined,
+              input_modalities: caps?.modalities?.input ?? undefined,
+            });
           }
         } else if (key.default_model) {
-          allModels.push({ name: key.default_model, provider });
+          allModels.push({
+            name: key.default_model,
+            provider,
+            tool_call: caps?.supports_tool_calling ?? undefined,
+            reasoning: caps?.supports_reasoning ?? undefined,
+            input_modalities: caps?.modalities?.input ?? undefined,
+          });
         }
       }
       // Deduplicate by model name + provider
@@ -459,9 +481,10 @@ export function ChatPanel() {
     const content = inputValue.trim();
     const hasSuccessfulFiles = pendingFiles.some((f) => f.status === "success");
     const hasUploadingFiles = pendingFiles.some((f) => f.status === "uploading");
+    const hasImages = pendingImages.length > 0;
 
-    // Block send: no content AND no files, or files still uploading
-    if ((!content && !hasSuccessfulFiles) || sending || !selectedAgentId || hasUploadingFiles) return;
+    // Block send: no content AND no files AND no images, or files still uploading
+    if ((!content && !hasSuccessfulFiles && !hasImages) || sending || !selectedAgentId || hasUploadingFiles) return;
 
     // Collect successfully uploaded document IDs and metadata for optimistic bubbles
     const documentIds = pendingFiles
@@ -476,14 +499,22 @@ export function ChatPanel() {
         size: f.size,
       }));
 
+    // Build image parts from pending images (for multimodal content_parts)
+    const imageParts = pendingImages.map((img) => ({
+      url: img.base64Url,
+      width: img.width,
+      height: img.height,
+    }));
+
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
-    void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined, documents.length > 0 ? documents : undefined).then(() => {
+    void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined, documents.length > 0 ? documents : undefined, imageParts.length > 0 ? imageParts : undefined).then(() => {
       clearActiveSkill();
     });
     setInputValue("");
-    // Clear pending files after send
+    // Clear pending files and images after send
     setPendingFiles([]);
+    setPendingImages([]);
   };
 
   // Stop button dual-action:
@@ -606,6 +637,64 @@ export function ChatPanel() {
   // Remove a pending file chip
   const handleRemoveFile = (tempId: string) => {
     setPendingFiles(prev => prev.filter((f) => f.tempId !== tempId));
+  };
+
+  // Select image file via Tauri dialog, read as base64, and get dimensions
+  const handleImageSelect = async () => {
+    if (!currentSessionId || !selectedAgentId) return;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        title: "选择图片",
+        filters: [{
+          name: "Images",
+          extensions: ["png", "jpg", "jpeg", "gif", "webp"],
+        }],
+        multiple: false,
+      });
+      if (!selected) return;
+      const filePath = selected as string;
+      if (!filePath) return;
+
+      // Read file contents via Tauri asset protocol
+      const { convertFileSrc } = await import("@tauri-apps/api/core");
+      const assetUrl = convertFileSrc(filePath);
+      const resp = await fetch(assetUrl);
+      const blob = await resp.blob();
+
+      // Convert blob to base64 data URL
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error("Failed to read image file"));
+        reader.readAsDataURL(blob);
+      });
+
+      // Get image dimensions
+      const dims = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+        const img = new window.Image();
+        img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+        img.onerror = () => reject(new Error("Failed to load image for dimension detection"));
+        img.src = dataUrl;
+      });
+
+      const filename = filePath.replace(/^.*[\\/]/, "");
+      const tempId = `img-${Date.now()}`;
+      setPendingImages(prev => [...prev, {
+        tempId,
+        filename,
+        base64Url: dataUrl,
+        width: dims.width,
+        height: dims.height,
+      }]);
+    } catch (err) {
+      console.error("[ChatPanel] Image selection failed:", err);
+    }
+  };
+
+  // Remove a pending image thumbnail
+  const handleRemoveImage = (tempId: string) => {
+    setPendingImages(prev => prev.filter((img) => img.tempId !== tempId));
   };
 
   // Tool approval: send decision to Gateway API directly, then clear inline state
@@ -954,6 +1043,31 @@ export function ChatPanel() {
             ))}
           </div>
         )}
+        {/* Pending image thumbnails */}
+        {pendingImages.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
+            {pendingImages.map((img) => (
+              <div
+                key={img.tempId}
+                className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700"
+              >
+                <img
+                  src={img.base64Url}
+                  alt={img.filename}
+                  className="h-full w-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleRemoveImage(img.tempId)}
+                  className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                  aria-label={`Remove ${img.filename}`}
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {/* Textarea area — borderless, transparent background */}
         <textarea
           value={inputValue}
@@ -1015,6 +1129,23 @@ export function ChatPanel() {
                 </div>
               </div>
             </div>
+            {/* Image upload button */}
+            <div className="group relative">
+              <button
+                className={toolbarButton}
+                onClick={handleImageSelect}
+                disabled={!currentSessionId || !selectedAgentId}
+                aria-label="上传图片"
+              >
+                <Image size={16} />
+              </button>
+              {/* Tooltip */}
+              <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
+                <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
+                  上传图片 (PNG/JPG/GIF/WebP)
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Right: send/stop button */}
@@ -1032,7 +1163,7 @@ export function ChatPanel() {
                   sending
                     ? false
                     : (inputDisabled
-                      || (!inputValue.trim() && !pendingFiles.some(f => f.status === "success"))
+                      || (!inputValue.trim() && !pendingFiles.some(f => f.status === "success") && pendingImages.length === 0)
                       || pendingFiles.some(f => f.status === "uploading"))
                 }
                 aria-label={sending ? (inputValue.trim() ? "Add to queue" : queuedMessages.length > 0 ? "Send queued & stop" : "Stop") : "Send message"}
@@ -1564,6 +1695,12 @@ function AddModelDialog({
       const effectiveSupportsToolCalling = hasModelsDevData 
         ? (modelInfo?.tool_call ?? supportsToolCalling)
         : supportsToolCalling;
+      const effectiveReasoning = hasModelsDevData
+        ? (modelInfo?.reasoning ?? undefined)
+        : undefined;
+      const effectiveModalities = hasModelsDevData && modelInfo?.input_modalities?.length
+        ? { input: modelInfo.input_modalities }
+        : undefined;
       
       // Rust requires context_window to be present (u64, not Option)
       // Default to 128000 if not specified (safe default for most models)
@@ -1574,6 +1711,8 @@ function AddModelDialog({
         context_window: ctxWindow,
         max_output_tokens: maxOutTokens,
         supports_tool_calling: effectiveSupportsToolCalling,
+        supports_reasoning: effectiveReasoning,
+        modalities: effectiveModalities,
       } : undefined;
       
       await invoke("add_key", {
@@ -1927,7 +2066,7 @@ function ModelMenu({
   currentProvider,
   onSelect,
 }: {
-  models: { name: string; provider: string }[];
+  models: { name: string; provider: string; tool_call?: boolean; reasoning?: boolean; input_modalities?: string[] }[];
   currentModel: string | null;
   currentProvider: string | null;
   onSelect: (model: string, provider: string) => void;
@@ -2019,7 +2158,8 @@ function ModelMenu({
                     : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
                 )}
               >
-                <span className={cn("font-medium")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
+                <span className="flex items-center gap-1 min-w-0">
+                  <span className={cn("font-medium truncate")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
                   {/* Strip provider prefix from model name if format is provider/model and model is longer */}
                   {(() => {
                     if (!m.name.includes('/')) return m.name;
@@ -2029,8 +2169,14 @@ function ModelMenu({
                     // Only strip if model name is longer than prefix (avoid stripping model/provider)
                     return modelName.length > prefix.length ? modelName : m.name;
                   })()}
+                  </span>
+                  <span className="flex items-center gap-0.5">
+                    {m.tool_call && <Wrench size={10} className="text-zinc-400" />}
+                    {m.reasoning && <Brain size={10} className="text-purple-400" />}
+                    {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
+                  </span>
                 </span>
-                <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">
+                <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
                   {m.provider}
                 </span>
               </button>
