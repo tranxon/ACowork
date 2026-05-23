@@ -423,7 +423,7 @@ impl GatewayService for GatewayGrpcService {
                                 ).await;
 
                                 // For AgentHello, the handler also pushes LLMConfigDelivery
-                                // and WorkspaceContextUpdate via the IPC session's push channel.
+                                // via the IPC session's push channel.
                                 // We need to deliver those to the gRPC outbound too.
                                 // This is handled by Branch 2 (ipc_push_rx).
 
@@ -450,7 +450,7 @@ impl GatewayService for GatewayGrpcService {
                     }
 
                     // Branch 2: Server-push message via IPC session channel
-                    // (IntentReceived, LLMConfigDelivery, WorkspaceContextUpdate, etc.)
+                    // (IntentReceived, LLMConfigDelivery, WorkspaceConfigUpdate, etc.)
                     push_msg = ipc_push_rx.recv() => {
                         match push_msg {
                             Some(msg) => {

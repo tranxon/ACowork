@@ -270,6 +270,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::approval::approval_routes())
         .merge(crate::http::question::question_routes())
         .merge(crate::http::documents::documents_routes())
+        .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)

@@ -200,6 +200,29 @@ pub async fn dispatch_grpc_request(
             GatewayResponse::CurrentSessionId { session_id: None }
         }
 
+        Some(proto::client_message::Payload::UpdateWorkspaceConfig(update)) => {
+            // Runtime pushes its workspace config snapshot for Gateway's in-memory cache.
+            let agent_id = {
+                let mgr = session_mgr.lock().await;
+                mgr.get_session(conn_id)
+                    .and_then(|s| s.agent_id.clone())
+            };
+            if let Some(ref aid) = agent_id {
+                let mut gw = state.write().await;
+                if let Some(info) = gw.running_agents.get_mut(aid) {
+                    info.workspace_config_json = Some(update.config_json);
+                    tracing::info!(
+                        agent_id = %aid,
+                        "Updated RunningAgentInfo workspace config cache"
+                    );
+                }
+            }
+            return proto::ServerMessage {
+                request_id,
+                payload: None,
+            };
+        }
+
         Some(proto::client_message::Payload::ConfigSnapshot(snap)) => {
             // ConfigSnapshot is a response to QueryConfig.
             // The pending request mechanism will route this to the caller.

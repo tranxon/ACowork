@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::budget::UsageReport;
-use crate::identity::IdentityEntry;
+pub use crate::identity::IdentityEntry;
 
 /// Default connection role for backward compatibility
 fn default_connection_role() -> String {
@@ -316,6 +316,17 @@ pub enum GatewayRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell_approval_threshold: Option<String>,
     },
+    /// Update workspace config snapshot (Runtime → Gateway).
+    ///
+    /// Sent by Runtime after AgentHello to populate Gateway's in-memory cache
+    /// with the current workspace config so that the Gateway HTTP API can serve
+    /// list_workspaces and handle CRUD requests without persisting workspace data.
+    /// Gateway caches this in RunningAgentInfo and uses it for HTTP responses;
+    /// it is NOT persisted to disk (Gateway is pure pass-through for workspace config).
+    UpdateWorkspaceConfig {
+        /// Full workspace config JSON (same format as .agent_workspaces.json)
+        config_json: String,
+    },
 }
 
 /// Gateway Service API response
@@ -353,14 +364,6 @@ pub enum GatewayResponse {
         /// Resolved protocol type (openai / anthropic / ollama)
         protocol_type: ProtocolType,
 
-        // ── Workspace Context ──
-        /// Formatted workspace directory listing for system prompt injection
-        workspace_context_text: Option<String>,
-        /// ID of the currently-selected workspace (if any)
-        current_workspace_id: Option<String>,
-        /// Absolute path of the currently-selected workspace (if any)
-        current_workspace_path: Option<String>,
-
         // ── Runtime Config Overrides ──
         /// Per-agent max_output_tokens override
         runtime_max_output_tokens: Option<u64>,
@@ -373,6 +376,11 @@ pub enum GatewayResponse {
         /// Per-agent shell approval threshold.
         /// "low" | "medium" (default) | "high" | "never"
         runtime_shell_approval_threshold: Option<String>,
+        /// Identity entries for cold-start system prompt injection (ADR-009).
+        /// Previously written to .identity_delivery.json in workspace;
+        /// now delivered via IPC to avoid Gateway writing to agent workspace.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        identity_entries: Vec<IdentityEntry>,
     },
     /// API key release result
     KeyReleaseResult {
@@ -488,19 +496,16 @@ pub enum GatewayResponse {
         /// List of cron entries
         entries: Vec<CronEntryInfo>,
     },
-    /// Workspace context update (Gateway → Runtime, push)
+    /// Workspace config update (Gateway → Runtime, push)
     ///
-    /// Pushes the formatted workspace context text to the Agent Runtime
-    /// so it can inject it into the LLM system prompt. Sent at two times:
-    ///   A) After AgentHello handshake (initial workspace config)
-    ///   B) When the user switches the current workspace (hot update)
-    WorkspaceContextUpdate {
-        /// Formatted workspace context text (Markdown, ready for LLM injection)
-        context_text: String,
-        /// ID of the currently selected workspace (if any)
-        current_workspace_id: Option<String>,
-        /// Absolute path of the currently selected workspace (if any)
-        current_workspace_path: Option<String>,
+    /// Pushes the full workspace config JSON to the Agent Runtime when
+    /// the user modifies workspace directories via the HTTP API.
+    /// The Runtime persists this to .agent_workspaces.json, reloads its
+    /// WorkspaceResolver, and self-formats the LLM context text.
+    /// Gateway does NOT persist workspace config — it is a pure pass-through.
+    WorkspaceConfigUpdate {
+        /// Full workspace config JSON (same format as .agent_workspaces.json)
+        config_json: String,
     },
     /// Iteration limit reached — agent loop paused, awaiting user decision.
     ///

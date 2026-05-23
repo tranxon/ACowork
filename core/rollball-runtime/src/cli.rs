@@ -942,7 +942,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     // Step 4: Build tool registry + activate by manifest
 
 
-    let workspace_resolver = crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir);
+    let workspace_resolver: crate::tools::workspace_resolver::SharedResolver = Arc::new(std::sync::RwLock::new(crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir)));
     let mut registry = ToolRegistry::new();
 
 
@@ -955,7 +955,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     }
 
 
-    let (active_tools, _) = registry.activate(&loaded.manifest, &config.work_dir, 60);
+    let active_tools = registry.activate(&loaded.manifest, &workspace_resolver, 60);
 
 
     tracing::info!(
@@ -1639,36 +1639,36 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         // runtime overrides would fall back to defaults until a hot-reload
 
 
-        // push arrives (which may never happen if settings don't change).
-
+        // ── Workspace Context (self-formatted from .agent_workspaces.json) ──
+        // Runtime reads its own workspace config and formats the LLM context text.
+        // Gateway is a pure pass-through for workspace CRUD (no persistence).
+        {
+            let config_path = std::path::Path::new(&config.work_dir)
+                .join("config")
+                .join(".agent_workspaces.json");
+            if config_path.exists() {
+                if let Ok(config_json) = std::fs::read_to_string(&config_path) {
+                    let context_text = crate::tools::workspace_resolver::format_workspace_context_from_json(
+                        &config_json,
+                        &config.work_dir,
+                    );
+                    tracing::info!(
+                        work_dir = %config.work_dir,
+                        "Applying self-formatted workspace context from .agent_workspaces.json"
+                    );
+                    session_manager.set_workspace_context(context_text);
+                }
+            } else {
+                // No config file yet — use fallback context
+                let fallback = crate::tools::workspace_resolver::format_workspace_context_from_json(
+                    r#"{"version":"1.0.0","additional_dirs":[]}"#,
+                    &config.work_dir,
+                );
+                session_manager.set_workspace_context(fallback);
+            }
+        }
 
         if let Some(ref cfg) = hello_config {
-
-
-            if let Some(ref ctx) = cfg.workspace_context_text {
-
-
-                tracing::info!(
-
-
-                    workspace_id = ?cfg.current_workspace_id,
-
-
-                    workspace_path = ?cfg.current_workspace_path,
-
-
-                    "Applying workspace context from AgentHelloResult"
-
-
-                );
-
-
-                session_manager.set_workspace_context(ctx.clone());
-
-
-            }
-
-
             if cfg.runtime_max_output_tokens.is_some()
 
 
@@ -1731,6 +1731,34 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 
         }
 
+
+        // Step 9.8: Send workspace config snapshot to Gateway (in-memory cache only).
+        // Gateway does NOT persist workspace config — it caches this for HTTP API responses
+        // (list_workspaces, etc.) and discards it when the agent disconnects.
+        {
+            let config_path = std::path::Path::new(&config.work_dir)
+                .join("config")
+                .join(".agent_workspaces.json");
+            let config_json = if config_path.exists() {
+                std::fs::read_to_string(&config_path).unwrap_or_else(|_| {
+                    r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string()
+                })
+            } else {
+                r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string()
+            };
+
+            let msg = rollball_core::proto::ClientMessage {
+                request_id: 0,
+                payload: Some(rollball_core::proto::client_message::Payload::UpdateWorkspaceConfig(
+                    rollball_core::proto::UpdateWorkspaceConfig { config_json },
+                )),
+            };
+            if client.outbound_sender().send(msg).await.is_err() {
+                tracing::warn!("Failed to send UpdateWorkspaceConfig snapshot to Gateway");
+            } else {
+                tracing::info!("Workspace config snapshot sent to Gateway");
+            }
+        }
 
         // Step 10: Notify Gateway that the agent is ready to receive messages.
 
@@ -2240,7 +2268,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
 
 
             skill_registry,
-
+            workspace_resolver.clone(),
 
             initial_session_id,
 
@@ -2898,6 +2926,7 @@ async fn run_gateway_loop(
 
     skill_registry: crate::skills::parser::SkillRegistry,
 
+    resolver: crate::tools::workspace_resolver::SharedResolver,
 
     _initial_session_id: String,
 
@@ -2947,6 +2976,7 @@ async fn run_gateway_loop(
 
 
                         &work_dir,
+                        &resolver,
 
 
                         &agent_id_for_reconnect,
@@ -3091,6 +3121,7 @@ async fn run_gateway_loop(
 
 
                 &work_dir,
+                &resolver,
 
 
                 &agent_id_for_reconnect,
@@ -3220,6 +3251,7 @@ async fn process_gateway_recv(
 
 
     work_dir: &str,
+    resolver: &crate::tools::workspace_resolver::SharedResolver,
 
 
     agent_id_for_reconnect: &str,
@@ -4590,39 +4622,40 @@ async fn process_gateway_recv(
                     }
 
 
-                    GatewayResponse::WorkspaceContextUpdate {
-
-
-                        context_text,
-
-
-                        current_workspace_id,
-
-
-                        current_workspace_path,
-
-
-                    } => {
-
-
+                    GatewayResponse::WorkspaceConfigUpdate { config_json } => {
                         tracing::info!(
-
-
-                            current_id = ?current_workspace_id,
-
-
-                            current_path = ?current_workspace_path,
-
-
-                            "Received WorkspaceContextUpdate from Gateway — broadcasting to all sessions"
-
-
+                            config_len = config_json.len(),
+                            "Received WorkspaceConfigUpdate from Gateway"
                         );
 
+                        // 1. Write config to .agent_workspaces.json (atomically)
+                        if let Err(e) = crate::tools::workspace_resolver::write_workspace_config(
+                            work_dir,
+                            &config_json,
+                        ) {
+                            tracing::error!(
+                                error = %e,
+                                "Failed to write .agent_workspaces.json from WorkspaceConfigUpdate"
+                            );
+                            return LoopAction::Continue;
+                        }
 
+                        // 2. Reload the shared WorkspaceResolver (hot-reload path whitelist)
+                        {
+                            let mut w = resolver.write().unwrap();
+                            *w = crate::tools::workspace_resolver::WorkspaceResolver::reload(work_dir);
+                        }
+
+                        // 3. Format context text and broadcast to all sessions
+                        let context_text = crate::tools::workspace_resolver::format_workspace_context_from_json(
+                            &config_json,
+                            work_dir,
+                        );
                         session_manager.set_workspace_context(context_text);
 
-
+                        tracing::info!(
+                            "Workspace config applied: file written, resolver reloaded, context broadcast"
+                        );
                         return LoopAction::Continue;
 
 
@@ -4859,7 +4892,11 @@ async fn process_gateway_recv(
 
                         // Handle MCP server config changes: connect, disconnect, or reconnect.
                         if let Some(mcp_configs) = mcp_servers {
+                            // Extract names before move for persistence
+                            let mcp_names: Vec<String> = mcp_configs.iter().map(|c| c.name.clone()).collect();
                             session_manager.apply_mcp_servers(mcp_configs).await;
+                            // Persist active MCP server names to workspace for recovery
+                            save_mcp_server_names(&work_dir, &mcp_names);
                         }
 
                         // Handle model/provider switch from Gateway (same pattern as model_switch action)
@@ -7476,3 +7513,51 @@ async fn try_reconnect_gateway(
 }
 
 
+
+// ── MCP server name persistence ─────────────────────────────────────
+
+const MCP_SERVERS_FILE: &str = "config/mcp_servers.json";
+
+/// Save the list of active MCP server names to the workspace.
+///
+/// Called after successfully applying MCP server config from Gateway.
+/// The names reference entries in the Gateway's global MCP catalog.
+fn save_mcp_server_names(work_dir: &str, names: &[String]) {
+    let path = std::path::Path::new(work_dir).join(MCP_SERVERS_FILE);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("Failed to create config dir for {}: {}", MCP_SERVERS_FILE, e);
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(names) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!("Failed to write {}: {}", MCP_SERVERS_FILE, e);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to serialize {}: {}", MCP_SERVERS_FILE, e);
+        }
+    }
+}
+
+/// Load the list of active MCP server names from the workspace.
+///
+/// Returns `None` if the file does not exist or cannot be parsed.
+/// The names reference entries in the Gateway's global MCP catalog;
+/// the actual server definitions are provided by Gateway via IPC.
+#[allow(dead_code)]
+fn load_mcp_server_names(work_dir: &str) -> Option<Vec<String>> {
+    let path = std::path::Path::new(work_dir).join(MCP_SERVERS_FILE);
+    if !path.exists() {
+        return None;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).ok(),
+        Err(e) => {
+            tracing::warn!("Failed to read {}: {}", MCP_SERVERS_FILE, e);
+            None
+        }
+    }
+}

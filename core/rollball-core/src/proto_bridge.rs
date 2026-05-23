@@ -514,6 +514,13 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                     },
                 ))
             }
+            protocol::GatewayRequest::UpdateWorkspaceConfig { config_json } => {
+                Some(proto::client_message::Payload::UpdateWorkspaceConfig(
+                    proto::UpdateWorkspaceConfig {
+                        config_json: config_json.clone(),
+                    },
+                ))
+            }
         };
 
         proto::ClientMessage {
@@ -547,14 +554,12 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 model_capabilities,
                 max_output_tokens_limit,
                 protocol_type,
-                workspace_context_text,
-                current_workspace_id,
-                current_workspace_path,
                 runtime_max_output_tokens,
                 runtime_max_iterations,
                 runtime_temperature,
                 runtime_system_prompt_override,
                 runtime_shell_approval_threshold,
+                identity_entries: _, // ADR-009: consumed by Runtime CLI, not gRPC bridge
             } => {
                 Some(proto::server_message::Payload::AgentHelloResult(
                     proto::AgentHelloResult {
@@ -570,15 +575,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                             .map(|c| c.into()),
                         max_output_tokens_limit: *max_output_tokens_limit,
                         protocol_type: format!("{:?}", protocol_type).to_lowercase(),
-                        workspace_context_text: workspace_context_text
-                            .clone()
-                            .unwrap_or_default(),
-                        current_workspace_id: current_workspace_id
-                            .clone()
-                            .unwrap_or_default(),
-                        current_workspace_path: current_workspace_path
-                            .clone()
-                            .unwrap_or_default(),
                         runtime_max_output_tokens: runtime_max_output_tokens.clone(),
                         runtime_max_iterations: runtime_max_iterations.clone(),
                         runtime_temperature: runtime_temperature.clone(),
@@ -724,16 +720,10 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     },
                 ))
             }
-            protocol::GatewayResponse::WorkspaceContextUpdate {
-                context_text,
-                current_workspace_id,
-                current_workspace_path,
-            } => {
-                Some(proto::server_message::Payload::WorkspaceContextUpdate(
-                    proto::WorkspaceContextUpdate {
-                        context_text: context_text.clone(),
-                        current_workspace_id: current_workspace_id.clone().unwrap_or_default(),
-                        current_workspace_path: current_workspace_path.clone().unwrap_or_default(),
+            protocol::GatewayResponse::WorkspaceConfigUpdate { config_json } => {
+                Some(proto::server_message::Payload::WorkspaceConfigUpdate(
+                    proto::WorkspaceConfigUpdate {
+                        config_json: config_json.clone(),
                     },
                 ))
             }

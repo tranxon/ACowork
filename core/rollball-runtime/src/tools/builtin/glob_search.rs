@@ -8,14 +8,14 @@ use std::path::Path;
 
 use crate::tools::output;
 use crate::tools::path_utils;
-use crate::tools::workspace_resolver::WorkspaceResolver;
+use crate::tools::workspace_resolver::SharedResolver;
 
 pub struct GlobSearchTool {
-    resolver: WorkspaceResolver,
+    resolver: SharedResolver,
 }
 
 impl GlobSearchTool {
-    pub fn new(resolver: &WorkspaceResolver) -> Self {
+    pub fn new(resolver: &SharedResolver) -> Self {
         Self {
             resolver: resolver.clone(),
         }
@@ -75,7 +75,8 @@ impl Tool for GlobSearchTool {
         let mut truncated = false;
 
         // Search current workspace only (respecting workspace setting)
-        let search_base = Path::new(self.resolver.current_dir());
+        let resolver_ref = self.resolver.read().unwrap();
+        let search_base = Path::new(resolver_ref.current_dir());
         if !search_base.exists() {
             return Ok(ToolResult {
                 ok: true,

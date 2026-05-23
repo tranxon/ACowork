@@ -15,7 +15,7 @@ pub struct ContextBuilder {
     system_prompt: String,
     /// Identity context (from Gateway injection)
     identity_context: Option<String>,
-    /// Workspace context (from Gateway WorkspaceContextUpdate push)
+    /// Workspace context (self-formatted from .agent_workspaces.json)
     workspace_context: Option<String>,
     /// Environment info override (for debug patching).
     /// When set, takes precedence over auto-detected platform info.
@@ -54,7 +54,7 @@ impl ContextBuilder {
         self
     }
 
-    /// Set workspace context (from Gateway WorkspaceContextUpdate)
+    /// Set workspace context (from Runtime self-formatting)
     pub fn with_workspace_context(mut self, workspace: Option<String>) -> Self {
         self.workspace_context = workspace;
         self
@@ -99,11 +99,11 @@ impl ContextBuilder {
         );
     }
 
-    /// Update workspace context in-place (from Gateway WorkspaceContextUpdate push)
+    /// Update workspace context in-place (from WorkspaceConfigUpdate push or self-formatting)
     pub fn set_workspace_context(&mut self, context_text: String) {
         tracing::info!(
             context_len = context_text.len(),
-            "ContextBuilder workspace context updated via WorkspaceContextUpdate"
+            "ContextBuilder workspace context updated"
         );
         self.workspace_context = Some(context_text);
     }

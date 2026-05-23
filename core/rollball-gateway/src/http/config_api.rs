@@ -291,41 +291,12 @@ pub async fn delete_logs(
         tracing::info!("Gateway logs cleaned from {:?}", log_dir);
     }
 
-    // ── Phase 3: Delete stopped agents' workspace logs ────────────────
-    {
-        let gw = state.gateway_state.read().await;
-        let running_ids: std::collections::HashSet<&String> =
-            gw.running_agents.keys().collect();
-        for (agent_id, info) in &gw.installed_agents {
-            if running_ids.contains(agent_id) {
-                continue; // running agents handle their own logs via IPC
-            }
-            let workspace_logs = std::path::PathBuf::from(&info.install_path)
-                .join("workspace")
-                .join("logs");
-            if workspace_logs.exists() {
-                if let Ok(entries) = std::fs::read_dir(&workspace_logs) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().map_or(false, |ext| ext == "log") {
-                            if let Err(e) = std::fs::remove_file(&path) {
-                                tracing::warn!(
-                                    agent = %agent_id,
-                                    "Failed to delete stopped agent log {:?}: {}",
-                                    path, e
-                                );
-                            } else {
-                                total_deleted += 1;
-                                tracing::debug!(agent = %agent_id, "Deleted stopped agent log {:?}", path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    tracing::info!("Log cleanup complete: {} log files deleted", total_deleted);
+    // ── Phase 3: Stopped agent logs ──────────────────────────────────
+    // ADR-009: Gateway no longer directly accesses agent workspace files.
+    // Stopped agents' workspace logs will be cleaned by the Runtime
+    // on next startup (self-cleanup). This eliminates the need for the
+    // Gateway to touch {install_path}/workspace/logs/.
+    tracing::info!("Log cleanup complete: {} log file(s) deleted", total_deleted);
     Ok(Json(MessageResponse {
         message: format!("Deleted {} log file(s)", total_deleted),
     }))

@@ -4,6 +4,7 @@ import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
+import { useMcpStore } from "../../stores/mcpStore";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -40,6 +41,9 @@ export function AgentSetupTab() {
   const [activeTools, setActiveTools] = useState<string[]>([]);
   const [toolsLoading, setToolsLoading] = useState(false);
 
+  // MCP server activation
+  const { catalog, activeServers, loadCatalog, loadActiveServers, toggleServer, activationLoading } = useMcpStore();
+
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
@@ -73,6 +77,9 @@ export function AgentSetupTab() {
       .finally(() => {
         if (!cancelled) setToolsLoading(false);
       });
+    // Load MCP catalog and per-agent activation
+    loadCatalog();
+    loadActiveServers(selectedAgentId);
     return () => {
       cancelled = true;
     };
@@ -340,6 +347,56 @@ export function AgentSetupTab() {
         )}
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           Uncheck all to disable all tools; empty = use manifest defaults
+        </p>
+      </div>
+
+      {/* MCP Server Activation */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          MCP Servers
+        </label>
+        {catalog.length === 0 ? (
+          <div className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+              No MCP servers in catalog. Add servers in Harness &gt; MCP tab.
+            </span>
+          </div>
+        ) : (
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+            {catalog.map((server) => {
+              const isChecked = activeServers.includes(server.name);
+              return (
+                <label
+                  key={server.name}
+                  className="flex items-center gap-2 py-1 px-1.5 rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => toggleServer(server.name)}
+                    disabled={activationLoading}
+                    className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                        {server.name}
+                      </span>
+                      <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
+                        {server.transport}
+                      </span>
+                    </div>
+                    <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
+                      {server.command || server.url || ""}
+                    </span>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        )}
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          Toggle MCP servers for this agent. Add more in Harness &gt; MCP tab.
         </p>
       </div>
 

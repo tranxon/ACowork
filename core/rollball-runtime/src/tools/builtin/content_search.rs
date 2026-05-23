@@ -9,16 +9,16 @@ use std::path::Path;
 
 use crate::tools::output;
 use crate::tools::path_utils;
-use crate::tools::workspace_resolver::WorkspaceResolver;
+use crate::tools::workspace_resolver::SharedResolver;
 
 const DEFAULT_MAX_RESULTS: usize = 1000;
 
 pub struct ContentSearchTool {
-    resolver: WorkspaceResolver,
+    resolver: SharedResolver,
 }
 
 impl ContentSearchTool {
-    pub fn new(resolver: &WorkspaceResolver) -> Self {
+    pub fn new(resolver: &SharedResolver) -> Self {
         Self {
             resolver: resolver.clone(),
         }
@@ -83,6 +83,7 @@ impl Tool for ContentSearchTool {
     }
 
     async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+        let resolver_ref = self.resolver.read().unwrap();
         let pattern = params["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
             return Ok(ToolResult {
@@ -173,12 +174,12 @@ impl Tool for ContentSearchTool {
         let user_path = params["path"].as_str();
         let search_roots: Vec<std::path::PathBuf> = if let Some(p) = user_path {
             // User specified a subdirectory — resolve against current_dir
-            let resolved = Path::new(self.resolver.current_dir()).join(p);
+            let resolved = Path::new(resolver_ref.current_dir()).join(p);
             if resolved.exists() {
                 vec![resolved]
             } else {
                 // Fallback: try resolving against each search_dir
-                self.resolver.search_dirs()
+                resolver_ref.search_dirs()
                     .iter()
                     .map(|d| Path::new(d).join(p))
                     .filter(|p| p.exists())
@@ -186,7 +187,7 @@ impl Tool for ContentSearchTool {
             }
         } else {
             // No path specified — search current workspace only
-            vec![Path::new(self.resolver.current_dir()).to_path_buf()]
+            vec![Path::new(resolver_ref.current_dir()).to_path_buf()]
         };
 
         if search_roots.is_empty() {
@@ -205,7 +206,7 @@ impl Tool for ContentSearchTool {
         let mut truncated = false;
 
         tracing::info!(
-            current_dir = %self.resolver.current_dir(),
+            current_dir = %resolver_ref.current_dir(),
             user_path = ?user_path,
             search_roots = ?search_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             include = ?include_glob,

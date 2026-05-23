@@ -591,3 +591,87 @@ export interface UserProfile {
   /** Custom colors override (when non-empty) */
   avatarColors: string[];
 }
+
+// ── MCP types ────────────────────────────────────────────────────────
+
+/** MCP transport type — matches McpTransportDef in rollball_core::protocol */
+export type McpTransportDef = "stdio" | "http" | "sse";
+
+/** MCP server config — matches McpServerConfigDef in rollball_core::protocol */
+export interface McpServerConfigDef {
+  name: string;
+  transport: McpTransportDef;
+  url?: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  headers?: Record<string, string>;
+  tool_timeout_secs?: number;
+}
+
+/** MCP catalog entry response (env values with sensitive fields masked) */
+export interface McpCatalogEntryResponse {
+  /** The server config (env values may be masked with "••••") */
+  [key: string]: unknown; // flattened McpServerConfigDef
+  name: string;
+  transport: McpTransportDef;
+  url?: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  headers?: Record<string, string>;
+  tool_timeout_secs?: number;
+  /** Whether this entry has sensitive env vars that are masked */
+  has_secrets: boolean;
+}
+
+/** Full MCP catalog response */
+export interface McpCatalogResponse {
+  servers: McpCatalogEntryResponse[];
+}
+
+/** Per-agent MCP server activation response */
+export interface AgentMcpServersResponse {
+  agent_id: string;
+  active_servers: string[];
+}
+
+/** Request body for PUT /api/agents/{id}/mcp-servers */
+export interface UpdateMcpServersRequest {
+  servers: string[];
+}
+
+/** MCP preset category */
+export type McpPresetCategory =
+  | "file"
+  | "search"
+  | "database"
+  | "vcs"
+  | "cloud"
+  | "communication"
+  | "knowledge"
+  | "browser"
+  | "utility";
+
+/** MCP preset definition (frontend-only, not persisted) */
+export interface McpPresetDef {
+  id: string;
+  name: string;
+  description: string;
+  category: McpPresetCategory;
+  transport: McpTransportDef;
+  /** For stdio: executable command */
+  command?: string;
+  /** For stdio: command arguments */
+  args?: string[];
+  /** For http/sse: server URL */
+  url?: string;
+  /** Required env vars (user must provide, e.g. API keys) */
+  requiredEnv: string[];
+  /** Optional env vars with defaults */
+  optionalEnv: Record<string, string>;
+  /** Install hint / instructions */
+  installHint?: string;
+  /** Icon name from lucide-react */
+  icon?: string;
+}

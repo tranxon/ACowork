@@ -34,6 +34,7 @@ message ClientMessage {
     MemoryConsolidateResult memory_consolidate_result = 22;
     MemoryDeleteResult      memory_delete_result   = 23;
     ConfigSnapshot          config_snapshot       = 35;
+    UpdateWorkspaceConfig   update_workspace_config = 36;
   }
 }
 
@@ -62,7 +63,7 @@ message ServerMessage {
     CapabilityUpdate        capability_update     = 20;
     LLMConfigDelivery       llm_config_delivery   = 21;
     IdentityDelivery        identity_delivery     = 22;
-    WorkspaceContextUpdate  workspace_context_update = 23;
+    // Field 23: reserved (was WorkspaceContextUpdate)
     IterationLimitPaused    iteration_limit_paused = 24;
     LogLevelUpdate          log_level_update     = 25;
     RuntimeConfigUpdate     runtime_config_update = 31;
@@ -72,6 +73,7 @@ message ServerMessage {
     MemoryDeleteQuery       memory_delete_query   = 30;
     LogRotate               log_rotate            = 32;
     QueryConfig             query_config          = 33;
+    WorkspaceConfigUpdate   workspace_config_update = 34;
   }
 }
 
@@ -107,12 +109,6 @@ message AgentHelloResult {
   uint64 max_output_tokens_limit = 9;
   string protocol_type = 10;
 
-  // ── Workspace Context (merged from WorkspaceContextUpdate) ──
-  // Empty string means no workspace configured for this agent.
-  string workspace_context_text = 11;
-  string current_workspace_id = 12;
-  string current_workspace_path = 13;
-
   // ── Runtime Config Overrides (merged from RuntimeConfigUpdate) ──
   // Using proto3 `optional` so 0/0.0 genuinely means "set this value to zero",
   // while absence of the field means "no override; fall back to defaults".
@@ -121,6 +117,10 @@ message AgentHelloResult {
   optional float runtime_temperature = 16;
   string runtime_system_prompt_override = 17;
   string runtime_shell_approval_threshold = 18;
+
+  // Fields 11-13: reserved (was workspace_context_text, current_workspace_id, current_workspace_path).
+  // Workspace config is now managed by Runtime; Gateway is pure pass-through.
+  reserved 11, 12, 13;
 }
 message KeyReleaseResult        { string api_key = 1; string error = 2; }
 message IntentDelivered         { string message_id = 1; }
@@ -161,7 +161,8 @@ message IntentReceived          { string from = 1; string action = 2; string par
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }
 message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; string protocol_type = 8; }
 message IdentityDelivery        { repeated IdentityEntry entries = 1; }
-message WorkspaceContextUpdate  { string context_text = 1; string current_workspace_id = 2; string current_workspace_path = 3; }
+message WorkspaceConfigUpdate   { string config_json = 1; }
+message UpdateWorkspaceConfig   { string config_json = 1; }
 message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
 message LogLevelUpdate           { string log_level = 1; }
 message LogRotate               {}

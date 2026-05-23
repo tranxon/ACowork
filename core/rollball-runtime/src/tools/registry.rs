@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::tools::wrappers::{PathGuardedTool, RateLimitedTool};
 
 
-use crate::tools::workspace_resolver::{WorkspaceDir, WorkspaceAccess, WorkspaceResolver};
+use crate::tools::workspace_resolver::{WorkspaceDir, WorkspaceAccess, WorkspaceResolver, SharedResolver};
 
 /// Tools that cannot be disabled — always available regardless of manifest
 /// or user configuration. These are foundational capabilities the LLM must
@@ -145,21 +145,11 @@ impl ToolRegistry {
 
 
     pub fn activate(
-
-
         &self,
-
-
         manifest: &AgentManifest,
-
-
-        work_dir: &str,
-
-
+        resolver: &SharedResolver,
         max_calls_per_minute: u32,
-
-
-    ) -> (Vec<Arc<dyn Tool>>, WorkspaceResolver) {
+    ) -> Vec<Arc<dyn Tool>> {
 
 
         let filtered: Vec<Arc<dyn Tool>> = if manifest.tools.is_empty() {
@@ -200,13 +190,8 @@ impl ToolRegistry {
 
 
 
-        // Build workspace resolver (single source of truth for directory resolution)
-
-
-        let resolver = WorkspaceResolver::new(work_dir);
-
-
-        let allowed_dirs = resolver.allowed_dirs().to_vec();
+        // Use the shared workspace resolver (single source of truth for directory resolution)
+        let allowed_dirs = resolver.read().unwrap().allowed_dirs().to_vec();
 
 
 
@@ -248,7 +233,7 @@ impl ToolRegistry {
 
 
 
-        (tools, resolver)
+        tools
 
 
     }

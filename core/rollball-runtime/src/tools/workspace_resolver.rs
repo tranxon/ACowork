@@ -17,8 +17,15 @@
 //!    - All workspace directories (including non-current ones)
 //!    - Falls back to `[agent_home]` if no workspaces configured
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
+
+/// Shared, hot-reloadable workspace resolver.
+///
+/// Wrapped in Arc<RwLock<>> so tools share one reference and see
+/// workspace changes immediately when Gateway pushes WorkspaceConfigUpdate.
+pub type SharedResolver = Arc<RwLock<WorkspaceResolver>>;
 
 /// Access level for a workspace directory
 #[derive(Clone, Debug, PartialEq)]
@@ -60,6 +67,14 @@ impl WorkspaceResolver {
             allowed_dirs,
             current_dir_index,
         }
+    }
+
+    /// Reload the resolver from disk (re-reads .agent_workspaces.json).
+    ///
+    /// Used after receiving a `WorkspaceConfigUpdate` from Gateway, which
+    /// writes the updated config to disk before calling this.
+    pub fn reload(work_dir: &str) -> Self {
+        Self::new(work_dir)
     }
 
     /// The "current working directory" for file operations.
@@ -223,6 +238,205 @@ fn fallback_dirs(work_dir: &str) -> (Vec<WorkspaceDir>, Option<usize>) {
     });
 
     (dirs, None)
+}
+
+// ── Persistence & Formatting ───────────────────────────────────────────────
+
+/// Full workspace directory entry with all metadata (for serialization + formatting).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDirFull {
+    pub id: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    pub access: String,
+    pub added_at: String,
+    #[serde(default)]
+    pub is_current: bool,
+    #[serde(default)]
+    pub select_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_selected_at: Option<String>,
+}
+
+/// Full workspace config (mirrors Gateway's WorkspaceConfig for file persistence).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkspaceConfigFull {
+    version: String,
+    #[serde(default)]
+    additional_dirs: Vec<WorkspaceDirFull>,
+}
+
+/// Write workspace config JSON to `.agent_workspaces.json` atomically (tmp + rename).
+pub fn write_workspace_config(work_dir: &str, config_json: &str) -> Result<(), String> {
+    let config_dir = Path::new(work_dir).join("config");
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("Failed to create config dir: {}", e))?;
+
+    let config_path = config_dir.join(".agent_workspaces.json");
+    let tmp_path = config_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, config_json)
+        .map_err(|e| format!("Failed to write temp config: {}", e))?;
+    std::fs::rename(&tmp_path, &config_path)
+        .map_err(|e| format!("Failed to rename config: {}", e))?;
+
+    tracing::info!(
+        work_dir,
+        "Wrote .agent_workspaces.json from Gateway WorkspaceConfigUpdate"
+    );
+    Ok(())
+}
+
+/// Format workspace context Markdown from the raw config JSON.
+///
+/// This is the Runtime-side equivalent of what Gateway's `format_workspace_context`
+/// used to do. The Runtime now self-formats its LLM context.
+///
+/// `install_path` is the agent's home directory (for the "Agent Home Directory" label).
+pub fn format_workspace_context_from_json(config_json: &str, install_path: &str) -> String {
+    let config: WorkspaceConfigFull = match serde_json::from_str(config_json) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to parse workspace config JSON for formatting");
+            return format_workspace_context_fallback(install_path);
+        }
+    };
+    format_workspace_context_full(&config.additional_dirs, install_path)
+}
+
+/// Compute the list of workspaces to inject into LLM context (at most 3).
+fn compute_context_workspaces(workspaces: &[WorkspaceDirFull]) -> Vec<usize> {
+    if workspaces.is_empty() {
+        return Vec::new();
+    }
+
+    let current_idx = workspaces.iter().position(|w| w.is_current);
+
+    let max_select = workspaces.iter().map(|w| w.select_count).max().unwrap_or(0);
+
+    let now = chrono::Utc::now();
+    let mut scored: Vec<(f64, usize)> = workspaces
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| !w.is_current)
+        .map(|(i, w)| {
+            let normalized = if max_select > 0 {
+                w.select_count as f64 / max_select as f64
+            } else {
+                0.0
+            };
+
+            let days_since = w
+                .last_selected_at
+                .as_ref()
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|dt| {
+                    let dur = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
+                    (dur.num_days().max(0) as f64)
+                })
+                .unwrap_or(1e9_f64);
+
+            let recency = 1.0 / (1.0 + days_since);
+            (normalized * 0.3 + recency * 0.7, i)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut result = Vec::new();
+    if let Some(idx) = current_idx {
+        result.push(idx);
+    }
+    for (_, idx) in scored.into_iter().take(2) {
+        if result.len() >= 3 {
+            break;
+        }
+        result.push(idx);
+    }
+    result
+}
+
+/// Escape special characters for Markdown table cells.
+fn escape_md(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ").replace('\r', "")
+}
+
+/// Produce the final Markdown context text.
+fn format_workspace_context_full(workspaces: &[WorkspaceDirFull], install_path: &str) -> String {
+    let mut buf = String::new();
+    buf.push_str("## Workspace Environment\n\n");
+
+    if workspaces.is_empty() {
+        buf.push_str(&format!(
+            "Current Working Directory: {} (agent home)\n",
+            escape_md(install_path)
+        ));
+        buf.push_str("No additional workspaces have been configured. Use the Agent Home Directory above\n");
+        buf.push_str("as the default working directory for all file and shell operations.\n");
+        return buf;
+    }
+
+    let active = workspaces.iter().find(|w| w.is_current);
+
+    // 1. Current Working Directory
+    if let Some(current) = active {
+        let alias = current.alias.as_deref().unwrap_or("-");
+        buf.push_str(&format!(
+            "Current Working Directory: {} ({}, {})\n",
+            escape_md(&current.path),
+            alias,
+            current.access,
+        ));
+        buf.push_str("This is your currently active workspace.\n\n");
+    } else {
+        buf.push_str(&format!(
+            "Current Working Directory: {} (agent home)\n",
+            escape_md(install_path)
+        ));
+        buf.push_str("No workspace is currently selected. The agent's home directory is the default working directory.\n\n");
+    }
+
+    // 2. Agent Home Directory
+    buf.push_str(&format!(
+        "Agent Home Directory: {} (installation directory)\n\n",
+        escape_md(install_path)
+    ));
+
+    // 3. Available Workspaces table
+    buf.push_str("### Available Workspaces\n");
+    buf.push_str("| # | Alias | Path | Access | Active |\n");
+    buf.push_str("|---|-------|------|--------|--------|\n");
+
+    for (i, ws) in workspaces.iter().enumerate() {
+        let alias = escape_md(ws.alias.as_deref().unwrap_or("-"));
+        let active_marker = if ws.is_current { "*" } else { "" };
+        buf.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            i + 1,
+            alias,
+            escape_md(&ws.path),
+            ws.access,
+            active_marker,
+        ));
+    }
+
+    buf.push_str("\nIMPORTANT: When performing file operations or running shell commands, ALWAYS use the\n");
+    buf.push_str("Current Working Directory path shown above as your starting directory.\n");
+    buf.push_str("Do NOT use the Agent Home Directory for project work — it contains the agent's own\n");
+    buf.push_str("configuration files, not your project code.\n");
+    buf.push_str("All listed directories are authorized for access at the indicated permission level.\n");
+
+    buf
+}
+
+/// Fallback context when config JSON is missing or unparseable.
+fn format_workspace_context_fallback(install_path: &str) -> String {
+    format!(
+        "## Workspace Environment\n\n\
+         Current Working Directory: {} (agent home)\n\
+         No workspace configuration available. The agent's home directory is the default working directory.\n",
+        escape_md(install_path)
+    )
 }
 
 #[cfg(test)]

@@ -45,11 +45,6 @@ pub struct AgentHelloConfig {
     pub max_output_tokens_limit: u64,
     pub protocol_type: ProtocolType,
 
-    // ── Workspace Context ──
-    pub workspace_context_text: Option<String>,
-    pub current_workspace_id: Option<String>,
-    pub current_workspace_path: Option<String>,
-
     // ── Runtime Config Overrides ──
     pub runtime_max_output_tokens: Option<u64>,
     pub runtime_max_iterations: Option<u32>,
@@ -461,21 +456,6 @@ impl GatewayGrpcClient {
                             "anthropic" => ProtocolType::Anthropic,
                             "ollama" => ProtocolType::Ollama,
                             _ => ProtocolType::OpenAI,
-                        },
-                        workspace_context_text: if result.workspace_context_text.is_empty() {
-                            None
-                        } else {
-                            Some(result.workspace_context_text)
-                        },
-                        current_workspace_id: if result.current_workspace_id.is_empty() {
-                            None
-                        } else {
-                            Some(result.current_workspace_id)
-                        },
-                        current_workspace_path: if result.current_workspace_path.is_empty() {
-                            None
-                        } else {
-                            Some(result.current_workspace_path)
                         },
                         runtime_max_output_tokens: result.runtime_max_output_tokens,
                         runtime_max_iterations: result.runtime_max_iterations,
@@ -1026,19 +1006,9 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
         Some(ServerPayload::IdentityDelivery(id)) => GatewayResponse::IdentityDelivery {
             entries: id.entries.into_iter().map(|e| e.into()).collect(),
         },
-        Some(ServerPayload::WorkspaceContextUpdate(wcu)) => {
-            GatewayResponse::WorkspaceContextUpdate {
-                context_text: wcu.context_text,
-                current_workspace_id: if wcu.current_workspace_id.is_empty() {
-                    None
-                } else {
-                    Some(wcu.current_workspace_id)
-                },
-                current_workspace_path: if wcu.current_workspace_path.is_empty() {
-                    None
-                } else {
-                    Some(wcu.current_workspace_path)
-                },
+        Some(ServerPayload::WorkspaceConfigUpdate(wcu)) => {
+            GatewayResponse::WorkspaceConfigUpdate {
+                config_json: wcu.config_json,
             }
         }
         Some(ServerPayload::IterationLimitPaused(ilp)) => {
@@ -1112,21 +1082,6 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 "ollama" => ProtocolType::Ollama,
                 _ => ProtocolType::OpenAI,
             },
-            workspace_context_text: if r.workspace_context_text.is_empty() {
-                None
-            } else {
-                Some(r.workspace_context_text)
-            },
-            current_workspace_id: if r.current_workspace_id.is_empty() {
-                None
-            } else {
-                Some(r.current_workspace_id)
-            },
-            current_workspace_path: if r.current_workspace_path.is_empty() {
-                None
-            } else {
-                Some(r.current_workspace_path)
-            },
             runtime_max_output_tokens: r.runtime_max_output_tokens,
             runtime_max_iterations: r.runtime_max_iterations,
             runtime_temperature: r.runtime_temperature,
@@ -1140,6 +1095,8 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             } else {
                 Some(r.runtime_shell_approval_threshold)
             },
+            // ADR-009: identity_entries not available via gRPC bridge (consumed at IPC level)
+            identity_entries: vec![],
         },
         Some(ServerPayload::KeyReleaseResult(r)) => GatewayResponse::KeyReleaseResult {
             api_key: if r.api_key.is_empty() {

@@ -816,21 +816,21 @@ async fn test_t26_identity_delivery_push() {
     assert!(result.is_ok(), "T26 timed out");
 }
 
-/// T27: WorkspaceContextUpdate push.
+/// T27: WorkspaceConfigUpdate push.
 #[tokio::test]
-async fn test_t27_workspace_context_update_push() {
+async fn test_t27_workspace_config_update_push() {
     let server = TestServer::start().await;
     let result = tokio::time::timeout(TEST_TIMEOUT, async {
         let mut client = server.connect_and_register("com.test.agent").await;
+
+        let config_json = r#"{"version":"1.0.0","additional_dirs":[{"id":"ws-001","path":"/home/user/project-x","alias":"Project X","access":"read-write","added_at":"2026-01-01T00:00:00Z","is_current":true,"select_count":1}]}"#.to_string();
 
         {
             let mgr = server.session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id("com.test.agent") {
                 let pushed = session
-                    .push_message(GatewayResponse::WorkspaceContextUpdate {
-                        context_text: "Project X workspace".to_string(),
-                        current_workspace_id: Some("ws-001".to_string()),
-                        current_workspace_path: Some("/home/user/project-x".to_string()),
+                    .push_message(GatewayResponse::WorkspaceConfigUpdate {
+                        config_json: config_json.clone(),
                     })
                     .await;
                 assert!(pushed, "Push should succeed");
@@ -838,14 +838,11 @@ async fn test_t27_workspace_context_update_push() {
         }
 
         match tokio::time::timeout(Duration::from_secs(5), client.recv_message()).await {
-            Ok(Ok(Some(GatewayResponse::WorkspaceContextUpdate {
-                context_text,
-                current_workspace_id,
-                current_workspace_path,
+            Ok(Ok(Some(GatewayResponse::WorkspaceConfigUpdate {
+                config_json,
             }))) => {
-                assert_eq!(context_text, "Project X workspace");
-                assert_eq!(current_workspace_id, Some("ws-001".to_string()));
-                assert_eq!(current_workspace_path, Some("/home/user/project-x".to_string()));
+                assert!(config_json.contains("Project X"));
+                assert!(config_json.contains("ws-001"));
             }
             Ok(Ok(Some(other))) => {
                 let _ = other;

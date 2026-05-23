@@ -48,27 +48,15 @@ impl LifecycleManager {
 
         // Determine workspace directory
         let workspace = PathBuf::from(&info.install_path).join("workspace");
-        std::fs::create_dir_all(&workspace)
-            .map_err(|e| GatewayError::Lifecycle(format!("Failed to create workspace: {}", e)))?;
+        // ADR-009: Do NOT create workspace directory here.
+        // The Runtime creates its own workspace on startup.
+        // We only need the path for process spawning.
 
-        // Build and deliver identity payload (cold-start injection)
+        // Build identity payload (will be delivered via IPC after agent connects)
+        // ADR-009: Do NOT write .identity_delivery.json to workspace.
+        // Identity entries are stored in RunningAgentInfo and delivered
+        // via AgentHelloResult when the Runtime connects via IPC.
         let identity_entries = self.build_identity_delivery(agent_id, state);
-        if !identity_entries.is_empty() {
-            let identity_path = workspace.join(".identity_delivery.json");
-            let json = serde_json::to_string(&identity_entries)
-                .map_err(|e| GatewayError::Lifecycle(
-                    format!("Failed to serialize identity delivery: {}", e)
-                ))?;
-            std::fs::write(&identity_path, json)
-                .map_err(|e| GatewayError::Lifecycle(
-                    format!("Failed to write identity delivery: {}", e)
-                ))?;
-            tracing::info!(
-                agent_id,
-                entries = identity_entries.len(),
-                "Identity delivery written to workspace"
-            );
-        }
 
         // Assign a per-agent debug port when running in dev mode
         let debug_port = if dev_mode {
@@ -99,6 +87,8 @@ impl LifecycleManager {
             ready: false,
             dev_mode,
             debug_port,
+            identity_entries,
+            workspace_config_json: None,
         });
 
         tracing::info!("Started agent: {} (PID: {})", agent_id, pid);

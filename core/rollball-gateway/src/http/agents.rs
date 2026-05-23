@@ -37,6 +37,7 @@ pub fn agent_routes() -> Router<AppState> {
         .route("/api/agents/{id}/model", get(get_agent_model))
         .route("/api/agents/{id}/config", get(get_agent_config).put(update_agent_config))
         .route("/api/agents/{id}/tools", get(get_agent_tools))
+        .route("/api/agents/{id}/mcp-servers", get(get_agent_mcp_servers).put(update_agent_mcp_servers))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -640,6 +641,11 @@ pub async fn get_agent_model(
 
 /// Read the system prompt from the agent's prompts directory.
 /// Concatenates all .md and .txt files sorted by filename.
+/// Read the system prompt from the agent's prompts directory.
+///
+/// **Deprecated (ADR-009)**: Gateway no longer reads agent workspace files.
+/// This function is kept for reference but should not be called in production code.
+#[allow(dead_code)]
 fn read_system_prompt(install_path: &str) -> Option<String> {
     let prompts_dir = std::path::Path::new(install_path).join("prompts");
     if !prompts_dir.exists() {
@@ -681,7 +687,10 @@ fn read_system_prompt(install_path: &str) -> Option<String> {
 }
 
 /// Read the tool names declared in the agent's manifest.toml.
-/// Returns a Vec of tool names from the `[[tools]]` section.
+///
+/// **Deprecated (ADR-009)**: Gateway no longer reads agent workspace files.
+/// active_tools should come from per-agent config only.
+#[allow(dead_code)]
 fn read_manifest_tools(install_path: &str) -> Vec<String> {
     let manifest_path = std::path::Path::new(install_path).join("manifest.toml");
     if !manifest_path.exists() {
@@ -700,9 +709,9 @@ fn read_manifest_tools(install_path: &str) -> Vec<String> {
 
 /// Write updated `[[tools]]` declarations back to manifest.toml.
 ///
-/// Rewrites the agent's manifest.toml with the new tool list, preserving
-/// all other sections unchanged. Uses simple line-based replacement of
-/// the `[[tools]]` block.
+/// **Deprecated (ADR-009)**: Gateway no longer writes to agent workspace files.
+/// active_tools persistence is handled by AgentConfigOverride in Gateway's data_dir.
+#[allow(dead_code)]
 fn write_manifest_tools(install_path: &str, active_tools: &[String]) {
     let manifest_path = std::path::Path::new(install_path).join("manifest.toml");
     let content = match std::fs::read_to_string(&manifest_path) {
@@ -791,11 +800,11 @@ pub async fn get_agent_config(
     // Load per-agent config override
     let per_agent = agent_config::load_agent_config(&data_dir, &agent_id).unwrap_or(None);
 
-    // Read system prompt from install_path/prompts/
-    let system_prompt = read_system_prompt(&info.install_path);
-
-    // Read manifest tools list
-    let manifest_active_tools = read_manifest_tools(&info.install_path);
+    // ADR-009: Do NOT read from agent workspace files.
+    // system_prompt and manifest tools come from per-agent config only.
+    // When agent is stopped, these fields will be None/empty (UI hides Setup tab).
+    let system_prompt = per_agent.as_ref().and_then(|c| c.system_prompt_override.clone());
+    let manifest_active_tools: Vec<String> = Vec::new(); // No longer read from manifest
 
     // Merge into effective config
     let effective = agent_config::get_effective_config(
@@ -876,10 +885,8 @@ pub async fn update_agent_config(
     agent_config::save_agent_config(&data_dir, &agent_id, &updated)
         .map_err(|e| ApiError::internal(&format!("Failed to save config: {}", e)))?;
 
-    // Write back active_tools to manifest.toml if changed
-    if let Some(ref tools) = req_active_tools {
-        write_manifest_tools(&info_install_path, tools);
-    }
+    // ADR-009: No longer write manifest.toml. active_tools persistence
+    // is handled by AgentConfigOverride (stored in Gateway's data_dir).
 
     // Push RuntimeConfigUpdate to connected agent if available
     if let Some(ref session_mgr) = state.session_mgr {
@@ -907,11 +914,9 @@ pub async fn update_agent_config(
         }
     }
 
-    // Read system prompt for response
-    let system_prompt = read_system_prompt(&info_install_path);
-
-    // Read manifest tools list
-    let manifest_active_tools = read_manifest_tools(&info_install_path);
+    // ADR-009: Do NOT read from agent workspace files for response
+    let system_prompt = updated.system_prompt_override.clone();
+    let manifest_active_tools: Vec<String> = Vec::new();
 
     // Return updated effective config
     let effective = agent_config::get_effective_config(
@@ -951,10 +956,11 @@ pub async fn get_agent_tools(
 
     // Determine active tools: config override > manifest
     let per_agent = agent_config::load_agent_config(&data_dir, &agent_id).unwrap_or(None);
+    // ADR-009: active_tools from per-agent config only, not manifest.toml
     let raw_active_tools = per_agent
         .as_ref()
         .and_then(|o| o.active_tools.clone())
-        .unwrap_or_else(|| read_manifest_tools(&info.install_path));
+        .unwrap_or_default();
 
     // Normalize platform-specific shell names (bash, powershell, pwsh)
     // to the unified "shell" tool name for consistent UI display.
@@ -1087,6 +1093,159 @@ fn normalize_shell_tools(tools: &[String]) -> Vec<String> {
         result.push("shell".to_string());
     }
     result
+}
+
+// ── Agent MCP server activation handlers ─────────────────────────────
+
+/// MCP server activation response (per-agent)
+#[derive(Serialize)]
+pub struct AgentMcpServersResponse {
+    pub agent_id: String,
+    /// Names of active MCP servers (resolved from catalog)
+    pub active_servers: Vec<String>,
+}
+
+/// Request body for PUT /api/agents/{id}/mcp-servers
+#[derive(Deserialize)]
+pub struct UpdateMcpServersRequest {
+    /// List of MCP server names to activate (from catalog)
+    pub servers: Vec<String>,
+}
+
+/// `GET /api/agents/{id}/mcp-servers` — get active MCP server names for an agent
+///
+/// Returns the list of MCP server names that are currently active for this agent.
+/// These names reference entries in the global MCP catalog.
+pub async fn get_agent_mcp_servers(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentMcpServersResponse>, (StatusCode, Json<ApiError>)> {
+    let gw = state.gateway_state.read().await;
+
+    // Verify agent exists
+    if !gw.installed_agents.contains_key(&agent_id) {
+        return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+    }
+
+    let data_dir = gw
+        .config
+        .as_ref()
+        .map(|c| std::path::PathBuf::from(&c.data_dir))
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+
+    // Load per-agent config
+    let per_agent = agent_config::load_agent_config(&data_dir, &agent_id).unwrap_or(None);
+
+    // Extract MCP server names from the per-agent config
+    // Current model: mcp_servers stores full McpServerConfigDef — extract names
+    let active_servers = per_agent
+        .and_then(|cfg| cfg.mcp_servers)
+        .map(|servers| servers.into_iter().map(|s| s.name).collect())
+        .unwrap_or_default();
+
+    Ok(Json(AgentMcpServersResponse {
+        agent_id,
+        active_servers,
+    }))
+}
+
+/// `PUT /api/agents/{id}/mcp-servers` — set active MCP servers for an agent
+///
+/// Accepts a list of MCP server names. The Gateway:
+/// 1. Looks up each name in the global MCP catalog to get full config
+/// 2. Merges catalog definitions with any per-agent overrides
+/// 3. Saves the full configs to per-agent config
+/// 4. Pushes RuntimeConfigUpdate to the running agent via IPC
+pub async fn update_agent_mcp_servers(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<UpdateMcpServersRequest>,
+) -> Result<Json<AgentMcpServersResponse>, (StatusCode, Json<ApiError>)> {
+    // Extract data from gateway state
+    let data_dir = {
+        let gw = state.gateway_state.read().await;
+
+        if !gw.installed_agents.contains_key(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+
+        gw.config
+            .as_ref()
+            .map(|c| std::path::PathBuf::from(&c.data_dir))
+            .unwrap_or_else(|| std::path::PathBuf::from("./data"))
+    };
+
+    // Load catalog
+    let catalog = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir)
+        .map_err(|e| ApiError::internal(&e))?;
+
+    // Resolve each name from catalog
+    let mut resolved_servers = Vec::new();
+    let mut not_found = Vec::new();
+    for name in &req.servers {
+        if let Some(entry) = catalog.iter().find(|c| &c.name == name) {
+            resolved_servers.push(entry.clone());
+        } else {
+            not_found.push(name.clone());
+        }
+    }
+
+    if !not_found.is_empty() {
+        return Err(ApiError::bad_request(&format!(
+            "MCP servers not found in catalog: {}", not_found.join(", ")
+        )));
+    }
+
+    // Load existing per-agent config
+    let mut existing = agent_config::load_agent_config(&data_dir, &agent_id)
+        .unwrap_or(None)
+        .unwrap_or_default();
+
+    // Update MCP servers field
+    existing.mcp_servers = if resolved_servers.is_empty() {
+        Some(Vec::new())
+    } else {
+        Some(resolved_servers.clone())
+    };
+
+    // Save per-agent config
+    agent_config::save_agent_config(&data_dir, &agent_id, &existing)
+        .map_err(|e| ApiError::internal(&format!("Failed to save config: {}", e)))?;
+
+    // Push RuntimeConfigUpdate to connected agent if available
+    if let Some(ref session_mgr) = state.session_mgr {
+        let mgr = session_mgr.lock().await;
+        if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+            let push_result = session
+                .push_message(GatewayResponse::RuntimeConfigUpdate {
+                    mcp_servers: if resolved_servers.is_empty() {
+                        Some(Vec::new())
+                    } else {
+                        Some(resolved_servers)
+                    },
+                    max_output_tokens: None,
+                    max_iterations: None,
+                    temperature: None,
+                    system_prompt_override: None,
+                    active_tools: None,
+                    shell_approval_threshold: None,
+                    model: None,
+                    provider: None,
+                })
+                .await;
+            if !push_result {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Failed to push MCP config update to connected agent"
+                );
+            }
+        }
+    }
+
+    Ok(Json(AgentMcpServersResponse {
+        agent_id,
+        active_servers: req.servers,
+    }))
 }
 
 #[cfg(test)]

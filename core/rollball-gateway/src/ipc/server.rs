@@ -613,10 +613,6 @@ pub async fn handle_agent_hello(
         let mut llm_protocol_type: rollball_core::protocol::ProtocolType =
             rollball_core::protocol::ProtocolType::OpenAI;
 
-        let mut workspace_text: Option<String> = None;
-        let mut workspace_id: Option<String> = None;
-        let mut workspace_path: Option<String> = None;
-
         let mut rt_max_output_tokens: Option<u64> = None;
         let mut rt_max_iterations: Option<u32> = None;
         let mut rt_temperature: Option<f32> = None;
@@ -680,31 +676,6 @@ pub async fn handle_agent_hello(
                 );
             }
 
-            // ── Workspace Context ─────────────────────────────────────────
-            let install_path = {
-                let state_guard = state.read().await;
-                state_guard.installed_agents.get(agent_id)
-                    .map(|info| info.install_path.clone())
-            };
-            if let Some(ref ip) = install_path {
-                if let Some((ctx_text, ws_id, ws_path)) =
-                    crate::http::workspaces::resolve_workspace_context(ip)
-                {
-                    tracing::info!(
-                        "Resolved workspace for agent={}: current_id={:?} current_path={:?}",
-                        agent_id, ws_id, ws_path
-                    );
-                    workspace_text = Some(ctx_text);
-                    workspace_id = ws_id;
-                    workspace_path = ws_path;
-                } else {
-                    tracing::debug!(
-                        "No workspace config for agent={}, skipping",
-                        agent_id
-                    );
-                }
-            }
-
             // ── Runtime Config Overrides ──────────────────────────────────
             {
                 let data_dir = state.read().await
@@ -733,6 +704,14 @@ pub async fn handle_agent_hello(
             }
         } // end if connection_role == "main"
 
+        // ADR-009: Get identity entries from RunningAgentInfo (stored at start_agent time)
+        let identity_entries = {
+            let gw = state.read().await;
+            gw.running_agents.get(agent_id)
+                .map(|info| info.identity_entries.clone())
+                .unwrap_or_default()
+        };
+
         GatewayResponse::AgentHelloResult {
             success: true,
             error: None,
@@ -744,14 +723,12 @@ pub async fn handle_agent_hello(
             model_capabilities: llm_capabilities,
             max_output_tokens_limit: llm_max_output_tokens_limit,
             protocol_type: llm_protocol_type,
-            workspace_context_text: workspace_text,
-            current_workspace_id: workspace_id,
-            current_workspace_path: workspace_path,
             runtime_max_output_tokens: rt_max_output_tokens,
             runtime_max_iterations: rt_max_iterations,
             runtime_temperature: rt_temperature,
             runtime_system_prompt_override: rt_system_prompt_override,
             runtime_shell_approval_threshold: rt_shell_approval_threshold,
+            identity_entries,
         }
     } else {
         tracing::warn!("AgentHello from unknown connection {}", conn_id);
@@ -766,14 +743,12 @@ pub async fn handle_agent_hello(
             model_capabilities: None,
             max_output_tokens_limit: 0,
             protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
-            workspace_context_text: None,
-            current_workspace_id: None,
-            current_workspace_path: None,
             runtime_max_output_tokens: None,
             runtime_max_iterations: None,
             runtime_temperature: None,
             runtime_system_prompt_override: None,
             runtime_shell_approval_threshold: None,
+            identity_entries: vec![],
         }
     }
 }
@@ -1124,6 +1099,7 @@ mod tests {
                 ready: false,
                 dev_mode: false,
                 debug_port: None,
+                identity_entries: vec![],
             });
         }
 

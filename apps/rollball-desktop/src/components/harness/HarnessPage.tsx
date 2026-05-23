@@ -1,11 +1,13 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ModelCapabilitiesMap, ProviderListEntry } from "../../lib/types";
+import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ModelCapabilitiesMap, ProviderListEntry, McpServerConfigDef, McpTransportDef, McpPresetDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
 import { Star } from "lucide-react";
+import { useMcpStore } from "../../stores/mcpStore";
+import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 
 type HarnessTab = "providers" | "mcp";
 
@@ -1192,14 +1194,306 @@ function ProvidersTab() {
 
 /** MCP tab — placeholder, content TBD */
 function McpTab() {
+  const { catalog, loading, error, loadCatalog, addServer, removeServer } = useMcpStore();
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [showPresets, setShowPresets] = useState(false);
+
+  // New server form state
+  const [newName, setNewName] = useState("");
+  const [newTransport, setNewTransport] = useState<McpTransportDef>("stdio");
+  const [newCommand, setNewCommand] = useState("");
+  const [newArgs, setNewArgs] = useState("");
+  const [newUrl, setNewUrl] = useState("");
+  const [newEnv, setNewEnv] = useState("");
+
+  // Preset env var form (for servers requiring API keys)
+  const [presetEnvForm, setPresetEnvForm] = useState<Record<string, string>>({});
+  const [activePreset, setActivePreset] = useState<McpPresetDef | null>(null);
+
+  useEffect(() => {
+    loadCatalog();
+  }, [loadCatalog]);
+
+  const catalogNames = useMemo(() => new Set(catalog.map((s) => s.name)), [catalog]);
+
+  const handleAddFromPreset = (preset: McpPresetDef) => {
+    if (preset.requiredEnv.length > 0) {
+      // Show env form for API keys
+      setActivePreset(preset);
+      setPresetEnvForm(
+        preset.requiredEnv.reduce((acc, key) => ({ ...acc, [key]: "" }), {})
+      );
+    } else {
+      // No API key needed, add directly
+      const config = presetToServerConfig(preset);
+      addServer(config);
+    }
+  };
+
+  const handlePresetEnvSubmit = () => {
+    if (!activePreset) return;
+    const config = presetToServerConfig(activePreset, presetEnvForm);
+    addServer(config);
+    setActivePreset(null);
+    setPresetEnvForm({});
+  };
+
+  const handleAddManual = () => {
+    if (!newName.trim()) return;
+    const config: McpServerConfigDef = {
+      name: newName.trim(),
+      transport: newTransport,
+      command: newCommand.trim(),
+      args: newArgs.trim() ? newArgs.trim().split(/\s+/) : [],
+      url: newUrl.trim() || undefined,
+      env: newEnv.trim()
+        ? Object.fromEntries(
+            newEnv.split(",").map((pair) => {
+              const [k, ...v] = pair.split("=");
+              return [k.trim(), v.join("=").trim()];
+            })
+          )
+        : {},
+    };
+    addServer(config);
+    setShowAddForm(false);
+    setNewName("");
+    setNewCommand("");
+    setNewArgs("");
+    setNewUrl("");
+    setNewEnv("");
+  };
+
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-2xl space-y-4">
+      {/* Catalog servers */}
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
-        <h2 className="text-xs font-medium">MCP Configuration</h2>
-        <p className="mt-3 text-xs text-zinc-400">
-          MCP (Model Context Protocol) configuration will be available here in a future update.
-        </p>
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-medium">MCP Server Catalog</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowPresets(!showPresets)}
+              className="rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700"
+            >
+              {showPresets ? "Hide Presets" : "Add from Presets"}
+            </button>
+            <button
+              onClick={() => setShowAddForm(!showAddForm)}
+              className="rounded px-2 py-1 text-xs bg-accent text-white hover:opacity-90"
+            >
+              {showAddForm ? "Cancel" : "Add Server"}
+            </button>
+          </div>
+        </div>
+
+        {error && (
+          <p className="mt-2 text-xs text-red-500">{error}</p>
+        )}
+
+        {loading && catalog.length === 0 && (
+          <p className="mt-3 text-xs text-zinc-400">Loading catalog...</p>
+        )}
+
+        {!loading && catalog.length === 0 && !showPresets && (
+          <p className="mt-3 text-xs text-zinc-400">
+            No MCP servers configured. Add from presets or add a custom server.
+          </p>
+        )}
+
+        {/* Server list */}
+        {catalog.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {catalog.map((server) => (
+              <div
+                key={server.name}
+                className="flex items-center justify-between rounded border border-zinc-100 px-3 py-2 dark:border-zinc-600"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-zinc-500 dark:bg-zinc-700">
+                    {server.transport}
+                  </span>
+                  <span className="text-xs font-medium">{server.name}</span>
+                  {server.has_secrets && (
+                    <span className="text-[10px] text-amber-500">has API key</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-zinc-400">
+                    {server.command || server.url || ""}
+                  </span>
+                  <button
+                    onClick={() => removeServer(server.name)}
+                    className="text-xs text-zinc-400 hover:text-red-500"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
+
+      {/* Presets gallery */}
+      {showPresets && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+          <h2 className="text-xs font-medium mb-3">Recommended MCP Servers</h2>
+          <div className="grid grid-cols-2 gap-2">
+            {MCP_PRESETS.map((preset) => {
+              const isInstalled = catalogNames.has(preset.id);
+              return (
+                <div
+                  key={preset.id}
+                  className="rounded border border-zinc-100 p-2 dark:border-zinc-600"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <span className="text-xs font-medium">{preset.name}</span>
+                      <span className="ml-1.5 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-400 dark:bg-zinc-700">
+                        {preset.category}
+                      </span>
+                    </div>
+                    {isInstalled ? (
+                      <span className="text-[10px] text-green-500">Installed</span>
+                    ) : (
+                      <button
+                        onClick={() => handleAddFromPreset(preset)}
+                        className="rounded px-1.5 py-0.5 text-[10px] bg-accent text-white hover:opacity-90"
+                      >
+                        Add
+                      </button>
+                    )}
+                  </div>
+                  <p className="mt-1 text-[10px] text-zinc-400 line-clamp-2">
+                    {preset.description}
+                  </p>
+                  {preset.requiredEnv.length > 0 && !isInstalled && (
+                    <p className="mt-1 text-[10px] text-amber-500">
+                      Requires: {preset.requiredEnv.join(", ")}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Manual add form (inline, no dialog) */}
+      {showAddForm && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+          <h2 className="text-xs font-medium mb-3">Add Custom MCP Server</h2>
+          <div className="space-y-2">
+            <div>
+              <label className="text-[10px] text-zinc-400">Name</label>
+              <input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
+                placeholder="my-server"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-400">Transport</label>
+              <select
+                value={newTransport}
+                onChange={(e) => setNewTransport(e.target.value as McpTransportDef)}
+                className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
+              >
+                <option value="stdio">stdio</option>
+                <option value="http">http</option>
+                <option value="sse">sse</option>
+              </select>
+            </div>
+            {newTransport === "stdio" ? (
+              <>
+                <div>
+                  <label className="text-[10px] text-zinc-400">Command</label>
+                  <input
+                    value={newCommand}
+                    onChange={(e) => setNewCommand(e.target.value)}
+                    className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
+                    placeholder="npx"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-zinc-400">Arguments (space-separated)</label>
+                  <input
+                    value={newArgs}
+                    onChange={(e) => setNewArgs(e.target.value)}
+                    className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
+                    placeholder="-y @modelcontextprotocol/server-filesystem"
+                  />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="text-[10px] text-zinc-400">URL</label>
+                <input
+                  value={newUrl}
+                  onChange={(e) => setNewUrl(e.target.value)}
+                  className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
+                  placeholder="http://localhost:3000"
+                />
+              </div>
+            )}
+            <div>
+              <label className="text-[10px] text-zinc-400">Environment (KEY=VALUE, comma-separated)</label>
+              <input
+                value={newEnv}
+                onChange={(e) => setNewEnv(e.target.value)}
+                className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
+                placeholder="API_KEY=sk-xxx, DEBUG=true"
+              />
+            </div>
+            <button
+              onClick={handleAddManual}
+              disabled={!newName.trim()}
+              className="rounded px-3 py-1 text-xs bg-accent text-white hover:opacity-90 disabled:opacity-50"
+            >
+              Add Server
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Preset env form (for servers requiring API keys) */}
+      {activePreset && (
+        <div className="rounded-lg border border-amber-200 bg-white p-4 dark:border-amber-700 dark:bg-zinc-800">
+          <h2 className="text-xs font-medium mb-1">Configure {activePreset.name}</h2>
+          <p className="text-[10px] text-zinc-400 mb-3">{activePreset.installHint}</p>
+          <div className="space-y-2">
+            {activePreset.requiredEnv.map((envKey) => (
+              <div key={envKey}>
+                <label className="text-[10px] text-zinc-400">{envKey}</label>
+                <input
+                  type="password"
+                  value={presetEnvForm[envKey] || ""}
+                  onChange={(e) =>
+                    setPresetEnvForm((prev) => ({ ...prev, [envKey]: e.target.value }))
+                  }
+                  className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
+                  placeholder={`Enter ${envKey}`}
+                />
+              </div>
+            ))}
+            <div className="flex gap-2">
+              <button
+                onClick={handlePresetEnvSubmit}
+                className="rounded px-3 py-1 text-xs bg-accent text-white hover:opacity-90"
+              >
+                Add Server
+              </button>
+              <button
+                onClick={() => { setActivePreset(null); setPresetEnvForm({}); }}
+                className="rounded px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

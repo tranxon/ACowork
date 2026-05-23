@@ -233,7 +233,7 @@ async fn test_select_cannot_mutate_context_builder_in_recv_branch() {
 /// This requires extending InboundMessage with new variants:
 ///   - InboundMessage::UpdateProvider { provider, model, ... }
 ///   - InboundMessage::ModelSwitch { model, provider }
-///   - InboundMessage::WorkspaceContextUpdate { context_text }
+///   - InboundMessage::WorkspaceConfigUpdate { config_json }
 ///
 /// For session management (create/activate/delete), we return "busy"
 /// during agent execution — these don't make sense while the agent is running.
