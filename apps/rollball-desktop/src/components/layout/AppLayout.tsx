@@ -10,6 +10,8 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
+import { useChatStore } from "../../stores/chatStore";
+import { getGatewayUrl } from "../../lib/config";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -61,6 +63,26 @@ export function AppLayout() {
       }
     }, 5000);
     return () => clearInterval(interval);
+  }, [checkHealth]);
+
+  // Detect wake from sleep via visibility change and reconnect
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      console.log("[AppLayout] Page visible after sleep/lock, checking connections");
+      checkHealth();
+      // Reconnect all agent WebSocket connections
+      const store = useChatStore.getState();
+      const gwUrl = getGatewayUrl();
+      for (const agentId of Object.keys(store.wsMap)) {
+        const ws = store.wsMap[agentId];
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          store.connectStream(agentId, gwUrl);
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
   }, [checkHealth]);
 
   const toggleResults = useCallback(() => {
