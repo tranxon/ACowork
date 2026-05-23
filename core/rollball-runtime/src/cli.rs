@@ -1729,6 +1729,23 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             }
 
 
+        
+            // Always cache the model from AgentHelloConfig so the SessionManager
+            // has it properly initialized — even when resolved_model matches the
+            // manifest's suggested_model.  Without this, the override_model stays
+            // None and subsequent sessions fall back to the (potentially stale)
+            // manifest model.  Switching models in the frontend sends a
+            // RuntimeConfigUpdate which calls update_model_override, completing
+            // the init; this ensures the AgentHelloResult model is cached from
+            // the start (same save-then-override pattern as line ~4903).
+            {
+                save_agent_model(&config.work_dir, &resolved_model, cfg.provider.as_deref());
+                session_manager.update_model_override(resolved_model.clone());
+                tracing::info!(
+                    model = %resolved_model,
+                    "Cached model override from AgentHelloResult"
+                );
+            }
         }
 
 

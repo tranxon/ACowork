@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
@@ -44,6 +45,10 @@ export function AgentList({ width }: AgentListProps) {
     try {
       await useAgentStore.getState().waitForAgentReady(agentId);
       useChatStore.getState().connectStream(agentId, getGatewayUrl());
+      // Refresh workspace list now that agent is running (workspace config
+      // is sent from Runtime to Gateway after AgentHello, so the cache is
+      // fresh by this point).
+      useWorkspaceStore.getState().fetchWorkspaces(agentId);
       addToast({ type: "success", message: devMode ? "Agent started in debug mode" : "Agent started" });
     } catch (e: any) {
       addToast({ type: "error", message: e?.message ?? String(e) });
