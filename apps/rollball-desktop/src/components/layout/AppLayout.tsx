@@ -190,22 +190,9 @@ export function AppLayout() {
             {/* Chat panel — elastic */}
             <ChatPanel />
 
-            {/* Right panel resize handle */}
-            <div
-              className="group relative w-px shrink-0 cursor-col-resize select-none"
-              onMouseDown={handleMouseDownRight}
-              role="separator"
-              aria-label="Resize right panel"
-            >
-              {/* Visible divider line */}
-              <div className="absolute inset-y-0 left-0 w-px bg-zinc-200 dark:bg-zinc-800" />
-              {/* Hover/active area for resize */}
-              <div className="absolute inset-y-0 -right-2 w-[7px] group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
-            </div>
-
             {/* Results panel / Debug panel — unified tabs, collapsible, resizable */}
             {!resultsCollapsed && (
-              <ResultsPanel width={rightWidth} onCollapse={toggleResults} isDebugMode={isDebugMode} />
+              <ResultsPanel width={rightWidth} onCollapse={toggleResults} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} />
             )}
           </div>
         )}

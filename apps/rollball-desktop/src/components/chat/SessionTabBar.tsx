@@ -326,7 +326,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   if (!agent) return null;
 
   return (
-    <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-1 border-b border-zinc-200 dark:border-zinc-800">
+    <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-[7px] border-b border-zinc-200 dark:border-zinc-800">
       {/* Left scroll arrow */}
       {canScrollLeft && (
         <button
@@ -355,7 +355,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               data-session-id={sessionId}
               onClick={() => handleTabClick(sessionId)}
               className={cn(
-                "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0 border-b-2",
+                "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-[var(--tab-py)] min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0 border-b-2",
                 isActive
                   ? "border-[var(--color-accent)] text-zinc-700 dark:text-zinc-200 font-medium"
                   : "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300",
@@ -369,9 +369,9 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               )}
               {/* Title */}
               <span className={cn(
-                "min-w-0 flex-1 truncate",
+                "min-w-0 flex-1 truncate text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]",
                 isProcessing && isActive && "text-zinc-700 dark:text-zinc-200",
-              )} style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}>
+              )}>
                 {getTitle(sessionId)}
               </span>
               {/* Close button */}

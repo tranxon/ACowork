@@ -5,7 +5,7 @@
 
 use rollball_core::manifest::AgentManifest;
 use rollball_core::protocol::ModelCapabilitiesInfo;
-use rollball_core::providers::traits::{ChatMessage, ChatRequest, MessageRole};
+use rollball_core::providers::traits::{ChatMessage, ChatRequest, ContentPart, MessageRole};
 
 use crate::agent::history::HistoryManager;
 
@@ -352,6 +352,33 @@ impl ContextBuilder {
         // 7.5 Sanitize messages before sending to LLM
         // This fixes corrupted tool_call data that would cause 400 errors
         HistoryManager::sanitize_messages(&mut messages);
+
+        // 7.6 Filter image content_parts for non-vision models
+        // When the model doesn't support image input (modalities known and
+        // lacks "image"), strip ImageUrl parts from multimodal content to
+        // prevent API 400 errors. This handles the case where a user switches
+        // from a vision model to a text-only model mid-session — the session
+        // history still contains base64 image data that would otherwise be
+        // sent to a model that cannot process it.
+        if let Some(caps) = gateway_capabilities {
+            let supports_image = caps.modalities
+                .as_ref()
+                .map(|m| m.input.iter().any(|s| s == "image"))
+                .unwrap_or(true); // true=don't filter when modalities unknown
+            if !supports_image {
+                for msg in &mut messages {
+                    if let Some(ref mut parts) = msg.content_parts {
+                        // Keep only Text parts, strip ImageUrl parts
+                        parts.retain(|p| matches!(p, ContentPart::Text { .. }));
+                        // If no text parts remain, set content_parts to None
+                        // to avoid sending an empty array to the API.
+                        if parts.is_empty() {
+                            msg.content_parts = None;
+                        }
+                    }
+                }
+            }
+        }
 
         // Determine the model to use
         let model = self.override_model.clone().unwrap_or_else(|| manifest.llm.suggested_model.clone());

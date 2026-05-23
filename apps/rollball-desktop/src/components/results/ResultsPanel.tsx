@@ -23,6 +23,7 @@ import { isGatewayLocal } from "../../lib/config";
 interface ResultsPanelProps {
   onCollapse: () => void;
   isDebugMode?: boolean;
+  onResizeStart?: (e: React.MouseEvent) => void;
 }
 
 type PanelTab = "debug" | "status" | "setup" | "memory";
@@ -30,7 +31,7 @@ type PanelTab = "debug" | "status" | "setup" | "memory";
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps & { width: number }) {
+export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: ResultsPanelProps & { width: number }) {
   const { agents, selectedAgentId } = useAgentStore();
   const tokenUsage = useChatStore((s) => {
     if (!selectedAgentId) return null;
@@ -138,7 +139,7 @@ export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps &
   useEffect(() => {
     if (!isDebugMode || !connected) return;
     const interval = setInterval(() => {
-      getState().catch(() => {});
+      getState().catch(() => { });
     }, 1000);
     return () => clearInterval(interval);
   }, [isDebugMode, connected, getState]);
@@ -186,9 +187,16 @@ export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps &
   }, [selectedAgent?.running, activeTab]);
 
   return (
-    <div className="flex flex-col border-l border-zinc-200 bg-zinc-50 transition-[width] duration-250 ease-in-out dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
+    <div className="relative flex flex-col border-l border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
+      {/* Resize handle overlay — invisible, sits on the border-l */}
+      <div
+        className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize z-10 group"
+        onMouseDown={onResizeStart}
+      >
+        <div className="absolute inset-y-0 left-0 w-2 group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
+      </div>
       {/* Header with tabs */}
-      <div className="border-b border-zinc-200 dark:border-zinc-800">
+      <div className="border-b border-zinc-200 pt-px dark:border-zinc-800">
         <div className="flex items-center px-3 pt-1.5">
           <div className="flex gap-0">
             {isDebugMode && (
@@ -389,7 +397,7 @@ export function ResultsPanel({ width, isDebugMode = false }: ResultsPanelProps &
           {/* Token statistics */}
           <div className="mb-4">
             <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              Session Stats
+              Session Status
             </h3>
             <div className="rounded-md bg-white p-3 text-xs dark:bg-zinc-800">
               {/* Context usage progress bar */}
@@ -516,7 +524,7 @@ function TabButton({
     <button
       onClick={onClick}
       className={cn(
-        "border-b-2 px-3 py-1.5 text-xs font-medium transition-colors",
+        "border-b-2 px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)] font-medium transition-colors",
         active
           ? "border-[var(--color-accent)] text-zinc-700 dark:text-zinc-200"
           : "border-transparent text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",

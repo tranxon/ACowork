@@ -93,6 +93,8 @@ export function ChatPanel() {
     width: number;
     height: number;
   }>>([]);
+  const [showImageUnsupportedDialog, setShowImageUnsupportedDialog] = useState(false);
+  const [imageCapableModels, setImageCapableModels] = useState<ModelEntry[]>([]);
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -116,7 +118,7 @@ export function ChatPanel() {
       | ChatMessage
       | { type: 'explore_group'; items: ChatMessage[] }
     > = [];
-    
+
     let exploreBuffer: ChatMessage[] = [];
 
     const flushExplore = () => {
@@ -171,7 +173,7 @@ export function ChatPanel() {
     flushExplore();
     return grouped;
   }, [messages, streamingMessageId]);
-  
+
   // Virtual scrolling: only render visible messages
   const virtualizer = useVirtualizer({
     count: displayMessages.length,
@@ -643,6 +645,24 @@ export function ChatPanel() {
   // Select image file via Tauri dialog, read as base64, and get dimensions
   const handleImageSelect = async () => {
     if (!currentSessionId || !selectedAgentId) return;
+
+    // Check if current model supports image input
+    const currentEntry = availableModels.find(
+      m => m.name === currentModel && m.provider === currentProvider
+    );
+    const supportsImage = currentEntry?.input_modalities?.includes('image');
+    if (!supportsImage) {
+      // Find models that support image — including other providers
+      const imageModels = availableModels.filter(m => m.input_modalities?.includes('image'));
+      if (imageModels.length === 0) {
+        console.warn("[ChatPanel] No image-capable models available — skipping dialog");
+        return;
+      }
+      setImageCapableModels(imageModels);
+      setShowImageUnsupportedDialog(true);
+      return;
+    }
+
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({
@@ -809,358 +829,358 @@ export function ChatPanel() {
   const inputDisabled = gatewayStatus !== "connected";
 
   return (
-    <div
-      className="flex flex-1 min-w-0 flex-col bg-[#FAFAFA] dark:bg-zinc-900"
-    >
-      {/* LLM config warning */}
-      {hasLlmConfig === false && (
-        <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 dark:border-amber-900 dark:bg-amber-950">
-          <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
-          <span className="text-xs text-amber-700 dark:text-amber-300">
-            No LLM provider configured. Please add an API key in Settings → Providers.
-          </span>
-        </div>
-      )}
-      {/* ADR-015: Session tab bar */}
-      {selectedAgentId && <SessionTabBar agentId={selectedAgentId} />}
-      {/* Messages area with drawer overlay */}
-      <div className="relative flex-1 overflow-hidden">
-        <div
-          ref={messagesContainerRef}
-          onScroll={handleScroll}
-          className="h-full overflow-y-auto px-4 py-3 select-text cursor-text"
-          role="log"
-          aria-label="Chat messages"
-        >
-          {/* Loading more indicator at top */}
-          {useChatStore.getState().isLoadingMore && (
-            <div className="flex items-center justify-center py-2">
-              <Loader className="h-4 w-4 animate-spin text-zinc-400 dark:text-zinc-500" />
-              <span className="ml-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">Loading more...</span>
-            </div>
-          )}
-          
-          {/* Loading session indicator */}
-          {isLoadingSession && messages.length === 0 && (
-            <div className="flex h-full items-center justify-center">
-              <div className="text-center">
-                <Loader className="mx-auto h-8 w-8 animate-spin text-zinc-400 dark:text-zinc-500" />
-                <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading conversation...</p>
-              </div>
-            </div>
-          )}
-          
-          {loadError && !isLoadingSession && (
-            <div className="flex h-full flex-col items-center justify-center gap-3 px-4">
-              <div className="text-sm text-red-500 dark:text-red-400">Session 加载失败</div>
-              <div className="max-w-xs text-center text-xs text-zinc-500 dark:text-zinc-400">
-                {loadError}
-              </div>
-              <button
-                onClick={() => {
-                  const sessionId = useSessionStore.getState().currentSessionId;
-                  const agentId = useAgentStore.getState().selectedAgentId;
-                  if (sessionId && agentId) {
-                    useChatStore.getState().loadSessionMessages(agentId, sessionId);
-                  }
-                }}
-                className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
-              >
-                重试
-              </button>
-            </div>
-          )}
-          {!loadError && !isLoadingSession && messages.length === 0 && (
-            <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
-              Start a conversation with {selectedAgent.name}
-            </div>
-          )}
-          {/* Virtualized message list — only renders visible items */}
-          {displayMessages.length > 0 && (
-            <div
-              style={{
-                height: virtualizer.getTotalSize(),
-                width: '100%',
-                position: 'relative',
-              }}
-            >
-              {virtualizer.getVirtualItems().map((virtualRow) => {
-                const item = displayMessages[virtualRow.index];
-                const displayItem = item as any;
-
-                return (
-                  <div
-                    key={virtualRow.key}
-                    ref={virtualizer.measureElement}
-                    data-index={virtualRow.index}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      transform: `translateY(${virtualRow.start}px)`,
-                    }}
-                    className=""
-                  >
-                    {/* Explore group - aggregated think + tool calls/results */}
-                    {displayItem.type === 'explore_group' && (
-                      <ExploreBlock
-                        items={displayItem.items}
-                        isStreaming={displayItem.items.some(
-                          (m: ChatMessage) => m.id === streamingMessageId || m.id === thinkingMessageId
-                        )}
-                        pendingApproval={pendingApproval}
-                        currentSessionId={currentSessionId}
-                        onApprove={(action) => handleToolApprove(action, pendingApproval!)}
-                      />
-                    )}
-
-                    {/* Regular message */}
-                    {displayItem.type !== 'explore_group' && (
-                      <MessageBubble message={item as ChatMessage} isStreaming={(item as ChatMessage).id === streamingMessageId} agentId={selectedAgentId ?? ""} />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          {/* LLM reasoning indicator — shimmering "thinking ..." shown while waiting for first token */}
-          {isReasoning && !streamingMessageId && !thinkingMessageId && (
-            <div className="flex items-center px-4 py-1.5 select-none">
-              <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>thinking ...</span>
-            </div>
-          )}
-          {/* Iteration limit pause — hint + Continue button */}
-          {iterationLimitPaused && (
-            <div className="flex flex-col items-start gap-1.5">
-              <span
-                className="text-zinc-600 dark:text-zinc-400"
-                style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
-              >
-                {iterationLimitPaused.message}
-              </span>
-              <button
-                onClick={() => {
-                  if (selectedAgentId) {
-                    continueExecution(selectedAgentId);
-                  }
-                }}
-                className="flex w-fit max-w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-white transition-opacity hover:opacity-90"
-                style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)", backgroundColor: "var(--color-accent)" }}
-              >
-                <Play className="h-3.5 w-3.5" />
-                <span>
-                  Continue ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
-                </span>
-              </button>
-            </div>
-          )}
-          {/* Ask question card — shown when LLM asks the user a question */}
-          {pendingQuestion && (
-            <AskQuestionCard
-              event={pendingQuestion}
-              agentId={selectedAgentId ?? ""}
-              sessionId={currentSessionId}
-              onAnswer={handleQuestionAnswer}
-            />
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
-
-      {/* Queued messages box — separate box above the input area,
-          flush against input, slightly narrower for layered depth */}
-      {queuedMessages.length > 0 && (
-        <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
-          <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
-            <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
-              消息队列 ({queuedMessages.length})
+    <>
+      <div
+        className="flex flex-1 min-w-0 flex-col bg-[#FAFAFA] dark:bg-zinc-900"
+      >
+        {/* LLM config warning */}
+        {hasLlmConfig === false && (
+          <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 dark:border-amber-900 dark:bg-amber-950">
+            <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+            <span className="text-xs text-amber-700 dark:text-amber-300">
+              No LLM provider configured. Please add an API key in Settings → Providers.
             </span>
           </div>
-          <div className="max-h-[7.5rem] overflow-y-auto">
-            {queuedMessages.map((msg, i) => (
-              <div
-                key={i}
-                className="group flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-zinc-100 dark:border-zinc-700/30 last:border-b-0"
-              >
-                <span className="shrink-0 text-[10px] mt-0.5 text-zinc-400 dark:text-zinc-500 select-none">{i + 1}.</span>
-                <span className="flex-1 min-w-0 text-xs text-zinc-700 dark:text-zinc-300 truncate leading-relaxed">
-                  {msg}
-                </span>
-                <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    type="button"
-                    onClick={() => handleEditQueued(i)}
-                    className="rounded-sm p-0.5 text-zinc-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:text-blue-400 dark:hover:bg-blue-900/30"
-                    aria-label={`Edit message ${i + 1}`}
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveQueued(i)}
-                    className="rounded-sm p-0.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 dark:hover:text-red-400 dark:hover:bg-red-900/30"
-                    aria-label={`Remove message ${i + 1}`}
-                  >
-                    <X size={12} />
-                  </button>
+        )}
+        {/* ADR-015: Session tab bar */}
+        {selectedAgentId && <SessionTabBar agentId={selectedAgentId} />}
+        {/* Messages area with drawer overlay */}
+        <div className="relative flex-1 overflow-hidden">
+          <div
+            ref={messagesContainerRef}
+            onScroll={handleScroll}
+            className="h-full overflow-y-auto px-4 py-3 select-text cursor-text"
+            role="log"
+            aria-label="Chat messages"
+          >
+            {/* Loading more indicator at top */}
+            {useChatStore.getState().isLoadingMore && (
+              <div className="flex items-center justify-center py-2">
+                <Loader className="h-4 w-4 animate-spin text-zinc-400 dark:text-zinc-500" />
+                <span className="ml-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">Loading more...</span>
+              </div>
+            )}
+
+            {/* Loading session indicator */}
+            {isLoadingSession && messages.length === 0 && (
+              <div className="flex h-full items-center justify-center">
+                <div className="text-center">
+                  <Loader className="mx-auto h-8 w-8 animate-spin text-zinc-400 dark:text-zinc-500" />
+                  <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading conversation...</p>
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
+            )}
 
-      {/* Unified input container with toolbar */}
-      <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-[#FAFAFA] dark:bg-zinc-900">
-        {/* Active skill badge */}
-        {activeSkill && (
-          <div className="flex items-center gap-1 px-3 pt-2">
-            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-[var(--color-accent)]/20" style={{ color: "var(--color-accent)" }}>
-              /{activeSkill.name}
-              <button
-                type="button"
-                onClick={clearActiveSkill}
-                className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-blue-100 dark:hover:bg-blue-800"
-                aria-label="Clear active skill"
-              >
-                <X size={12} />
-              </button>
-            </span>
-          </div>
-        )}
-
-        {/* Pending file chips */}
-        {pendingFiles.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
-            {pendingFiles.map((file) => (
-              <DocumentChip
-                key={file.tempId}
-                filename={file.filename}
-                format={file.format}
-                size={file.size > 0 ? file.size : undefined}
-                status={file.status}
-                errorMessage={file.errorMessage}
-                onRemove={() => handleRemoveFile(file.tempId)}
-              />
-            ))}
-          </div>
-        )}
-        {/* Pending image thumbnails */}
-        {pendingImages.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
-            {pendingImages.map((img) => (
-              <div
-                key={img.tempId}
-                className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700"
-              >
-                <img
-                  src={img.base64Url}
-                  alt={img.filename}
-                  className="h-full w-full object-cover"
-                />
+            {loadError && !isLoadingSession && (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-4">
+                <div className="text-sm text-red-500 dark:text-red-400">Session 加载失败</div>
+                <div className="max-w-xs text-center text-xs text-zinc-500 dark:text-zinc-400">
+                  {loadError}
+                </div>
                 <button
-                  type="button"
-                  onClick={() => handleRemoveImage(img.tempId)}
-                  className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
-                  aria-label={`Remove ${img.filename}`}
+                  onClick={() => {
+                    const sessionId = useSessionStore.getState().currentSessionId;
+                    const agentId = useAgentStore.getState().selectedAgentId;
+                    if (sessionId && agentId) {
+                      useChatStore.getState().loadSessionMessages(agentId, sessionId);
+                    }
+                  }}
+                  className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
                 >
-                  <X size={10} />
+                  重试
                 </button>
               </div>
-            ))}
-          </div>
-        )}
-        {/* Textarea area — borderless, transparent background */}
-        <textarea
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder={
-            gatewayStatus !== "connected"
-              ? "Gateway not connected"
-              : !wsMap[selectedAgentId!] || wsMap[selectedAgentId!].readyState !== WebSocket.OPEN
-                ? activeSkill
-                  ? "输入参数... (Connecting to agent...)"
-                  : "Type a message... (Connecting to agent...)"
-                : activeSkill
-                  ? "输入参数... (Enter to send, Shift+Enter for new line)"
-                  : "Type a message... (Enter to send, Shift+Enter for new line)"
-          }
-          disabled={inputDisabled}
-          className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
-          style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              // Let handleSend() itself decide whether to proceed
-              handleSend();
-            }
-          }}
-        />
+            )}
+            {!loadError && !isLoadingSession && messages.length === 0 && (
+              <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+                Start a conversation with {selectedAgent.name}
+              </div>
+            )}
+            {/* Virtualized message list — only renders visible items */}
+            {displayMessages.length > 0 && (
+              <div
+                style={{
+                  height: virtualizer.getTotalSize(),
+                  width: '100%',
+                  position: 'relative',
+                }}
+              >
+                {virtualizer.getVirtualItems().map((virtualRow) => {
+                  const item = displayMessages[virtualRow.index];
+                  const displayItem = item as any;
 
-        {/* Bottom toolbar */}
-        <div className="flex items-center justify-between px-3 pb-2">
-          {/* Left: feature buttons */}
-          <div className="flex items-center gap-1">
-            {/* Model switcher — only enabled when agent is running */}
-            {availableModels.length > 1 && selectedAgent?.running && (
-              <ModelMenu
-                models={availableModels}
-                currentModel={currentModel}
-                currentProvider={currentProvider}
-                onSelect={(m, p) => selectedAgentId && setCurrentModel(m, p, selectedAgentId)}
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      ref={virtualizer.measureElement}
+                      data-index={virtualRow.index}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                      className=""
+                    >
+                      {/* Explore group - aggregated think + tool calls/results */}
+                      {displayItem.type === 'explore_group' && (
+                        <ExploreBlock
+                          items={displayItem.items}
+                          isStreaming={displayItem.items.some(
+                            (m: ChatMessage) => m.id === streamingMessageId || m.id === thinkingMessageId
+                          )}
+                          pendingApproval={pendingApproval}
+                          currentSessionId={currentSessionId}
+                          onApprove={(action) => handleToolApprove(action, pendingApproval!)}
+                        />
+                      )}
+
+                      {/* Regular message */}
+                      {displayItem.type !== 'explore_group' && (
+                        <MessageBubble message={item as ChatMessage} isStreaming={(item as ChatMessage).id === streamingMessageId} agentId={selectedAgentId ?? ""} />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* LLM reasoning indicator — shimmering "thinking ..." shown while waiting for first token */}
+            {isReasoning && !streamingMessageId && !thinkingMessageId && (
+              <div className="flex items-center px-4 py-1.5 select-none">
+                <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>thinking ...</span>
+              </div>
+            )}
+            {/* Iteration limit pause — hint + Continue button */}
+            {iterationLimitPaused && (
+              <div className="flex flex-col items-start gap-1.5">
+                <span
+                  className="text-zinc-600 dark:text-zinc-400"
+                  style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
+                >
+                  {iterationLimitPaused.message}
+                </span>
+                <button
+                  onClick={() => {
+                    if (selectedAgentId) {
+                      continueExecution(selectedAgentId);
+                    }
+                  }}
+                  className="flex w-fit max-w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-white transition-opacity hover:opacity-90"
+                  style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)", backgroundColor: "var(--color-accent)" }}
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  <span>
+                    Continue ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
+                  </span>
+                </button>
+              </div>
+            )}
+            {/* Ask question card — shown when LLM asks the user a question */}
+            {pendingQuestion && (
+              <AskQuestionCard
+                event={pendingQuestion}
+                agentId={selectedAgentId ?? ""}
+                sessionId={currentSessionId}
+                onAnswer={handleQuestionAnswer}
               />
             )}
-            {/* Workspace button */}
-            <WorkspaceSelector />
-            {/* Skills dropdown */}
-            <SkillsPanel />
-            {/* File upload button */}
-            <div className="group relative">
-              <button
-                className={toolbarButton}
-                onClick={handleFileUpload}
-                disabled={!currentSessionId || !selectedAgentId}
-                aria-label="上传文件"
-              >
-                <Paperclip size={14} />
-              </button>
-              {/* Tooltip */}
-              <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
-                <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
-                  上传文件 (PDF/DOCX/PPTX/XLSX)
-                </div>
-              </div>
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {/* Queued messages box — separate box above the input area,
+          flush against input, slightly narrower for layered depth */}
+        {queuedMessages.length > 0 && (
+          <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+            <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
+              <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+                消息队列 ({queuedMessages.length})
+              </span>
             </div>
-            {/* Image upload button */}
-            <div className="group relative">
-              <button
-                className={toolbarButton}
-                onClick={handleImageSelect}
-                disabled={!currentSessionId || !selectedAgentId}
-                aria-label="上传图片"
-              >
-                <Image size={14} />
-              </button>
-              {/* Tooltip */}
-              <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
-                <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
-                  上传图片 (PNG/JPG/GIF/WebP)
+            <div className="max-h-[7.5rem] overflow-y-auto">
+              {queuedMessages.map((msg, i) => (
+                <div
+                  key={i}
+                  className="group flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-zinc-100 dark:border-zinc-700/30 last:border-b-0"
+                >
+                  <span className="shrink-0 text-[10px] mt-0.5 text-zinc-400 dark:text-zinc-500 select-none">{i + 1}.</span>
+                  <span className="flex-1 min-w-0 text-xs text-zinc-700 dark:text-zinc-300 truncate leading-relaxed">
+                    {msg}
+                  </span>
+                  <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      type="button"
+                      onClick={() => handleEditQueued(i)}
+                      className="rounded-sm p-0.5 text-zinc-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:text-blue-400 dark:hover:bg-blue-900/30"
+                      aria-label={`Edit message ${i + 1}`}
+                    >
+                      <Pencil size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveQueued(i)}
+                      className="rounded-sm p-0.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 dark:hover:text-red-400 dark:hover:bg-red-900/30"
+                      aria-label={`Remove message ${i + 1}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ))}
             </div>
           </div>
+        )}
 
-          {/* Right: send/stop button */}
+        {/* Unified input container with toolbar */}
+        <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-[#FAFAFA] dark:bg-zinc-900">
+          {/* Active skill badge */}
+          {activeSkill && (
+            <div className="flex items-center gap-1 px-3 pt-2">
+              <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-[var(--color-accent)]/20" style={{ color: "var(--color-accent)" }}>
+                /{activeSkill.name}
+                <button
+                  type="button"
+                  onClick={clearActiveSkill}
+                  className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-blue-100 dark:hover:bg-blue-800"
+                  aria-label="Clear active skill"
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            </div>
+          )}
+
+          {/* Pending file chips */}
+          {pendingFiles.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+              {pendingFiles.map((file) => (
+                <DocumentChip
+                  key={file.tempId}
+                  filename={file.filename}
+                  format={file.format}
+                  size={file.size > 0 ? file.size : undefined}
+                  status={file.status}
+                  errorMessage={file.errorMessage}
+                  onRemove={() => handleRemoveFile(file.tempId)}
+                />
+              ))}
+            </div>
+          )}
+          {/* Pending image thumbnails */}
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
+              {pendingImages.map((img) => (
+                <div
+                  key={img.tempId}
+                  className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700"
+                >
+                  <img
+                    src={img.base64Url}
+                    alt={img.filename}
+                    className="h-full w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveImage(img.tempId)}
+                    className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                    aria-label={`Remove ${img.filename}`}
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Textarea area — borderless, transparent background */}
+          <textarea
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder={
+              gatewayStatus !== "connected"
+                ? "Gateway not connected"
+                : !wsMap[selectedAgentId!] || wsMap[selectedAgentId!].readyState !== WebSocket.OPEN
+                  ? activeSkill
+                    ? "输入参数... (Connecting to agent...)"
+                    : "Type a message... (Connecting to agent...)"
+                  : activeSkill
+                    ? "输入参数... (Enter to send, Shift+Enter for new line)"
+                    : "Type a message... (Enter to send, Shift+Enter for new line)"
+            }
+            disabled={inputDisabled}
+            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                // Let handleSend() itself decide whether to proceed
+                handleSend();
+              }
+            }}
+          />
+
+          {/* Bottom toolbar */}
+          <div className="flex items-center justify-between px-3 pb-2">
+            {/* Left: feature buttons */}
+            <div className="flex items-center gap-1">
+              {/* Model switcher — only enabled when agent is running */}
+              {availableModels.length > 1 && selectedAgent?.running && (
+                <ModelMenu
+                  models={availableModels}
+                  currentModel={currentModel}
+                  currentProvider={currentProvider}
+                  onSelect={(m, p) => selectedAgentId && setCurrentModel(m, p, selectedAgentId)}
+                />
+              )}
+              {/* Workspace button */}
+              <WorkspaceSelector />
+              {/* Skills dropdown */}
+              <SkillsPanel />
+              {/* File upload button */}
+              <div className="group relative">
+                <button
+                  className={toolbarButton}
+                  onClick={handleFileUpload}
+                  disabled={!currentSessionId || !selectedAgentId}
+                  aria-label="上传文件"
+                >
+                  <Paperclip size={14} />
+                </button>
+                {/* Tooltip */}
+                <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
+                  <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
+                    上传文件 (PDF/DOCX/PPTX/XLSX)
+                  </div>
+                </div>
+              </div>
+              {/* Image upload button */}
+              <div className="group relative">
+                <button
+                  className={toolbarButton}
+                  onClick={handleImageSelect}
+                  disabled={!currentSessionId || !selectedAgentId}
+                  aria-label="上传图片"
+                >
+                  <Image size={14} />
+                </button>
+                {/* Tooltip */}
+                <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-50">
+                  <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
+                    上传图片 (PNG/JPG/GIF/WebP)
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Right: send/stop button */}
 
             {/* Send/Stop button with tooltip above */}
             <div className="group relative">
               <button
-                className={`rounded-lg p-1.5 transition-colors ${
-                  sending
-                    ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
-                    : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
-                }`}
+                className={`rounded-lg p-1.5 transition-colors ${sending
+                  ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
+                  : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
+                  }`}
                 onClick={sending ? handleStop : handleSend}
                 disabled={
                   sending
@@ -1178,17 +1198,31 @@ export function ChatPanel() {
                 <div className="whitespace-nowrap rounded-md bg-zinc-800 dark:bg-zinc-200 px-2.5 py-1.5 text-[11px] leading-tight text-white dark:text-zinc-800 shadow-lg">
                   {sending
                     ? (inputValue.trim()
-                        ? "加入队列"
-                        : queuedMessages.length > 0
-                          ? "发送队列 & 停止"
-                          : "停止")
+                      ? "加入队列"
+                      : queuedMessages.length > 0
+                        ? "发送队列 & 停止"
+                        : "停止")
                     : "发送消息"}
                 </div>
               </div>
             </div>
           </div>
         </div>
-    </div>
+      </div>
+
+      {/* Image unsupported dialog */}
+      <UnsupportedImageDialog
+        open={showImageUnsupportedDialog}
+        models={imageCapableModels}
+        onSelect={(model: string, provider: string) => {
+          if (selectedAgentId) {
+            setCurrentModel(model, provider, selectedAgentId);
+            setShowImageUnsupportedDialog(false);
+          }
+        }}
+        onClose={() => setShowImageUnsupportedDialog(false)}
+      />
+    </>
   );
 }
 
@@ -1228,7 +1262,7 @@ function parseThinkContent(content: string): {
   // Extract reply content (after the first </think>)
   // Also strip any remaining <think>...</think> tags from the reply
   let replyContent = content.slice(firstThinkEnd + 8); // length of "</think>"
-  
+
   // Remove any remaining <think>...</think> blocks from reply content
   const thinkRegex = new RegExp('<think>[\\s\\S]*?</think>', 'g');
   replyContent = replyContent.replace(thinkRegex, "");
@@ -1237,7 +1271,7 @@ function parseThinkContent(content: string): {
   if (lastUnclosedThink !== -1 && replyContent.indexOf("</think>", lastUnclosedThink + 7) === -1) {
     replyContent = replyContent.slice(0, lastUnclosedThink);
   }
-  
+
   // Trim leading whitespace/newlines from reply content
   replyContent = replyContent.trimStart();
 
@@ -1256,7 +1290,7 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
     e.stopPropagation();
     const selection = window.getSelection();
     const selectedText = selection?.toString().trim();
-    
+
     // Only show context menu if there's selected text
     if (selectedText) {
       setContextMenu({ x: e.clientX, y: e.clientY });
@@ -1287,7 +1321,7 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
   // Close context menu on outside click (but not on right-click)
   useEffect(() => {
     if (!contextMenu) return;
-    
+
     const handleClick = (e: MouseEvent) => {
       // Check if click is outside the context menu
       const target = e.target as Node;
@@ -1295,13 +1329,13 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
         setContextMenu(null);
       }
     };
-    
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setContextMenu(null);
       }
     };
-    
+
     document.addEventListener("mousedown", handleClick);
     document.addEventListener("keydown", handleKeyDown);
     return () => {
@@ -1682,11 +1716,11 @@ function AddModelDialog({
       setTestResult({ success: false, message: "Please enter an API Key first" });
       return;
     }
-    
+
     setSaving(true);
     setTesting(true);
     setTestResult(null);
-    
+
     try {
       // First test the API key
       if (needsApiKey(provider)) {
@@ -1696,12 +1730,12 @@ function AddModelDialog({
           key,
           baseUrl: baseUrl || undefined,
         });
-        
+
         // Try to fetch models to verify the key works
         await fetchProviderModels(provider);
-        
+
         setTestResult({ success: true, message: "API Key is valid!" });
-        
+
         // Remove the temporary key
         await invoke("remove_key", { provider });
       }
@@ -1712,30 +1746,30 @@ function AddModelDialog({
       setSaving(false);
       return;
     }
-    
+
     setTesting(false);
-    
+
     // Test passed, proceed with saving
     try {
       // Get effective values (prefer models.dev data if available)
       const primaryModel = models.length > 0 ? models[0] : "";
       const modelInfo = availableModels.find(m => m.id === primaryModel);
       const hasModelsDevData = !!(modelInfo && (modelInfo.context_window || modelInfo.max_tokens));
-      const effectiveContextWindow = hasModelsDevData 
+      const effectiveContextWindow = hasModelsDevData
         ? (modelInfo?.context_window?.toString() ?? contextWindow)
         : contextWindow;
-      const effectiveMaxOutputTokens = hasModelsDevData 
+      const effectiveMaxOutputTokens = hasModelsDevData
         ? (modelInfo?.max_tokens?.toString() ?? maxOutputTokens)
         : maxOutputTokens;
-      const effectiveSupportsToolCalling = hasModelsDevData 
+      const effectiveSupportsToolCalling = hasModelsDevData
         ? (modelInfo?.tool_call ?? supportsToolCalling)
         : supportsToolCalling;
-      
+
       // Rust requires context_window to be present (u64, not Option)
       // Default to 128000 if not specified (safe default for most models)
       const ctxWindow = effectiveContextWindow ? parseInt(effectiveContextWindow) : 128000;
       const maxOutTokens = effectiveMaxOutputTokens ? parseInt(effectiveMaxOutputTokens) : 0;
-      
+
       // Build per-model capabilities map
       const modelCapabilities: ModelCapabilitiesMap = {};
       for (const modelId of models) {
@@ -1748,7 +1782,7 @@ function AddModelDialog({
           modalities: mi?.input_modalities?.length ? { input: mi.input_modalities } : undefined,
         };
       }
-      
+
       await invoke("add_key", {
         provider,
         key,
@@ -1777,280 +1811,280 @@ function AddModelDialog({
 
         <div className="flex-1 overflow-y-auto px-6">
           <div className="space-y-2">
-          {/* Provider dropdown */}
-          <div>
-            <label className="mb-1 block text-xs text-zinc-500">Provider</label>
-            {providersLoading ? (
-              <div className="flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-2 text-xs text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900">
-                <RefreshCw className="h-3 w-3 animate-spin" />
-                Loading providers...
-              </div>
-            ) : (
-              <select
-                value={provider}
-                onChange={(e) => setProvider(e.target.value)}
-                className="w-full appearance-none rounded-md border border-zinc-200 bg-white px-3 py-2 pr-8 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                  backgroundPosition: 'right 0.5rem center',
-                  backgroundRepeat: 'no-repeat',
-                  backgroundSize: '1.5em 1.5em',
-                }}
-              >
-                <optgroup label="All Providers">
-                  {dynamicProviders.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </optgroup>
-              </select>
-            )}
-          </div>
-
-          {/* API Key */}
-          {needsApiKey(provider) && (
+            {/* Provider dropdown */}
             <div>
-              <label className="mb-1 block text-xs text-zinc-500">API Key</label>
+              <label className="mb-1 block text-xs text-zinc-500">Provider</label>
+              {providersLoading ? (
+                <div className="flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-2 text-xs text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900">
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  Loading providers...
+                </div>
+              ) : (
+                <select
+                  value={provider}
+                  onChange={(e) => setProvider(e.target.value)}
+                  className="w-full appearance-none rounded-md border border-zinc-200 bg-white px-3 py-2 pr-8 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundRepeat: 'no-repeat',
+                    backgroundSize: '1.5em 1.5em',
+                  }}
+                >
+                  <optgroup label="All Providers">
+                    {dynamicProviders.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </optgroup>
+                </select>
+              )}
+            </div>
+
+            {/* API Key */}
+            {needsApiKey(provider) && (
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">API Key</label>
+                <input
+                  type="password"
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  placeholder={keyPlaceholder(provider)}
+                  className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                />
+              </div>
+            )}
+
+            {showBaseUrl && (
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
+                <input
+                  type="text"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="https://..."
+                  className="w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                />
+              </div>
+            )}
+
+            {/* Model selection */}
+            <div>
+              <label className="mb-1 block text-xs text-zinc-500">
+                Model {models.length > 0 && <span className="text-accent-green">({models.length} selected)</span>}
+              </label>
+
+              {/* Capability filters */}
+              <div className="mb-2 flex gap-2">
+                <button
+                  onClick={() => setModelCapabilityFilter(
+                    modelCapabilityFilter.includes('tool_call')
+                      ? modelCapabilityFilter.filter(f => f !== 'tool_call')
+                      : [...modelCapabilityFilter, 'tool_call']
+                  )}
+                  className={cn(
+                    "rounded px-2 py-0.5 text-[10px] font-medium",
+                    modelCapabilityFilter.includes('tool_call')
+                      ? "bg-accent-green/10 text-accent-green"
+                      : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                  )}
+                >
+                  🔧 Tool Calling
+                </button>
+                <button
+                  onClick={() => setModelCapabilityFilter(
+                    modelCapabilityFilter.includes('reasoning')
+                      ? modelCapabilityFilter.filter(f => f !== 'reasoning')
+                      : [...modelCapabilityFilter, 'reasoning']
+                  )}
+                  className={cn(
+                    "rounded px-2 py-0.5 text-[10px] font-medium",
+                    modelCapabilityFilter.includes('reasoning')
+                      ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
+                      : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                  )}
+                >
+                  🧠 Reasoning
+                </button>
+              </div>
+
+              {/* Selected models as tags */}
+              {models.length > 0 && (
+                <div className="mb-1 flex flex-wrap gap-1">
+                  {models.map((m) => (
+                    <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
+                      {m}
+                      <button onClick={() => setModels(models.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Search */}
               <input
-                type="password"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                placeholder={keyPlaceholder(provider)}
+                type="text"
+                value={modelSearchTerm}
+                onChange={(e) => setModelSearchTerm(e.target.value)}
+                placeholder="Search models..."
                 className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
               />
-            </div>
-          )}
 
-          {showBaseUrl && (
-            <div>
-              <label className="mb-1 block text-xs text-zinc-500">Base URL</label>
-              <input
-                type="text"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="https://..."
-                className="w-full rounded-md border border-zinc-200 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-              />
-            </div>
-          )}
+              {/* Model list */}
+              <div className="mt-1 max-h-40 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
+                {modelsLoading ? (
+                  <div className="px-3 py-2 text-xs text-zinc-400">Loading models...</div>
+                ) : (
+                  availableModels
+                    .filter((m) => {
+                      const matchesSearch = !modelSearchTerm ||
+                        m.id.toLowerCase().includes(modelSearchTerm.toLowerCase()) ||
+                        m.name.toLowerCase().includes(modelSearchTerm.toLowerCase());
 
-          {/* Model selection */}
-          <div>
-            <label className="mb-1 block text-xs text-zinc-500">
-              Model {models.length > 0 && <span className="text-accent-green">({models.length} selected)</span>}
-            </label>
-            
-            {/* Capability filters */}
-            <div className="mb-2 flex gap-2">
-              <button
-                onClick={() => setModelCapabilityFilter(
-                  modelCapabilityFilter.includes('tool_call') 
-                    ? modelCapabilityFilter.filter(f => f !== 'tool_call')
-                    : [...modelCapabilityFilter, 'tool_call']
+                      const matchesCapabilities = modelCapabilityFilter.length === 0 ||
+                        modelCapabilityFilter.every(filter => {
+                          if (filter === 'tool_call') return m.tool_call === true;
+                          if (filter === 'reasoning') return m.reasoning === true;
+                          return true;
+                        });
+
+                      return matchesSearch && matchesCapabilities;
+                    })
+                    .map((m) => (
+                      <label
+                        key={m.id}
+                        className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-700"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={models.includes(m.id)}
+                          disabled={keys.some(k => k.provider === provider && k.models?.includes(m.id))}
+                          onChange={() => toggleModel(m.id, models, setModels)}
+                          className="accent-accent-green disabled:opacity-50"
+                        />
+                        <div className="flex flex-1 flex-col gap-0.5">
+                          <span className="truncate">{m.name || m.id}</span>
+                          <div className="flex items-center gap-2 text-[10px] text-zinc-400">
+                            {keys.some(k => k.provider === provider && k.models?.includes(m.id)) && (
+                              <span className="text-green-600 dark:text-green-400">✓ Added</span>
+                            )}
+                            {m.context_window && (
+                              <span>{(m.context_window / 1000).toFixed(0)}K context</span>
+                            )}
+                            {m.max_tokens && (
+                              <span>{(m.max_tokens / 1000).toFixed(1)}K max output</span>
+                            )}
+                            {m.reasoning && <span>🧠 reasoning</span>}
+                            {m.tool_call && <span>🔧 tools</span>}
+                          </div>
+                        </div>
+                      </label>
+                    ))
                 )}
-                className={cn(
-                  "rounded px-2 py-0.5 text-[10px] font-medium",
-                  modelCapabilityFilter.includes('tool_call')
-                    ? "bg-accent-green/10 text-accent-green"
-                    : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
+                {!modelsLoading && availableModels.length === 0 && (
+                  <div className="px-3 py-2 text-xs text-zinc-400">No models found. Select provider first.</div>
                 )}
-              >
-                🔧 Tool Calling
-              </button>
-              <button
-                onClick={() => setModelCapabilityFilter(
-                  modelCapabilityFilter.includes('reasoning') 
-                    ? modelCapabilityFilter.filter(f => f !== 'reasoning')
-                    : [...modelCapabilityFilter, 'reasoning']
-                )}
-                className={cn(
-                  "rounded px-2 py-0.5 text-[10px] font-medium",
-                  modelCapabilityFilter.includes('reasoning')
-                    ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
-                    : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400"
-                )}
-              >
-                🧠 Reasoning
-              </button>
-            </div>
-            
-            {/* Selected models as tags */}
-            {models.length > 0 && (
-              <div className="mb-1 flex flex-wrap gap-1">
-                {models.map((m) => (
-                  <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
-                    {m}
-                    <button onClick={() => setModels(models.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
-                  </span>
-                ))}
               </div>
-            )}
-            
-            {/* Search */}
-            <input
-              type="text"
-              value={modelSearchTerm}
-              onChange={(e) => setModelSearchTerm(e.target.value)}
-              placeholder="Search models..."
-              className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-            />
-            
-            {/* Model list */}
-            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
-              {modelsLoading ? (
-                <div className="px-3 py-2 text-xs text-zinc-400">Loading models...</div>
-              ) : (
-                availableModels
-                  .filter((m) => {
-                    const matchesSearch = !modelSearchTerm ||
-                      m.id.toLowerCase().includes(modelSearchTerm.toLowerCase()) ||
-                      m.name.toLowerCase().includes(modelSearchTerm.toLowerCase());
-                    
-                    const matchesCapabilities = modelCapabilityFilter.length === 0 ||
-                      modelCapabilityFilter.every(filter => {
-                        if (filter === 'tool_call') return m.tool_call === true;
-                        if (filter === 'reasoning') return m.reasoning === true;
-                        return true;
-                      });
-                    
-                    return matchesSearch && matchesCapabilities;
-                  })
-                  .map((m) => (
-                    <label
-                      key={m.id}
-                      className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-700"
-                    >
+
+              {/* Manual model input */}
+              <div className="mt-2 flex gap-1">
+                <input
+                  type="text"
+                  placeholder="Or type a custom model name..."
+                  className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const val = (e.target as HTMLInputElement).value.trim();
+                      if (val && !models.includes(val)) {
+                        setModels([...models, val]);
+                        (e.target as HTMLInputElement).value = "";
+                      }
+                    }
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Model Capabilities */}
+            {models.length > 0 && (() => {
+              const primaryModel = models[0];
+              const modelInfo = availableModels.find(m => m.id === primaryModel);
+              const hasModelsDevData = !!(modelInfo && (modelInfo.context_window || modelInfo.max_tokens));
+              const autoContextWindow = modelInfo?.context_window?.toString() ?? "";
+              const autoMaxOutputTokens = modelInfo?.max_tokens?.toString() ?? "";
+              const autoSupportsToolCalling = modelInfo?.tool_call ?? true;
+              const displayContextWindow = hasModelsDevData ? autoContextWindow : contextWindow;
+              const displayMaxOutputTokens = hasModelsDevData ? autoMaxOutputTokens : maxOutputTokens;
+              const displaySupportsToolCalling = hasModelsDevData ? autoSupportsToolCalling : supportsToolCalling;
+              return (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-500">
+                    Model Capabilities
+                    {hasModelsDevData && <span className="ml-1 text-[10px] text-zinc-400">(from models.dev)</span>}
+                    {!hasModelsDevData && <span className="ml-1 text-[10px] text-amber-500">(manual input required)</span>}
+                  </label>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <label className="mb-0.5 block text-[10px] text-zinc-400">Context Window</label>
+                      <input
+                        type="number"
+                        value={displayContextWindow}
+                        onChange={(e) => setContextWindow(e.target.value)}
+                        readOnly={hasModelsDevData}
+                        placeholder="e.g. 128000"
+                        className={cn(
+                          "w-full rounded-md border border-zinc-200 px-3 py-2 text-xs",
+                          hasModelsDevData
+                            ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
+                            : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
+                        )}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="mb-0.5 block text-[10px] text-zinc-400">Max Output Tokens</label>
+                      <input
+                        type="number"
+                        value={displayMaxOutputTokens}
+                        onChange={(e) => setMaxOutputTokens(e.target.value)}
+                        readOnly={hasModelsDevData}
+                        placeholder="e.g. 4096"
+                        className={cn(
+                          "w-full rounded-md border border-zinc-200 px-3 py-2 text-xs",
+                          hasModelsDevData
+                            ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
+                            : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
+                        )}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <label className="flex items-center gap-1.5 text-xs text-zinc-500">
                       <input
                         type="checkbox"
-                        checked={models.includes(m.id)}
-                        disabled={keys.some(k => k.provider === provider && k.models?.includes(m.id))}
-                        onChange={() => toggleModel(m.id, models, setModels)}
-                        className="accent-accent-green disabled:opacity-50"
+                        checked={displaySupportsToolCalling}
+                        onChange={(e) => setSupportsToolCalling(e.target.checked)}
+                        disabled={hasModelsDevData}
+                        className="accent-accent-green"
                       />
-                      <div className="flex flex-1 flex-col gap-0.5">
-                        <span className="truncate">{m.name || m.id}</span>
-                        <div className="flex items-center gap-2 text-[10px] text-zinc-400">
-                          {keys.some(k => k.provider === provider && k.models?.includes(m.id)) && (
-                            <span className="text-green-600 dark:text-green-400">✓ Added</span>
-                          )}
-                          {m.context_window && (
-                            <span>{(m.context_window / 1000).toFixed(0)}K context</span>
-                          )}
-                          {m.max_tokens && (
-                            <span>{(m.max_tokens / 1000).toFixed(1)}K max output</span>
-                          )}
-                          {m.reasoning && <span>🧠 reasoning</span>}
-                          {m.tool_call && <span>🔧 tools</span>}
-                        </div>
-                      </div>
+                      Supports Tool Calling
                     </label>
-                  ))
-              )}
-              {!modelsLoading && availableModels.length === 0 && (
-                <div className="px-3 py-2 text-xs text-zinc-400">No models found. Select provider first.</div>
-              )}
-            </div>
-            
-            {/* Manual model input */}
-            <div className="mt-2 flex gap-1">
-              <input
-                type="text"
-                placeholder="Or type a custom model name..."
-                className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    const val = (e.target as HTMLInputElement).value.trim();
-                    if (val && !models.includes(val)) {
-                      setModels([...models, val]);
-                      (e.target as HTMLInputElement).value = "";
-                    }
-                  }
-                }}
-              />
-            </div>
-          </div>
+                  </div>
+                </div>
+              );
+            })()}
 
-          {/* Model Capabilities */}
-          {models.length > 0 && (() => {
-            const primaryModel = models[0];
-            const modelInfo = availableModels.find(m => m.id === primaryModel);
-            const hasModelsDevData = !!(modelInfo && (modelInfo.context_window || modelInfo.max_tokens));
-            const autoContextWindow = modelInfo?.context_window?.toString() ?? "";
-            const autoMaxOutputTokens = modelInfo?.max_tokens?.toString() ?? "";
-            const autoSupportsToolCalling = modelInfo?.tool_call ?? true;
-            const displayContextWindow = hasModelsDevData ? autoContextWindow : contextWindow;
-            const displayMaxOutputTokens = hasModelsDevData ? autoMaxOutputTokens : maxOutputTokens;
-            const displaySupportsToolCalling = hasModelsDevData ? autoSupportsToolCalling : supportsToolCalling;
-            return (
-              <div>
-                <label className="mb-1 block text-xs text-zinc-500">
-                  Model Capabilities
-                  {hasModelsDevData && <span className="ml-1 text-[10px] text-zinc-400">(from models.dev)</span>}
-                  {!hasModelsDevData && <span className="ml-1 text-[10px] text-amber-500">(manual input required)</span>}
-                </label>
-                <div className="flex gap-2">
-                  <div className="flex-1">
-                    <label className="mb-0.5 block text-[10px] text-zinc-400">Context Window</label>
-                    <input
-                      type="number"
-                      value={displayContextWindow}
-                      onChange={(e) => setContextWindow(e.target.value)}
-                      readOnly={hasModelsDevData}
-                      placeholder="e.g. 128000"
-                      className={cn(
-                        "w-full rounded-md border border-zinc-200 px-3 py-2 text-xs",
-                        hasModelsDevData
-                          ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
-                          : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
-                      )}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <label className="mb-0.5 block text-[10px] text-zinc-400">Max Output Tokens</label>
-                    <input
-                      type="number"
-                      value={displayMaxOutputTokens}
-                      onChange={(e) => setMaxOutputTokens(e.target.value)}
-                      readOnly={hasModelsDevData}
-                      placeholder="e.g. 4096"
-                      className={cn(
-                        "w-full rounded-md border border-zinc-200 px-3 py-2 text-xs",
-                        hasModelsDevData
-                          ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
-                          : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
-                      )}
-                    />
-                  </div>
-                </div>
-                <div className="mt-1.5 flex items-center gap-2">
-                  <label className="flex items-center gap-1.5 text-xs text-zinc-500">
-                    <input
-                      type="checkbox"
-                      checked={displaySupportsToolCalling}
-                      onChange={(e) => setSupportsToolCalling(e.target.checked)}
-                      disabled={hasModelsDevData}
-                      className="accent-accent-green"
-                    />
-                    Supports Tool Calling
-                  </label>
-                </div>
+
+
+            {/* Test result */}
+            {testResult && (
+              <div className={cn(
+                "rounded-md px-3 py-2 text-xs",
+                testResult.success
+                  ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
+                  : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
+              )}>
+                {testResult.message}
               </div>
-            );
-          })()}
-
-
-
-          {/* Test result */}
-          {testResult && (
-            <div className={cn(
-              "rounded-md px-3 py-2 text-xs",
-              testResult.success
-                ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
-                : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
-            )}>
-              {testResult.message}
-            </div>
-          )}
-        </div>
+            )}
+          </div>
         </div>
 
         <div className="shrink-0 flex items-center justify-between gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
@@ -2070,7 +2104,7 @@ function AddModelDialog({
               <div className="text-xs text-zinc-400">Testing...</div>
             )}
           </div>
-          
+
           {/* Buttons on the right with equal width */}
           <div className="flex gap-2 shrink-0">
             <button
@@ -2087,6 +2121,79 @@ function AddModelDialog({
               {saving ? "Saving..." : "Save"}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Dialog shown when user tries to upload an image but the current model doesn't support it */
+function UnsupportedImageDialog({
+  open,
+  models,
+  onSelect,
+  onClose,
+}: {
+  open: boolean;
+  models: ModelEntry[];
+  onSelect: (model: string, provider: string) => void;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="w-[400px] overflow-hidden rounded-lg bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="shrink-0 px-6 pt-6 pb-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          当前模型不支持图片输入
+        </h3>
+        <p className="px-6 pb-4 text-xs text-zinc-500 dark:text-zinc-400">
+          请切换到以下支持图片输入的模型：
+        </p>
+
+        <div className="max-h-[240px] overflow-y-auto px-6 pb-2">
+          {models.map((m) => (
+            <button
+              key={`${m.name}::${m.provider}`}
+              type="button"
+              onClick={() => {
+                onSelect(m.name, m.provider);
+              }}
+              className="flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-700/50 text-zinc-600 dark:text-zinc-300"
+            >
+              <span className="flex items-center gap-1.5 min-w-0">
+                <Image size={12} className="shrink-0 text-blue-400" />
+                <span className="font-medium truncate">
+                  {(() => {
+                    if (!m.name.includes('/')) return m.name;
+                    const parts = m.name.split('/');
+                    const prefix = parts[0];
+                    const modelName = parts.slice(1).join('/');
+                    return modelName.length > prefix.length ? modelName : m.name;
+                  })()}
+                </span>
+                <span className="flex items-center gap-0.5 shrink-0">
+                  {m.tool_call && <Wrench size={10} className="text-zinc-400" />}
+                  {m.reasoning && <Brain size={10} className="text-purple-400" />}
+                </span>
+              </span>
+              <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
+                {m.provider}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="shrink-0 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
+          <button
+            onClick={onClose}
+            className="rounded-md px-4 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+          >
+            关闭
+          </button>
         </div>
       </div>
     </div>
@@ -2115,7 +2222,7 @@ function ModelMenu({
     const PADDING = 30; // Left + right padding (12.5px each side)
     const GAP = 12; // Space between model and provider (~2 chars)
     let maxWidth = 0;
-    
+
     for (const m of models) {
       const displayName = m.name.includes('/') && m.name.split('/')[0].length < m.name.split('/').slice(1).join('/').length
         ? m.name.split('/').slice(1).join('/')
@@ -2123,7 +2230,7 @@ function ModelMenu({
       const itemWidth = displayName.length * CHAR_WIDTH + m.provider.length * CHAR_WIDTH + GAP + PADDING;
       if (itemWidth > maxWidth) maxWidth = itemWidth;
     }
-    
+
     return Math.max(maxWidth, 180); // Minimum 180px
   }, [models]);
 
@@ -2176,46 +2283,46 @@ function ModelMenu({
           {/* Model list */}
           <div className="max-h-[240px] overflow-y-auto">
             {models.map((m) => {
-            const isActive = m.name === currentModel && m.provider === currentProvider;
-            return (
-              <button
-                key={`${m.name}::${m.provider}`}
-                type="button"
-                onClick={() => {
-                  onSelect(m.name, m.provider);
-                  setOpen(false);
-                }}
-                className={cn(
-                  "flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors",
-                  isActive
-                    ? "text-zinc-900 dark:text-white"
-                    : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
-                )}
-              >
-                <span className="flex items-center gap-1 min-w-0">
-                  <span className={cn("font-medium truncate")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
-                  {/* Strip provider prefix from model name if format is provider/model and model is longer */}
-                  {(() => {
-                    if (!m.name.includes('/')) return m.name;
-                    const parts = m.name.split('/');
-                    const prefix = parts[0];
-                    const modelName = parts.slice(1).join('/');
-                    // Only strip if model name is longer than prefix (avoid stripping model/provider)
-                    return modelName.length > prefix.length ? modelName : m.name;
-                  })()}
+              const isActive = m.name === currentModel && m.provider === currentProvider;
+              return (
+                <button
+                  key={`${m.name}::${m.provider}`}
+                  type="button"
+                  onClick={() => {
+                    onSelect(m.name, m.provider);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors",
+                    isActive
+                      ? "text-zinc-900 dark:text-white"
+                      : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
+                  )}
+                >
+                  <span className="flex items-center gap-1 min-w-0">
+                    <span className={cn("font-medium truncate")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
+                      {/* Strip provider prefix from model name if format is provider/model and model is longer */}
+                      {(() => {
+                        if (!m.name.includes('/')) return m.name;
+                        const parts = m.name.split('/');
+                        const prefix = parts[0];
+                        const modelName = parts.slice(1).join('/');
+                        // Only strip if model name is longer than prefix (avoid stripping model/provider)
+                        return modelName.length > prefix.length ? modelName : m.name;
+                      })()}
+                    </span>
+                    <span className="flex items-center gap-0.5 ml-2">
+                      {m.tool_call && <Wrench size={10} className="text-zinc-400" />}
+                      {m.reasoning && <Brain size={10} className="text-purple-400" />}
+                      {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
+                    </span>
                   </span>
-                  <span className="flex items-center gap-0.5 ml-2">
-                    {m.tool_call && <Wrench size={10} className="text-zinc-400" />}
-                    {m.reasoning && <Brain size={10} className="text-purple-400" />}
-                    {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
+                  <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
+                    {m.provider}
                   </span>
-                </span>
-                <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
-                  {m.provider}
-                </span>
-              </button>
-            );
-          })}
+                </button>
+              );
+            })}
           </div>
 
           {/* Divider */}

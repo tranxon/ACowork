@@ -2,7 +2,8 @@
 
 @theme {
   --color-accent: #3B82F6;
-  --color-text-secondary: hsl(240 3.7% 46.9%); /* ~zinc-500: secondary labels & icons */
+  --color-text-secondary: hsl(240 3.7% 46.9%);
+  /* ~zinc-500: secondary labels & icons */
 }
 
 /* Enable class-based dark mode for Tailwind v4 */
@@ -64,7 +65,15 @@
   /* Shimmer gradient stops */
   --shimmer-from: hsl(240 5% 64%);
   --shimmer-mid: hsl(240 5% 80%);
-  --shimmer-to:  hsl(240 5% 26%);
+  --shimmer-to: hsl(240 5% 26%);
+
+  /* Tab bar layout — unified across SessionTabBar & ResultsPanel tabs */
+  --tab-font-size: 0.75rem;
+  --tab-line-height: 1rem;
+  --tab-py: 0.375rem;
+  /* py-1.5 = 6px */
+  --tab-px: 0.75rem;
+  /* px-3 = 12px */
 }
 
 /* Dark mode overrides */
@@ -78,12 +87,13 @@
 
   --color-bg: hsl(240 10% 3.9%);
   --color-text: hsl(0 0% 98%);
-  --color-text-secondary: hsl(240 5% 64.9%); /* ~zinc-400 for dark mode */
+  --color-text-secondary: hsl(240 5% 64.9%);
+  /* ~zinc-400 for dark mode */
 
   /* Shimmer gradient stops (dark) */
   --shimmer-from: hsl(240 5% 40%);
   --shimmer-mid: hsl(240 5% 52%);
-  --shimmer-to:  hsl(240 5% 82%);
+  --shimmer-to: hsl(240 5% 82%);
 }
 
 /* Base styles */
@@ -131,7 +141,10 @@ body {
 
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+
+  *,
+  *::before,
+  *::after {
     animation-duration: 0ms !important;
     transition-duration: 0ms !important;
   }
@@ -229,21 +242,60 @@ body {
 }
 
 /* Headings — balanced weight and color */
-.prose h1 { font-weight: 500; letter-spacing: -0.02em; color: hsl(240 5% 20%); }
-.prose h2 { font-weight: 500; letter-spacing: -0.01em; color: hsl(240 5% 22%); }
-.prose h3 { font-weight: 500; color: hsl(240 5% 26%); }
-.prose h4 { font-weight: 500; color: hsl(240 5% 30%); }
+.prose h1 {
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: hsl(240 5% 20%);
+}
 
-.dark .prose h1 { color: hsl(240 5% 88%); }
-.dark .prose h2 { color: hsl(240 5% 82%); }
-.dark .prose h3 { color: hsl(240 5% 78%); }
-.dark .prose h4 { color: hsl(240 5% 72%); }
+.prose h2 {
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: hsl(240 5% 22%);
+}
+
+.prose h3 {
+  font-weight: 500;
+  color: hsl(240 5% 26%);
+}
+
+.prose h4 {
+  font-weight: 500;
+  color: hsl(240 5% 30%);
+}
+
+.dark .prose h1 {
+  color: hsl(240 5% 88%);
+}
+
+.dark .prose h2 {
+  color: hsl(240 5% 82%);
+}
+
+.dark .prose h3 {
+  color: hsl(240 5% 78%);
+}
+
+.dark .prose h4 {
+  color: hsl(240 5% 72%);
+}
 
 /* Lists — softer bullets */
-.prose ul > li::marker { color: hsl(240 5% 65%); }
-.prose ol > li::marker { color: hsl(240 5% 55%); }
-.dark .prose ul > li::marker { color: hsl(240 5% 45%); }
-.dark .prose ol > li::marker { color: hsl(240 5% 40%); }
+.prose ul>li::marker {
+  color: hsl(240 5% 65%);
+}
+
+.prose ol>li::marker {
+  color: hsl(240 5% 55%);
+}
+
+.dark .prose ul>li::marker {
+  color: hsl(240 5% 45%);
+}
+
+.dark .prose ol>li::marker {
+  color: hsl(240 5% 40%);
+}
 
 /* Blockquotes — elegant borders */
 .prose blockquote {
@@ -333,8 +385,8 @@ body {
 }
 
 /* Nested lists */
-.prose li > ul,
-.prose li > ol {
+.prose li>ul,
+.prose li>ol {
   margin-top: 0.3em;
   margin-bottom: 0.3em;
 }
@@ -381,7 +433,7 @@ body {
   margin-bottom: 0.6em;
 }
 
-.prose blockquote > p {
+.prose blockquote>p {
   margin-top: 0.3em;
   margin-bottom: 0.3em;
 }
@@ -392,6 +444,7 @@ input[type="number"]::-webkit-outer-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
+
 input[type="number"] {
   -moz-appearance: textfield;
 }
@@ -403,17 +456,20 @@ input[type="range"] {
   background: transparent;
   cursor: pointer;
 }
+
 /* Track */
 input[type="range"]::-webkit-slider-runnable-track {
   height: 4px;
   background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
   border-radius: 2px;
 }
+
 input[type="range"]::-moz-range-track {
   height: 4px;
   background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
   border-radius: 2px;
 }
+
 /* Thumb */
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -423,6 +479,7 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--color-accent);
   margin-top: -5px;
 }
+
 input[type="range"]::-moz-range-thumb {
   height: 14px;
   width: 14px;
@@ -430,10 +487,12 @@ input[type="range"]::-moz-range-thumb {
   background: var(--color-accent);
   border: none;
 }
+
 /* Dark mode */
 .dark input[type="range"]::-webkit-slider-runnable-track {
   background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #52525b var(--progress, 0%));
 }
+
 .dark input[type="range"]::-moz-range-track {
   background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #52525b var(--progress, 0%));
 }
@@ -451,6 +510,7 @@ input[type="radio"] {
   transition: border-color 0.15s, background-color 0.15s;
   background-color: transparent;
 }
+
 input[type="radio"]:checked {
   border-color: var(--color-accent);
   background-color: var(--color-accent);
@@ -461,13 +521,16 @@ input[type="radio"]:checked {
   background: #e4e4e7;
   color: #27272a;
 }
+
 .btn-solid:hover {
   background: #d4d4d8;
 }
+
 .dark .btn-solid {
   background: #3f3f46;
   color: #e4e4e7;
 }
+
 .dark .btn-solid:hover {
   background: #52525b;
 }
@@ -477,13 +540,16 @@ input[type="radio"]:checked {
   color: #71717a;
   background: transparent;
 }
+
 .btn-outline:hover {
   background: #fafafa;
 }
+
 .dark .btn-outline {
   border-color: #52525b;
   color: #a1a1aa;
 }
+
 .dark .btn-outline:hover {
   background: #27272a;
 }
@@ -499,13 +565,16 @@ input[type="radio"]:checked {
   background: transparent;
   transition: all 0.15s ease;
 }
+
 .btn-option:hover {
   background: #fafafa;
 }
+
 .dark .btn-option {
   border-color: #3f3f46;
   color: #a1a1aa;
 }
+
 .dark .btn-option:hover {
   background: #27272a;
 }
@@ -515,6 +584,7 @@ input[type="radio"]:checked {
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
   color: var(--color-accent);
 }
+
 .dark .btn-option-active {
   border-color: var(--color-accent);
   background: color-mix(in srgb, var(--color-accent) 20%, transparent);
@@ -526,32 +596,38 @@ input[type="radio"]:checked {
   background-color: var(--color-accent);
   color: white;
 }
+
 .btn-accent:hover {
   filter: brightness(0.9);
 }
+
 .dark .btn-accent {
   background-color: var(--color-accent);
   color: white;
 }
+
 .dark .btn-accent:hover {
   filter: brightness(0.85);
 }
 
 /* ── Thinking shimmer animation ── */
 @keyframes shimmer {
-  from { background-position: 200% center; }
-  to   { background-position: -200% center; }
+  from {
+    background-position: 200% center;
+  }
+
+  to {
+    background-position: -200% center;
+  }
 }
 
 .thinking-shimmer {
-  background: linear-gradient(
-    90deg,
-    var(--shimmer-from) 0%,
-    var(--shimmer-mid) 35%,
-    var(--shimmer-to) 50%,
-    var(--shimmer-mid) 65%,
-    var(--shimmer-from) 100%
-  );
+  background: linear-gradient(90deg,
+      var(--shimmer-from) 0%,
+      var(--shimmer-mid) 35%,
+      var(--shimmer-to) 50%,
+      var(--shimmer-mid) 65%,
+      var(--shimmer-from) 100%);
   background-size: 200% auto;
   -webkit-background-clip: text;
   background-clip: text;
