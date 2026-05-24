@@ -13,6 +13,8 @@ import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
+import { emitAgentConfigRefresh } from "../../lib/refresh";
+import { syncAgentUI } from "../../lib/agent-start";
 import { toolbarButton, toolbarButtonActive } from "../../lib/ui-styles";
 import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil, Paperclip, Image, Brain } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -812,9 +814,7 @@ export function ChatPanel() {
           <button
             onClick={async () => {
               await startAgent(selectedAgent.agent_id);
-              const { waitForAgentReady } = useAgentStore.getState();
-              await waitForAgentReady(selectedAgent.agent_id);
-              connectStream(selectedAgent.agent_id, getGatewayUrl());
+              await syncAgentUI(selectedAgent.agent_id);
             }}
             className="mt-3 inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium"
           >
@@ -1790,6 +1790,7 @@ function AddModelDialog({
         models: models.length > 0 ? models : undefined,
         modelCapabilities,
       });
+      emitAgentConfigRefresh();
       onSuccess();
       onClose();
     } catch (e) {

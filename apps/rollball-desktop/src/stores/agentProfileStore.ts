@@ -24,6 +24,14 @@ export interface AgentProfileSettings {
   activeTools?: string[];
   /** Shell approval threshold: "low" | "medium" | "high" | "never" */
   shellApprovalThreshold?: string;
+  /** Gateway global max_output_tokens limit (informational, from ConfigSnapshot) */
+  globalMaxTokens?: number;
+  /** Available model names from Gateway (informational, from ConfigSnapshot) */
+  availableModels?: string[];
+  /** Current active model name (from ConfigSnapshot) */
+  activeModel?: string;
+  /** Current active provider name (from ConfigSnapshot) */
+  activeProvider?: string;
 }
 
 const STORAGE_KEY = "rollball-agent-profiles";
@@ -77,6 +85,10 @@ function loadProfiles(): Record<string, AgentProfileSettings> {
           systemPrompt: settings.systemPrompt,
           activeTools: Array.isArray(settings.activeTools) ? settings.activeTools : undefined,
           shellApprovalThreshold: settings.shellApprovalThreshold,
+          globalMaxTokens: typeof settings.globalMaxTokens === "number" ? settings.globalMaxTokens : undefined,
+          availableModels: Array.isArray(settings.availableModels) ? settings.availableModels : undefined,
+          activeModel: typeof settings.activeModel === "string" ? settings.activeModel : undefined,
+          activeProvider: typeof settings.activeProvider === "string" ? settings.activeProvider : undefined,
         };
       }
       return result;

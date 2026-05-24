@@ -2538,7 +2538,7 @@ mod tests {
         let budget = test_budget();
         let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello from standalone!");
     }
@@ -2556,7 +2556,7 @@ mod tests {
         let budget = test_budget();
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Accumulated content here");
     }
@@ -2574,7 +2574,7 @@ mod tests {
         let budget = test_budget();
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
     }
 
@@ -2588,7 +2588,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Final response");
         // Verify usage was tracked (budget guard should have been updated)
@@ -2608,7 +2608,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_err());
         // Error from chat_stream propagates as Core(RollballError::Provider(...))
         // because Provider trait returns rollball_core::RollballError
@@ -2630,7 +2630,7 @@ mod tests {
         let budget = test_budget();
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "All done");
     }
@@ -2644,7 +2644,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
     }
@@ -2659,7 +2659,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let _ = agent_loop.run("Hi", &mut context_builder).await;
+        let _ = agent_loop.run("Hi", &mut context_builder, None).await;
         let messages = agent_loop.history().messages();
         // Should have: user message + assistant message
         let assistant_msgs: Vec<_> = messages.iter()
@@ -2678,7 +2678,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let _ = agent_loop.run("Hi", &mut context_builder).await;
+        let _ = agent_loop.run("Hi", &mut context_builder, None).await;
         // Budget guard should have been updated with usage from the stream
         // (MockProvider returns usage with total_tokens=150)
         // We can't directly check budget_guard, but we verify no error occurred
@@ -2699,7 +2699,7 @@ mod tests {
         // Inject a user message before running
         inbound_tx.try_send(InboundMessage::UserMessage("Injected question".to_string())).unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         // Verify the injected message appeared in history
         let messages = agent_loop.history().messages();
@@ -2724,7 +2724,7 @@ mod tests {
             data: serde_json::json!({"key": "new_value"}),
         }).unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let notif: Vec<_> = messages.iter()
@@ -2749,7 +2749,7 @@ mod tests {
             params: serde_json::json!({}),
         }).unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let intent: Vec<_> = messages.iter()
@@ -2773,7 +2773,7 @@ mod tests {
             inbound_tx.try_send(InboundMessage::UserMessage(format!("Message {i}"))).unwrap();
         }
 
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let injected: Vec<_> = messages.iter()
@@ -2814,7 +2814,7 @@ mod tests {
 
         // Run without any inbound messages — drain should return immediately
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Hi", &mut context_builder).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None).await;
         let elapsed = start.elapsed();
         assert!(result.is_ok());
         // Drain should not block — core path is sub-100ms, but allow up to 2s
@@ -2912,7 +2912,7 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Run parallel", &mut context_builder).await;
+        let result = agent_loop.run("Run parallel", &mut context_builder, None).await;
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "Parallel execution should succeed: {:?}", result);
@@ -3024,7 +3024,7 @@ mod tests {
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        let result = agent_loop.run("Test failure", &mut context_builder).await;
+        let result = agent_loop.run("Test failure", &mut context_builder, None).await;
         assert!(result.is_ok(), "Should succeed even with one tool failure");
         assert_eq!(result.unwrap(), "Mixed results");
     }
@@ -3088,7 +3088,7 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Test timeout", &mut context_builder).await;
+        let result = agent_loop.run("Test timeout", &mut context_builder, None).await;
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "Should succeed with timeout error captured: {:?}", result);
@@ -3141,7 +3141,7 @@ mod tests {
 
         // The tool call will fail because shell is not in the tool registry
         // (empty tools vec), so it should produce "Unknown tool: shell"
-        let result = agent_loop.run("Run shell", &mut context_builder).await;
+        let result = agent_loop.run("Run shell", &mut context_builder, None).await;
         // Should still succeed — error becomes tool result message
         assert!(result.is_ok());
     }
@@ -3244,7 +3244,7 @@ mod tests {
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        let result = agent_loop.run("Run ordered", &mut context_builder).await;
+        let result = agent_loop.run("Run ordered", &mut context_builder, None).await;
         assert!(result.is_ok());
 
         // Verify that tool results in history are in order
@@ -3378,7 +3378,7 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Test iteration timeout", &mut context_builder).await;
+        let result = agent_loop.run("Test iteration timeout", &mut context_builder, None).await;
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "Should succeed with partial results: {:?}", result);
@@ -3466,7 +3466,7 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Test tool timeout", &mut context_builder).await;
+        let result = agent_loop.run("Test tool timeout", &mut context_builder, None).await;
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "Should succeed with tool timeout error: {:?}", result);
@@ -3569,7 +3569,7 @@ mod tests {
         let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        let result = agent_loop.run("Test partial permission", &mut context_builder).await;
+        let result = agent_loop.run("Test partial permission", &mut context_builder, None).await;
         assert!(result.is_ok(), "Should succeed even with one tool permission denied: {:?}", result);
 
         // Verify echo result appears (it was executed) and shell has permission denied

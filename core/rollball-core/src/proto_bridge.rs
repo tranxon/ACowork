@@ -445,12 +445,16 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 agent_id,
                 version,
                 connection_role,
+                provider_list_version,
+                mcp_list_version,
             } => {
                 Some(proto::client_message::Payload::AgentHello(
                     proto::AgentHelloRequest {
                         agent_id: agent_id.clone(),
                         version: version.clone(),
                         connection_role: connection_role.clone(),
+                        provider_list_version: *provider_list_version,
+                        mcp_list_version: *mcp_list_version,
                     },
                 ))
             }
@@ -499,7 +503,13 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 system_prompt_override,
                 active_tools,
                 shell_approval_threshold,
+                mcp_servers,
+                available_models,
             } => {
+                let mcp_json: Vec<String> = mcp_servers
+                    .iter()
+                    .map(|s| serde_json::to_string(s).unwrap_or_default())
+                    .collect();
                 Some(proto::client_message::Payload::ConfigSnapshot(
                     proto::ConfigSnapshot {
                         request_id: snap_request_id.clone(),
@@ -511,6 +521,8 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         system_prompt_override: system_prompt_override.clone(),
                         active_tools: active_tools.clone().unwrap_or_default(),
                         shell_approval_threshold: shell_approval_threshold.clone(),
+                        mcp_servers_json: mcp_json,
+                        available_models: available_models.clone(),
                     },
                 ))
             }
@@ -546,44 +558,31 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             protocol::GatewayResponse::AgentHelloResult {
                 success,
                 error,
-                provider,
-                model,
-                api_key,
-                base_url,
-                models,
-                model_capabilities,
-                max_output_tokens_limit,
-                protocol_type,
-                runtime_max_output_tokens,
-                runtime_max_iterations,
-                runtime_temperature,
-                runtime_system_prompt_override,
-                runtime_shell_approval_threshold,
+                provider_list,
+                provider_list_version,
+                mcp_list,
+                mcp_list_version,
+                provider_key_vault,
+                mcp_key_vault,
                 identity_entries: _, // ADR-009: consumed by Runtime CLI, not gRPC bridge
             } => {
+                let _ = (provider_list, provider_list_version, mcp_list, mcp_list_version);
+                // AgentHelloResult now carries structured resource lists with version-driven diff sync.
+                // gRPC bridge serializes these as JSON strings for backward compat with proto.
+                let pl_json = provider_list.as_ref().map(|pl| serde_json::to_string(pl).unwrap_or_default());
+                let ml_json = mcp_list.as_ref().map(|ml| serde_json::to_string(ml).unwrap_or_default());
+                let pkv_json = serde_json::to_string(&provider_key_vault).unwrap_or_default();
+                let mkv_json = serde_json::to_string(&mcp_key_vault).unwrap_or_default();
                 Some(proto::server_message::Payload::AgentHelloResult(
                     proto::AgentHelloResult {
                         success: *success,
                         error: error.clone().unwrap_or_default(),
-                        provider: provider.clone().unwrap_or_default(),
-                        model: model.clone().unwrap_or_default(),
-                        api_key: api_key.clone().unwrap_or_default(),
-                        base_url: base_url.clone().unwrap_or_default(),
-                        models: models.clone(),
-                        model_capabilities: model_capabilities
-                            .as_ref()
-                            .map(|c| c.into()),
-                        max_output_tokens_limit: *max_output_tokens_limit,
-                        protocol_type: format!("{:?}", protocol_type).to_lowercase(),
-                        runtime_max_output_tokens: runtime_max_output_tokens.clone(),
-                        runtime_max_iterations: runtime_max_iterations.clone(),
-                        runtime_temperature: runtime_temperature.clone(),
-                        runtime_system_prompt_override: runtime_system_prompt_override
-                            .clone()
-                            .unwrap_or_default(),
-                        runtime_shell_approval_threshold: runtime_shell_approval_threshold
-                            .clone()
-                            .unwrap_or_default(),
+                        provider_list_json: pl_json.unwrap_or_default(),
+                        provider_list_version: *provider_list_version,
+                        mcp_list_json: ml_json.unwrap_or_default(),
+                        mcp_list_version: *mcp_list_version,
+                        provider_key_vault_json: pkv_json,
+                        mcp_key_vault_json: mkv_json,
                     },
                 ))
             }

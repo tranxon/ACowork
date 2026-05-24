@@ -13,7 +13,7 @@
 //! Requires environment variable: MINIMAX_API_KEY
 
 use std::env;
-
+use std::sync::Arc;
 
 use rollball_core::providers::traits::{
     ChatMessage, ChatRequest, Provider, StreamEvent, ToolCall,
@@ -58,7 +58,7 @@ fn system_message(content: &str) -> ChatMessage {
 /// This replicates the convert_tools pipeline from openai.rs:
 ///   ToolSpec → serde_json::to_value (produces "parameters" field) → Vec<Value>
 fn serialize_builtin_tools(work_dir: &str, agent_id: &str) -> Vec<serde_json::Value> {
-    let resolver = WorkspaceResolver::new(work_dir);
+    let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(work_dir)));
     let tools = builtin::all_builtin_tools(&resolver, agent_id);
     tools
         .iter()
@@ -110,7 +110,7 @@ fn build_tool_definitions_by_names(
     agent_id: &str,
     names: &[&str],
 ) -> Vec<serde_json::Value> {
-    let resolver = WorkspaceResolver::new(work_dir);
+    let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(work_dir)));
     let tools = builtin::all_builtin_tools(&resolver, agent_id);
     let tool_jsons: Vec<serde_json::Value> = tools
         .iter()

@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::grpc::SharedGrpcSessionMgr;
+use crate::ipc::global_push::GlobalResourcePusher;
 use crate::http::approval::ApprovalPendingRequests;
 use crate::http::auth::HttpAuth;
 use crate::ipc::session::SessionManager;
@@ -172,6 +173,8 @@ pub struct AppState {
     pub log_reload_handle: Option<crate::LogReloadHandle>,
     /// gRPC session manager for Gateway→Runtime request-response
     pub grpc_session_mgr: Option<SharedGrpcSessionMgr>,
+    /// Unified global resource pusher (provider/model, MCP catalog, …)
+    pub pusher: Option<Arc<GlobalResourcePusher>>,
     /// Whether CORS is enabled (allows any origin for remote Desktop connections)
     pub cors_enabled: bool,
 }
@@ -197,6 +200,7 @@ impl AppState {
             approval_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             log_reload_handle: None,
             grpc_session_mgr: None,
+            pusher: None,
             cors_enabled: false,
         }
     }
@@ -223,6 +227,7 @@ impl AppState {
             approval_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             log_reload_handle,
             grpc_session_mgr: None,
+            pusher: None,
             cors_enabled: false,
         }
     }

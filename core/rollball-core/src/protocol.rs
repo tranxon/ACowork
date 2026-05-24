@@ -111,6 +111,95 @@ pub struct ModelCapabilitiesInfo {
     pub knowledge_cutoff: Option<String>,
 }
 
+
+/// Provider list entry — delivered by Gateway to Runtime via AgentHelloResult.
+///
+/// Contains all metadata needed to construct a Provider instance
+/// (base_url, protocol_type, models with capabilities).
+/// API keys are NOT included — see ProviderKeyEntry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderListItem {
+    /// Provider identifier (e.g. "alibaba-cn", "openai")
+    pub id: String,
+    /// API base URL
+    pub base_url: String,
+    /// LLM protocol type
+    pub protocol_type: ProtocolType,
+    /// Available models for this provider with full capabilities
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ProviderModelEntry>,
+}
+
+/// Individual model entry within a provider's model list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderModelEntry {
+    /// Model identifier (e.g. "gpt-4o", "qwen-plus")
+    pub id: String,
+    /// Resolved model capabilities from models.dev offline data
+    pub capabilities: ModelCapabilitiesInfo,
+    /// Gateway-level max output tokens limit for this model
+    #[serde(default = "default_max_output_tokens_limit")]
+    pub max_output_tokens_limit: u64,
+}
+
+/// MCP server list entry — delivered by Gateway to Runtime via AgentHelloResult.
+///
+/// Describes an installed MCP server that the Runtime can connect to.
+/// API keys/tokens are NOT included — see McpKeyEntry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpListItem {
+    /// Server identifier
+    pub id: String,
+    /// Display name
+    pub name: String,
+    /// Transport type
+    #[serde(default)]
+    pub transport: McpTransportDef,
+    /// Server URL (for HTTP/SSE transports)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Command path (for stdio transport)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command: String,
+    /// Command arguments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment variables
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    /// HTTP headers
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    /// Tool timeout override
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_secs: Option<u64>,
+}
+
+/// Provider key entry — delivered by Gateway to Runtime via AgentHelloResult.
+///
+/// Always delivered in full on every AgentHello (no version check).
+/// Runtime stores this ONLY in memory, never persisted to disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderKeyEntry {
+    /// Provider identifier
+    pub provider_id: String,
+    /// Decrypted API key
+    pub api_key: String,
+}
+
+/// MCP key entry — delivered by Gateway to Runtime via AgentHelloResult.
+///
+/// Always delivered in full on every AgentHello (no version check).
+/// Runtime stores this ONLY in memory, never persisted to disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpKeyEntry {
+    /// MCP server identifier
+    pub mcp_id: String,
+    /// API key or access token (optional, some MCP servers don't require auth)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
 /// Context usage info reported by Runtime to Gateway after each LLM call.
 /// Forwarded to Desktop App via WebSocket for UI display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +331,12 @@ pub enum GatewayRequest {
         /// Defaults to "main" when absent (backward compatible).
         #[serde(default = "default_connection_role")]
         connection_role: String,
+        /// Runtime's cached provider list version (0 = never synced)
+        #[serde(default)]
+        provider_list_version: u64,
+        /// Runtime's cached MCP server list version (0 = never synced)
+        #[serde(default)]
+        mcp_list_version: u64,
     },
     /// List sessions request (S1.14)
     ///
@@ -315,6 +410,12 @@ pub enum GatewayRequest {
         /// Shell approval threshold
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell_approval_threshold: Option<String>,
+        /// Active MCP server configurations (full defs, from agent_config.json)
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mcp_servers: Vec<McpServerConfigDef>,
+        /// Available models list cached from last Gateway push
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        available_models: Vec<String>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -346,37 +447,33 @@ pub enum GatewayResponse {
         /// Error message if registration failed
         error: Option<String>,
 
-        // ── LLM Configuration (only for "main" connections) ──
-        /// Provider name (e.g. "openai", "anthropic")
-        provider: Option<String>,
-        /// Selected model name
-        model: Option<String>,
-        /// Decrypted API key from Vault
-        api_key: Option<String>,
-        /// Custom base URL (if configured)
-        base_url: Option<String>,
-        /// Available models for this provider
-        models: Vec<String>,
-        /// Resolved model capabilities (context window, tool calling, etc.)
-        model_capabilities: Option<ModelCapabilitiesInfo>,
-        /// Gateway-level max output tokens limit
-        max_output_tokens_limit: u64,
-        /// Resolved protocol type (openai / anthropic / ollama)
-        protocol_type: ProtocolType,
+        // ── Global Resource Lists (version-driven diff sync) ──
+        /// Provider list with full models + capabilities.
+        /// Only included when provider_list_version in AgentHello < Gateway's current version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_list: Option<Vec<ProviderListItem>>,
+        /// Gateway's current provider list version
+        #[serde(default)]
+        provider_list_version: u64,
 
-        // ── Runtime Config Overrides ──
-        /// Per-agent max_output_tokens override
-        runtime_max_output_tokens: Option<u64>,
-        /// Per-agent max_iterations override
-        runtime_max_iterations: Option<u32>,
-        /// Per-agent temperature override
-        runtime_temperature: Option<f32>,
-        /// Per-agent system prompt override
-        runtime_system_prompt_override: Option<String>,
-        /// Per-agent shell approval threshold.
-        /// "low" | "medium" (default) | "high" | "never"
-        runtime_shell_approval_threshold: Option<String>,
-        /// Identity entries for cold-start system prompt injection (ADR-009).
+        /// MCP server list.
+        /// Only included when mcp_list_version in AgentHello < Gateway's current version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_list: Option<Vec<McpListItem>>,
+        /// Gateway's current MCP list version
+        #[serde(default)]
+        mcp_list_version: u64,
+
+        // ── Key Vaults (always delivered in full, Runtime memory-only) ──
+        /// Provider API keys — NEVER persisted to workspace disk by Runtime.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_key_vault: Vec<ProviderKeyEntry>,
+
+        /// MCP server keys/tokens — NEVER persisted to workspace disk by Runtime.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mcp_key_vault: Vec<McpKeyEntry>,
+
+        // ── Identity (retained from previous protocol) ──
         /// Previously written to .identity_delivery.json in workspace;
         /// now delivered via IPC to avoid Gateway writing to agent workspace.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

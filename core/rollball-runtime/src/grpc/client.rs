@@ -26,7 +26,7 @@ use rollball_core::error::RollballError;
 use rollball_core::proto;
 use rollball_core::proto::server_message::Payload as ServerPayload;
 use rollball_core::proto_bridge::GatewayRequestToProto;
-use rollball_core::protocol::{GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ProtocolType};
+use rollball_core::protocol::{GatewayRequest, GatewayResponse, McpKeyEntry, McpListItem, ModelCapabilitiesInfo, ProtocolType, ProviderKeyEntry, ProviderListItem};
 
 /// Configuration delivered by Gateway in the AgentHelloResult handshake.
 ///
@@ -35,22 +35,17 @@ use rollball_core::protocol::{GatewayRequest, GatewayResponse, ModelCapabilities
 /// read from the shared push channel during startup.
 #[derive(Debug, Clone)]
 pub struct AgentHelloConfig {
-    // ── LLM Configuration ──
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub models: Vec<String>,
-    pub model_capabilities: Option<ModelCapabilitiesInfo>,
-    pub max_output_tokens_limit: u64,
-    pub protocol_type: ProtocolType,
+    // ── Global resource lists (version-driven diff sync) ──
+    pub provider_list: Option<Vec<ProviderListItem>>,
+    pub provider_list_version: u64,
+    pub mcp_list: Option<Vec<McpListItem>>,
+    pub mcp_list_version: u64,
+    pub provider_key_vault: Vec<ProviderKeyEntry>,
+    pub mcp_key_vault: Vec<McpKeyEntry>,
 
-    // ── Runtime Config Overrides ──
-    pub runtime_max_output_tokens: Option<u64>,
-    pub runtime_max_iterations: Option<u32>,
-    pub runtime_temperature: Option<f32>,
-    pub runtime_system_prompt_override: Option<String>,
-    pub runtime_shell_approval_threshold: Option<String>,
+    // ── Runtime Config Overrides (removed Phase 5) ──
+    // Per-agent config is now loaded from workspace/config/agent_config.json.
+    // AgentHelloResult no longer carries runtime_* fields.
 }
 
 /// Request timeout for individual RPC calls
@@ -250,8 +245,10 @@ impl GatewayGrpcClient {
         endpoint: &str,
         agent_id: &str,
         version: &str,
+        cached_provider_version: u64,
+        cached_mcp_version: u64,
     ) -> Result<(Self, AgentHelloConfig), RollballError> {
-        Self::connect_and_register_with_role(endpoint, agent_id, version, "main").await
+        Self::connect_and_register_with_role(endpoint, agent_id, version, "main", cached_provider_version, cached_mcp_version).await
     }
 
     /// Convenience: connect with a specific connection role and send AgentHello.
@@ -262,10 +259,12 @@ impl GatewayGrpcClient {
         agent_id: &str,
         version: &str,
         connection_role: &str,
+        cached_provider_version: u64,
+        cached_mcp_version: u64,
     ) -> Result<(Self, AgentHelloConfig), RollballError> {
         let client = Self::connect(endpoint).await?;
         let config = client
-            .send_agent_hello(agent_id, version, connection_role)
+            .send_agent_hello(agent_id, version, connection_role, cached_provider_version, cached_mcp_version)
             .await?;
         Ok((client, config))
     }
@@ -292,7 +291,10 @@ impl GatewayGrpcClient {
             *guard = saved_reports;
         }
 
-        let _config = self.send_agent_hello(agent_id, version, "main").await?;
+        // On reconnect, request full resource sync (versions = 0) since
+        // in-memory state was lost. Resource cache file versions are
+        // reloaded by the caller when the Runtime restarts.
+        let _config = self.send_agent_hello(agent_id, version, "main", 0, 0).await?;
         self.flush_pending_reports().await?;
         Ok(())
     }
@@ -404,16 +406,24 @@ impl GatewayGrpcClient {
     /// Returns the bundled [`AgentHelloConfig`] containing LLM configuration,
     /// workspace context, and runtime overrides — all delivered atomically
     /// in the AgentHelloResult response (no separate push messages needed).
+    ///
+    /// `cached_provider_version` / `cached_mcp_version` are Runtime's
+    /// locally-cached resource versions from `resource_cache.json`.
+    /// Pass 0 on first start (never synced).
     pub async fn send_agent_hello(
         &self,
         agent_id: &str,
         version: &str,
         connection_role: &str,
+        cached_provider_version: u64,
+        cached_mcp_version: u64,
     ) -> Result<AgentHelloConfig, RollballError> {
         let request = GatewayRequest::AgentHello {
             agent_id: agent_id.to_string(),
             version: version.to_string(),
             connection_role: connection_role.to_string(),
+            provider_list_version: cached_provider_version,
+            mcp_list_version: cached_mcp_version,
         };
 
         let resp = self.send_gateway_request(request).await?;
@@ -429,52 +439,27 @@ impl GatewayGrpcClient {
                     tracing::info!(agent_id = %agent_id, "Gateway registered agent via gRPC");
 
                     let config = AgentHelloConfig {
-                        provider: if result.provider.is_empty() {
+                        provider_list: if result.provider_list_json.is_empty() {
                             None
                         } else {
-                            Some(result.provider)
+                            serde_json::from_str(&result.provider_list_json).ok()
                         },
-                        model: if result.model.is_empty() {
+                        provider_list_version: result.provider_list_version,
+                        mcp_list: if result.mcp_list_json.is_empty() {
                             None
                         } else {
-                            Some(result.model)
+                            serde_json::from_str(&result.mcp_list_json).ok()
                         },
-                        api_key: if result.api_key.is_empty() {
-                            None
+                        mcp_list_version: result.mcp_list_version,
+                        provider_key_vault: if result.provider_key_vault_json.is_empty() {
+                            vec![]
                         } else {
-                            Some(result.api_key)
+                            serde_json::from_str(&result.provider_key_vault_json).unwrap_or_default()
                         },
-                        base_url: if result.base_url.is_empty() {
-                            None
+                        mcp_key_vault: if result.mcp_key_vault_json.is_empty() {
+                            vec![]
                         } else {
-                            Some(result.base_url)
-                        },
-                        models: result.models,
-                        model_capabilities: result.model_capabilities.map(|c| c.into()),
-                        max_output_tokens_limit: result.max_output_tokens_limit,
-                        protocol_type: match result.protocol_type.as_str() {
-                            "anthropic" => ProtocolType::Anthropic,
-                            "ollama" => ProtocolType::Ollama,
-                            _ => ProtocolType::OpenAI,
-                        },
-                        runtime_max_output_tokens: result.runtime_max_output_tokens,
-                        runtime_max_iterations: result.runtime_max_iterations,
-                        runtime_temperature: result.runtime_temperature,
-                        runtime_system_prompt_override: if result
-                            .runtime_system_prompt_override
-                            .is_empty()
-                        {
-                            None
-                        } else {
-                            Some(result.runtime_system_prompt_override)
-                        },
-                        runtime_shell_approval_threshold: if result
-                            .runtime_shell_approval_threshold
-                            .is_empty()
-                        {
-                            None
-                        } else {
-                            Some(result.runtime_shell_approval_threshold)
+                            serde_json::from_str(&result.mcp_key_vault_json).unwrap_or_default()
                         },
                     };
                     Ok(config)
@@ -1063,40 +1048,38 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
         },
 
         // Response messages (request_id > 0) — included for robustness
-        Some(ServerPayload::AgentHelloResult(r)) => GatewayResponse::AgentHelloResult {
-            success: r.success,
-            error: if r.error.is_empty() {
+        Some(ServerPayload::AgentHelloResult(r)) => {
+            let provider_list: Option<Vec<ProviderListItem>> = if r.provider_list_json.is_empty() {
                 None
             } else {
-                Some(r.error)
-            },
-            provider: if r.provider.is_empty() { None } else { Some(r.provider) },
-            model: if r.model.is_empty() { None } else { Some(r.model) },
-            api_key: if r.api_key.is_empty() { None } else { Some(r.api_key) },
-            base_url: if r.base_url.is_empty() { None } else { Some(r.base_url) },
-            models: r.models,
-            model_capabilities: r.model_capabilities.map(|c| c.into()),
-            max_output_tokens_limit: r.max_output_tokens_limit,
-            protocol_type: match r.protocol_type.as_str() {
-                "anthropic" => ProtocolType::Anthropic,
-                "ollama" => ProtocolType::Ollama,
-                _ => ProtocolType::OpenAI,
-            },
-            runtime_max_output_tokens: r.runtime_max_output_tokens,
-            runtime_max_iterations: r.runtime_max_iterations,
-            runtime_temperature: r.runtime_temperature,
-            runtime_system_prompt_override: if r.runtime_system_prompt_override.is_empty() {
+                serde_json::from_str(&r.provider_list_json).ok()
+            };
+            let mcp_list: Option<Vec<McpListItem>> = if r.mcp_list_json.is_empty() {
                 None
             } else {
-                Some(r.runtime_system_prompt_override)
-            },
-            runtime_shell_approval_threshold: if r.runtime_shell_approval_threshold.is_empty() {
-                None
+                serde_json::from_str(&r.mcp_list_json).ok()
+            };
+            let provider_key_vault: Vec<ProviderKeyEntry> = if r.provider_key_vault_json.is_empty() {
+                vec![]
             } else {
-                Some(r.runtime_shell_approval_threshold)
-            },
-            // ADR-009: identity_entries not available via gRPC bridge (consumed at IPC level)
-            identity_entries: vec![],
+                serde_json::from_str(&r.provider_key_vault_json).unwrap_or_default()
+            };
+            let mcp_key_vault: Vec<McpKeyEntry> = if r.mcp_key_vault_json.is_empty() {
+                vec![]
+            } else {
+                serde_json::from_str(&r.mcp_key_vault_json).unwrap_or_default()
+            };
+            GatewayResponse::AgentHelloResult {
+                success: r.success,
+                error: if r.error.is_empty() { None } else { Some(r.error) },
+                provider_list,
+                provider_list_version: r.provider_list_version,
+                mcp_list,
+                mcp_list_version: r.mcp_list_version,
+                provider_key_vault,
+                mcp_key_vault,
+                identity_entries: vec![],
+            }
         },
         Some(ServerPayload::KeyReleaseResult(r)) => GatewayResponse::KeyReleaseResult {
             api_key: if r.api_key.is_empty() {

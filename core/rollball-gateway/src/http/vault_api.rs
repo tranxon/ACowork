@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};
+use crate::resource_cache;
 use crate::vault::StoredModelCapabilities;
+use std::path::PathBuf;
 
 /// Build the vault router
 pub fn vault_routes() -> Router<AppState> {
@@ -171,11 +173,15 @@ pub async fn add_key(
         &body.key,
         &body.model_capabilities,
     ).map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
+
+    // Rebuild provider_list cache so AgentHello picks up the new provider.
+    let data_dir = get_data_dir_from_gw(&gw);
+    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir, &state.models_cache).await;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
 
-    // Hot-push LLMConfigDelivery to all connected agents
+    // Hot-push resource version change to all connected agents
     // so they pick up the new provider without requiring a Gateway restart.
-    hot_push_llm_config(&state).await;
+    if let Some(ref pusher) = state.pusher { pusher.push_llm_config().await; }
 
     Ok((StatusCode::CREATED, Json(MessageResponse {
         message: format!("Key stored for provider: {}", body.provider),
@@ -190,6 +196,10 @@ pub async fn remove_key(
     let mut gw = state.gateway_state.write().await;
     gw.vault.remove_key(&provider)
         .map_err(|e| ApiError::not_found(&format!("Key not found for provider '{}': {}", provider, e)))?;
+
+    // Rebuild provider_list cache after removal.
+    let data_dir = get_data_dir_from_gw(&gw);
+    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir, &state.models_cache).await;
 
     Ok(Json(MessageResponse {
         message: format!("Key removed for provider: {}", provider),
@@ -279,90 +289,29 @@ pub async fn update_key(
         &api_key,
         &resolved_capabilities,
     ).map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
+
+    // Rebuild provider_list cache after update.
+    let data_dir = get_data_dir_from_gw(&gw);
+    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir, &state.models_cache).await;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
 
-    // Hot-push LLMConfigDelivery to all connected agents
-    hot_push_llm_config(&state).await;
+    // Hot-push resource version change to all connected agents
+    if let Some(ref pusher) = state.pusher { pusher.push_llm_config().await; }
 
     Ok(Json(MessageResponse {
         message: format!("Key updated for provider: {}", provider),
     }))
 }
 
-/// Hot-push LLMConfigDelivery to all connected agents after a vault update.
-/// Uses the shared session manager to find authenticated "main" sessions
-/// and pushes the resolved LLM config from Vault.
-async fn hot_push_llm_config(state: &AppState) {
-    use crate::ipc::server::resolve_llm_config_for_agent;
-    use rollball_core::protocol::GatewayResponse;
 
-    let session_mgr = match &state.session_mgr {
-        Some(mgr) => mgr.clone(),
-        None => {
-            tracing::warn!("No IPC session manager available, skipping hot-push");
-            return;
-        }
-    };
+// ── Helpers ───────────────────────────────────────────────────────────
 
-    // Collect running agent IDs (brief read lock)
-    let agent_ids: Vec<String> = {
-        let gw = state.gateway_state.read().await;
-        gw.running_agents.keys().cloned().collect()
-    };
-
-    for agent_id in agent_ids {
-        if let Some(cfg) =
-            resolve_llm_config_for_agent(&agent_id, &state.gateway_state).await
-        {
-            // Resolve model capabilities with priority:
-            // 1. User-overridden capabilities from Vault entry
-            // 2. models.dev / offline data
-            let model_capabilities = if cfg.stored_capabilities.is_some() {
-                cfg.stored_capabilities
-            } else if let Some(ref m) = cfg.model {
-                crate::http::models_api::lookup_model_capabilities_with_cache(
-                    &state.models_cache, &cfg.provider, m,
-                ).await
-            } else {
-                None
-            };
-            // Derive protocol type from models.dev npm field
-            let (protocol_type, api_override) =
-                crate::http::models_api::lookup_protocol_info_with_cache(
-                    &state.models_cache, &cfg.provider, cfg.model.as_deref(),
-                ).await;
-            // Model-level api override takes precedence over Vault base_url
-            let effective_base_url = api_override.or(cfg.base_url.clone());
-            let mgr = session_mgr.lock().await;
-            if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                // Read max_output_tokens_limit from Gateway config
-                let max_output_tokens_limit = state.gateway_state.read().await.config
-                    .as_ref().map(|c| c.max_output_tokens_limit).unwrap_or(32_768);
-                let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
-                    provider: cfg.provider.clone(),
-                    model: cfg.model.clone(),
-                    api_key: cfg.api_key.clone(),
-                    base_url: effective_base_url,
-                    models: cfg.models.clone(),
-                    model_capabilities,
-                    max_output_tokens_limit,
-                    protocol_type,
-                }).await;
-                if push_result {
-                    tracing::info!(
-                        agent = %agent_id,
-                        provider = %cfg.provider,
-                        "Hot-pushed LLMConfigDelivery after vault update"
-                    );
-                } else {
-                    tracing::warn!(
-                        agent = %agent_id,
-                        "Failed to hot-push LLMConfigDelivery (channel closed)"
-                    );
-                }
-            }
-        }
-    }
+/// Get data_dir from GatewayState config.
+fn get_data_dir_from_gw(gw: &crate::gateway::state::GatewayState) -> PathBuf {
+    gw.config
+        .as_ref()
+        .map(|c| PathBuf::from(&c.data_dir))
+        .unwrap_or_else(|| PathBuf::from("./data"))
 }
 
 #[cfg(test)]

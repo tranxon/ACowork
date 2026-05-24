@@ -7,6 +7,8 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
 
 
+use rollball_core::protocol::{McpListItem, ProtocolType, ProviderListItem};
+
 use crate::agent::agent_core::AgentCore;
 
 
@@ -421,6 +423,74 @@ impl Cli {
 /// Attempt to connect to Gateway via the given socket path.
 
 
+// ── Resource cache (version-driven diff sync) ─────────────────────────
+
+/// Runtime-side resource cache stored in workspace/config/resource_cache.json.
+/// Stores versions (for diff sync) and optionally cached provider/MCP lists
+/// (for use when Gateway reports "same version, no update needed").
+/// API keys are NEVER stored in this file — they come from the live provider_key_vault.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct RuntimeResourceCache {
+    #[serde(default)]
+    provider_list_version: u64,
+    #[serde(default)]
+    mcp_list_version: u64,
+    /// Cached provider list (without api keys — keys come from vault).
+    /// None when no cache exists yet (first start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    providers: Option<Vec<ProviderListItem>>,
+    /// Cached MCP server list (without auth tokens — tokens come from vault).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcps: Option<Vec<McpListItem>>,
+}
+
+/// Resource cache file path in agent workspace config directory.
+fn resource_cache_path(work_dir: &std::path::Path) -> std::path::PathBuf {
+    work_dir.join("config").join("resource_cache.json")
+}
+
+/// Read the full runtime resource cache (versions + cached lists).
+/// Returns default (versions=0, no lists) if file is missing or corrupt.
+fn read_resource_cache(work_dir: &std::path::Path) -> RuntimeResourceCache {
+    let path = resource_cache_path(work_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str::<RuntimeResourceCache>(&raw).unwrap_or_else(|e| {
+            tracing::warn!(path=%path.display(), error=%e, "Failed to parse resource_cache.json");
+            RuntimeResourceCache::default()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RuntimeResourceCache::default(),
+        Err(e) => {
+            tracing::warn!(path=%path.display(), error=%e, "Failed to read resource_cache.json");
+            RuntimeResourceCache::default()
+        }
+    }
+}
+
+/// Save the runtime resource cache to disk.
+fn save_resource_cache(work_dir: &std::path::Path, cache: &RuntimeResourceCache) {
+    let path = resource_cache_path(work_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string(cache) {
+        Ok(content) => {
+            if let Err(e) = std::fs::write(&path, &content) {
+                tracing::warn!(path=%path.display(), error=%e, "Failed to write resource_cache.json");
+            } else {
+                tracing::info!(
+                    provider_ver = cache.provider_list_version,
+                    mcp_ver = cache.mcp_list_version,
+                    has_providers = cache.providers.is_some(),
+                    "Resource cache saved"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error=%e, "Failed to serialize resource cache");
+        }
+    }
+}
+
 /// Returns Some((client, config)) on success, None on failure (graceful fallback to standalone mode).
 
 
@@ -436,13 +506,21 @@ async fn connect_gateway_client(
     version: &str,
 
 
+    work_dir: &str,
+
+
 ) -> Option<(crate::grpc::client::GatewayGrpcClient, crate::grpc::client::AgentHelloConfig)> {
 
+
+    // Read locally-cached resource versions for diff sync.
+    let work_dir_path = std::path::Path::new(work_dir);
+    let resource_cache = read_resource_cache(work_dir_path);
+    let (cached_prov_ver, cached_mcp_ver) = (resource_cache.provider_list_version, resource_cache.mcp_list_version);
 
     match crate::grpc::client::GatewayGrpcClient::connect_and_register(
 
 
-        endpoint, agent_id, version,
+        endpoint, agent_id, version, cached_prov_ver, cached_mcp_ver,
 
 
     ).await {
@@ -655,16 +733,28 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         if let Some((client, cfg)) =
 
 
-            connect_gateway_client(endpoint, &loaded.manifest.agent_id, &loaded.manifest.version).await
+            connect_gateway_client(endpoint, &loaded.manifest.agent_id, &loaded.manifest.version, &config.work_dir).await
 
 
         {
 
 
+            // Persist resource versions + lists for next startup's diff sync.
+            // Preserve old cached lists if GW didn't send new ones (version match).
+            let prov_list = cfg.provider_list.clone();
+            let mcp_list_data = cfg.mcp_list.clone();
+            let prov_ver = cfg.provider_list_version;
+            let mcp_ver = cfg.mcp_list_version;
+            let old_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
+            let new_cache = RuntimeResourceCache {
+                provider_list_version: prov_ver,
+                mcp_list_version: mcp_ver,
+                providers: prov_list.or(old_cache.providers),
+                mcps: mcp_list_data.or(old_cache.mcps),
+            };
             grpc_client = Some(client);
-
-
             hello_config = Some(cfg);
+            save_resource_cache(std::path::Path::new(&config.work_dir), &new_cache);
 
 
         }
@@ -775,167 +865,71 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     let mut gateway_max_output_tokens_limit: u64 = 32_768;
 
 
-    let (provider, mut resolved_model, available_models, protocol_type) = if let Some(ref cfg) = hello_config {
+    // FIXME(Task10): Process provider_list, mcp_list, key_vault from AgentHelloConfig.
+    // In Gateway mode: use AgentHelloConfig (provider_list + key_vault).
+    // provider_list is Some when GW version differs from Runtime cached version.
+    // When None (version match), fall back to locally-cached provider list from disk.
+    // Provider key vault is always delivered fresh and never persisted to disk.
+    let resource_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
 
+    let (provider, mut resolved_model, available_models, protocol_type) = {
+        if let Some(ref cfg) = hello_config {
+            let provider_list = cfg.provider_list.as_ref().or(resource_cache.providers.as_ref());
 
-        // Gateway mode: config was bundled in AgentHelloResult
+            if let Some(providers) = provider_list {
+                let suggested_provider = &loaded.manifest.llm.suggested_provider;
+                if let Some(prov) = providers.iter().find(|p| p.id == *suggested_provider) {
+                    // Resolve API key from fresh key vault (never cached to disk).
+                    let api_key = cfg.provider_key_vault.iter()
+                        .find(|k| k.provider_id == prov.id)
+                        .map(|k| k.api_key.as_str());
 
+                    let suggested_model = &loaded.manifest.llm.suggested_model;
+                    let model = prov.models.iter().find(|m| m.id == *suggested_model);
 
-        if let Some(ref provider_name) = cfg.provider {
+                    if let Some(m) = model {
+                        gateway_model_capabilities = Some(m.capabilities.clone());
+                        gateway_max_output_tokens_limit = m.max_output_tokens_limit;
+                    }
 
+                    let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+                    let model_id = model.map(|m| m.id.clone()).unwrap_or_else(|| suggested_model.clone());
 
-            tracing::info!(
-
-
-                provider = %provider_name,
-
-
-                model = ?cfg.model,
-
-
-                source = "AgentHelloResult",
-
-
-                "LLM config received from Gateway"
-
-
-            );
-
-
-            gateway_model_capabilities = cfg.model_capabilities.clone();
-
-
-            gateway_max_output_tokens_limit = cfg.max_output_tokens_limit;
-
-
-            let p = crate::providers::router::create_provider(
-
-
-                provider_name,
-
-
-                &cfg.protocol_type,
-
-
-                cfg.api_key.as_deref(),
-
-
-                cfg.base_url.as_deref(),
-
-
-            );
-
-
-            // Model resolution: prefer explicit model > first from user-selected models list
-
-
-            let resolved = cfg.model
-
-
-                .clone()
-
-
-                .or_else(|| cfg.models.first().cloned())
-
-
-                .unwrap_or_else(|| {
-
-
-                    tracing::error!(
-
-
-                        provider = %provider_name,
-
-
-                        "No model available from Gateway. \
-
-
-                         Please configure a provider and select a model in Settings."
-
-
+                    let provider = crate::providers::router::create_provider(
+                        &prov.id,
+                        &prov.protocol_type,
+                        api_key,
+                        Some(&prov.base_url),
                     );
 
+                    tracing::info!(
+                        provider = %prov.id,
+                        model = %model_id,
+                        num_models = available.len(),
+                        has_api_key = api_key.is_some(),
+                        "Provider initialized from AgentHelloConfig"
+                    );
 
-                    format!("NO_MODEL_FOR_{}", provider_name.to_uppercase())
-
-
-                });
-
-
-            let models = cfg.models.clone();
-
-
-            (p, resolved, models, cfg.protocol_type.clone())
-
-
+                    (provider, model_id, available, prov.protocol_type.clone())
+                } else {
+                    tracing::warn!(
+                        suggested = %suggested_provider,
+                        available = ?providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+                        "Suggested provider not found in Gateway list, using noop"
+                    );
+                    let p = crate::providers::router::create_noop_provider();
+                    (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+                }
+            } else {
+                tracing::warn!("No provider list available from Gateway or cache, using noop");
+                let p = crate::providers::router::create_noop_provider();
+                (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+            }
         } else {
-
-
-            // No LLM config in AgentHelloResult — fall back to noop
-
-
-            tracing::error!(
-
-
-                "CRITICAL: No LLM config delivered by Gateway in AgentHelloResult. \
-
-
-                 Agent cannot process messages until API key is configured."
-
-
-            );
-
-
+            // Standalone mode: no Gateway, fall through to noop provider.
             let p = crate::providers::router::create_noop_provider();
-
-
-            (p, "no-model".to_string(), vec![], cfg.protocol_type.clone())
-
-
+            (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
         }
-
-
-    } else {
-
-
-        // Standalone mode: use manifest suggested_provider + env vars
-
-
-        let api_key = resolve_api_key(&loaded.manifest);
-
-
-        let base_url = std::env::var("ROLLBALL_LLM_BASE_URL").ok();
-
-
-        let p = build_runtime_provider(&loaded.manifest, api_key.as_deref(), base_url.as_deref());
-
-
-        tracing::info!(
-
-
-            provider = %p.name(),
-
-
-            model = %loaded.manifest.llm.suggested_model,
-
-
-            source = "manifest + env",
-
-
-            "Provider initialized (standalone mode)"
-
-
-        );
-
-
-        (
-            p,
-            loaded.manifest.llm.suggested_model.clone(),
-            vec![],
-            crate::providers::router::infer_protocol_type(&loaded.manifest.llm.suggested_provider),
-        )
-
-
     };
 
 
@@ -1177,7 +1171,15 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
     // On cold start, restore that preference if the model is still available.
 
 
+    //
+    // persisted_provider is extracted to survive outside the if-let so that
+    // the save at line ~1723 can preserve the user's provider choice instead of
+    // blindly overwriting it with the Gateway-resolved default provider.
+
+
+    let mut persisted_provider: Option<String> = None;
     if let Some((saved_model, saved_provider)) = load_agent_model(&config.work_dir) {
+        persisted_provider = saved_provider.clone();
 
 
         if available_models.contains(&saved_model) {
@@ -1669,65 +1671,46 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         }
 
         if let Some(ref cfg) = hello_config {
-            if cfg.runtime_max_output_tokens.is_some()
+            // ── Per-agent config loaded from workspace/config/agent_config.json ─
+            // (Phase 5 refactor: this replaces the old AgentHelloResult.runtime_* fields.)
+            // On first start (no config file), create a default with empty overrides;
+            // subsequent starts load any user-customized values.
+            let work_dir_path = std::path::Path::new(&config.work_dir);
+            let agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
+                .unwrap_or_default()
+                .unwrap_or_default();
 
-
-                || cfg.runtime_max_iterations.is_some()
-
-
-                || cfg.runtime_temperature.is_some()
-
-
-                || cfg.runtime_system_prompt_override.is_some()
-
-
-                || cfg.runtime_shell_approval_threshold.is_some()
-
-
+            // If this is first start, persist the default config so the file exists.
+            if std::path::Path::new(&config.work_dir)
+                .join("config")
+                .join("agent_config.json")
+                .exists()
+                == false
             {
-
-
-                tracing::info!(
-
-
-                    max_output_tokens = ?cfg.runtime_max_output_tokens,
-
-
-                    max_iterations = ?cfg.runtime_max_iterations,
-
-
-                    temperature = ?cfg.runtime_temperature,
-
-
-                    "Applying runtime config overrides from AgentHelloResult"
-
-
-                );
-
-
-                session_manager.apply_runtime_config_override(
-
-
-                    cfg.runtime_max_output_tokens,
-
-
-                    cfg.runtime_max_iterations,
-
-
-                    cfg.runtime_temperature,
-
-
-                    cfg.runtime_system_prompt_override.clone(),
-
-
-                    cfg.runtime_shell_approval_threshold.clone(),
-
-
-                );
-
-
+                let _ = crate::agent_config::save_agent_config(work_dir_path, &agent_cfg);
             }
 
+            let has_overrides = agent_cfg.max_output_tokens.is_some()
+                || agent_cfg.max_iterations.is_some()
+                || agent_cfg.temperature.is_some()
+                || agent_cfg.system_prompt_override.is_some()
+                || agent_cfg.shell_approval_threshold.is_some();
+
+            if has_overrides {
+                tracing::info!(
+                    max_output_tokens = ?agent_cfg.max_output_tokens,
+                    max_iterations = ?agent_cfg.max_iterations,
+                    temperature = ?agent_cfg.temperature,
+                    "Applying runtime config overrides from workspace agent_config.json"
+                );
+                session_manager.apply_runtime_config_override(
+                    agent_cfg.max_output_tokens,
+                    agent_cfg.max_iterations,
+                    agent_cfg.temperature,
+                    agent_cfg.system_prompt_override.clone(),
+                    agent_cfg.shell_approval_threshold.clone(),
+                );
+            }
 
         
             // Always cache the model from AgentHelloConfig so the SessionManager
@@ -1739,7 +1722,10 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             // the init; this ensures the AgentHelloResult model is cached from
             // the start (same save-then-override pattern as line ~4903).
             {
-                save_agent_model(&config.work_dir, &resolved_model, cfg.provider.as_deref());
+                // Preserve the user's provider preference from agent_model.json
+                // when available; otherwise fall back to Gateway-resolved provider.
+                let provider_to_save = persisted_provider.as_deref(); // FIXME(Task10): provider from agent_model.json
+                save_agent_model(&config.work_dir, &resolved_model, provider_to_save);
                 session_manager.update_model_override(resolved_model.clone());
                 tracing::info!(
                     model = %resolved_model,
@@ -3040,6 +3026,17 @@ async fn run_gateway_loop(
                                 let (current_model, current_provider) =
                                     load_agent_model(&work_dir).unwrap_or((String::new(), None));
                                 let overrides = &session_manager.runtime_overrides;
+                                // Read persisted agent config for MCP + available_models.
+                                let persisted = crate::agent_config::load_agent_config(
+                                    std::path::Path::new(&work_dir),
+                                )
+                                .unwrap_or_default()
+                                .unwrap_or_default();
+                                let mcp_json: Vec<String> = persisted
+                                    .mcp_servers
+                                    .iter()
+                                    .map(|s| serde_json::to_string(s).unwrap_or_default())
+                                    .collect();
 
                                 let snapshot = proto::client_message::Payload::ConfigSnapshot(
                                     proto::ConfigSnapshot {
@@ -3052,6 +3049,8 @@ async fn run_gateway_loop(
                                         system_prompt_override: overrides.system_prompt_override.clone(),
                                         active_tools: overrides.active_tools.clone().unwrap_or_default(),
                                         shell_approval_threshold: overrides.shell_approval_threshold.clone(),
+                                        mcp_servers_json: mcp_json,
+                                        available_models: persisted.available_models,
                                     },
                                 );
 
@@ -4632,6 +4631,21 @@ async fn process_gateway_recv(
 
                         );
 
+                        // Persist available_models to agent_config.json so that
+                        // ConfigSnapshot responses (served via QueryConfig IPC)
+                        // always return the latest model list from Gateway.
+                        {
+                            let mut persisted = crate::agent_config::load_agent_config(
+                                std::path::Path::new(&work_dir),
+                            )
+                            .unwrap_or_default()
+                            .unwrap_or_default();
+                            persisted.available_models = available_models;
+                            let _ = crate::agent_config::save_agent_config(
+                                std::path::Path::new(&work_dir),
+                                &persisted,
+                            );
+                        }
 
                         return LoopAction::Continue;
 
@@ -4927,6 +4941,33 @@ async fn process_gateway_recv(
                                 model = ?model,
                                 provider = ?provider,
                                 "Model/provider override applied from RuntimeConfigUpdate"
+                            );
+                        }
+
+                        // Persist per-agent config to workspace/config/agent_config.json.
+                        // This consolidates all overrides into a single file owned by Runtime,
+                        // replacing the former Gateway-side data/agent_configs/{agent_id}.json.
+                        {
+                            // Preserve available_models written by LLMConfigDelivery hot-push.
+                            let persisted_before = crate::agent_config::load_agent_config(
+                                std::path::Path::new(&work_dir),
+                            )
+                            .unwrap_or_default()
+                            .unwrap_or_default();
+                            let overrides = &session_manager.runtime_overrides;
+                            let agent_cfg = crate::agent_config::AgentConfig {
+                                max_output_tokens: overrides.max_output_tokens,
+                                max_iterations: overrides.max_iterations,
+                                temperature: overrides.temperature,
+                                system_prompt_override: overrides.system_prompt_override.clone(),
+                                active_tools: overrides.active_tools.clone().unwrap_or_default(),
+                                shell_approval_threshold: overrides.shell_approval_threshold.clone(),
+                                mcp_servers: vec![],
+                                available_models: persisted_before.available_models,
+                            };
+                            let _ = crate::agent_config::save_agent_config(
+                                std::path::Path::new(&work_dir),
+                                &agent_cfg,
                             );
                         }
 

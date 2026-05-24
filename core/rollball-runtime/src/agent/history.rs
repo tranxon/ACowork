@@ -635,15 +635,15 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_tokens() {
+    fn test_estimate_text_tokens() {
         // ASCII: 5 chars / 4 = 1.25 → ceil = 2
-        assert_eq!(estimate_tokens("hello"), 2);
-        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_text_tokens("hello"), 2);
+        assert_eq!(estimate_text_tokens(""), 0);
         // Pure CJK: 4 chars × 2 tokens/char = 4 tokens (rounded: (4*2+1)/2 = 4)
-        assert!(estimate_tokens("你好世界") >= 4); // "hello world" in Chinese
+        assert!(estimate_text_tokens("你好世界") >= 4); // "hello world" in Chinese
         // Mixed: CJK chars get ~2 tokens each, ASCII ~1/4
         let mixed = "你好world"; // 2 CJK + 5 ASCII
-        let est = estimate_tokens(mixed);
+        let est = estimate_text_tokens(mixed);
         assert!(est > 2, "CJK should add more tokens than pure ASCII of same len");
     }
 

@@ -135,7 +135,7 @@ async fn test_s5_intent_cross_agent_call() {
     let mut context_builder = ContextBuilder::new("You are a weather agent.".to_string());
 
     let result = agent_loop
-        .run("Check Shanghai weather and create a reminder", &mut context_builder)
+        .run("Check Shanghai weather and create a reminder", &mut context_builder, None)
         .await;
     assert!(result.is_ok(), "Intent cross-agent call should succeed: {:?}", result);
 

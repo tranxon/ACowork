@@ -88,7 +88,13 @@ message CronRegisterRequest     { string agent_id = 1; string schedule = 2; stri
 message CronUnregisterRequest   { string cron_id = 1; }
 message CronListRequest         {}
 message ContextUsageReportRequest { string agent_id = 1; ContextUsageInfo context = 2; }
-message AgentHelloRequest       { string agent_id = 1; string version = 2; string connection_role = 3; }
+message AgentHelloRequest       {
+  string agent_id = 1;
+  string version = 2;
+  string connection_role = 3;
+  uint64 provider_list_version = 4;
+  uint64 mcp_list_version = 5;
+}
 message ListSessionsRequest     {}
 message GetSessionMessagesRequest { string session_id = 1; string cursor = 2; uint32 limit = 3; string direction = 4; }
 message CreateSessionRequest    {}
@@ -98,29 +104,25 @@ message AgentHelloResult {
   bool success = 1;
   string error = 2;
 
-  // ── LLM Configuration (merged from LLMConfigDelivery) ──
-  // Only populated for "main" connections; empty/zero for chunk-relay.
-  string provider = 3;
-  string model = 4;
-  string api_key = 5;
-  string base_url = 6;
-  repeated string models = 7;
-  ModelCapabilitiesInfo model_capabilities = 8;
-  uint64 max_output_tokens_limit = 9;
-  string protocol_type = 10;
+  // ── Global resource lists (version-driven diff sync) ──
+  // Provider list (JSON-serialized Vec<ProviderListItem>), only when version differs.
+  string provider_list_json = 19;
+  uint64 provider_list_version = 20;
 
-  // ── Runtime Config Overrides (merged from RuntimeConfigUpdate) ──
-  // Using proto3 `optional` so 0/0.0 genuinely means "set this value to zero",
-  // while absence of the field means "no override; fall back to defaults".
-  optional uint64 runtime_max_output_tokens = 14;
-  optional uint32 runtime_max_iterations = 15;
-  optional float runtime_temperature = 16;
-  string runtime_system_prompt_override = 17;
-  string runtime_shell_approval_threshold = 18;
+  // MCP server list (JSON-serialized Vec<McpListItem>), only when version differs.
+  string mcp_list_json = 21;
+  uint64 mcp_list_version = 22;
 
-  // Fields 11-13: reserved (was workspace_context_text, current_workspace_id, current_workspace_path).
-  // Workspace config is now managed by Runtime; Gateway is pure pass-through.
-  reserved 11, 12, 13;
+  // Provider key vault (JSON-serialized Vec<ProviderKeyEntry>), always full delivery.
+  string provider_key_vault_json = 23;
+
+  // MCP key vault (JSON-serialized Vec<McpKeyEntry>), always full delivery.
+  string mcp_key_vault_json = 24;
+
+  // Fields 3-10: removed (was provider, model, api_key, base_url, models,
+  //   model_capabilities, max_output_tokens_limit, protocol_type).
+  // Fields 11-18: reserved (was workspace_context_*, runtime_* overrides).
+  reserved 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18;
 }
 message KeyReleaseResult        { string api_key = 1; string error = 2; }
 message IntentDelivered         { string message_id = 1; }
@@ -155,6 +157,9 @@ message ConfigSnapshot {
   optional string system_prompt_override = 7;
   repeated string active_tools = 8;
   optional string shell_approval_threshold = 9;
+  // MCP server configs as JSON strings (one per server)
+  repeated string mcp_servers_json = 10;
+  repeated string available_models = 11;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }

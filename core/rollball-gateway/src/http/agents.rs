@@ -769,126 +769,126 @@ fn write_manifest_tools(install_path: &str, active_tools: &[String]) {
 
 /// `GET /api/agents/{id}/config` — get agent runtime config
 ///
-/// Returns the effective config for an agent by merging per-agent overrides
-/// with global Gateway defaults.
+/// Queries the connected Runtime via QueryConfig IPC for per-agent config
+/// (Phase 5 refactor: per-agent config is now owned by Runtime workspace).
+/// Merges with Gateway global defaults for the response.
 pub async fn get_agent_config(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentConfigResponse>, (StatusCode, Json<ApiError>)> {
-    let gw = state.gateway_state.read().await;
+    let global_max_output_tokens = {
+        let gw = state.gateway_state.read().await;
+        if !gw.installed_agents.contains_key(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        // Guard: agent must be running and ready.
+        if let Some(info) = gw.running_agents.get(&agent_id) {
+            if !info.ready {
+                return Err(ApiError::service_unavailable(
+                    &format!("Agent '{}' is starting up, please wait", agent_id),
+                ));
+            }
+        } else {
+            return Err(ApiError::service_unavailable(
+                &format!("Agent '{}' is not started", agent_id),
+            ));
+        }
+        gw.config
+            .as_ref()
+            .map(|c| c.max_output_tokens_limit)
+            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS)
+    };
 
-    // Verify agent exists
-    let info = gw
-        .installed_agents
-        .get(&agent_id)
-        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+    // Query Runtime workspace config via IPC (QueryConfig → ConfigSnapshot roundtrip).
+    let (model, provider, max_output_tokens, max_iterations, temperature,
+         system_prompt_override, active_tools, shell_approval_threshold,
+         mcp_servers, available_models) =
+        if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+            let query = rollball_core::proto::server_message::Payload::QueryConfig(
+                rollball_core::proto::QueryConfig {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                },
+            );
+            match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
+                Some(response) => {
+                    if let Some(rollball_core::proto::client_message::Payload::ConfigSnapshot(snap)) = response.payload {
+                        (snap.model, snap.provider,
+                         snap.max_output_tokens, snap.max_iterations, snap.temperature,
+                         snap.system_prompt_override,
+                         if snap.active_tools.is_empty() { None } else { Some(snap.active_tools) },
+                         snap.shell_approval_threshold,
+                         snap.mcp_servers_json,
+                         snap.available_models)
+                    } else {
+                        (None, None, None, None, None, None, None, None, vec![], vec![])
+                    }
+                }
+                None => (None, None, None, None, None, None, None, None, vec![], vec![]),
+            }
+        } else {
+            (None, None, None, None, None, None, None, None, vec![], vec![])
+        };
 
-    // Get data_dir from Gateway config
-    let data_dir = gw
-        .config
-        .as_ref()
-        .map(|c| std::path::PathBuf::from(&c.data_dir))
-        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-
-    // Get global max_output_tokens from config
-    let global_max_output_tokens = gw
-        .config
-        .as_ref()
-        .map(|c| c.max_output_tokens_limit)
-        .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS);
-
-    // Load per-agent config override
-    let per_agent = agent_config::load_agent_config(&data_dir, &agent_id).unwrap_or(None);
-
-    // ADR-009: Do NOT read from agent workspace files.
-    // system_prompt and manifest tools come from per-agent config only.
-    // When agent is stopped, these fields will be None/empty (UI hides Setup tab).
-    let system_prompt = per_agent.as_ref().and_then(|c| c.system_prompt_override.clone());
-    let manifest_active_tools: Vec<String> = Vec::new(); // No longer read from manifest
-
-    // Merge into effective config
-    let effective = agent_config::get_effective_config(
-        &agent_id,
-        per_agent.as_ref(),
+    // Build the effective config from ConfigSnapshot data
+    let effective = AgentConfigResponse {
+        agent_id,
+        max_output_tokens: max_output_tokens,
+        max_iterations: max_iterations,
+        temperature,
+        system_prompt: None,
+        // Use model snap fields for active model/provider in response
+        model,
+        provider,
+        active_tools: active_tools.unwrap_or_default(),
+        system_prompt_override,
+        shell_approval_threshold,
+        mcp_servers,
+        available_models,
         global_max_output_tokens,
-        system_prompt,
-        manifest_active_tools,
-    );
+    };
 
     Ok(Json(effective))
 }
 
 /// `PUT /api/agents/{id}/config` — update agent runtime config
 ///
-/// Accepts partial updates: only provided fields are modified.
-/// Saves the updated config to disk and pushes RuntimeConfigUpdate
-/// to the connected agent if available.
+/// Accepts partial updates. Forwards to Runtime via RuntimeConfigUpdate push.
+/// (Phase 5 refactor): Gateway no longer persists per-agent config locally.
+/// The Runtime is the authoritative owner and persists to workspace/config/.
 pub async fn update_agent_config(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<UpdateAgentConfigRequest>,
 ) -> Result<Json<AgentConfigResponse>, (StatusCode, Json<ApiError>)> {
-    // Extract data from gateway state first (release lock before async ops)
-    let (info_install_path, data_dir, global_max_output_tokens) = {
+    let global_max_output_tokens = {
         let gw = state.gateway_state.read().await;
-
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-
-        let data_dir = gw
-            .config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.data_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-
-        let global_max_output_tokens = gw
-            .config
+        if !gw.installed_agents.contains_key(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        // Guard: agent must be running and ready.
+        if let Some(info) = gw.running_agents.get(&agent_id) {
+            if !info.ready {
+                return Err(ApiError::service_unavailable(
+                    &format!("Agent '{}' is starting up, please wait", agent_id),
+                ));
+            }
+        } else {
+            return Err(ApiError::service_unavailable(
+                &format!("Agent '{}' is not started", agent_id),
+            ));
+        }
+        gw.config
             .as_ref()
             .map(|c| c.max_output_tokens_limit)
-            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS);
-
-        (info.install_path.clone(), data_dir, global_max_output_tokens)
+            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS)
     };
 
-    // Load existing config or create default
-    let existing = agent_config::load_agent_config(&data_dir, &agent_id)
-        .unwrap_or(None)
-        .unwrap_or_default();
-
-    // Merge update: provided values override, None means keep existing
-    // Clone String fields before move so we can use them for push later
     let req_system_prompt_override = req.system_prompt_override.clone();
     let req_active_tools = req.active_tools.clone();
     let req_shell_approval_threshold = req.shell_approval_threshold;
     let req_mcp_servers = req.mcp_servers.clone();
-    let updated = AgentConfigOverride {
-        max_output_tokens: req.max_output_tokens.or(existing.max_output_tokens),
-        max_iterations: req.max_iterations.or(existing.max_iterations),
-        temperature: req.temperature.or(existing.temperature),
-        system_prompt_override: req
-            .system_prompt_override
-            .or(existing.system_prompt_override),
-        active_tools: req
-            .active_tools
-            .or(existing.active_tools),
-        shell_approval_threshold: req
-            .shell_approval_threshold
-            .or(existing.shell_approval_threshold),
-        mcp_servers: req
-            .mcp_servers
-            .or(existing.mcp_servers),
-    };
 
-    // Save to disk
-    agent_config::save_agent_config(&data_dir, &agent_id, &updated)
-        .map_err(|e| ApiError::internal(&format!("Failed to save config: {}", e)))?;
-
-    // ADR-009: No longer write manifest.toml. active_tools persistence
-    // is handled by AgentConfigOverride (stored in Gateway's data_dir).
-
-    // Push RuntimeConfigUpdate to connected agent if available
+    // Push RuntimeConfigUpdate to connected agent (no Gateway disk save)
     if let Some(ref session_mgr) = state.session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
@@ -914,18 +914,23 @@ pub async fn update_agent_config(
         }
     }
 
-    // ADR-009: Do NOT read from agent workspace files for response
-    let system_prompt = updated.system_prompt_override.clone();
-    let manifest_active_tools: Vec<String> = Vec::new();
-
-    // Return updated effective config
-    let effective = agent_config::get_effective_config(
-        &agent_id,
-        Some(&updated),
+    // Return echo of submitted config (the actual persisted values will be
+    // available on next GET, which queries the Runtime via ConfigSnapshot).
+    let effective = AgentConfigResponse {
+        agent_id,
+        max_output_tokens: req.max_output_tokens,
+        max_iterations: req.max_iterations,
+        temperature: req.temperature,
+        system_prompt: None,
+        system_prompt_override: req.system_prompt_override,
+        active_tools: req.active_tools.unwrap_or_default(),
+        shell_approval_threshold: req_shell_approval_threshold.map(|t| format!("{:?}", t).to_lowercase()),
+        mcp_servers: vec![],
+        available_models: vec![],
+        model: None,
+        provider: None,
         global_max_output_tokens,
-        system_prompt,
-        manifest_active_tools,
-    );
+    };
 
     Ok(Json(effective))
 }

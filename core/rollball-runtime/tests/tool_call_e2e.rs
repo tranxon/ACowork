@@ -19,7 +19,7 @@ use rollball_runtime::agent::loop_::AgentLoop;
 use rollball_runtime::config::RuntimeConfig;
 use rollball_runtime::tools::builtin;
 use rollball_runtime::tools::wrappers::{PathGuardedTool, WorkspaceAccess, WorkspaceDir};
-use rollball_runtime::tools::workspace_resolver::WorkspaceResolver;
+use rollball_runtime::tools::workspace_resolver::{SharedResolver, WorkspaceResolver};
 
 
 use serde_json::Value;
@@ -125,7 +125,7 @@ async fn test_tool_definition_parameters_serialization() {
     // Verify all builtin tools' ToolSpec serialize with "parameters" field
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let resolver = WorkspaceResolver::new(&work_dir);
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
     let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
 
@@ -172,7 +172,7 @@ async fn test_tool_definition_parameters_serialization() {
 async fn test_all_builtin_tools_have_unique_names() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let resolver = WorkspaceResolver::new(&work_dir);
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
     let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
 
@@ -193,7 +193,7 @@ async fn test_all_builtin_tools_count() {
     // Design doc: 15 built-in tools (without RAG)
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let resolver = WorkspaceResolver::new(&work_dir);
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
     let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
     assert_eq!(tools.len(), 16, "Should have 16 builtin tools (14 fixed + 2 shell on Windows)");
@@ -230,7 +230,7 @@ async fn test_tool_call_with_valid_json_arguments() {
     let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let mut context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
-    let result = agent_loop.run("Read the file test.txt", &mut context_builder).await;
+    let result = agent_loop.run("Read the file test.txt", &mut context_builder, None).await;
     assert!(result.is_ok(), "Valid tool call should succeed: {:?}", result);
 }
 
@@ -272,7 +272,7 @@ async fn test_tool_call_with_invalid_json_arguments() {
     let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let mut context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
-    let result = agent_loop.run("Read a file", &mut context_builder).await;
+    let result = agent_loop.run("Read a file", &mut context_builder, None).await;
     // Should NOT panic — the invalid JSON is caught and produces a graceful error
     assert!(result.is_ok(), "Invalid JSON arguments should not crash: {:?}", result);
 }
@@ -311,7 +311,7 @@ async fn test_tool_call_with_empty_arguments() {
     let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let mut context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
-    let result = agent_loop.run("Read a file with no args", &mut context_builder).await;
+    let result = agent_loop.run("Read a file with no args", &mut context_builder, None).await;
     assert!(result.is_ok(), "Empty arguments should not crash: {:?}", result);
 }
 
@@ -626,7 +626,8 @@ async fn test_glob_search_valid() {
     std::fs::write(tmp.path().join("lib.rs"), "pub fn lib() {}").unwrap();
     std::fs::write(tmp.path().join("readme.md"), "# Hello").unwrap();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::glob_search::GlobSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "*.rs" }))
         .await
@@ -649,7 +650,8 @@ async fn test_glob_search_recursive_pattern() {
     std::fs::write(sub.join("app.rs"), "mod app;").unwrap();
     std::fs::write(tmp.path().join("root.rs"), "mod root;").unwrap();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::glob_search::GlobSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "**/*.rs" }))
         .await
@@ -665,7 +667,8 @@ async fn test_glob_search_no_matches() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::glob_search::GlobSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "*.xyz" }))
         .await
@@ -680,7 +683,8 @@ async fn test_glob_search_empty_pattern() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::glob_search::GlobSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "" }))
         .await
@@ -702,7 +706,8 @@ async fn test_glob_search_windows_backslash_pattern() {
     std::fs::write(sub.join("lib.rs"), "pub fn lib() {}").unwrap();
     std::fs::write(tmp.path().join("readme.md"), "# Hello").unwrap();
 
-    let tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::glob_search::GlobSearchTool::new(&resolver);
     // Use Windows-style backslash separator in the pattern
     let result = tool
         .execute(serde_json::json!({ "pattern": "src\\*.rs" }))
@@ -724,7 +729,8 @@ async fn test_content_search_valid() {
     std::fs::write(tmp.path().join("hello.txt"), "Hello, RollBall AI!").unwrap();
     std::fs::write(tmp.path().join("bye.txt"), "Goodbye, world!").unwrap();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::content_search::ContentSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "RollBall" }))
         .await
@@ -742,7 +748,8 @@ async fn test_content_search_no_matches() {
 
     std::fs::write(tmp.path().join("data.txt"), "Nothing interesting here").unwrap();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::content_search::ContentSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "nonexistent_pattern_12345" }))
         .await
@@ -757,7 +764,8 @@ async fn test_content_search_invalid_regex() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::content_search::ContentSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "[invalid" }))
         .await
@@ -772,7 +780,8 @@ async fn test_content_search_empty_pattern() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::content_search::ContentSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "" }))
         .await
@@ -792,7 +801,8 @@ async fn test_content_search_path_format() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(sub.join("main.rs"), "fn main() { RollBall; }").unwrap();
 
-    let tool = builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
+    let tool = builtin::content_search::ContentSearchTool::new(&resolver);
     let result = tool
         .execute(serde_json::json!({ "pattern": "RollBall" }))
         .await
@@ -987,7 +997,7 @@ async fn test_provider_error_does_not_crash_runtime() {
     let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let mut context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
-    let result = agent_loop.run("Hello", &mut context_builder).await;
+    let result = agent_loop.run("Hello", &mut context_builder, None).await;
     // Should return an error, not panic
     assert!(result.is_err(), "Provider error should propagate as Err");
 }
@@ -1042,7 +1052,7 @@ async fn test_multiple_concurrent_tool_calls() {
     let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let mut context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
-    let result = agent_loop.run("Read both files", &mut context_builder).await;
+    let result = agent_loop.run("Read both files", &mut context_builder, None).await;
     assert!(result.is_ok(), "Concurrent tool calls should succeed: {:?}", result);
 
     // Verify history has the tool call messages
@@ -1090,7 +1100,7 @@ async fn test_unknown_tool_returns_error_not_panic() {
     let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
     let mut context_builder = ContextBuilder::new("You are a test assistant.".to_string());
 
-    let result = agent_loop.run("Use a nonexistent tool", &mut context_builder).await;
+    let result = agent_loop.run("Use a nonexistent tool", &mut context_builder, None).await;
     assert!(result.is_ok(), "Unknown tool should not crash: {:?}", result);
 }
 
@@ -1223,7 +1233,7 @@ fn test_convert_tools_preserves_all_builtin_tools() {
     // Verify that all builtin tools can be serialized and converted
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
-    let resolver = WorkspaceResolver::new(&work_dir);
+    let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
     let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
 

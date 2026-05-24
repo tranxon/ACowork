@@ -49,11 +49,14 @@ pub struct AgentConfigOverride {
 pub struct AgentConfigResponse {
     pub agent_id: String,
     /// Effective max_output_tokens (per-agent override > global > hardcoded default)
-    pub max_output_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// Effective max_iterations
-    pub max_iterations: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
     /// Effective temperature
-    pub temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     /// The manifest-compiled system prompt (read-only, loaded by caller)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -63,10 +66,22 @@ pub struct AgentConfigResponse {
     /// Active tool names (from manifest + config overrides)
     pub active_tools: Vec<String>,
     /// Effective shell approval threshold
-    pub shell_approval_threshold: ShellApprovalThreshold,
-    /// Effective MCP server configurations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_approval_threshold: Option<String>,
+    /// Effective MCP server configurations (JSON strings from ConfigSnapshot)
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<McpServerConfigDef>,
+    pub mcp_servers: Vec<String>,
+    /// Available models list (from Gateway global resources)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub available_models: Vec<String>,
+    /// Current model name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Current provider name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Gateway global max_output_tokens limit
+    pub global_max_output_tokens: u64,
 }
 
 /// PUT request body for updating agent config.
@@ -152,33 +167,29 @@ pub fn save_agent_config(
 }
 
 /// Merge per-agent override with global defaults to produce effective config.
+///
+/// NOTE: Deprecated by Phase 5 refactor. Per-agent config is now owned by Runtime.
+/// This function remains for backward compatibility but returns a stub.
 pub fn get_effective_config(
     agent_id: &str,
-    per_agent: Option<&AgentConfigOverride>,
+    _per_agent: Option<&AgentConfigOverride>,
     global_max_output_tokens: u64,
-    system_prompt: Option<String>,
-    manifest_active_tools: Vec<String>,
+    _system_prompt: Option<String>,
+    _manifest_active_tools: Vec<String>,
 ) -> AgentConfigResponse {
-    let over = per_agent;
     AgentConfigResponse {
         agent_id: agent_id.to_string(),
-        max_output_tokens: over.and_then(|o| o.max_output_tokens)
-            .unwrap_or(global_max_output_tokens)
-            .max(1), // 0 means "use default", but for display we show the actual default
-        max_iterations: over.and_then(|o| o.max_iterations)
-            .unwrap_or(DEFAULT_MAX_ITERATIONS),
-        temperature: over.and_then(|o| o.temperature)
-            .unwrap_or(DEFAULT_TEMPERATURE),
-        system_prompt,
-        system_prompt_override: over.and_then(|o| o.system_prompt_override.clone()),
-        active_tools: over
-            .and_then(|o| o.active_tools.clone())
-            .unwrap_or(manifest_active_tools),
-        shell_approval_threshold: over
-            .and_then(|o| o.shell_approval_threshold)
-            .unwrap_or(DEFAULT_SHELL_APPROVAL_THRESHOLD),
-        mcp_servers: over
-            .and_then(|o| o.mcp_servers.clone())
-            .unwrap_or_default(),
+        max_output_tokens: Some(global_max_output_tokens),
+        max_iterations: Some(DEFAULT_MAX_ITERATIONS),
+        temperature: Some(DEFAULT_TEMPERATURE),
+        system_prompt: None,
+        system_prompt_override: None,
+        active_tools: vec![],
+        shell_approval_threshold: Some("medium".to_string()),
+        mcp_servers: vec![],
+        available_models: vec![],
+        model: None,
+        provider: None,
+        global_max_output_tokens,
     }
 }

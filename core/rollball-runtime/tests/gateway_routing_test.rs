@@ -130,6 +130,7 @@ fn make_session_config(budget: Budget, chunk_tx: Option<mpsc::Sender<SessionChun
         full_tool_specs: Vec::new(),
         identity_context: None,
         override_model: None,
+        protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
     }
 }
 
@@ -194,6 +195,8 @@ async fn sa_04_gateway_routing_never_blocks() {
             content: "Hello A".to_string(),
             message_id: "msg-sa04-a".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -204,6 +207,8 @@ async fn sa_04_gateway_routing_never_blocks() {
             content: "Hello B".to_string(),
             message_id: "msg-sa04-b".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     let route_elapsed = b_route_time.elapsed();
@@ -275,6 +280,8 @@ async fn ipc_01_gateway_disconnect_recovery() {
             content: "Before disconnect".to_string(),
             message_id: "msg-ipc01-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -299,7 +306,9 @@ async fn ipc_01_gateway_disconnect_recovery() {
     let route_result = manager.send_to_session(&session_a, SessionMessage::ChatMessage {
         content: "After disconnect".to_string(),
         message_id: "msg-ipc01-2".to_string(),
-    skill_instructions: None,
+        skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     assert!(
         route_result.is_ok(),
@@ -321,6 +330,8 @@ async fn ipc_01_gateway_disconnect_recovery() {
             content: "After reconnect".to_string(),
             message_id: "msg-ipc01-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -472,6 +483,8 @@ async fn ipc_03_message_to_nonexistent_session() {
             content: "This should fail".to_string(),
             message_id: "msg-ipc03-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         },
     );
     assert!(
@@ -497,7 +510,9 @@ async fn ipc_03_message_to_nonexistent_session() {
     let real_send_result = manager.send_to_session(&session_real, SessionMessage::ChatMessage {
         content: "Still works".to_string(),
         message_id: "msg-ipc03-2".to_string(),
-    skill_instructions: None,
+        skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     assert!(
         real_send_result.is_ok(),
@@ -522,6 +537,8 @@ async fn ipc_03_message_to_nonexistent_session() {
                 content: "test".to_string(),
                 message_id: format!("msg-fake-{}", i),
                 skill_instructions: None,
+                    documents: None,
+                    content_parts: None,
             },
         );
         assert!(result.is_err(), "Send {} to nonexistent session should fail", i);
@@ -577,6 +594,8 @@ async fn lifecycle_01_create_session_while_receiving_messages() {
             content: "First message".to_string(),
             message_id: "msg-lifecycle-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -585,6 +604,8 @@ async fn lifecycle_01_create_session_while_receiving_messages() {
             content: "Second message".to_string(),
             message_id: "msg-lifecycle-2".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 

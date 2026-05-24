@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
-import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
@@ -15,7 +14,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import type { CloneResponse } from "../../lib/types";
-import { getGatewayUrl } from "../../lib/config";
+import { syncAgentUI } from "../../lib/agent-start";
 
 interface AgentListProps {
   width?: number;
@@ -43,12 +42,7 @@ export function AgentList({ width }: AgentListProps) {
   const waitForAgentReady = async (agentId: string, devMode: boolean) => {
     setStartingAgentIds((prev) => new Set(prev).add(agentId));
     try {
-      await useAgentStore.getState().waitForAgentReady(agentId);
-      useChatStore.getState().connectStream(agentId, getGatewayUrl());
-      // Refresh workspace list now that agent is running (workspace config
-      // is sent from Runtime to Gateway after AgentHello, so the cache is
-      // fresh by this point).
-      useWorkspaceStore.getState().fetchWorkspaces(agentId);
+      await syncAgentUI(agentId);
       addToast({ type: "success", message: devMode ? "Agent started in debug mode" : "Agent started" });
     } catch (e: any) {
       addToast({ type: "error", message: e?.message ?? String(e) });
@@ -75,7 +69,7 @@ export function AgentList({ width }: AgentListProps) {
     message: "",
     confirmLabel: "Confirm",
     destructive: false,
-    onConfirm: () => {},
+    onConfirm: () => { },
   });
 
   // Agent detail dialog state
@@ -322,7 +316,7 @@ export function AgentList({ width }: AgentListProps) {
 
         {filteredAgents.map((agent, index) => {
           const sessionTitle = sessionTitles[agent.agent_id];
-          
+
           return (
             <div
               key={agent.agent_id}

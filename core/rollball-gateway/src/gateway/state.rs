@@ -7,6 +7,7 @@ use crate::rate::bucket::RateLimiter;
 use crate::capability::registry::CapabilityRegistry;
 use crate::cron::CronScheduler;
 use crate::cron::store::CronStore;
+use crate::resource_cache::ResourceCache;
 
 /// Information about an installed agent
 #[derive(Debug, Clone)]
@@ -68,6 +69,9 @@ pub struct GatewayState {
     /// Shared models.dev cache (set during Gateway::run before IPC/HTTP start).
     /// Allows IPC server to look up model capabilities with cache freshness.
     pub(crate) models_cache: Option<crate::http::models_api::ModelsCache>,
+    /// Resource cache — versioned provider and MCP lists for AgentHello diff sync.
+    /// Loaded at startup and rebuilt by HTTP handlers when resources change.
+    pub resource_cache: ResourceCache,
 }
 
 impl GatewayState {
@@ -85,6 +89,7 @@ impl GatewayState {
             config: None,
             ipc_sessions: None,
             models_cache: None,
+            resource_cache: ResourceCache::default(),
         }
     }
 
@@ -249,6 +254,7 @@ mod tests {
             dev_mode: false,
             debug_port: None,
             identity_entries: vec![],
+            workspace_config_json: None,
         });
         assert!(state.is_running("com.example.weather"));
         

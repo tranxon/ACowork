@@ -590,7 +590,8 @@ mod tests {
         let manifest = manifest_with_tools(&["shell", "calculator"]);
 
 
-        let (activated, _) = reg.activate(&manifest, "/tmp/work", 60);
+        let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new("/tmp/test")));
+        let activated = reg.activate(&manifest, &resolver, 60);
 
 
         assert_eq!(activated.len(), 2);
@@ -662,7 +663,8 @@ mod tests {
         let manifest = AgentManifest::from_toml(toml_str).unwrap();
 
 
-        let (activated, _) = reg.activate(&manifest, "/tmp/work", 60);
+        let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new("/tmp/test")));
+        let activated = reg.activate(&manifest, &resolver, 60);
 
 
         assert_eq!(activated.len(), 4); // All tools available

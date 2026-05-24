@@ -5,6 +5,7 @@
 
 pub mod server;
 pub mod session;
+pub mod global_push;
 
 // Re-export SharedState for convenience
 pub use server::SharedState;

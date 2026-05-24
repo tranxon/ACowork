@@ -373,6 +373,11 @@ impl Gateway {
             tracing::warn!("Failed to auto-start System Agent: {}", e);
         }
 
+        // Load resource cache (provider_list.json + mcp_list.json) into memory.
+        // These files are rebuilt by HTTP handlers when resources change.
+        let cache_dir = std::path::PathBuf::from(&self.config.data_dir);
+        self.state.resource_cache = crate::resource_cache::load_resource_cache(&cache_dir);
+
 
         // Wrap state in Arc<RwLock> for concurrent access in multi-connection mode.
         // std::mem::take replaces self.state with Default so the Arc takes ownership.
@@ -439,6 +444,28 @@ impl Gateway {
             let mut gw = shared_state.write().await;
             gw.ipc_sessions = Some(session_mgr.clone());
             gw.models_cache = Some(models_cache.clone());
+        }
+
+        // Rebuild resource cache from Vault and MCP catalog at startup.
+        // provider_list.json / mcp_list.json are only persisted when explicitly
+        // modified via HTTP API; they won't exist if Gateway never saved them.
+        // Always rebuilding ensures the in-memory cache reflects current Vault
+        // state before any Runtime connects (AgentHello version-driven diff sync).
+        // This also prevents version rollback when cache files are lost between restarts.
+        {
+            let mut gw = shared_state.write().await;
+            crate::resource_cache::rebuild_and_save_provider_cache(
+                &mut gw,
+                &data_dir_path,
+                &models_cache,
+            ).await;
+            if let Ok(catalog) = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir_path) {
+                crate::resource_cache::rebuild_and_save_mcp_cache(
+                    &mut gw,
+                    &data_dir_path,
+                    &catalog,
+                );
+            }
         }
 
         // S3.1: Start cron scheduler tick loop

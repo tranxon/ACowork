@@ -187,7 +187,7 @@ async fn stress_test_glob_search_many_files() {
     let work_dir = tmp.path().to_string_lossy().to_string();
 
     let write_tool = builtin::file_write::FileWriteTool::new(&work_dir);
-    let glob_tool = builtin::glob_search::GlobSearchTool::new(&WorkspaceResolver::new(&work_dir));
+    let glob_tool = builtin::glob_search::GlobSearchTool::new(&Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir))));
 
     let file_count = 100;
 
@@ -246,7 +246,7 @@ async fn stress_test_concurrent_content_search() {
     let work_dir = tmp.path().to_string_lossy().to_string();
 
     let write_tool = builtin::file_write::FileWriteTool::new(&work_dir);
-    let search_tool = Arc::new(builtin::content_search::ContentSearchTool::new(&WorkspaceResolver::new(&work_dir)));
+    let search_tool = Arc::new(builtin::content_search::ContentSearchTool::new(&Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)))));
 
     let file_count = 20;
 
@@ -301,7 +301,7 @@ async fn stress_test_tool_spec_serialization_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_string_lossy().to_string();
 
-    let resolver = WorkspaceResolver::new(&work_dir);
+    let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
     let tools = builtin::all_builtin_tools(&resolver, "com.test.stress");
     let rounds = 1000;
 

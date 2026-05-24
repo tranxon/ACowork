@@ -102,6 +102,8 @@ async fn test_e2e_intent_routing_with_capabilities() {
             ready: false,
             dev_mode: false,
             debug_port: None,
+            identity_entries: vec![],
+            workspace_config_json: None,
         });
     }
 
@@ -270,6 +272,8 @@ async fn test_e2e_intent_budget_rate_combined() {
             ready: false,
             dev_mode: false,
             debug_port: None,
+            identity_entries: vec![],
+            workspace_config_json: None,
         });
 
         // Set budget and rate limits

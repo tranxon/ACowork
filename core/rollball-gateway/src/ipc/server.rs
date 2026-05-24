@@ -9,7 +9,6 @@ use tokio::sync::{RwLock, Mutex};
 
 use rollball_core::protocol::GatewayResponse;
 use crate::gateway::state::GatewayState;
-use crate::http::agent_config;
 use crate::ipc::session::SessionManager;
 
 /// Shared state type: Arc<RwLock<GatewayState>> for concurrent read/write access.
@@ -567,21 +566,24 @@ pub async fn handle_context_usage_report(
 ///
 /// On successful authentication, bundles all handshake-time configuration
 /// (LLM config, workspace context, runtime overrides) into the AgentHelloResult
-/// response.  Separate push messages are no longer sent during handshake;
-/// they remain available for runtime hot-reload (e.g. settings-change push).
+/// response.  Resource lists use version-driven diff sync:
+/// - provider_list / mcp_list are only sent when Runtime's cached version < Gateway's.
+/// - provider_key_vault / mcp_key_vault are always sent in full (keys not versioned).
 /// This satisfies PRD GTW-05 and SEC-07: API keys are distributed via IPC,
 /// not environment variables.
 pub async fn handle_agent_hello(
     agent_id: &str,
     version: &str,
     connection_role: &str,
+    provider_list_version: u64,
+    mcp_list_version: u64,
     conn_id: &str,
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
     tracing::info!(
-        "AgentHello received: agent_id={} version={} conn={} role={}",
-        agent_id, version, conn_id, connection_role
+        "AgentHello received: agent_id={} version={} conn={} role={} prov_ver={} mcp_ver={}",
+        agent_id, version, conn_id, connection_role, provider_list_version, mcp_list_version
     );
 
     let mut mgr = session_mgr.lock().await;
@@ -596,113 +598,54 @@ pub async fn handle_agent_hello(
             gw.set_agent_connected(agent_id, true);
         }
 
-        // ── Resolve all handshake-time configuration ────────────────────────
-        //
-        // All critical configuration (LLM config, workspace context, runtime
-        // overrides) is bundled into the AgentHelloResult response so the
-        // Runtime receives it atomically.  Separate push messages are no
-        // longer sent during handshake — they remain available for runtime
-        // hot-reload (e.g. settings-change → IntentReceived → push).
-        let mut llm_provider: Option<String> = None;
-        let mut llm_model: Option<String> = None;
-        let mut llm_api_key: Option<String> = None;
-        let mut llm_base_url: Option<String> = None;
-        let mut llm_models: Vec<String> = Vec::new();
-        let mut llm_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo> = None;
-        let mut llm_max_output_tokens_limit: u64 = 32_768;
-        let mut llm_protocol_type: rollball_core::protocol::ProtocolType =
-            rollball_core::protocol::ProtocolType::OpenAI;
+        // ── Build resource lists from in-memory cache ─────────────────
+        let gw = state.read().await;
 
-        let mut rt_max_output_tokens: Option<u64> = None;
-        let mut rt_max_iterations: Option<u32> = None;
-        let mut rt_temperature: Option<f32> = None;
-        let mut rt_system_prompt_override: Option<String> = None;
-        let mut rt_shell_approval_threshold: Option<String> = None;
+        let (provider_list, gw_provider_version) = if provider_list_version < gw.resource_cache.provider_list.version {
+            (
+                Some(gw.resource_cache.provider_list.providers.clone()),
+                gw.resource_cache.provider_list.version,
+            )
+        } else {
+            (None, gw.resource_cache.provider_list.version)
+        };
 
-        // Only resolve config for main connections.
-        // chunk-relay connections don't need LLM config — they only send StreamChunk.
-        if connection_role == "main" {
-            // ── LLM Config ────────────────────────────────────────────────
-            let llm_config = resolve_llm_config_for_agent(agent_id, state).await;
-            if let Some(cfg) = llm_config {
-                tracing::info!(
-                    "Resolved LLM config for agent={}: provider={} model={:?} models={:?}",
-                    agent_id, cfg.provider, cfg.model, cfg.models
-                );
-                let models_cache = {
-                    let gw = state.read().await;
-                    gw.models_cache.clone()
-                };
-                let model_capabilities = if cfg.stored_capabilities.is_some() {
-                    cfg.stored_capabilities
-                } else if let Some(m) = &cfg.model {
-                    if let Some(ref cache) = models_cache {
-                        crate::http::models_api::lookup_model_capabilities_with_cache(
-                            cache, &cfg.provider, m,
-                        ).await
-                    } else {
-                        crate::http::models_api::lookup_model_capabilities(&cfg.provider, m)
+        let (mcp_list, gw_mcp_version) = if mcp_list_version < gw.resource_cache.mcp_list.version {
+            (
+                Some(gw.resource_cache.mcp_list.servers.clone()),
+                gw.resource_cache.mcp_list.version,
+            )
+        } else {
+            (None, gw.resource_cache.mcp_list.version)
+        };
+
+        // ── Key vaults (always full, from Vault + MCP catalog) ─────
+        let provider_key_vault: Vec<rollball_core::protocol::ProviderKeyEntry> = gw
+            .vault
+            .list_providers()
+            .iter()
+            .filter_map(|name| {
+                gw.vault.get_provider(name).ok().map(|entry| {
+                    rollball_core::protocol::ProviderKeyEntry {
+                        provider_id: name.clone(),
+                        api_key: entry.api_key,
                     }
-                } else {
-                    None
-                };
-                let (protocol_type, api_override) = if let Some(ref cache) = models_cache {
-                    crate::http::models_api::lookup_protocol_info_with_cache(
-                        cache, &cfg.provider, cfg.model.as_deref(),
-                    ).await
-                } else {
-                    crate::http::models_api::lookup_protocol_info(
-                        &cfg.provider, cfg.model.as_deref(),
-                    )
-                };
-                let effective_base_url = api_override.or(cfg.base_url);
-                let max_output_tokens_limit = {
-                    let gw = state.read().await;
-                    gw.config.as_ref().map(|c| c.max_output_tokens_limit).unwrap_or(32_768)
-                };
+                })
+            })
+            .collect();
 
-                llm_provider = Some(cfg.provider);
-                llm_model = cfg.model;
-                llm_api_key = Some(cfg.api_key);
-                llm_base_url = effective_base_url;
-                llm_models = cfg.models;
-                llm_capabilities = model_capabilities;
-                llm_max_output_tokens_limit = max_output_tokens_limit;
-                llm_protocol_type = protocol_type;
-            } else {
-                tracing::warn!(
-                    "No LLM config available for agent={}. Agent will fall back to manifest/env.",
-                    agent_id
-                );
-            }
+        // Load MCP catalog for key extraction
+        let data_dir = gw
+            .config
+            .as_ref()
+            .map(|c| std::path::PathBuf::from(&c.data_dir))
+            .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+        let mcp_key_vault = match crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir) {
+            Ok(catalog) => crate::resource_cache::build_mcp_key_vault(&catalog),
+            Err(_) => Vec::new(),
+        };
 
-            // ── Runtime Config Overrides ──────────────────────────────────
-            {
-                let data_dir = state.read().await
-                    .config.as_ref()
-                    .map(|c| std::path::PathBuf::from(&c.data_dir))
-                    .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-                if let Ok(Some(per_agent)) = agent_config::load_agent_config(&data_dir, agent_id) {
-                    let has_override = per_agent.max_iterations.is_some()
-                        || per_agent.temperature.is_some()
-                        || per_agent.system_prompt_override.is_some()
-                        || per_agent.max_output_tokens.is_some()
-                        || per_agent.shell_approval_threshold.is_some();
-                    if has_override {
-                        tracing::info!(
-                            agent_id = %agent_id,
-                            "Resolved runtime config: max_iterations={:?} temperature={:?}",
-                            per_agent.max_iterations, per_agent.temperature
-                        );
-                        rt_max_output_tokens = per_agent.max_output_tokens;
-                        rt_max_iterations = per_agent.max_iterations;
-                        rt_temperature = per_agent.temperature;
-                        rt_system_prompt_override = per_agent.system_prompt_override;
-                        rt_shell_approval_threshold = per_agent.shell_approval_threshold.map(|t| format!("{:?}", t).to_lowercase());
-                    }
-                }
-            }
-        } // end if connection_role == "main"
+        drop(gw);
 
         // ADR-009: Get identity entries from RunningAgentInfo (stored at start_agent time)
         let identity_entries = {
@@ -715,19 +658,12 @@ pub async fn handle_agent_hello(
         GatewayResponse::AgentHelloResult {
             success: true,
             error: None,
-            provider: llm_provider,
-            model: llm_model,
-            api_key: llm_api_key,
-            base_url: llm_base_url,
-            models: llm_models,
-            model_capabilities: llm_capabilities,
-            max_output_tokens_limit: llm_max_output_tokens_limit,
-            protocol_type: llm_protocol_type,
-            runtime_max_output_tokens: rt_max_output_tokens,
-            runtime_max_iterations: rt_max_iterations,
-            runtime_temperature: rt_temperature,
-            runtime_system_prompt_override: rt_system_prompt_override,
-            runtime_shell_approval_threshold: rt_shell_approval_threshold,
+            provider_list,
+            provider_list_version: gw_provider_version,
+            mcp_list,
+            mcp_list_version: gw_mcp_version,
+            provider_key_vault,
+            mcp_key_vault,
             identity_entries,
         }
     } else {
@@ -735,19 +671,12 @@ pub async fn handle_agent_hello(
         GatewayResponse::AgentHelloResult {
             success: false,
             error: Some(format!("Unknown connection: {}", conn_id)),
-            provider: None,
-            model: None,
-            api_key: None,
-            base_url: None,
-            models: vec![],
-            model_capabilities: None,
-            max_output_tokens_limit: 0,
-            protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
-            runtime_max_output_tokens: None,
-            runtime_max_iterations: None,
-            runtime_temperature: None,
-            runtime_system_prompt_override: None,
-            runtime_shell_approval_threshold: None,
+            provider_list: None,
+            provider_list_version: 0,
+            mcp_list: None,
+            mcp_list_version: 0,
+            provider_key_vault: vec![],
+            mcp_key_vault: vec![],
             identity_entries: vec![],
         }
     }
@@ -1100,6 +1029,7 @@ mod tests {
                 dev_mode: false,
                 debug_port: None,
                 identity_entries: vec![],
+                workspace_config_json: None,
             });
         }
 

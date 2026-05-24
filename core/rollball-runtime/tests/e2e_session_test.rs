@@ -84,6 +84,7 @@ fn make_session_config(budget: Budget) -> SessionManagerConfig {
         full_tool_specs: Vec::new(),
         identity_context: None,
         override_model: None,
+        protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
     }
 }
 
@@ -101,6 +102,7 @@ fn make_small_history_config() -> SessionManagerConfig {
         full_tool_specs: Vec::new(),
         identity_context: None,
         override_model: None,
+        protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
     }
 }
 
@@ -119,6 +121,7 @@ fn make_streaming_config(
         full_tool_specs: Vec::new(),
         identity_context: None,
         override_model: None,
+        protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
     }
 }
 
@@ -136,6 +139,7 @@ fn make_limited_session_config(max_sessions: usize) -> (SessionManagerConfig, us
             full_tool_specs: Vec::new(),
             identity_context: None,
             override_model: None,
+            protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
         },
         max_sessions,
     )
@@ -170,6 +174,8 @@ async fn e2e_01_three_session_concurrent_conversation() {
             content: "What is 1+1?".to_string(),
             message_id: "msg-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     manager_b
@@ -177,6 +183,8 @@ async fn e2e_01_three_session_concurrent_conversation() {
             content: "What is 2+2?".to_string(),
             message_id: "msg-2".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     manager_c
@@ -184,6 +192,8 @@ async fn e2e_01_three_session_concurrent_conversation() {
             content: "What is 3+3?".to_string(),
             message_id: "msg-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -268,6 +278,8 @@ async fn e2e_01_real_three_session_concurrent_with_minimax() {
             content: "What is 1+1? Reply with just the number.".to_string(),
             message_id: "msg-real-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     manager
@@ -275,6 +287,8 @@ async fn e2e_01_real_three_session_concurrent_with_minimax() {
             content: "What is 2+2? Reply with just the number.".to_string(),
             message_id: "msg-real-2".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     manager
@@ -282,6 +296,8 @@ async fn e2e_01_real_three_session_concurrent_with_minimax() {
             content: "What is 3+3? Reply with just the number.".to_string(),
             message_id: "msg-real-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -338,6 +354,8 @@ async fn e2e_02_long_conversation_trim_chain() {
                 content: msg,
                 message_id: format!("msg-trim-{}", i),
                 skill_instructions: None,
+            documents: None,
+            content_parts: None,
             })
             .unwrap();
         // Small delay to allow processing
@@ -382,6 +400,8 @@ async fn e2e_03_session_switch_no_interrupt() {
             content: "Hello A".to_string(),
             message_id: "msg-a-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -391,6 +411,8 @@ async fn e2e_03_session_switch_no_interrupt() {
             content: "Hello B".to_string(),
             message_id: "msg-b-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -455,6 +477,8 @@ async fn e2e_04_complete_lifecycle() {
             content: "Hello lifecycle test".to_string(),
             message_id: "msg-lifecycle-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -484,6 +508,8 @@ async fn e2e_04_complete_lifecycle() {
         content: "Should fail".to_string(),
         message_id: "msg-should-fail".to_string(),
     skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     assert!(
         result.is_err(),
@@ -525,6 +551,8 @@ async fn e2e_04_complete_lifecycle_with_jsonl() {
             content: "Hello JSONL test".to_string(),
             message_id: "msg-jsonl-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -585,6 +613,8 @@ async fn lifecycle_02_streaming_no_cross_contamination() {
             content: "Hello A".to_string(),
             message_id: "msg-a-lc02".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     manager_b
@@ -592,6 +622,8 @@ async fn lifecycle_02_streaming_no_cross_contamination() {
             content: "Hello B".to_string(),
             message_id: "msg-b-lc02".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -689,6 +721,8 @@ async fn edge_03_extra_long_message() {
         content: large_content.clone(),
         message_id: "msg-large".to_string(),
     skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
 
     // Sending itself should succeed (channel accepts the message)
@@ -743,6 +777,8 @@ async fn edge_03_extra_long_message_jsonl() {
             content: large_content.clone(),
             message_id: "msg-large-jsonl".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -868,6 +904,8 @@ async fn e2e_concurrent_sessions_with_tool_calls() {
             content: "Call echo from A".to_string(),
             message_id: "msg-tool-a".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -877,6 +915,8 @@ async fn e2e_concurrent_sessions_with_tool_calls() {
             content: "Hello B".to_string(),
             message_id: "msg-tool-b".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -941,6 +981,8 @@ async fn e2e_multi_turn_conversation_jsonl() {
                 content: format!("Turn {}", i + 1),
                 message_id: format!("msg-turn-{}", i),
                 skill_instructions: None,
+            documents: None,
+            content_parts: None,
             })
             .unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1016,6 +1058,8 @@ async fn e2e_session_title_set_from_first_message() {
             content: "This is my first message about Rust programming".to_string(),
             message_id: "msg-title-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -1077,6 +1121,8 @@ async fn e2e_destroy_session_file_persists() {
             content: "Before destroy".to_string(),
             message_id: "msg-persist-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1096,6 +1142,8 @@ async fn e2e_destroy_session_file_persists() {
         content: "After destroy".to_string(),
         message_id: "msg-persist-2".to_string(),
     skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     assert!(result.is_err(), "Sending to destroyed session should fail");
 }
@@ -1133,6 +1181,8 @@ async fn e2e_conversation_resume() {
             content: "First conversation message".to_string(),
             message_id: "msg-resume-1".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1158,6 +1208,8 @@ async fn e2e_conversation_resume() {
             content: "Resumed conversation message".to_string(),
             message_id: "msg-resume-2".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;

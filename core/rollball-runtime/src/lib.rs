@@ -12,6 +12,7 @@ pub mod skills;
 pub mod ipc;
 pub mod grpc;
 pub mod config;
+pub mod agent_config;
 pub mod cli;
 pub mod error;
 pub mod token;

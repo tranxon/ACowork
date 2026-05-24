@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::http::routes::{ApiError, AppState};
+use crate::resource_cache;
 use rollball_core::protocol::McpServerConfigDef;
 
 /// Build the MCP catalog router
@@ -176,8 +177,14 @@ pub async fn replace_catalog(
     save_mcp_catalog(&data_dir, &new_catalog)
         .map_err(|e| ApiError::internal(&e))?;
 
+    // Rebuild mcp_list cache for AgentHello diff sync.
+    {
+        let mut gw = state.gateway_state.write().await;
+        resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &new_catalog);
+    }
+
     // Hot-push MCP config to all running agents
-    hot_push_mcp_config(&state).await;
+    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
 
     // Return masked response
     let sensitive_keywords = ["key", "token", "secret", "password"];
@@ -221,8 +228,14 @@ pub async fn add_catalog_entry(
     save_mcp_catalog(&data_dir, &catalog)
         .map_err(|e| ApiError::internal(&e))?;
 
+    // Rebuild mcp_list cache for AgentHello diff sync.
+    {
+        let mut gw = state.gateway_state.write().await;
+        resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
+    }
+
     // Hot-push MCP config to all running agents
-    hot_push_mcp_config(&state).await;
+    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
 
     Ok((StatusCode::CREATED, Json(MessageResponse {
         message: format!("MCP server '{}' added to catalog", name),
@@ -287,8 +300,14 @@ pub async fn update_catalog_entry(
     save_mcp_catalog(&data_dir, &catalog)
         .map_err(|e| ApiError::internal(&e))?;
 
+    // Rebuild mcp_list cache for AgentHello diff sync.
+    {
+        let mut gw = state.gateway_state.write().await;
+        resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
+    }
+
     // Hot-push MCP config to all running agents
-    hot_push_mcp_config(&state).await;
+    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
 
     Ok(Json(MessageResponse {
         message: format!("MCP server '{}' updated in catalog", new_name),
@@ -315,8 +334,14 @@ pub async fn remove_catalog_entry(
     save_mcp_catalog(&data_dir, &catalog)
         .map_err(|e| ApiError::internal(&e))?;
 
+    // Rebuild mcp_list cache for AgentHello diff sync.
+    {
+        let mut gw = state.gateway_state.write().await;
+        resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
+    }
+
     // Hot-push MCP config to all running agents
-    hot_push_mcp_config(&state).await;
+    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
 
     Ok(Json(MessageResponse {
         message: format!("MCP server '{}' removed from catalog", name),
@@ -333,169 +358,6 @@ async fn get_data_dir(state: &AppState) -> Result<PathBuf, (StatusCode, Json<Api
         .as_ref()
         .map(|c| PathBuf::from(&c.data_dir))
         .unwrap_or_else(|| PathBuf::from("./data")))
-}
-
-/// Hot-push MCP config to all running agents after a catalog change.
-///
-/// Optimization strategy:
-/// 1. Load catalog once (not per-agent)
-/// 2. Collect push targets under a brief lock, then release
-/// 3. Skip agents with no active MCP servers
-/// 4. Concurrent push via `tokio::JoinSet` (O(1) wall-clock vs O(N) serial)
-/// 5. Each push clones the `mpsc::Sender` so the SessionManager lock is not held during I/O
-async fn hot_push_mcp_config(state: &AppState) {
-    use crate::http::agent_config;
-    use rollball_core::protocol::GatewayResponse;
-    use tokio::task::JoinSet;
-
-    let session_mgr = match &state.session_mgr {
-        Some(mgr) => mgr.clone(),
-        None => return,
-    };
-
-    // ── Phase 1: Collect data under brief locks ──────────────────────
-    let agent_ids: Vec<String> = {
-        let gw = state.gateway_state.read().await;
-        gw.running_agents.keys().cloned().collect()
-    };
-
-    let data_dir = match get_data_dir(state).await {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-
-    // Load catalog once
-    let catalog = match load_mcp_catalog(&data_dir) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("Failed to load MCP catalog for hot-push: {}", e);
-            return;
-        }
-    };
-
-    // Build per-agent merged server lists (skip agents with no MCP)
-    // Returns Vec<(agent_id, merged_servers)>
-    //
-    // Note: `load_agent_config` does synchronous file I/O. We run it on a
-    // blocking thread to avoid starving the tokio runtime when many agents
-    // are running concurrently.
-    let data_dir_clone = data_dir.clone();
-    let agent_ids_clone = agent_ids.clone();
-    let per_agent_configs: Vec<(String, Vec<McpServerConfigDef>)> =
-        tokio::task::spawn_blocking(move || {
-            let mut results = Vec::new();
-            for agent_id in &agent_ids_clone {
-                let per_agent = agent_config::load_agent_config(&data_dir_clone, agent_id)
-                    .unwrap_or(None);
-                let active_servers = match &per_agent {
-                    Some(cfg) => cfg.mcp_servers.clone().unwrap_or_default(),
-                    None => Vec::new(),
-                };
-                results.push((agent_id.clone(), active_servers));
-            }
-            results
-        })
-        .await
-        .unwrap_or_default();
-
-    let mut push_targets: Vec<(String, Vec<McpServerConfigDef>)> = Vec::new();
-    for (agent_id, active_servers) in per_agent_configs {
-        if active_servers.is_empty() {
-            continue; // Skip agents with no MCP servers
-        }
-
-        // Catalog-first merge: if the server name exists in catalog,
-        // use the (possibly updated) catalog version. Otherwise keep
-        // the per-agent version (backward compat for pre-catalog servers).
-        let merged: Vec<McpServerConfigDef> = active_servers
-            .into_iter()
-            .map(|s| {
-                catalog.iter().find(|c| c.name == s.name).cloned().unwrap_or(s)
-            })
-            .collect();
-
-        push_targets.push((agent_id, merged));
-    }
-
-    if push_targets.is_empty() {
-        return; // Nothing to push
-    }
-
-    // ── Phase 2: Clone senders under brief lock, then release ────────
-    let senders: Vec<(String, crate::ipc::session::PushSender)> = {
-        let mgr = session_mgr.lock().await;
-        push_targets
-            .iter()
-            .filter_map(|(agent_id, _)| {
-                mgr.find_by_agent_id(agent_id)
-                    .and_then(|(_, session)| session.push_sender().cloned())
-                    .map(|tx| (agent_id.clone(), tx))
-            })
-            .collect()
-    };
-
-    if senders.is_empty() {
-        return;
-    }
-
-    // Build the push payloads (one per agent, already merged)
-    let payload_map: std::collections::HashMap<String, Vec<McpServerConfigDef>> = push_targets
-        .into_iter()
-        .collect();
-
-    // ── Phase 3: Concurrent push (lock-free) ─────────────────────────
-    let mut join_set = JoinSet::new();
-    for (agent_id, sender) in senders {
-        let merged = match payload_map.get(&agent_id) {
-            Some(s) => s.clone(),
-            None => continue,
-        };
-        join_set.spawn(async move {
-            let result = sender
-                .send(GatewayResponse::RuntimeConfigUpdate {
-                    mcp_servers: Some(merged),
-                    max_output_tokens: None,
-                    max_iterations: None,
-                    temperature: None,
-                    system_prompt_override: None,
-                    active_tools: None,
-                    shell_approval_threshold: None,
-                    model: None,
-                    provider: None,
-                })
-                .await;
-            (agent_id, result.is_ok())
-        });
-    }
-
-    // Await all pushes and log results
-    let mut pushed = 0u32;
-    let mut failed = 0u32;
-    while let Some(res) = join_set.join_next().await {
-        match res {
-            Ok((agent_id, true)) => {
-                tracing::info!(agent = %agent_id, "Hot-pushed MCP config update");
-                pushed += 1;
-            }
-            Ok((agent_id, false)) => {
-                tracing::warn!(agent = %agent_id, "Hot-push MCP config failed (channel closed)");
-                failed += 1;
-            }
-            Err(e) => {
-                tracing::warn!("Hot-push MCP config task panicked: {}", e);
-                failed += 1;
-            }
-        }
-    }
-
-    if pushed > 0 || failed > 0 {
-        tracing::info!(
-            pushed,
-            failed,
-            total = pushed + failed,
-            "Hot-push MCP catalog update complete"
-        );
-    }
 }
 
 #[cfg(test)]

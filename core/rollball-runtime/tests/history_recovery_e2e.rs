@@ -319,7 +319,7 @@ async fn test_agent_restart_with_polluted_history_no_400() {
     // Run with a new user message — should NOT panic or error
     let mut context_builder = ContextBuilder::new("You are a test assistant.".to_string());
     let result = agent_loop
-        .run("New message after restart", &mut context_builder)
+        .run("New message after restart", &mut context_builder, None)
         .await;
     assert!(
         result.is_ok(),
@@ -569,7 +569,7 @@ async fn test_llm_tool_call_with_proper_tool_call_id() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     std::fs::write(tmp.path().join("hello.txt"), "Hello from RollBall!").unwrap();
 
-    let resolver = WorkspaceResolver::new(&work_dir);
+    let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
     let builtin_tools = builtin::all_builtin_tools(&resolver, "com.test.history-recovery");
     let tool_jsons: Vec<serde_json::Value> = builtin_tools
         .iter()

@@ -190,6 +190,7 @@ fn make_session_config(budget: Budget) -> SessionManagerConfig {
         full_tool_specs: Vec::new(),
         identity_context: None,
         override_model: None,
+        protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
     }
 }
 
@@ -238,6 +239,8 @@ async fn sa_02_sessions_do_not_block_each_other() {
             content: "Hello A".to_string(),
             message_id: "msg-a-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -248,6 +251,8 @@ async fn sa_02_sessions_do_not_block_each_other() {
             content: "Hello B".to_string(),
             message_id: "msg-b-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -303,6 +308,8 @@ async fn sa_03_session_manager_lifecycle() {
         content: "should fail".to_string(),
         message_id: "msg-fail".to_string(),
     skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     assert!(result.is_err(), "Should not be able to send to destroyed session");
 
@@ -397,6 +404,8 @@ async fn conc_01_shared_tool_concurrent_calls() {
             content: "Call echo from A".to_string(),
             message_id: "msg-a-2".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
     manager
@@ -404,6 +413,8 @@ async fn conc_01_shared_tool_concurrent_calls() {
             content: "Call echo from B".to_string(),
             message_id: "msg-b-2".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -445,6 +456,8 @@ async fn budget_01_per_session_token_isolation() {
             content: "Hello A".to_string(),
             message_id: "msg-a-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -454,6 +467,8 @@ async fn budget_01_per_session_token_isolation() {
             content: "Hello B".to_string(),
             message_id: "msg-b-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -509,6 +524,8 @@ async fn edge_02_session_panic_isolation() {
             content: "Trigger panic".to_string(),
             message_id: "msg-panic".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -518,6 +535,8 @@ async fn edge_02_session_panic_isolation() {
             content: "Hello B".to_string(),
             message_id: "msg-b-3".to_string(),
             skill_instructions: None,
+            documents: None,
+            content_parts: None,
         })
         .unwrap();
 
@@ -550,6 +569,8 @@ async fn edge_04_empty_message_handling() {
         content: "".to_string(),
         message_id: "msg-empty".to_string(),
     skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     // Sending itself should succeed (channel accepts the message)
     assert!(result.is_ok(), "Sending empty message should not error on send");
@@ -566,6 +587,8 @@ async fn edge_04_empty_message_handling() {
         content: "   ".to_string(),
         message_id: "msg-ws".to_string(),
     skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     assert!(result.is_ok(), "Sending whitespace message should not error on send");
 
@@ -664,6 +687,8 @@ async fn test_send_to_nonexistent_session() {
         content: "hello".to_string(),
         message_id: "msg-none".to_string(),
     skill_instructions: None,
+        documents: None,
+        content_parts: None,
     });
     assert!(result.is_err(), "Sending to non-existent session should return error");
 }

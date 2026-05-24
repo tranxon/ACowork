@@ -6,6 +6,7 @@
 
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
+import { emitAgentConfigRefresh } from "../lib/refresh";
 import type {
   McpCatalogEntryResponse,
   McpServerConfigDef,
@@ -103,6 +104,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       }
       // Reload catalog after adding
       await get().loadCatalog();
+      emitAgentConfigRefresh();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       set({ error: message, loading: false });
@@ -123,6 +125,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       }
       // Reload catalog after updating
       await get().loadCatalog();
+      emitAgentConfigRefresh();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       set({ error: message, loading: false });
@@ -141,6 +144,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       }
       // Reload catalog after removing
       await get().loadCatalog();
+      emitAgentConfigRefresh();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       set({ error: message, loading: false });
@@ -161,6 +165,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       }
       // Reload catalog after replacing
       await get().loadCatalog();
+      emitAgentConfigRefresh();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       set({ error: message, loading: false });
