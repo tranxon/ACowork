@@ -110,6 +110,7 @@ export function ChatPanel() {
   const justMountedRef = useRef(true);
 
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+  const agentDisplayName = useAgentProfileStore((s) => selectedAgentId ? s.profiles[selectedAgentId]?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
 
   // Group consecutive messages for display
   // - Consecutive think + tool_call + tool_result → explore_group (aggregated)
@@ -809,17 +810,17 @@ export function ChatPanel() {
     return (
       <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
         <div className="text-center">
-          <div className="mx-auto text-3xl text-zinc-300 dark:text-zinc-600">⏸</div>
-          <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">{selectedAgent.name} is stopped</p>
           <button
             onClick={async () => {
               await startAgent(selectedAgent.agent_id);
               await syncAgentUI(selectedAgent.agent_id);
             }}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium"
+            className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
+            title="Start Agent"
           >
-            <Play className="h-3.5 w-3.5" /> Start Agent
+            <Play className="h-8 w-8 ml-1" />
           </button>
+          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">{agentDisplayName} is sleeping</p>
         </div>
       </div>
     );

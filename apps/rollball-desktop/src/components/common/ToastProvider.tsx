@@ -14,7 +14,7 @@ interface ToastContextValue {
   addToast: (toast: Omit<Toast, "id">) => void;
 }
 
-const ToastContext = createContext<ToastContextValue>({ addToast: () => {} });
+const ToastContext = createContext<ToastContextValue>({ addToast: () => { } });
 
 export function useToast() {
   return useContext(ToastContext);
@@ -63,7 +63,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
   };
 
   const iconMap: Record<ToastType, string> = {
-    success: "✅",
+    success: "",
     error: "❌",
     warning: "⚠️",
     info: "ℹ️",
