@@ -1612,60 +1612,23 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         // Runtime reads its own workspace config and formats the LLM context text.
         // Gateway is a pure pass-through for workspace CRUD (no persistence).
         //
-        // With the session-level workspace refactor:
-        //   - Per-session workspace defaults to "__agent_home__".
-        //   - If legacy is_current is found in .agent_workspaces.json, the initial
-        //     session inherits that workspace selection.
-        //   - The global workspace_context cache is still set for backward compat
-        //     with sessions created *after* startup (they receive the legacy fallback
-        //     until set_session_workspace() is called on them).
+        // Per-session workspace defaults to the last_active workspace from config,
+        // or "__agent_home__" if none is set. The initial session receives its
+        // per-session context immediately; the global workspace_context cache is
+        // set as a fallback for sessions created later.
         {
             let config_path = std::path::Path::new(&config.work_dir)
                 .join("config")
                 .join(".agent_workspaces.json");
             if config_path.exists() {
                 if let Ok(config_json) = std::fs::read_to_string(&config_path) {
-                    // Check for legacy is_current to migrate to per-session workspace
-                    let legacy_ws_id: Option<String> = {
-                        #[derive(serde::Deserialize)]
-                        struct LegacyConfig {
-                            #[serde(default)]
-                            additional_dirs: Vec<LegacyDir>,
-                        }
-                        #[derive(serde::Deserialize)]
-                        struct LegacyDir {
-                            id: String,
-                            #[serde(default)]
-                            is_current: bool,
-                        }
-                        serde_json::from_str::<LegacyConfig>(&config_json)
-                            .ok()
-                            .and_then(|c| {
-                                c.additional_dirs
-                                    .into_iter()
-                                    .find(|d| d.is_current)
-                                    .map(|d| d.id)
-                            })
-                    };
-
-                    if let Some(ws_id) = legacy_ws_id {
-                        // Legacy is_current found → initial session inherits this workspace
-                        session_manager.set_session_workspace(&initial_session_id, &ws_id);
-                        tracing::info!(
-                            initial_session_id = %initial_session_id,
-                            legacy_workspace_id = %ws_id,
-                            "Migrated legacy is_current to per-session workspace"
-                        );
-                    }
-
                     // Send per-session workspace context to the initial session
                     session_manager.update_session_workspace_context(
                         &initial_session_id,
                         &workspace_resolver.read().unwrap(),
                     );
 
-                    // Also cache the legacy-formatted context for backward compat
-                    // (sessions created later receive this as a fallback)
+                    // Cache the formatted context as a fallback for sessions created later
                     let context_text = crate::tools::workspace_resolver::format_workspace_context_from_json(
                         &config_json,
                         &config.work_dir,
@@ -1673,7 +1636,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
                     session_manager.set_workspace_context(context_text);
                 }
             } else {
-                // No config file yet — use per-session context + legacy fallback
+                // No config file yet — send per-session context + empty fallback
                 session_manager.update_session_workspace_context(
                     &initial_session_id,
                     &workspace_resolver.read().unwrap(),

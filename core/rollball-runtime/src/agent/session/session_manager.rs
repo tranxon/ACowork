@@ -301,8 +301,10 @@ impl SessionManager {
         // Initialize per-session workspace.
         // For resumed sessions, restore the persisted workspace_id from JSONL metadata.
         // New sessions default to last_active workspace (or agent home fallback).
+        // Use set_session_workspace() to both update the in-memory map and persist
+        // the workspace_id to the session's JSONL conversation file.
         let initial_workspace = persisted_workspace_id.unwrap_or_else(|| self.default_workspace_id.clone());
-        self.session_workspaces.insert(session_id.clone(), initial_workspace);
+        self.set_session_workspace(&session_id, &initial_workspace);
 
         // Re-apply any runtime config overrides accumulated from prior
         // Gateway pushes. Without this, a new session would start from the

@@ -178,7 +178,7 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
         access: String,
         added_at: String,
         #[serde(default)]
-        is_current: bool,
+        last_active: bool,
     }
 
     let config_path = Path::new(work_dir).join("config").join(".agent_workspaces.json");
@@ -206,7 +206,7 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
                         } else {
                             WorkspaceAccess::ReadOnly
                         },
-                        last_active: entry.is_current,
+                        last_active: entry.last_active,
                     });
                 }
 
@@ -298,10 +298,9 @@ pub struct WorkspaceDirFull {
     pub alias: Option<String>,
     pub access: WorkspaceAccess,
     pub added_at: String,
-    /// Deprecated: replaced by session-level workspace selection.
-    /// Renamed from `is_current` for backward-compatible JSON reading.
-    /// Still stored in JSON but no longer drives context formatting.
-    #[serde(default, alias = "is_current")]
+    /// Whether this was the last active workspace when the user last selected it.
+    /// Used as the default workspace for new sessions.
+    #[serde(default)]
     pub last_active: bool,
     #[serde(default)]
     pub select_count: u32,
@@ -544,7 +543,7 @@ mod tests {
                     "alias": "my-project",
                     "access": "read-write",
                     "added_at": "2026-05-01T00:00:00Z",
-                    "is_current": true
+                    "last_active": true
                 },
                 {
                     "id": "ws-2",

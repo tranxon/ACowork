@@ -206,6 +206,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: [newSession, ...state.sessions],
         currentSessionId: data.session_id,
       }));
+
+      // Populate workspace for the new session from last_active in workspace list.
+      // This must happen BEFORE activateSession so the WorkspaceSelector reads
+      // the correct workspace immediately when it re-renders.
+      const wsStore = useWorkspaceStore.getState();
+      const lastActiveWs = wsStore.workspaces.find((w) => w.last_active);
+      if (lastActiveWs) {
+        useWorkspaceStore.setState({
+          sessionWorkspaceMap: {
+            ...wsStore.sessionWorkspaceMap,
+            [data.session_id]: lastActiveWs.id,
+          },
+        });
+      }
+
       // Activate the new session in chatStore (creates session state entry)
       useChatStore.getState().activateSession(agentId, data.session_id);
     } catch (e) {
