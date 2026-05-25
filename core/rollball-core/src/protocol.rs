@@ -879,6 +879,10 @@ pub struct AvailableToolsResponse {
     pub tools: Vec<AvailableTool>,
     /// Currently active tool names (from manifest + config overrides)
     pub active_tools: Vec<String>,
+    /// Tool names declared in manifest.toml [[tools]] — these are
+    /// always-on and cannot be disabled by the user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manifest_tools: Vec<String>,
 }
 
 /// Cron entry info (for IPC responses, S5.8 enhanced)

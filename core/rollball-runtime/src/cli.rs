@@ -1680,17 +1680,35 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             // On first start (no config file), create a default with empty overrides;
             // subsequent starts load any user-customized values.
             let work_dir_path = std::path::Path::new(&config.work_dir);
-            let agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
+            let mut agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
                 .unwrap_or_default()
                 .unwrap_or_default();
 
             // If this is first start, persist the default config so the file exists.
-            if std::path::Path::new(&config.work_dir)
+            let is_first_start = std::path::Path::new(&config.work_dir)
                 .join("config")
                 .join("agent_config.json")
                 .exists()
-                == false
-            {
+                == false;
+
+            // On first start, seed active_tools from manifest.toml [[tools]] declarations.
+            // This ensures manifest-declared tools are always-on by default and the
+            // ConfigSnapshot response includes them from the very first QueryConfig.
+            if is_first_start && agent_cfg.active_tools.is_empty() && !loaded.manifest.tools.is_empty() {
+                let manifest_tool_names: Vec<String> = loaded.manifest.tools.iter()
+                    .map(|t| t.name.clone())
+                    .collect();
+                tracing::info!(
+                    count = manifest_tool_names.len(),
+                    tools = ?manifest_tool_names,
+                    "First start: initializing active_tools from manifest.toml [[tools]]"
+                );
+                agent_cfg.active_tools = manifest_tool_names.clone();
+                // Apply immediately so ConfigSnapshot queries return the correct list.
+                session_manager.apply_active_tools(Some(manifest_tool_names));
+            }
+
+            if is_first_start {
                 let _ = crate::agent_config::save_agent_config(work_dir_path, &agent_cfg);
             }
 
@@ -5002,9 +5020,19 @@ async fn process_gateway_recv(
                             );
                         }
 
+                        // Hot-rebuild tool definitions when active_tools changes.
+                        // This must be called separately from apply_runtime_config_override
+                        // because tool rebuilding requires full_tool_specs which live in
+                        // SessionManagerConfig, not in the RuntimeConfigOverrides cache.
+                        if active_tools.is_some() {
+                            session_manager.apply_active_tools(active_tools);
+                        }
+
                         // Persist per-agent config to workspace/config/agent_config.json.
                         // This consolidates all overrides into a single file owned by Runtime,
                         // replacing the former Gateway-side data/agent_configs/{agent_id}.json.
+                        // MUST run AFTER apply_active_tools so that runtime_overrides.active_tools
+                        // has the latest value before serialization.
                         {
                             // Preserve available_models written by LLMConfigDelivery hot-push.
                             let persisted_before = crate::agent_config::load_agent_config(
@@ -5027,27 +5055,6 @@ async fn process_gateway_recv(
                                 std::path::Path::new(&work_dir),
                                 &agent_cfg,
                             );
-                        }
-
-
-                        // Hot-rebuild tool definitions when active_tools changes.
-
-
-                        // This must be called separately from apply_runtime_config_override
-
-
-                        // because tool rebuilding requires full_tool_specs which live in
-
-
-                        // SessionManagerConfig, not in the RuntimeConfigOverrides cache.
-
-
-                        if active_tools.is_some() {
-
-
-                            session_manager.apply_active_tools(active_tools);
-
-
                         }
 
 

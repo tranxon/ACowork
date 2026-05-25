@@ -943,8 +943,8 @@ pub async fn get_agent_tools(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AvailableToolsResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify agent exists and is running
-    {
+    // Read manifest tools from installed agent info (before dropping the lock)
+    let manifest_tools: Vec<String> = {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
             return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
@@ -960,7 +960,17 @@ pub async fn get_agent_tools(
                 &format!("Agent '{}' is not started", agent_id),
             ));
         }
-    }
+        gw.installed_agents
+            .get(&agent_id)
+            .map(|info| {
+                info.manifest
+                    .tools
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
     // Get all available built-in tools with metadata
     let available = builtin_tool_metadata();
@@ -990,6 +1000,7 @@ pub async fn get_agent_tools(
         agent_id,
         tools: available,
         active_tools,
+        manifest_tools,
     }))
 }
 

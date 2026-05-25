@@ -148,7 +148,7 @@ impl Gateway {
 
         // Copy agent files to packages directory
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let agent_pkg_dir = packages_dir.join(format!("{}-{}", agent_id, version));
+        let agent_pkg_dir = packages_dir.join(&agent_id);
 
         // Remove existing directory if it exists
         let _ = std::fs::remove_dir_all(&agent_pkg_dir);

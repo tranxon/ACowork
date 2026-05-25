@@ -19,6 +19,7 @@ interface ToolsResponse {
   agent_id: string;
   tools: AvailableTool[];
   active_tools: string[];
+  manifest_tools: string[];
 }
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -39,6 +40,7 @@ export function AgentSetupTab() {
   // Tools configuration
   const [availableTools, setAvailableTools] = useState<AvailableTool[]>([]);
   const [activeTools, setActiveTools] = useState<string[]>([]);
+  const [manifestTools, setManifestTools] = useState<string[]>([]);
   const [toolsLoading, setToolsLoading] = useState(false);
 
   // MCP server activation
@@ -81,6 +83,7 @@ export function AgentSetupTab() {
         if (cancelled || !data) return;
         setAvailableTools(data.tools);
         setActiveTools(data.active_tools);
+        setManifestTools(data.manifest_tools ?? []);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -138,8 +141,9 @@ export function AgentSetupTab() {
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
       if (profile.temperature !== undefined) body.temperature = profile.temperature;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
-      // Always send active_tools (even empty array = disable all tools)
-      if (activeTools.length >= 0) body.active_tools = activeTools;
+      // Always send active_tools — merge manifest tools (always-on) with user-toggled extras
+      const allActiveTools = [...new Set([...manifestTools, ...activeTools])];
+      if (allActiveTools.length >= 0) body.active_tools = allActiveTools;
 
       const res = await fetch(
         `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
@@ -356,13 +360,14 @@ export function AgentSetupTab() {
         ) : (
           <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
             {availableTools.map((tool) => {
-              const checked = activeTools.includes(tool.name);
+              const isManifest = manifestTools.includes(tool.name);
+              const checked = isManifest || activeTools.includes(tool.name);
               const toggle = () => {
                 setActiveTools((prev) =>
                   checked ? prev.filter((n) => n !== tool.name) : [...prev, tool.name],
                 );
               };
-              const isAlwaysOn = tool.always_on === true;
+              const isAlwaysOn = tool.always_on === true || isManifest;
               return (
                 <label
                   key={tool.name}
