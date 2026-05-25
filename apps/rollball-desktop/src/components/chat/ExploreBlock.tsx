@@ -47,6 +47,7 @@ function approvalMatchesSession(
 export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove }: ExploreBlockProps) {
   const [expanded, setExpanded] = useState(isStreaming);
   const contentRef = useRef<HTMLDivElement>(null);
+  const manuallyCollapsed = useRef(false);
 
   // Auto-scroll to bottom when streaming and expanded
   useEffect(() => {
@@ -55,34 +56,72 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
     }
   }, [expanded, isStreaming, items]);
 
-  // Keep expanded state synced with streaming
+  const pairedItems = buildPairedItems(items);
+  const stepCount = pairedItems.length;
+
+  // Still have tool_calls without results
+  const hasPendingTools = pairedItems.some(
+    (item) => item.kind === "tool" && !item.result
+  );
+
+  const isExploring = isStreaming || hasPendingTools;
+
+  // Auto-expand when exploring starts (respect user manual collapse)
   useEffect(() => {
-    if (isStreaming) setExpanded(true);
-  }, [isStreaming]);
+    if (isExploring && !manuallyCollapsed.current) {
+      setExpanded(true);
+    }
+  }, [isExploring]);
 
-  const stepCount = buildPairedItems(items).length;
+  // Auto-collapse when exploring ends → reset manual state for next cycle
+  useEffect(() => {
+    if (!isExploring) {
+      setExpanded(false);
+      manuallyCollapsed.current = false;
+    }
+  }, [isExploring]);
 
-  // Auto-expand when there's a pending approval for this session
+  // Check if this block has a pending shell approval for current session
   const hasPendingApproval = approvalMatchesSession(pendingApproval, currentSessionId) && items.some(
     (m) => m.type === "tool_call" && m.toolName === pendingApproval!.tool_name && !items.some(
       (r) => r.type === "tool_result" && r.toolName === m.toolName
     )
   );
+
+  // Auto-expand when pending approval — always, even if user collapsed
   useEffect(() => {
-    if (hasPendingApproval) setExpanded(true);
+    if (hasPendingApproval) {
+      setExpanded(true);
+      manuallyCollapsed.current = false;
+      // Auto-scroll to bottom so the approval button is visible
+      setTimeout(() => {
+        if (contentRef.current) {
+          contentRef.current.scrollTop = contentRef.current.scrollHeight;
+        }
+      }, 0);
+    }
   }, [hasPendingApproval]);
 
   return (
     <div className="my-1 max-w-[var(--content-max-width)]">
       {/* Header: clickable toggle */}
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          const next = !expanded;
+          setExpanded(next);
+          // Track manual collapse during exploring; reset on manual expand
+          if (!next && isExploring) {
+            manuallyCollapsed.current = true;
+          } else if (next) {
+            manuallyCollapsed.current = false;
+          }
+        }}
         className="flex w-fit items-center gap-2 rounded-lg bg-zinc-50 px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
         <span className="font-medium text-zinc-400 dark:text-zinc-500">
-          {isStreaming ? "Exploring..." : "Explored"}
+          {isExploring ? "Exploring..." : "Explored"}
         </span>
         <span className="text-zinc-400 dark:text-zinc-500">
           ({stepCount} {stepCount === 1 ? "step" : "steps"})
@@ -102,7 +141,7 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
           style={{ maxHeight: "240px" }}
         >
           <div className="flex flex-col gap-0.5">
-            {buildPairedItems(items).map((paired, idx) => (
+            {pairedItems.map((paired, idx) => (
               <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} />
             ))}
           </div>
