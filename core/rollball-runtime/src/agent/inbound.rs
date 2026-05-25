@@ -34,6 +34,46 @@ fn truncate_json_to_bytes(val: &serde_json::Value, max_bytes: usize) -> serde_js
     serde_json::Value::String(truncated)
 }
 
+/// User-initiated operations that take effect immediately via
+/// the `send_inbound()` fast channel, bypassing SessionTask's
+/// main message loop. This guarantees delivery even while the
+/// agent loop is mid-execution (streaming or running tools).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UserOp {
+    /// Interrupt the current agent loop iteration.
+    InterruptLoop {
+        reason: String,
+    },
+    /// Continue execution after iteration limit was reached.
+    /// Resets the iteration counter and resumes the agent loop.
+    ContinueLoop {
+        reason: String,
+    },
+    /// Tool approval decision from user (shell command risk confirmation).
+    ApprovalDecision {
+        request_id: String,
+        approved: bool,
+        allow_all_session: bool,
+        reason: Option<String>,
+    },
+    /// User's answer to an ask_user_question prompt.
+    QuestionAnswer {
+        request_id: String,
+        answer: String,
+    },
+    /// Apply runtime configuration changes immediately.
+    /// These are also persisted via the SessionTask channel
+    /// (`SessionMessage::UpdateRuntimeConfig`) for tool definitions
+    /// and other session-level updates.
+    UpdateRuntimeConfig {
+        max_output_tokens: Option<u64>,
+        max_iterations: Option<u32>,
+        temperature: Option<f32>,
+        system_prompt_override: Option<String>,
+        shell_approval_threshold: Option<String>,
+    },
+}
+
 /// Messages that can be injected into the agent loop from external sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InboundMessage {
@@ -82,6 +122,11 @@ pub enum InboundMessage {
         /// - If they typed free text (via "Other"): their free-text input
         answer: String,
     },
+    /// Unified user operation delivered via the fast `send_inbound()`
+    /// channel.  These bypass SessionTask's message loop and are
+    /// consumed by `poll_interrupt()` / `drain_inbound_queue()` for
+    /// immediate in-flight effect.
+    UserOperation(UserOp),
 }
 
 impl InboundMessage {
@@ -151,6 +196,9 @@ impl InboundMessage {
                     *answer = truncate_to_bytes(answer, MAX_INBOUND_PAYLOAD_SIZE);
                     truncated = true;
                 }
+            }
+            InboundMessage::UserOperation(_) => {
+                // UserOperation variants don't need size limits
             }
         }
         (self, truncated)

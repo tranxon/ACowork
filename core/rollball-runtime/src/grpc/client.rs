@@ -74,11 +74,13 @@ pub struct GatewayGrpcClient {
     connected: Arc<AtomicBool>,
     /// S4.5.2: Pending usage reports buffered during disconnect
     pending_reports: Arc<Mutex<VecDeque<budget::UsageReport>>>,
-    /// Memory query receiver — inbound loop forwards MemoryXxxQuery here.
-    /// The agent loop polls this channel and handles memory operations.
-    /// Wrapped in Option to allow take_memory_query_rx() extraction
+    /// Gateway query receiver — inbound loop forwards QueryConfig and
+    /// MemoryXxxQuery here. The runtime main loop polls this channel:
+    ///   - QueryConfig → handled locally (read agent_config.json)
+    ///   - Memory queries → forwarded to the agent loop
+    /// Wrapped in Option to allow take_gateway_query_rx() extraction
     /// for tokio::select! without &mut self conflicts.
-    memory_query_rx: Option<mpsc::UnboundedReceiver<(u64, proto::server_message::Payload)>>,
+    gateway_query_rx: Option<mpsc::UnboundedReceiver<(u64, proto::server_message::Payload)>>,
 }
 
 impl GatewayGrpcClient {
@@ -119,7 +121,7 @@ impl GatewayGrpcClient {
         ));
         let next_request_id = Arc::new(AtomicU64::new(1));
         let (push_tx, push_rx) = mpsc::unbounded_channel();
-        let (memory_query_tx, memory_query_rx) = mpsc::unbounded_channel();
+        let (gateway_query_tx, gateway_query_rx) = mpsc::unbounded_channel();
         let connected = Arc::new(AtomicBool::new(true));
 
 
@@ -132,12 +134,13 @@ impl GatewayGrpcClient {
             loop {
                 match inbound.message().await {
                     Ok(Some(msg)) => {
-                        // Check if this is a memory API query from Gateway.
-                        // These require non-trivial request_id for Gateway→Runtime
-                        // request-response, and are forwarded to the agent loop.
-                        if is_memory_query_payload(&msg) {
+                        // Check if this is a Gateway→Runtime request-response query.
+                        // (QueryConfig for agent config, MemoryXxxQuery for memory API).
+                        // These bypass the push channel and are forwarded to the
+                        // runtime main loop via gateway_query_tx for handling.
+                        if is_gateway_query_payload(&msg) {
                             if let Some(payload) = msg.payload {
-                                let _ = memory_query_tx.send((msg.request_id, payload));
+                                let _ = gateway_query_tx.send((msg.request_id, payload));
                             }
                             continue;
                         }
@@ -185,7 +188,7 @@ impl GatewayGrpcClient {
             push_rx,
             connected,
             pending_reports: Arc::new(Mutex::new(VecDeque::new())),
-            memory_query_rx: Some(memory_query_rx),
+            gateway_query_rx: Some(gateway_query_rx),
         })
     }
 
@@ -307,15 +310,15 @@ impl GatewayGrpcClient {
         self.outbound_tx.clone()
     }
 
-    /// Take the memory query receiver out of the client.
+    /// Take the gateway query receiver out of the client.
     ///
-    /// This is needed so the agent loop can `tokio::select!` on both
-    /// `recv_message()` and the memory query channel without &mut self
+    /// This is needed so the runtime main loop can `tokio::select!` on both
+    /// `recv_message()` and the gateway query channel without &mut self
     /// conflicts. Returns None if already taken.
-    pub fn take_memory_query_rx(
+    pub fn take_gateway_query_rx(
         &mut self,
     ) -> Option<mpsc::UnboundedReceiver<(u64, proto::server_message::Payload)>> {
-        self.memory_query_rx.take()
+        self.gateway_query_rx.take()
     }
 
     // ── Status ─────────────────────────────────────────────────────────────
@@ -1049,10 +1052,6 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 provider: rcu.provider,
             }
         }
-        Some(ServerPayload::QueryConfig(q)) => GatewayResponse::QueryConfig {
-            request_id: q.request_id,
-        },
-
         // Response messages (request_id > 0) — included for robustness
         Some(ServerPayload::AgentHelloResult(r)) => {
             let provider_list: Option<Vec<ProviderListItem>> = if r.provider_list_json.is_empty() {
@@ -1196,11 +1195,13 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
     }
 }
 
-/// Check if a ServerMessage payload is a memory API query from Gateway.
+/// Check if a ServerMessage payload is a Gateway→Runtime query that
+/// requires a request-response roundtrip (bypasses the push channel).
 ///
-/// These are gateway→runtime requests that bypass the push channel and
-/// are forwarded to the agent loop via `memory_query_tx`.
-fn is_memory_query_payload(msg: &proto::ServerMessage) -> bool {
+/// These are forwarded to the runtime main loop via `gateway_query_tx`,
+/// where QueryConfig is handled locally and Memory queries are forwarded
+/// to the agent loop.
+fn is_gateway_query_payload(msg: &proto::ServerMessage) -> bool {
     matches!(
         msg.payload,
         Some(ServerPayload::MemoryNodesQuery(_))

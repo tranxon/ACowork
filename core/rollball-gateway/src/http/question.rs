@@ -12,13 +12,10 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use rollball_core::protocol::GatewayResponse;
 
 use crate::http::routes::{ApiError, AppState};
-use crate::ipc::session::SessionManager;
 
 /// Request body for the question answer endpoint.
 #[derive(Debug, Deserialize)]

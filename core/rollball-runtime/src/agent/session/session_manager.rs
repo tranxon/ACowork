@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::agent_core::AgentCore;
+use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::loop_::SessionChunkEvent;
 use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
@@ -500,13 +501,38 @@ impl SessionManager {
             None, // active_tools handled separately via apply_active_tools
             shell_approval_threshold.clone(),
         );
-        self.broadcast(SessionMessage::UpdateRuntimeConfig {
+        // ── 1. Broadcast to SessionTask channels (for tool definitions etc.) ──
+        let sessions = self.broadcast(SessionMessage::UpdateRuntimeConfig {
+            max_output_tokens,
+            max_iterations,
+            temperature,
+            system_prompt_override: system_prompt_override.clone(),
+            shell_approval_threshold: shell_approval_threshold.clone(),
+        });
+
+        // ── 2. Also deliver via send_inbound() fast channel ──
+        // This ensures the AgentLoop immediately picks up runtime config
+        // changes even while mid-execution (streaming / running tools),
+        // when the SessionTask's message loop is blocked on agent_loop.run().
+        let user_op = UserOp::UpdateRuntimeConfig {
             max_output_tokens,
             max_iterations,
             temperature,
             system_prompt_override,
             shell_approval_threshold,
-        })
+        };
+        let inbound_msg = InboundMessage::UserOperation(user_op);
+        for (session_id, handle) in &self.sessions {
+            if let Err(e) = handle.send_inbound(inbound_msg.clone()) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to deliver UpdateRuntimeConfig via send_inbound (session channel may be full or closed)"
+                );
+            }
+        }
+
+        sessions
     }
 
     /// Apply active tools override from Gateway RuntimeConfigUpdate.

@@ -14,7 +14,6 @@
 //! concurrent push via JoinSet → log results) is shared.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::http::models_api::ModelsCache;
 use crate::http::routes::{SharedHttpState, SharedSessionMgr};
@@ -30,7 +29,8 @@ pub struct GlobalResourcePusher {
 }
 
 impl GlobalResourcePusher {
-    pub fn new(
+    #[allow(dead_code)]
+    pub(crate) fn new(
         session_mgr: Option<SharedSessionMgr>,
         gateway_state: SharedHttpState,
         data_dir: PathBuf,

@@ -15,11 +15,12 @@
 //! every AgentHello. They are built on-the-fly from Vault + MCP catalog
 //! (reading decrypted values) rather than cached on disk.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::Path;
 
 use rollball_core::protocol::{
-    McpKeyEntry, McpListItem, ProviderKeyEntry, ProviderListItem, ProviderModelEntry,
+    McpKeyEntry, McpListItem, ProviderListItem, ProviderModelEntry,
 };
 
 /// In-memory resource cache loaded at Gateway startup.
@@ -171,10 +172,10 @@ pub fn save_mcp_list(data_dir: &Path, list: &McpListFile) -> Result<(), String> 
 ///
 /// Called by vault_api.rs handlers after add/update/delete provider key.
 /// Updates the in-memory `gw.resource_cache.provider_list` and persists to disk.
-pub async fn rebuild_and_save_provider_cache(
+pub(crate) async fn rebuild_and_save_provider_cache(
     gw: &mut crate::gateway::state::GatewayState,
     data_dir: &Path,
-    models_cache: &crate::http::models_api::ModelsCache,
+    _models_cache: &crate::http::models_api::ModelsCache,
 ) {
     let max_output_tokens = gw
         .config

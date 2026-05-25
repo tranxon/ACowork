@@ -1190,14 +1190,14 @@ async fn async_main(
             None
         };
 
-        // Extract memory query receiver before passing client to the loop.
+        // Extract gateway query receiver before passing client to the loop.
         // This avoids &mut self conflicts when tokio::select! polls both
-        // recv_message() and the memory query channel.
-        let memory_query_rx = client.take_memory_query_rx();
+        // recv_message() and the gateway query channel.
+        let gateway_query_rx = client.take_gateway_query_rx();
         let result = run_gateway_loop(
             &mut session_manager,
             &mut client,
-            memory_query_rx,
+            gateway_query_rx,
             config.work_dir.clone(),
             socket_path.clone(),
             agent_id.clone(),
@@ -1466,7 +1466,7 @@ async fn run_chat_loop(
 async fn run_gateway_loop(
     session_manager: &mut SessionManager,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
-    mut memory_query_rx: Option<
+    mut gateway_query_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<(u64, rollball_core::proto::server_message::Payload)>,
     >,
     work_dir: String,
@@ -1485,9 +1485,10 @@ async fn run_gateway_loop(
     use rollball_core::proto::server_message::Payload as ServerPayload;
 
     // Main message loop — receive messages from Gateway and route them.
-    // Also polls the memory query channel for HTTP→Runtime memory API requests.
+    // Also polls the gateway query channel for HTTP→Runtime request-response
+    // queries (QueryConfig, Memory API).
     loop {
-        if let Some(ref mut mq_rx) = memory_query_rx {
+        if let Some(ref mut mq_rx) = gateway_query_rx {
             tokio::select! {
                 recv_result = grpc_client.recv_message() => {
                     match process_gateway_recv(
@@ -1568,8 +1569,8 @@ async fn run_gateway_loop(
                             }
                         }
                         None => {
-                            tracing::warn!("Memory query channel closed unexpectedly");
-                            memory_query_rx = None;
+                            tracing::warn!("Gateway query channel closed unexpectedly");
+                            gateway_query_rx = None;
                         }
                     }
                 }

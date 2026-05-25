@@ -324,6 +324,59 @@ impl AgentLoop {
         self.core.apply_runtime_config(max_output_tokens, max_iterations, temperature, system_prompt_override, shell_approval_threshold);
     }
 
+    /// Apply a user operation delivered via the `send_inbound()` fast channel.
+    ///
+    /// This is the central dispatch point for all `UserOp` variants received
+    /// through `InboundMessage::UserOperation`. It handles operations that
+    /// must take effect immediately even while the agent loop is mid-execution.
+    ///
+    /// Returns `true` if the operation is an interrupt (caller should abort
+    /// the current loop).
+    pub(crate) fn apply_user_op(&mut self, op: &crate::agent::inbound::UserOp) -> bool {
+        match op {
+            crate::agent::inbound::UserOp::InterruptLoop { reason } => {
+                tracing::info!(reason = %reason, "UserOp: interrupt loop");
+                true
+            }
+            crate::agent::inbound::UserOp::ContinueLoop { reason } => {
+                tracing::info!(reason = %reason, "UserOp: continue loop (no-op here; handled at iteration limit pause)");
+                false
+            }
+            crate::agent::inbound::UserOp::ApprovalDecision { .. } => {
+                tracing::debug!("UserOp: approval decision (no-op here; handled via approval subsystem)");
+                false
+            }
+            crate::agent::inbound::UserOp::QuestionAnswer { .. } => {
+                tracing::debug!("UserOp: question answer (no-op here; handled via ask_user_question subsystem)");
+                false
+            }
+            crate::agent::inbound::UserOp::UpdateRuntimeConfig {
+                max_output_tokens,
+                max_iterations,
+                temperature,
+                system_prompt_override,
+                shell_approval_threshold,
+            } => {
+                tracing::info!(
+                    max_output_tokens,
+                    max_iterations,
+                    temperature,
+                    system_prompt_override = system_prompt_override.as_deref(),
+                    shell_approval_threshold = shell_approval_threshold.as_deref(),
+                    "UserOp: applying runtime config immediately in AgentLoop"
+                );
+                self.apply_runtime_config(
+                    *max_output_tokens,
+                    *max_iterations,
+                    *temperature,
+                    system_prompt_override.clone(),
+                    shell_approval_threshold.clone(),
+                );
+                false
+            }
+        }
+    }
+
     /// Get the current conversation session ID (S1.14)
     ///
     /// Returns the session ID of the active ConversationSession,
@@ -896,6 +949,7 @@ impl AgentLoop {
                 });
 
                 // Wait for ContinueExecution or Interrupt from inbound queue
+                // Also checks UserOperation variants for the unified fast channel.
                 loop {
                     match self.inbound_rx.recv().await {
                         Some(InboundMessage::ContinueExecution { reason }) => {
@@ -919,6 +973,30 @@ impl AgentLoop {
                             let name = self.core.user_display_name.as_deref().unwrap_or("user");
                             return Ok(format!("Agent stopped by {} after reaching iteration limit.", name));
                         }
+                        Some(InboundMessage::UserOperation(user_op)) => {
+                            match user_op {
+                                crate::agent::inbound::UserOp::ContinueLoop { reason } => {
+                                    tracing::info!(
+                                        reason = %reason,
+                                        "UserOp: continue loop via fast channel"
+                                    );
+                                    self.transition_status(SessionStatus::Streaming { message_id: None });
+                                    iteration = 0;
+                                    self.trim_history_to_budget(&current_model);
+                                    break;
+                                }
+                                crate::agent::inbound::UserOp::InterruptLoop { reason } => {
+                                    tracing::info!(reason = %reason, "UserOp: interrupt via fast channel during iteration limit pause");
+                                    self.transition_status(SessionStatus::Idle);
+                                    let name = self.core.user_display_name.as_deref().unwrap_or("user");
+                                    return Ok(format!("Agent stopped by {} after reaching iteration limit.", name));
+                                }
+                                other_op => {
+                                    // Other UserOps (UpdateRuntimeConfig etc.) — apply inline
+                                    self.apply_user_op(&other_op);
+                                }
+                            }
+                        }
                         Some(other) => {
                             // Other messages (UserMessage, etc.) — inject into history
                             let (msg, _) = other.enforce_size_limit();
@@ -939,7 +1017,7 @@ impl AgentLoop {
                                         format!("[intent:{}:{}] {}", from, action, params),
                                     ));
                                 }
-                                _ => {} // ContinueExecution and Interrupt handled above
+                                _ => {} // ContinueExecution, Interrupt, UserOperation handled above
                             }
                         }
                         None => {
@@ -1612,6 +1690,23 @@ impl AgentLoop {
                     interrupted = true;
                     // Consume and continue — drain all pending interrupts
                 }
+                InboundMessage::UserOperation(op) => {
+                    match &op {
+                        crate::agent::inbound::UserOp::InterruptLoop { .. } => {
+                            interrupted = true;
+                            // Consume and continue — drain all pending interrupts
+                        }
+                        _ => {
+                            // Buffer non-Interrupt UserOp for re-injection
+                            // by drain_inbound_queue().
+                            tracing::info!(
+                                op = ?std::mem::discriminant(&op),
+                                "poll_interrupt(): buffering UserOp for re-injection by drain_inbound_queue()"
+                            );
+                            self.session.deferred_inbound.push(InboundMessage::UserOperation(op));
+                        }
+                    }
+                }
                 other => {
                     // Buffer non-Interrupt messages for re-injection at the
                     // next drain_inbound_queue() call. This guarantees that
@@ -1644,7 +1739,10 @@ impl AgentLoop {
         let mut interrupted = false;
 
         // ── Step 1: process messages deferred from poll_interrupt() ──
-        for msg in self.session.deferred_inbound.drain(..) {
+        // Collect to release the drain iterator's borrow on self.session
+        // before calling apply_user_op() (which needs &mut self).
+        let deferred: Vec<_> = self.session.deferred_inbound.drain(..).collect();
+        for msg in deferred {
             let (msg, _truncated) = msg.enforce_size_limit();
             match msg {
                 InboundMessage::UserMessage(text) => {
@@ -1687,6 +1785,15 @@ impl AgentLoop {
                     // Question answers arrive via inbound channel during
                     // question wait; during normal drain, ignore.
                     tracing::debug!("Ignoring deferred QuestionAnswer");
+                }
+                InboundMessage::UserOperation(user_op) => {
+                    tracing::info!(
+                        op = ?std::mem::discriminant(&user_op),
+                        "drain_inbound_queue: processing deferred UserOperation"
+                    );
+                    if self.apply_user_op(&user_op) {
+                        interrupted = true;
+                    }
                 }
             }
         }
@@ -1738,6 +1845,15 @@ impl AgentLoop {
                 InboundMessage::QuestionAnswer { .. } => {
                     // Question answers are only meaningful during question wait.
                     tracing::debug!("Ignoring QuestionAnswer during normal drain");
+                }
+                InboundMessage::UserOperation(user_op) => {
+                    tracing::info!(
+                        op = ?std::mem::discriminant(&user_op),
+                        "drain_inbound_queue: processing live UserOperation"
+                    );
+                    if self.apply_user_op(&user_op) {
+                        interrupted = true;
+                    }
                 }
             }
         }

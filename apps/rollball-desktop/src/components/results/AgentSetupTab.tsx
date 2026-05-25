@@ -327,7 +327,7 @@ export function AgentSetupTab() {
           onChange={(e) => {
             const v = e.target.value;
             setProfile(selectedAgentId, {
-              shellApprovalThreshold: v === "medium" ? undefined : v,
+              shellApprovalThreshold: v,
             });
           }}
           className="w-full appearance-none rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
