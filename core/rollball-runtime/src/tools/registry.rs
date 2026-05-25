@@ -31,7 +31,10 @@ use std::sync::Arc;
 use crate::tools::wrappers::{PathGuardedTool, RateLimitedTool};
 
 
-use crate::tools::workspace_resolver::{WorkspaceDir, WorkspaceAccess, WorkspaceResolver, SharedResolver};
+use crate::tools::workspace_resolver::SharedResolver;
+
+#[cfg(test)]
+use crate::tools::workspace_resolver::{WorkspaceDir, WorkspaceAccess, WorkspaceResolver};
 
 /// Tools that cannot be disabled — always available regardless of manifest
 /// or user configuration. These are foundational capabilities the LLM must

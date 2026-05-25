@@ -79,6 +79,9 @@ pub struct WorkspaceDir {
     pub id: String,
     pub path: String,
     pub access: WorkspaceAccess,
+    /// Whether this was the last active workspace when the user last selected it.
+    /// Used as the default workspace for new sessions.
+    pub last_active: bool,
 }
 
 /// Central resolver for workspace directories.
@@ -144,6 +147,16 @@ impl WorkspaceResolver {
     pub fn allowed_dirs(&self) -> &[WorkspaceDir] {
         &self.allowed_dirs
     }
+
+    /// Return the workspace ID of the last active workspace, if any.
+    /// Checks the `last_active` flag on each user-configured workspace.
+    /// Returns `None` if no workspace has `last_active` set.
+    pub fn last_active_workspace_id(&self) -> Option<&str> {
+        self.allowed_dirs
+            .iter()
+            .find(|d| d.last_active)
+            .map(|d| d.id.as_str())
+    }
 }
 
 /// Load workspace directories from `.agent_workspaces.json`.
@@ -193,6 +206,7 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
                         } else {
                             WorkspaceAccess::ReadOnly
                         },
+                        last_active: entry.is_current,
                     });
                 }
 
@@ -204,6 +218,7 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
                             id: "__package_root__".to_string(),
                             path: package_root_str,
                             access: WorkspaceAccess::ReadOnly,
+                            last_active: false,
                         });
                     }
                 }
@@ -213,6 +228,7 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
                     id: "__agent_home__".to_string(),
                     path: work_dir.to_string(),
                     access: WorkspaceAccess::ReadWrite,
+                    last_active: false,
                 });
 
                 tracing::info!(
@@ -256,6 +272,7 @@ fn fallback_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
                 id: "__package_root__".to_string(),
                 path: package_root_str,
                 access: WorkspaceAccess::ReadOnly,
+                last_active: false,
             });
         }
     }
@@ -264,6 +281,7 @@ fn fallback_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
         id: "__agent_home__".to_string(),
         path: work_dir.to_string(),
         access: WorkspaceAccess::ReadWrite,
+        last_active: false,
     });
 
     dirs

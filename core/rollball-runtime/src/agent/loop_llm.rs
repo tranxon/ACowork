@@ -10,6 +10,7 @@
 //! - Tool call argument accumulation and dedup
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use chrono::Utc;
 use futures::StreamExt;
@@ -87,31 +88,32 @@ impl AgentLoop {
         // must be discarded to avoid corrupting the arguments.
         let mut finished_tool_indices: HashSet<u64> = HashSet::new();
 
-        while let Some(event) = stream.next().await {
-            // Check for user interrupt before processing each stream event
-            if self.poll_interrupt() {
-                tracing::info!("LLM stream interrupted by user — aborting");
-
-                // Notify frontend via chunk channel
-                let _ = self.core.try_send_chunk(ChunkEvent::Interrupted {
-                    content: accumulated_content.clone(),
-                });
-
-                // Return partial response with whatever content was accumulated
-                return Ok(ChatResponse {
-                    content: accumulated_content,
-                    reasoning_content: if accumulated_reasoning_content.is_empty() {
-                        None
-                    } else {
-                        Some(accumulated_reasoning_content)
-                    },
-                    tool_calls: None, // discard partial tool calls on interrupt
-                    usage: None,
-                    reasoning_started_at: None,
-                    reasoning_finished_at: None,
-                });
-            }
-            match event {
+        // ── Stream processing loop with periodic interrupt polling ──
+        // Use tokio::select! to check for user interrupts during stream idle
+        // periods (e.g., long LLM reasoning between chunks). Without this,
+        // stream.next().await can block for tens of seconds without responding
+        // to STOP signals, because poll_interrupt() would only run between
+        // received chunks.
+        //
+        // When the stream actively sends data, the event branch wins immediately
+        // (no 500ms latency). When idle, the sleep branch fires every 500ms.
+        loop {
+            tokio::select! {
+                event = stream.next() => {
+                    match event {
+                        Some(event) => {
+                            // Check for user interrupt before processing each stream event
+                            if self.poll_interrupt() {
+                                tracing::info!("LLM stream interrupted by user — aborting");
+                                let _ = self.core.try_send_chunk(ChunkEvent::Interrupted {
+                                    content: accumulated_content.clone(),
+                                });
+                                return Ok(build_interrupted_response(
+                                    accumulated_content,
+                                    accumulated_reasoning_content,
+                                ));
+                            }
+                            match event {
                 StreamEvent::Content(chunk) => {
                     // Mark reasoning finished when content starts after reasoning
                     if reasoning_in_progress {
@@ -258,6 +260,33 @@ impl AgentLoop {
                     return Err(RuntimeError::StreamError(e));
                 }
             }
+                        }
+                        None => {
+                            // Stream ended without a Finished event
+                            // (common with OpenAI-compatible APIs like MiniMax).
+                            break;
+                        }
+                    }
+                }
+                // Periodic interrupt polling during stream idle periods.
+                // tokio::select! polls ALL branches simultaneously:
+                // - When stream has data ready: event branch wins immediately, sleep is dropped
+                // - When stream is idle (waiting for next chunk): sleep fires every 500ms
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    if self.poll_interrupt() {
+                        tracing::info!(
+                            "LLM stream interrupted by user during idle period — aborting"
+                        );
+                        let _ = self.core.try_send_chunk(ChunkEvent::Interrupted {
+                            content: accumulated_content.clone(),
+                        });
+                        return Ok(build_interrupted_response(
+                            accumulated_content,
+                            accumulated_reasoning_content,
+                        ));
+                    }
+                }
+            }
         }
 
         // Post-stream: Apply accumulated argument chunks to tool calls.
@@ -316,6 +345,27 @@ impl AgentLoop {
             reasoning_started_at,
             reasoning_finished_at,
         })
+    }
+}
+
+/// Build a partial [`ChatResponse`] for stream interrupt.
+///
+/// Returns the accumulated content so far and discards any partial tool calls.
+fn build_interrupted_response(
+    content: String,
+    reasoning_content: String,
+) -> ChatResponse {
+    ChatResponse {
+        content,
+        reasoning_content: if reasoning_content.is_empty() {
+            None
+        } else {
+            Some(reasoning_content)
+        },
+        tool_calls: None,
+        usage: None,
+        reasoning_started_at: None,
+        reasoning_finished_at: None,
     }
 }
 

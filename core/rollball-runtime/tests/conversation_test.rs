@@ -53,6 +53,7 @@ fn create_minimal_session_file(conv_dir: &Path, session_id: &str) {
         updated_at: None,
         message_count: Some(0),
         corrupted: false,
+        workspace_id: None,
     };
     let mut file = std::fs::File::create(&path).unwrap();
     serde_json::to_writer(&mut file, &meta).unwrap();
@@ -209,6 +210,7 @@ fn test_t06_session_metadata_updated_on_close() {
         updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         message_count: Some(2),
         corrupted: false,
+        workspace_id: None,
     };
     session.update_metadata(updated_meta);
     wait_writer();
@@ -418,6 +420,7 @@ fn test_t14_corrupted_line_recovery() {
             updated_at: None,
             message_count: Some(4),
             corrupted: false,
+            workspace_id: None,
         };
         serde_json::to_writer(&mut file, &meta).unwrap();
         writeln!(file).unwrap();

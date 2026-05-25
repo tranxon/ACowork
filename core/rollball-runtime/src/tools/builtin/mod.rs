@@ -40,7 +40,7 @@ pub mod ask_user_question;
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
 
-use crate::tools::workspace_resolver::{SharedResolver, WorkspaceResolver};
+use crate::tools::workspace_resolver::SharedResolver;
 
 /// Create the standard built-in tools (without RAG).
 ///
@@ -55,7 +55,7 @@ pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
 ) -> Vec<Arc<dyn Tool>> {
-    let work_dir = resolver.read().unwrap().agent_home().to_string();
+    let _work_dir = resolver.read().unwrap().agent_home().to_string();
     let current_dir = resolver.read().unwrap().agent_home().to_string();
 
     // Register shell tools based on platform detection

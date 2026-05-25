@@ -194,6 +194,9 @@ pub struct SessionManager {
     /// the session_id → ws_id mapping is moved here so it can be
     /// reconciled if the workspace is re-added.
     pub pending_workspaces: HashMap<String, String>,
+    /// Default workspace ID for new sessions (no persisted workspace).
+    /// Falls back to "__agent_home__" when no last_active workspace is set.
+    default_workspace_id: String,
 }
 
 impl SessionManager {
@@ -214,6 +217,7 @@ impl SessionManager {
             mcp_manager: McpManager::new(),
             session_workspaces: HashMap::new(),
             pending_workspaces: HashMap::new(),
+            default_workspace_id: "__agent_home__".to_string(),
         }
     }
 
@@ -296,8 +300,8 @@ impl SessionManager {
 
         // Initialize per-session workspace.
         // For resumed sessions, restore the persisted workspace_id from JSONL metadata.
-        // New sessions default to agent home.
-        let initial_workspace = persisted_workspace_id.unwrap_or_else(|| "__agent_home__".to_string());
+        // New sessions default to last_active workspace (or agent home fallback).
+        let initial_workspace = persisted_workspace_id.unwrap_or_else(|| self.default_workspace_id.clone());
         self.session_workspaces.insert(session_id.clone(), initial_workspace);
 
         // Re-apply any runtime config overrides accumulated from prior
@@ -958,6 +962,17 @@ impl SessionManager {
                 "SessionManager: cannot update workspace context — session not found"
             );
         }
+    }
+
+    /// Set the default workspace ID for new sessions.
+    /// When set to a workspace ID other than "__agent_home__", newly created
+    /// sessions will use this workspace instead of agent home.
+    pub fn set_default_workspace_id(&mut self, workspace_id: &str) {
+        self.default_workspace_id = workspace_id.to_string();
+        tracing::info!(
+            default_workspace_id = %workspace_id,
+            "SessionManager: default workspace updated for new sessions"
+        );
     }
 
     /// Reconcile deleted workspaces: for all sessions whose selected workspace

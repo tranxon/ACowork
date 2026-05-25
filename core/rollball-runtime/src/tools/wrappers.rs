@@ -361,6 +361,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-workdir".to_string(),
             access: WorkspaceAccess::ReadWrite,
+            last_active: false,
         }]);
         let result = tool
             .execute(serde_json::json!({ "path": "/tmp/agent-workdir/file.txt" }))
@@ -376,6 +377,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-workdir".to_string(),
             access: WorkspaceAccess::ReadWrite,
+            last_active: false,
         }]);
         let result = tool
             .execute(serde_json::json!({ "path": "/etc/passwd" }))
@@ -392,6 +394,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-workdir".to_string(),
             access: WorkspaceAccess::ReadWrite,
+            last_active: false,
         }]);
         let result = tool
             .execute(serde_json::json!({ "path": "subdir/file.txt" }))
@@ -407,6 +410,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-workdir".to_string(),
             access: WorkspaceAccess::ReadWrite,
+            last_active: false,
         }]);
         // echo is not a filesystem tool, so no path check
         let result = tool
@@ -423,6 +427,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-workdir".to_string(),
             access: WorkspaceAccess::ReadWrite,
+            last_active: false,
         }]);
         // Path traversal via ".." resolves to /etc/passwd which is outside allowed dir
         let result = tool
@@ -440,6 +445,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-workdir".to_string(),
             access: WorkspaceAccess::ReadWrite,
+            last_active: false,
         }]);
         // Prefix-suffix attack: "/tmp/agent-workdir-eval" starts with "/tmp/agent-workdir"
         let result = tool
@@ -458,6 +464,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-pkg".to_string(),
             access: WorkspaceAccess::ReadOnly,
+            last_active: false,
         }]);
         let result = tool
             .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }))
@@ -494,6 +501,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-pkg".to_string(),
             access: WorkspaceAccess::ReadOnly,
+            last_active: false,
         }]);
         let result = tool
             .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }))
@@ -531,6 +539,7 @@ mod tests {
             id: "test-ws".to_string(),
             path: "/tmp/agent-pkg".to_string(),
             access: WorkspaceAccess::ReadOnly,
+            last_active: false,
         }]);
         let result = tool
             .execute(serde_json::json!({ "file_path": "/tmp/agent-pkg/prompts/system.md" }))
@@ -551,11 +560,13 @@ mod tests {
                 id: "rw".to_string(),
                 path: "/tmp/agent-pkg".to_string(),
                 access: WorkspaceAccess::ReadOnly,
+                last_active: false,
             },
             WorkspaceDir {
                 id: "ws".to_string(),
                 path: "/tmp/agent-pkg/workspace".to_string(),
                 access: WorkspaceAccess::ReadWrite,
+                last_active: false,
             },
         ]);
         // Read within workspace should succeed (ReadWrite wins)
@@ -576,11 +587,13 @@ mod tests {
                 id: "rw".to_string(),
                 path: "/tmp/agent-pkg".to_string(),
                 access: WorkspaceAccess::ReadWrite,
+                last_active: false,
             },
             WorkspaceDir {
                 id: "ro".to_string(),
                 path: "/tmp/agent-pkg/readonly".to_string(),
                 access: WorkspaceAccess::ReadOnly,
+                last_active: false,
             },
         ]);
         // A write tool should be blocked in the nested ReadOnly directory
@@ -610,11 +623,13 @@ mod tests {
                 id: "rw".to_string(),
                 path: "/tmp/agent-pkg".to_string(),
                 access: WorkspaceAccess::ReadWrite,
+                last_active: false,
             },
             WorkspaceDir {
                 id: "ro".to_string(),
                 path: "/tmp/agent-pkg/readonly".to_string(),
                 access: WorkspaceAccess::ReadOnly,
+                last_active: false,
             },
         ]);
         // Write within /tmp/agent-pkg/readonly should be blocked

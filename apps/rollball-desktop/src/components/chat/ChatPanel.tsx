@@ -947,7 +947,8 @@ export function ChatPanel() {
             )}
             {/* LLM reasoning indicator — shimmering "thinking ..." shown while waiting for first token */}
             {isReasoning && !streamingMessageId && !thinkingMessageId && (
-              <div className="flex items-center px-4 py-1.5 select-none">
+              <div className="flex items-center gap-1.5 px-4 py-1.5 select-none">
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
                 <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>thinking ...</span>
               </div>
             )}
@@ -1449,7 +1450,10 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
                 </div>
               )}
               {showPlaceholder && (
-                <span className="text-zinc-400">Thinking...</span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                  <span className="text-zinc-400">Thinking...</span>
+                </span>
               )}
               {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
             </div>

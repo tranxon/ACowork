@@ -441,6 +441,7 @@ async fn test_redteam_path_traversal_blocked() {
         id: "ws".to_string(),
         path: "/workspace/agent-data".to_string(),
         access: WorkspaceAccess::ReadWrite,
+        last_active: false,
     }]);
 
     // Various path traversal techniques
