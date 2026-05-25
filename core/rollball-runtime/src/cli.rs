@@ -1533,6 +1533,18 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
         let mut session_manager = SessionManager::new(core, session_manager_config, String::new());
 
 
+        // Set the default workspace for new sessions from last_active in .agent_workspaces.json
+        // This makes new sessions inherit the user's last selected workspace instead of agent home.
+        if let Some(ws_id) = workspace_resolver.read().unwrap().last_active_workspace_id() {
+            let ws_id_owned = ws_id.to_owned();
+            session_manager.set_default_workspace_id(&ws_id_owned);
+            tracing::info!(
+                default_workspace_id = %ws_id_owned,
+                "SessionManager: initialized default workspace from last_active"
+            );
+        }
+
+
         // Create initial session with the resumed/created conversation
 
 
@@ -1674,7 +1686,7 @@ async fn async_main(config: RuntimeConfig, log_reload_handle: Option<LogReloadHa
             }
         }
 
-        if let Some(ref cfg) = hello_config {
+        if let Some(ref _cfg) = hello_config {
             // ── Per-agent config loaded from workspace/config/agent_config.json ─
             // (Phase 5 refactor: this replaces the old AgentHelloResult.runtime_* fields.)
             // On first start (no config file), create a default with empty overrides;
@@ -2517,6 +2529,7 @@ fn load_identity_entries(work_dir: &str) -> Option<Vec<rollball_core::identity::
 /// Otherwise falls back to a simple single provider.
 
 
+#[allow(dead_code)]
 fn build_runtime_provider(
 
 
@@ -2745,6 +2758,7 @@ fn build_runtime_provider(
 /// `env` field for the specific provider, with ProtocolType as fallback only.
 
 
+#[allow(dead_code)]
 fn resolve_api_key(manifest: &rollball_core::AgentManifest) -> Option<String> {
 
 
@@ -4609,10 +4623,7 @@ async fn process_gateway_recv(
                                     provider = %provider,
 
 
-                                    "No model available from Gateway hot-push. \
-
-
-                                     Please configure a provider and select a model in Settings."
+                                    "No model available from Gateway hot-push. Please configure a provider and select a model in Settings."
 
 
                                 );
@@ -4705,10 +4716,15 @@ async fn process_gateway_recv(
                             *w = crate::tools::workspace_resolver::WorkspaceResolver::reload(work_dir);
                         }
 
-                        // 3. Refresh context for CURRENT session only (not broadcast).
+                        // 3. Update default workspace for new sessions from last_active
+                        let resolver_guard = resolver.read().unwrap();
+                        if let Some(ws_id) = resolver_guard.last_active_workspace_id() {
+                            session_manager.set_default_workspace_id(ws_id);
+                        }
+
+                        // 4. Refresh context for CURRENT session only (not broadcast).
                         // Workspace list CRUD only affects the foreground session;
                         // other sessions reconcile lazily when switched to foreground.
-                        let resolver_guard = resolver.read().unwrap();
                         let current_sid = session_manager.current_session_id().to_string();
                         if !current_sid.is_empty() {
                             session_manager.update_session_workspace_context(

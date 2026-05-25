@@ -359,13 +359,12 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                 isActive
                   ? "border-[var(--color-accent)] text-zinc-700 dark:text-zinc-200 font-medium"
                   : "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300",
-                isProcessing && !isActive && "text-[var(--color-accent)]",
               )}
               title={getTitle(sessionId)}
             >
               {/* Streaming indicator dot (only when processing and not active) */}
               {isProcessing && !isActive && (
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
               )}
               {/* Title */}
               <span className={cn(

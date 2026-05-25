@@ -401,6 +401,7 @@ async fn test_file_read_path_traversal_blocked() {
         id: "ws".to_string(),
         path: work_dir.clone(),
         access: WorkspaceAccess::ReadWrite,
+        last_active: false,
     }]);
 
     // Attempt to read a file outside the workspace using ".."

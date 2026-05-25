@@ -704,6 +704,7 @@ async fn test_t49_session_id_special_characters() {
         updated_at: None,
         message_count: Some(0),
         corrupted: false,
+        workspace_id: None,
     };
     let mut file = std::fs::File::create(&file_path).unwrap();
     serde_json::to_writer(&mut file, &meta).unwrap();
@@ -721,6 +722,7 @@ async fn test_t49_session_id_special_characters() {
         updated_at: None,
         message_count: Some(0),
         corrupted: false,
+        workspace_id: None,
     };
     let mut normal_file = std::fs::File::create(&normal_path).unwrap();
     serde_json::to_writer(&mut normal_file, &normal_meta).unwrap();

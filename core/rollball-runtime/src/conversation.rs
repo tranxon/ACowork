@@ -184,7 +184,9 @@ pub struct ConversationSession {
     current_title: std::sync::Mutex<Option<String>>,
     /// Per-session workspace selection, persisted in JSONL metadata.
     /// `None` or `"__agent_home__"` means the agent's home directory.
-    workspace_id: Option<String>,
+    /// Wrapped in Mutex for interior mutability so that both file persistence
+    /// and in-memory state are updated atomically on the API side.
+    workspace_id: std::sync::Mutex<Option<String>>,
     sender: mpsc::UnboundedSender<WriterCommand>,
     /// Path to the JSONL file (for session-level distillation on close).
     session_file_path: PathBuf,
@@ -238,7 +240,7 @@ impl ConversationSession {
             created_at: now_for_self,
             title_set: AtomicBool::new(false),
             current_title: std::sync::Mutex::new(None),
-            workspace_id: None,
+            workspace_id: std::sync::Mutex::new(None),
             sender: tx,
             session_file_path: file_path,
         })
@@ -270,7 +272,7 @@ impl ConversationSession {
             created_at: meta.created_at,
             title_set: AtomicBool::new(meta.title.is_some()),
             current_title: std::sync::Mutex::new(meta.title.clone()),
-            workspace_id: meta.workspace_id.clone(),
+            workspace_id: std::sync::Mutex::new(meta.workspace_id.clone()),
             sender: tx,
             session_file_path: file_path,
         })
@@ -377,7 +379,7 @@ impl ConversationSession {
             updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             message_count: None,
             corrupted: false,
-            workspace_id: self.workspace_id.clone(),
+            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -417,7 +419,7 @@ impl ConversationSession {
             updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             message_count: None,
             corrupted: false,
-            workspace_id: self.workspace_id.clone(),
+            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -435,6 +437,11 @@ impl ConversationSession {
     /// `SessionManager.session_workspaces` — the caller is responsible for
     /// keeping the two in sync.
     pub fn update_workspace_id(&self, workspace_id: &str) {
+        // Update in-memory state FIRST so that subsequent metadata updates
+        // (e.g. set_title via first user message) don't lose workspace_id.
+        if let Ok(mut w) = self.workspace_id.lock() {
+            *w = Some(workspace_id.to_string());
+        }
         let metadata = SessionMetadata {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -455,8 +462,8 @@ impl ConversationSession {
     }
 
     /// Return the persisted workspace_id, if any.
-    pub fn workspace_id(&self) -> Option<&str> {
-        self.workspace_id.as_deref()
+    pub fn workspace_id(&self) -> Option<String> {
+        self.workspace_id.lock().ok().and_then(|w| w.clone())
     }
 }
 

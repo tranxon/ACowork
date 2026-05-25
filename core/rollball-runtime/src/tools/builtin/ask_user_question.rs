@@ -28,6 +28,7 @@ const MAX_QUESTION_LEN: usize = 2000;
 const MAX_OPTION_LABEL_LEN: usize = 100;
 
 /// Maximum free-text answer length
+#[allow(dead_code)]
 const MAX_ANSWER_LEN: usize = 4000;
 
 /// A single option presented to the user

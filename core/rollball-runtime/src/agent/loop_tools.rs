@@ -144,43 +144,7 @@ impl AgentLoop {
         let total = all_indices.len();
 
         if use_gateway_approval {
-            // ── Gateway mode: 3-way select (results / timeout / approval) ──
-            while collected.len() < total {
-                tokio::select! {
-                    // A result arrived from a spawned task
-                    entry = rx.recv() => {
-                        match entry {
-                            Some((idx, result)) => collected.push((idx, result)),
-                            None => break, // All senders dropped
-                        }
-                    }
-                    // Iteration-level deadline exceeded
-                    _ = tokio::time::sleep_until(deadline) => {
-                        tracing::warn!(
-                            "Iteration timeout reached ({}ms), aborting {} remaining tool(s)",
-                            iteration_timeout.as_millis(),
-                            total - collected.len()
-                        );
-                        for handle in &handles {
-                            handle.abort();
-                        }
-                        break;
-                    }
-                    // Approval request from a spawned tool task
-                    approval_req = self.approval_rx.recv() => {
-                        match approval_req {
-                            Some((req, decision_tx)) => {
-                                self.handle_approval_request(req, decision_tx).await;
-                            }
-                            None => {
-                                tracing::warn!("Approval channel closed unexpectedly");
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // ── CLI / test mode: 2-way select (results / timeout) ──
+            // ── Gateway mode: 4-way select (results / timeout / approval / interrupt) ──
             while collected.len() < total {
                 tokio::select! {
                     entry = rx.recv() => {
@@ -199,6 +163,65 @@ impl AgentLoop {
                             handle.abort();
                         }
                         break;
+                    }
+                    approval_req = self.approval_rx.recv() => {
+                        match approval_req {
+                            Some((req, decision_tx)) => {
+                                self.handle_approval_request(req, decision_tx).await;
+                            }
+                            None => {
+                                tracing::warn!("Approval channel closed unexpectedly");
+                            }
+                        }
+                    }
+                    // Periodic interrupt polling during tool execution.
+                    // Without this branch, a slow tool (e.g. file_read on large file)
+                    // would block the select! at rx.recv() until timeout, making
+                    // STOP unresponsive for potentially minutes.
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        if self.poll_interrupt() {
+                            tracing::info!(
+                                "User interrupt detected during tool execution — aborting"
+                            );
+                            for handle in &handles {
+                                handle.abort();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            // ── CLI / test mode: 3-way select (results / timeout / interrupt) ──
+            while collected.len() < total {
+                tokio::select! {
+                    entry = rx.recv() => {
+                        match entry {
+                            Some((idx, result)) => collected.push((idx, result)),
+                            None => break,
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!(
+                            "Iteration timeout reached ({}ms), aborting {} remaining tool(s)",
+                            iteration_timeout.as_millis(),
+                            total - collected.len()
+                        );
+                        for handle in &handles {
+                            handle.abort();
+                        }
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        if self.poll_interrupt() {
+                            tracing::info!(
+                                "User interrupt detected during tool execution — aborting"
+                            );
+                            for handle in &handles {
+                                handle.abort();
+                            }
+                            break;
+                        }
                     }
                 }
             }

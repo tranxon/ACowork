@@ -26,7 +26,7 @@ use rollball_core::error::RollballError;
 use rollball_core::proto;
 use rollball_core::proto::server_message::Payload as ServerPayload;
 use rollball_core::proto_bridge::GatewayRequestToProto;
-use rollball_core::protocol::{GatewayRequest, GatewayResponse, McpKeyEntry, McpListItem, ModelCapabilitiesInfo, ProtocolType, ProviderKeyEntry, ProviderListItem};
+use rollball_core::protocol::{GatewayRequest, GatewayResponse, McpKeyEntry, McpListItem, ProtocolType, ProviderKeyEntry, ProviderListItem};
 
 /// Configuration delivered by Gateway in the AgentHelloResult handshake.
 ///
