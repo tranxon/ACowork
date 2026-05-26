@@ -1,7 +1,26 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, Children, isValidElement } from "react";
 import { ChevronRight, ChevronDown, Atom } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { CodeBlock } from "./CodeBlock";
+
+/** ReactMarkdown component overrides — code blocks with title bar */
+const thinkMarkdownComponents = {
+  pre: ({ children }: { children?: React.ReactNode }) => {
+    const childArray = Children.toArray(children);
+    const codeEl = childArray.find(
+      (child): child is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
+        isValidElement(child) && child.type === "code"
+    );
+    if (codeEl) {
+      const { className, children: codeContent } = codeEl.props;
+      const language = className?.replace(/^language-/, "") || "";
+      const code = Children.toArray(codeContent).join("");
+      return <CodeBlock language={language} code={code} />;
+    }
+    return <pre>{children}</pre>;
+  },
+};
 
 export interface ThinkBlockProps {
   content: string;
@@ -62,8 +81,8 @@ export function ThinkBlock({ content, isStreaming, startTime, endTime, defaultEx
           className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-y-auto"
           style={{ maxHeight: `${MAX_VISIBLE_LINES * LINE_HEIGHT_REM}rem` }}
         >
-          <div className="prose prose-sm prose-zinc max-w-none [&_*]:!text-zinc-500 dark:[&_*]:!text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content.trim() || "..."}</ReactMarkdown>
+          <div className="prose prose-sm prose-zinc max-w-none [&_*]:!text-zinc-500 dark:[&_*]:!text-zinc-400 [&_table]:bg-zinc-200/20 [&_tbody_tr]:!bg-transparent dark:[&_table]:bg-zinc-900/30" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={thinkMarkdownComponents}>{content.trim() || "..."}</ReactMarkdown>
           </div>
         </div>
       )}

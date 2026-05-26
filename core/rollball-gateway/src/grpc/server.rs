@@ -22,7 +22,6 @@ use rollball_core::proto_bridge::GatewayResponseToProto;
 use rollball_core::protocol::GatewayResponse;
 
 use crate::ipc::server::SharedState;
-use crate::http::approval::ApprovalPendingRequests;
 use crate::http::routes::{BridgeEvent, SessionPendingRequests, SharedSessionMgr};
 
 use super::dispatch::{dispatch_grpc_request, is_stream_chunk};
@@ -311,7 +310,6 @@ pub struct GatewayGrpcService {
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: Option<SessionPendingRequests>,
-    approval_pending: Option<ApprovalPendingRequests>,
 }
 
 #[async_trait::async_trait]
@@ -357,7 +355,6 @@ impl GatewayService for GatewayGrpcService {
         let mut cap_rx = self.capability_tx.subscribe();
         let bridge_tx = self.bridge_tx.clone();
         let session_pending = self.session_pending.clone();
-        let approval_pending = self.approval_pending.clone();
         let conn_id_clone = conn_id.clone();
 
         // Spawn handler task for this connection
@@ -389,7 +386,6 @@ impl GatewayService for GatewayGrpcService {
                                         &ipc_session_mgr,
                                         &bridge_tx,
                                         &session_pending,
-                                        &approval_pending,
                                     ).await;
                                     continue;
                                 }
@@ -419,7 +415,6 @@ impl GatewayService for GatewayGrpcService {
                                     &ipc_session_mgr,
                                     &bridge_tx,
                                     &session_pending,
-                                    &approval_pending,
                                 ).await;
 
                                 // For AgentHello, the handler also pushes LLMConfigDelivery
@@ -554,7 +549,6 @@ pub async fn start_grpc_server(
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: Option<SessionPendingRequests>,
-    approval_pending: Option<ApprovalPendingRequests>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let service = GatewayGrpcService {
         state,
@@ -563,7 +557,6 @@ pub async fn start_grpc_server(
         capability_tx,
         bridge_tx,
         session_pending,
-        approval_pending,
     };
 
     tracing::info!("gRPC server starting on {}", addr);

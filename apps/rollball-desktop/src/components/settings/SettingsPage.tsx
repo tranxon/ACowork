@@ -266,7 +266,7 @@ function AppearanceTab() {
   ];
 
   return (
-    <div className="max-w-lg space-y-4">
+    <div className="w-fit space-y-4">
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">Theme</h2>
         <RadioGroup
@@ -284,7 +284,7 @@ function AppearanceTab() {
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">Accent Color</h2>
         <p className="mb-3 text-xs text-zinc-500">全局高亮色</p>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-[14px]">
           {[
             // Cool tones
             { label: "Blue", value: "#3b82f6" },
@@ -326,6 +326,7 @@ function AppearanceTab() {
           value={contentWidth}
           options={contentWidths}
           onChange={setContentWidth}
+          noWrap
         />
       </div>
 

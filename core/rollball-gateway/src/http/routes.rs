@@ -17,7 +17,6 @@ use tokio::sync::RwLock;
 use crate::gateway::state::GatewayState;
 use crate::grpc::SharedGrpcSessionMgr;
 use crate::ipc::global_push::GlobalResourcePusher;
-use crate::http::approval::ApprovalPendingRequests;
 use crate::http::auth::HttpAuth;
 use crate::ipc::session::SessionManager;
 
@@ -167,8 +166,6 @@ pub struct AppState {
     pub(crate) models_cache: crate::http::models_api::ModelsCache,
     /// Pending session requests for IPC response correlation (S1.14)
     pub session_pending: SessionPendingRequests,
-    /// Pending approval requests for tool approval flow (C1+C2)
-    pub approval_pending: ApprovalPendingRequests,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
     /// gRPC session manager for Gateway→Runtime request-response
@@ -197,7 +194,6 @@ impl AppState {
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
-            approval_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             log_reload_handle: None,
             grpc_session_mgr: None,
             pusher: None,
@@ -224,7 +220,6 @@ impl AppState {
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
-            approval_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             log_reload_handle,
             grpc_session_mgr: None,
             pusher: None,

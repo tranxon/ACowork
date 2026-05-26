@@ -6,9 +6,10 @@ import { ThinkBlock } from "./ThinkBlock";
 interface ExploreBlockProps {
   items: ChatMessage[];
   isStreaming: boolean;
-  pendingApproval?: ToolApprovalNeededEvent | null;
+  /** Map of tool_call_id → approval event for precise matching with tool call items. */
+  pendingApproval?: Record<string, ToolApprovalNeededEvent> | null;
   currentSessionId?: string | null;
-  onApprove?: (action: "allow" | "deny") => void;
+  onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void;
 }
 
 const SHELL_TOOLS = ["bash", "powershell", "shell"];
@@ -22,16 +23,13 @@ function isShellTool(name: string): boolean {
   return SHELL_TOOLS.includes(name);
 }
 
-/** Check if a pending approval belongs to the current session.
+/** Check if a specific approval event belongs to the current session.
  *  If session_id is absent (old Runtime), assume it matches (backward compat). */
 function approvalMatchesSession(
-  approval: ToolApprovalNeededEvent | null | undefined,
+  approval: ToolApprovalNeededEvent,
   currentSessionId?: string | null,
 ): boolean {
-  if (!approval) return false;
-  // No session_id on the event → old Runtime, assume match for backward compat
   if (approval.session_id === undefined || approval.session_id === null) return true;
-  // session_id present → must match current session
   return approval.session_id === currentSessionId;
 }
 
@@ -81,11 +79,32 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
     }
   }, [isExploring]);
 
-  // Check if this block has a pending shell approval for current session
-  const hasPendingApproval = approvalMatchesSession(pendingApproval, currentSessionId) && items.some(
-    (m) => m.type === "tool_call" && m.toolName === pendingApproval!.tool_name && !items.some(
-      (r) => r.type === "tool_result" && r.toolName === m.toolName
-    )
+  // Check if this block has any pending shell approval for current session
+  const pendingKeys = pendingApproval ? Object.keys(pendingApproval) : [];
+  const itemToolCallIds = items.filter(m => m.type === "tool_call").map(m => m.toolCallId);
+  console.log("[DIAG:ExploreBlock:hasPending]", {
+    pendingKeys,
+    itemToolCallIds,
+    itemsCount: items.length,
+    currentSessionId,
+    isStreaming,
+  });
+  const hasPendingApproval = pendingApproval && Object.values(pendingApproval).some(
+    (ev) => {
+      const sessionMatch = approvalMatchesSession(ev, currentSessionId);
+      const toolMatch = items.some(
+        (m) => m.type === "tool_call" && m.toolCallId === ev.tool_call_id && !items.some(
+          (r) => r.type === "tool_result" && r.toolName === m.toolName
+        )
+      );
+      console.log("[DIAG:ExploreBlock:matchCheck]", {
+        "ev.tool_call_id": ev.tool_call_id,
+        "ev.request_id": ev.request_id,
+        sessionMatch,
+        toolMatch,
+      });
+      return sessionMatch && toolMatch;
+    }
   );
 
   // Auto-expand when pending approval — always, even if user collapsed
@@ -196,7 +215,7 @@ function buildPairedItems(items: ChatMessage[]): PairedItem[] {
 }
 
 /** Render a paired item */
-function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionId, onApprove }: { item: PairedItem; isStreaming: boolean; pendingApproval?: ToolApprovalNeededEvent | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny") => void }) {
+function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionId, onApprove }: { item: PairedItem; isStreaming: boolean; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void }) {
   if (item.kind === "thought") {
     return (
       <ThinkBlock
@@ -223,7 +242,7 @@ function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionI
 }
 
 /** Tool call + result paired display: icon + tool name + status indicator + expandable details */
-function ToolCallItem({ call, result, pendingApproval, currentSessionId, onApprove }: { call: ChatMessage; result?: ChatMessage; pendingApproval?: ToolApprovalNeededEvent | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny") => void }) {
+function ToolCallItem({ call, result, pendingApproval, currentSessionId, onApprove }: { call: ChatMessage; result?: ChatMessage; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void }) {
   const [showDetails, setShowDetails] = useState(false);
   const toolName = call.toolName ?? "tool";
   const isShell = isShellTool(toolName);
@@ -234,8 +253,47 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
   const isError = result?.toolStatus === "error";
   const isPendingResult = !result;
 
-  // Check if this tool_call has a pending approval for the current session
-  const needsApproval = approvalMatchesSession(pendingApproval, currentSessionId) && pendingApproval!.tool_name === toolName && isPendingResult;
+  // Check if this specific tool_call has a pending approval for the current session
+  const specificApproval = pendingApproval && call.toolCallId ? pendingApproval[call.toolCallId] : undefined;
+  const needsApproval = specificApproval
+    ? approvalMatchesSession(specificApproval, currentSessionId) && isPendingResult
+    : false;
+  console.log("[DIAG:ToolCallItem]", {
+    "call.toolCallId": call.toolCallId,
+    "call.toolName": call.toolName,
+    hasSpecific: !!specificApproval,
+    needsApproval,
+    isPendingResult,
+    pendingKeys: pendingApproval ? Object.keys(pendingApproval) : [],
+    currentSessionId,
+  });
+
+  // Countdown timer for approval timeout
+  const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
+  useEffect(() => {
+    if (!needsApproval || !specificApproval?.approval_timeout_secs) {
+      setRemainingSecs(null);
+      return;
+    }
+    const total = specificApproval.approval_timeout_secs;
+    setRemainingSecs(total);
+    const interval = setInterval(() => {
+      setRemainingSecs((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [needsApproval, specificApproval?.approval_timeout_secs]);
+
+  // Hide approval when countdown reaches 0 (Runtime auto-rejects)
+  const showApproval = needsApproval && remainingSecs !== 0;
+  const countdownLabel = remainingSecs !== null && remainingSecs > 0
+    ? `${Math.floor(remainingSecs / 60)}:${String(remainingSecs % 60).padStart(2, "0")}`
+    : remainingSecs === 0 ? "expired" : null;
 
   let summary = "";
   try {
@@ -270,22 +328,33 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           )}
         </button>
         {/* Approval buttons — shown when this tool needs user approval */}
-        {needsApproval && onApprove && (
+        {showApproval && onApprove && specificApproval && (
           <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+            {countdownLabel && countdownLabel !== "expired" && (
+              <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right">
+                {countdownLabel}
+              </span>
+            )}
             <button
-              onClick={() => onApprove("deny")}
+              onClick={() => onApprove("deny", specificApproval)}
               className="rounded-md border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-200 dark:border-zinc-500 dark:text-zinc-400 dark:hover:bg-zinc-600"
             >
               Deny
             </button>
             <button
-              onClick={() => onApprove("allow")}
+              onClick={() => onApprove("allow", specificApproval)}
               className="rounded-md px-2 py-0.5 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
               style={{ backgroundColor: "var(--color-accent)" }}
             >
               Allow
             </button>
           </div>
+        )}
+        {/* Expired indicator */}
+        {needsApproval && remainingSecs === 0 && (
+          <span className="text-[10px] text-red-500 dark:text-red-400 shrink-0">
+            Timed out
+          </span>
         )}
         {/* Status indicator */}
         {isSuccess ? (

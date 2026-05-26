@@ -29,12 +29,14 @@ impl AgentLoop {
     ///
     /// Returns results in the same order as input tool calls.
     /// Individual tool failures are captured as error strings, not propagated.
+    /// Returns (results, was_interrupted) — `was_interrupted` is `true` when the user
+    /// clicked Stop during tool execution, so the caller should not continue the loop.
     pub(crate) async fn execute_tools_parallel(
         &mut self,
         tool_calls: &[ToolCall],
-    ) -> Vec<String> {
+    ) -> (Vec<String>, bool) {
         if tool_calls.is_empty() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
         tracing::info!(
@@ -93,6 +95,7 @@ impl AgentLoop {
                                 &tc.function.name,
                                 &tc.function.arguments,
                                 &shell_threshold,
+                                &tc.id,
                             )
                             .await
                             {
@@ -106,6 +109,7 @@ impl AgentLoop {
                                 &tc.function.name,
                                 &tc.function.arguments,
                                 &shell_threshold,
+                                &tc.id,
                             )
                             .await
                             {
@@ -138,10 +142,11 @@ impl AgentLoop {
 
         // Collect results with iteration-level deadline.
         // In Gateway mode, also listen for approval requests from spawned tasks.
-        let deadline = Instant::now() + iteration_timeout;
+        let mut deadline = Instant::now() + iteration_timeout;
         let mut collected: Vec<(usize, String)> =
             Vec::with_capacity(all_indices.len());
         let total = all_indices.len();
+        let mut interrupted = false;
 
         if use_gateway_approval {
             // ── Gateway mode: 4-way select (results / timeout / approval / interrupt) ──
@@ -167,7 +172,13 @@ impl AgentLoop {
                     approval_req = self.approval_rx.recv() => {
                         match approval_req {
                             Some((req, decision_tx)) => {
+                                // Pause iteration timeout during approval wait.
+                                // handle_approval_request() blocks on user decision,
+                                // which can take minutes — that time should not count
+                                // against the iteration deadline.
+                                let remaining = deadline.saturating_duration_since(Instant::now());
                                 self.handle_approval_request(req, decision_tx).await;
+                                deadline = Instant::now() + remaining;
                             }
                             None => {
                                 tracing::warn!("Approval channel closed unexpectedly");
@@ -186,6 +197,7 @@ impl AgentLoop {
                             for handle in &handles {
                                 handle.abort();
                             }
+                            interrupted = true;
                             break;
                         }
                     }
@@ -220,6 +232,7 @@ impl AgentLoop {
                             for handle in &handles {
                                 handle.abort();
                             }
+                            interrupted = true;
                             break;
                         }
                     }
@@ -255,7 +268,7 @@ impl AgentLoop {
             );
         }
 
-        results
+        (results, interrupted)
     }
 }
 
@@ -344,6 +357,7 @@ async fn check_shell_approval(
     tool_name: &str,
     params_json: &str,
     threshold: &ShellApprovalThreshold,
+    tool_call_id: &str,
 ) -> Option<String> {
     // "Never" threshold: skip approval entirely
     if *threshold == ShellApprovalThreshold::Never {
@@ -396,6 +410,7 @@ async fn check_shell_approval(
         reason: assessment.reason.clone(),
         executable_paths: assessment.executable_paths.clone(),
         provenance_elevated: assessment.provenance_elevated,
+        tool_call_id: tool_call_id.to_string(),
     };
 
     tracing::info!(
@@ -455,6 +470,7 @@ async fn check_shell_approval_handle(
     tool_name: &str,
     params_json: &str,
     threshold: &ShellApprovalThreshold,
+    tool_call_id: &str,
 ) -> Option<String> {
     // "Never" threshold: skip approval entirely
     if *threshold == ShellApprovalThreshold::Never {
@@ -507,6 +523,7 @@ async fn check_shell_approval_handle(
         reason: assessment.reason.clone(),
         executable_paths: assessment.executable_paths.clone(),
         provenance_elevated: assessment.provenance_elevated,
+        tool_call_id: tool_call_id.to_string(),
     };
 
     tracing::info!(
@@ -523,13 +540,14 @@ async fn check_shell_approval_handle(
         tracing::info!(command = %command, "Shell command approved by user");
         None
     } else {
-        tracing::info!(command = %command, "Shell command rejected by user");
+        let reject_reason = decision.reason.as_deref().unwrap_or("rejected by user");
+        tracing::info!(command = %command, reason = %reject_reason, "Shell command rejected");
         Some(format!(
-            "Error: Shell command was rejected by the user based on risk assessment.\n\
+            "Error: Shell command was rejected based on risk assessment.\n\
              Command: {}\nRisk level: {}\nReason: {}",
             command,
             assessment.risk.label(),
-            assessment.reason
+            reject_reason
         ))
     }
 }

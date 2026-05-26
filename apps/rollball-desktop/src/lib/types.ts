@@ -222,6 +222,8 @@ export interface ChatMessage {
   senderRole?: string;
   /** For tool_call: tool name */
   toolName?: string;
+  /** LLM-generated tool_call.id — used to match approval events to specific tool calls */
+  toolCallId?: string;
   /** For tool_call/tool_result: parameters or result JSON */
   toolData?: Record<string, unknown>;
   /** For tool_call: duration in ms */
@@ -440,6 +442,10 @@ export interface ToolApprovalNeededEvent {
   risk_level: "Low" | "Medium" | "High";
   /** Session ID that originated this approval (used for multi-session routing) */
   session_id?: string;
+  /** LLM-generated tool_call.id for precise UI matching to tool call items */
+  tool_call_id?: string;
+  /** Approval timeout in seconds — frontend shows countdown, Runtime auto-rejects after this */
+  approval_timeout_secs?: number;
   shell_command?: {
     command: string;
     preview: string;

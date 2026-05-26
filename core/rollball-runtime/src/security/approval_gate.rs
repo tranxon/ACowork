@@ -38,6 +38,8 @@ pub struct ApprovalRequest {
     pub executable_paths: Vec<PathBuf>,
     /// Whether the risk was elevated due to file provenance.
     pub provenance_elevated: bool,
+    /// LLM tool_call_id for frontend matching
+    pub tool_call_id: String,
 }
 
 /// Trait for approval gate implementations.
@@ -206,6 +208,7 @@ mod tests {
             reason: "Executing Downloaded file".to_string(),
             executable_paths: vec![PathBuf::from("./payload.sh")],
             provenance_elevated: true,
+            tool_call_id: "call_test".to_string(),
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -223,6 +226,7 @@ mod tests {
             reason: "Dangerous command".to_string(),
             executable_paths: vec![],
             provenance_elevated: false,
+            tool_call_id: "call_test".to_string(),
         };
         let response = gate.request_approval(&request).await;
         assert_eq!(response, ApprovalResponse::Approved);
@@ -238,6 +242,7 @@ mod tests {
             reason: "Destructive".to_string(),
             executable_paths: vec![],
             provenance_elevated: false,
+            tool_call_id: "call_test".to_string(),
         };
         let response = gate.request_approval(&request).await;
         assert_eq!(response, ApprovalResponse::Rejected);
@@ -253,6 +258,7 @@ mod tests {
             reason: "Can download content".to_string(),
             executable_paths: vec![],
             provenance_elevated: false,
+            tool_call_id: "call_test".to_string(),
         };
         let response = gate.request_approval(&request).await;
         assert_eq!(response, ApprovalResponse::Approved);

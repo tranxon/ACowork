@@ -1,46 +1,25 @@
 //! Tool approval HTTP endpoint
 //!
 //! Provides the HTTP API that the Desktop App calls when the user
-//! clicks Allow/Deny in the ToolApprovalModal. The endpoint resolves
-//! a oneshot channel that unblocks the gRPC dispatch handler, and
-//! additionally pushes an `approval_decision` IntentReceived to the
-//! Runtime's AgentLoop (unified pause architecture).
+//! clicks Allow/Deny in the ToolApprovalModal. The endpoint pushes
+//! an `approval_decision` IntentReceived to the Runtime's AgentLoop
+//! via gRPC (pure relay — Runtime owns the approval state).
 
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{Mutex, oneshot};
 
 use rollball_core::protocol::GatewayResponse;
 
 use crate::http::routes::{ApiError, AppState};
 
-/// Pending approval request map (shared between HTTP API and gRPC dispatch).
-///
-/// When Runtime requests tool approval via gRPC IntentSend(action="tool_approval_needed"),
-/// the gRPC dispatch handler creates a oneshot channel and stores it here keyed by
-/// request_id. The HTTP endpoint `POST /api/agents/:id/approval` resolves the oneshot
-/// with the user's decision (Allow/Deny).
-pub type ApprovalPendingRequests =
-    Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResult>>>>;
-
-/// Decision sent from the Desktop App after user interaction.
-#[derive(Debug, Clone)]
-pub struct ApprovalResult {
-    /// "allow" or "deny"
-    pub action: String,
-}
-
 /// Request body for the approval endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ApprovalRequest {
-    /// Unique request ID (correlates with the oneshot channel)
+    /// Unique request ID (correlates with the approval event)
     pub request_id: String,
     /// User decision: "allow", "deny", or "allow_all_session"
     pub action: String,
@@ -57,20 +36,19 @@ pub struct ApprovalResponse {
     pub status: String,
 }
 
-/// POST /api/agents/:agent_id/approval — resolve a pending tool approval request.
+/// POST /api/agents/:agent_id/approval — relay tool approval decision to Runtime.
 ///
 /// The Desktop App calls this when the user clicks Allow or Deny in the
-/// ToolApprovalModal. The handler looks up the oneshot channel for the given
-/// request_id and sends the user's decision, which unblocks the gRPC dispatch
-/// handler waiting for this approval.
+/// ToolApprovalModal. The handler pushes an `approval_decision` IntentReceived
+/// to the Runtime via gRPC. Runtime owns the approval state and handles
+/// matching by request_id internally.
 ///
-/// Returns 200 with `{ request_id, action, status: "resolved" }` on success,
-/// or 404 if the request_id is not found (already resolved or timed out).
+/// Returns 200 with `{ request_id, action, status: "resolved" }` on success.
 async fn handle_approval(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
     Json(req): Json<ApprovalRequest>,
-) -> Result<Json<ApprovalResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ApprovalResponse>, (axum::http::StatusCode, Json<ApiError>)> {
     let request_id = req.request_id.clone();
 
     tracing::info!(
@@ -80,98 +58,88 @@ async fn handle_approval(
         "Tool approval received from Desktop App"
     );
 
-    // Look up the oneshot sender for this request_id
-    let sender = {
-        let mut map = state.approval_pending.lock().await;
-        map.remove(&request_id)
-    };
+    // Push approval_decision back to Runtime via gRPC (pure relay).
+    // Runtime owns the approval state; Gateway does NOT maintain approval_pending.
+    let approved = req.action == "allow" || req.action == "allow_all_session";
+    let allow_all_session = req.action == "allow_all_session";
 
-    match sender {
-        Some(sender) => {
-            let action = req.action.clone();
-            // Resolve the oneshot — this unblocks the gRPC dispatch handler
-            if sender.send(ApprovalResult {
-                action: action.clone(),
-            }).is_err() {
+    if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+        let grpc_mgr = grpc_mgr.lock().await;
+        if let Some((_, session)) = grpc_mgr.find_by_agent_id(&agent_id) {
+            let mut params = serde_json::json!({
+                "request_id": &request_id,
+                "approved": approved,
+                "allow_all_session": allow_all_session,
+            });
+            // Explicit session_id pass-through for multi-session routing (P0 fix)
+            if let Some(ref sid) = req.session_id {
+                params["session_id"] = serde_json::json!(sid);
+            }
+            let pushed = session.push_message(
+                GatewayResponse::IntentReceived {
+                    from: "http-api".to_string(),
+                    action: "approval_decision".to_string(),
+                    params,
+                    command: None,
+                },
+            ).await;
+            if !pushed {
                 tracing::warn!(
+                    agent_id = %agent_id,
                     request_id = %request_id,
-                    "Approval oneshot receiver already dropped — Runtime may have timed out"
+                    "Failed to push approval_decision to Runtime — gRPC channel may be closed"
+                );
+                return Err((
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ApiError {
+                        error: format!("Failed to push approval decision for agent {}", agent_id),
+                        code: 503,
+                    }),
+                ));
+            } else {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    request_id = %request_id,
+                    approved,
+                    allow_all_session,
+                    "Pushed approval_decision to Runtime"
                 );
             }
-
-            // Push approval_decision back to Runtime via gRPC (unified pause architecture).
-            // The Runtime's AgentLoop is blocked in `await_approval_decision()`
-            // waiting for InboundMessage::ApprovalDecision.
-            let approved = action == "allow" || action == "allow_all_session";
-            let allow_all_session = action == "allow_all_session";
-            if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-                let grpc_mgr = grpc_mgr.lock().await;
-                if let Some((_, session)) = grpc_mgr.find_by_agent_id(&agent_id) {
-                    let mut params = serde_json::json!({
-                        "request_id": &request_id,
-                        "approved": approved,
-                        "allow_all_session": allow_all_session,
-                    });
-                    // Explicit session_id pass-through for multi-session routing (P0 fix)
-                    if let Some(ref sid) = req.session_id {
-                        params["session_id"] = serde_json::json!(sid);
-                    }
-                    let pushed = session.push_message(
-                        GatewayResponse::IntentReceived {
-                            from: "http-api".to_string(),
-                            action: "approval_decision".to_string(),
-                            params,
-                            command: None,
-                        },
-                    ).await;
-                    if !pushed {
-                        tracing::warn!(
-                            agent_id = %agent_id,
-                            request_id = %request_id,
-                            "Failed to push approval_decision to Runtime — gRPC channel may be closed"
-                        );
-                    } else {
-                        tracing::info!(
-                            agent_id = %agent_id,
-                            request_id = %request_id,
-                            approved,
-                            allow_all_session,
-                            "Pushed approval_decision to Runtime"
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        agent_id = %agent_id,
-                        "No gRPC session found for agent — cannot push approval_decision"
-                    );
-                }
-            } else {
-                tracing::warn!("No grpc_session_mgr available — cannot push approval_decision");
-            }
-
-            tracing::info!(
-                request_id = %request_id,
-                action = %action,
-                "Tool approval resolved successfully"
-            );
-
-            Ok(Json(ApprovalResponse {
-                request_id,
-                action,
-                status: "resolved".to_string(),
-            }))
-        }
-        None => {
+        } else {
             tracing::warn!(
-                request_id = %request_id,
-                "Approval request not found — may have already timed out or been resolved"
+                agent_id = %agent_id,
+                "No gRPC session found for agent — cannot push approval_decision"
             );
-            Err(ApiError::not_found(&format!(
-                "Approval request '{}' not found (already resolved or timed out)",
-                request_id
-            )))
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!("No gRPC session found for agent {}", agent_id),
+                    code: 404,
+                }),
+            ));
         }
+    } else {
+        tracing::warn!("No grpc_session_mgr available — cannot push approval_decision");
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError {
+                error: "gRPC session manager not initialized".to_string(),
+                code: 503,
+            }),
+        ));
     }
+
+    tracing::info!(
+        request_id = %request_id,
+        action = %req.action,
+        "Tool approval relayed to Runtime"
+    );
+
+    Ok(Json(ApprovalResponse {
+        request_id,
+        action: req.action,
+        status: "resolved".to_string(),
+    }))
 }
 
 /// Build the approval routes for the HTTP router.
@@ -184,10 +152,13 @@ pub fn approval_routes() -> Router<AppState> {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::RwLock;
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
     use crate::http::routes::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
 
     fn test_app_state() -> AppState {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -197,94 +168,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gw_state = GatewayState::new(&dir.to_string_lossy());
-        let mut state = AppState::new(
+        AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
             None,
             None,
             None,
-        );
-        state.approval_pending = Arc::new(Mutex::new(HashMap::new()));
-        state
+        )
     }
 
     #[tokio::test]
-    async fn test_approval_resolve_success() {
+    async fn test_approval_response_structure() {
+        // Verify ApprovalResponse serialization
+        let resp = ApprovalResponse {
+            request_id: "req-1".to_string(),
+            action: "allow".to_string(),
+            status: "resolved".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("req-1"));
+        assert!(json.contains("allow"));
+        assert!(json.contains("resolved"));
+    }
+
+    #[tokio::test]
+    async fn test_approval_request_deserialization() {
+        let json = r#"{"request_id":"req-2","action":"deny"}"#;
+        let req: ApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.request_id, "req-2");
+        assert_eq!(req.action, "deny");
+        assert!(req.session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_approval_request_with_session() {
+        let json = r#"{"request_id":"req-3","action":"allow","session_id":"sess-1"}"#;
+        let req: ApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.request_id, "req-3");
+        assert_eq!(req.action, "allow");
+        assert_eq!(req.session_id, Some("sess-1".to_string()));
+    }
+
+    /// Test that handle_approval returns 503 when grpc_session_mgr is None.
+    #[tokio::test]
+    async fn test_handle_approval_no_grpc_session_mgr() {
         let state = test_app_state();
-        let request_id = "test-req-1".to_string();
+        assert!(state.grpc_session_mgr.is_none(), "test state must have no grpc_session_mgr");
 
-        // Simulate gRPC dispatch: create a oneshot channel
-        let (tx, mut rx) = oneshot::channel::<ApprovalResult>();
-        {
-            let mut map = state.approval_pending.lock().await;
-            map.insert(request_id.clone(), tx);
-        }
+        let app = approval_routes().with_state(state);
 
-        // Call the HTTP endpoint
-        let result = handle_approval(
-            Path("com.test.agent".to_string()),
-            State(state.clone()),
-            Json(ApprovalRequest {
-                request_id: request_id.clone(),
-                action: "allow".to_string(),
-                session_id: None,
-            }),
-        ).await;
+        let body = serde_json::json!({
+            "request_id": "req-no-grpc",
+            "action": "allow"
+        });
 
-        assert!(result.is_ok());
-        let resp = result.unwrap();
-        assert_eq!(resp.request_id, request_id);
-        assert_eq!(resp.action, "allow");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents/test-agent/approval")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let error: ApiError = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(error.code, 503);
+        assert!(error.error.contains("gRPC session manager not initialized"));
+    }
+
+    /// Test that ApprovalRequest rejects invalid JSON.
+    #[tokio::test]
+    async fn test_handle_approval_invalid_body() {
+        let state = test_app_state();
+        let app = approval_routes().with_state(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents/test-agent/approval")
+            .header("content-type", "application/json")
+            .body(Body::from("not json"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Test ApprovalDecision reason field presence in serialization.
+    /// (ApprovalDecision lives in runtime crate; we test the concept via
+    /// ApprovalResponse structure which carries the decision outcome.)
+    #[tokio::test]
+    async fn test_approval_response_with_reason() {
+        // ApprovalResponse doesn't have a reason field directly, but we verify
+        // that the serialized form can carry extra fields for forward compat.
+        let json = serde_json::json!({
+            "request_id": "req-reason",
+            "action": "deny",
+            "status": "resolved",
+            "reason": "tool approval timed out after 300s"
+        });
+        let resp: ApprovalResponse = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(resp.request_id, "req-reason");
+        assert_eq!(resp.action, "deny");
         assert_eq!(resp.status, "resolved");
 
-        // Verify the oneshot was resolved
-        let approval_result = rx.try_recv().unwrap();
-        assert_eq!(approval_result.action, "allow");
-    }
-
-    #[tokio::test]
-    async fn test_approval_resolve_not_found() {
-        let state = test_app_state();
-
-        let result = handle_approval(
-            Path("com.test.agent".to_string()),
-            State(state),
-            Json(ApprovalRequest {
-                request_id: "nonexistent".to_string(),
-                action: "deny".to_string(),
-                session_id: None,
-            }),
-        ).await;
-
-        assert!(result.is_err());
-        let (status, _) = result.unwrap_err();
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn test_approval_resolve_deny() {
-        let state = test_app_state();
-        let request_id = "test-req-deny".to_string();
-
-        let (tx, mut rx) = oneshot::channel::<ApprovalResult>();
-        {
-            let mut map = state.approval_pending.lock().await;
-            map.insert(request_id.clone(), tx);
-        }
-
-        let result = handle_approval(
-            Path("com.test.agent".to_string()),
-            State(state),
-            Json(ApprovalRequest {
-                request_id: request_id.clone(),
-                action: "deny".to_string(),
-                session_id: None,
-            }),
-        ).await;
-
-        assert!(result.is_ok());
-
-        let approval_result = rx.try_recv().unwrap();
-        assert_eq!(approval_result.action, "deny");
+        // Re-serialize: the extra "reason" field is gracefully ignored on deser
+        let re_json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(re_json["request_id"], "req-reason");
+        assert_eq!(re_json["action"], "deny");
     }
 }

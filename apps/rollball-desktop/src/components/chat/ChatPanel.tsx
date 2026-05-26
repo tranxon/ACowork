@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, Children, isValidElement, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
@@ -6,9 +6,9 @@ import { useChatStore } from "../../stores/chatStore";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
-import { usePermissionStore } from "../../stores/permissionStore";
 import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
+import type { ToolApprovalNeededEvent } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
@@ -22,6 +22,25 @@ import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry, ModelInfo, ModelEntry, ModelCapabilitiesMap } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { ExploreBlock } from "./ExploreBlock";
+import { CodeBlock } from "./CodeBlock";
+
+/** ReactMarkdown component overrides — code blocks with title bar */
+const markdownComponents = {
+  pre: ({ children }: { children?: React.ReactNode }) => {
+    const childArray = Children.toArray(children);
+    const codeEl = childArray.find(
+      (child): child is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
+        isValidElement(child) && child.type === "code"
+    );
+    if (codeEl) {
+      const { className, children: codeContent } = codeEl.props;
+      const language = className?.replace(/^language-/, "") || "";
+      const code = Children.toArray(codeContent).join("");
+      return <CodeBlock language={language} code={code} />;
+    }
+    return <pre>{children}</pre>;
+  },
+};
 import { AskQuestionCard } from "./AskQuestionCard";
 import { SessionTabBar } from "./SessionTabBar";
 import { SkillsPanel } from "../skills/SkillsPanel";
@@ -53,7 +72,12 @@ export function ChatPanel() {
   const streamingMessageId = sessionState?.streamingMessageId ?? null;
   const thinkingMessageId = sessionState?.thinkingMessageId ?? null;
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
-  const pendingApproval = sessionState?.pendingApproval ?? null;
+  const pendingApproval = sessionState?.pendingApproval ?? {};
+  console.log("[DIAG:ChatPanel:pendingApproval]", {
+    keys: Object.keys(pendingApproval),
+    activeSessionId: agentState?.activeSessionId,
+    sessionKeys: sessionState ? Object.keys(sessionState.messages || []) : null,
+  });
   const pendingQuestion = sessionState?.pendingQuestion ?? null;
   const isReasoning = sessionState?.isReasoning ?? false;
   const isLoadingSession = sessionState?.isLoadingSession ?? false;
@@ -71,7 +95,7 @@ export function ChatPanel() {
   const currentProvider = agentState?.provider ?? useChatStore.getState().currentProvider;
 
   // Global state and actions
-  const { wsMap, connectStream, sendMessage, sendInterrupt, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution, resolveApproval } = useChatStore();
+  const { wsMap, connectStream, sendMessage, sendInterrupt, availableModels, setCurrentModel, setAvailableModels, loadAgentModel, continueExecution, resolveApproval, resolveApprovalByToolCallId } = useChatStore();
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
@@ -728,10 +752,9 @@ export function ChatPanel() {
   };
 
   // Tool approval: send decision to Gateway API directly, then clear inline state
-  const handleToolApprove = async (action: "allow" | "deny", approval: import("../../lib/types").ToolApprovalNeededEvent) => {
-    const approvalData = approval as unknown as Record<string, unknown>;
-    const agentId = String(approvalData.agent_id ?? selectedAgentId ?? "");
-    const requestId = String(approvalData.request_id ?? "");
+  const handleToolApprove = async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
+    const agentId = String(approval.agent_id ?? selectedAgentId ?? "");
+    const requestId = String(approval.request_id ?? "");
     const sessionId = approval.session_id;
     try {
       const url = `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/approval`;
@@ -747,10 +770,12 @@ export function ChatPanel() {
     } catch (err) {
       console.error("[ChatPanel] Failed to send approval:", err);
     }
-    // Clear inline approval state regardless of result
-    resolveApproval(selectedAgentId ?? "");
-    // Also clear permissionStore to prevent stale queue
-    usePermissionStore.getState().clearAll();
+    // Clear the specific approval from the pending map by tool_call_id
+    if (selectedAgentId && approval.tool_call_id) {
+      resolveApprovalByToolCallId(selectedAgentId, approval.tool_call_id);
+    } else {
+      resolveApproval(selectedAgentId ?? "");
+    }
   };
 
   // Ask question answer: send answer to Gateway API, then clear pendingQuestion
@@ -961,7 +986,7 @@ export function ChatPanel() {
                           )}
                           pendingApproval={pendingApproval}
                           currentSessionId={currentSessionId}
-                          onApprove={(action) => handleToolApprove(action, pendingApproval!)}
+                          onApprove={(action, approval) => handleToolApprove(action, approval)}
                         />
                       )}
 
@@ -1467,8 +1492,8 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             </div>
             <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               {message.content && (
-                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words" style={fontSizeStyle}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_table]:bg-zinc-200/20 [&_tbody_tr]:!bg-transparent dark:[&_table]:bg-zinc-900/30" style={fontSizeStyle}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown>
                 </div>
               )}
               {showPlaceholder && (

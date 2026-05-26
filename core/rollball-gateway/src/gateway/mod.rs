@@ -508,14 +508,6 @@ impl Gateway {
         let http_session_pending = Some(session_pending.clone());
         let grpc_session_pending = Some(session_pending);
 
-        // C1+C2: Create shared approval_pending for HTTP approval endpoint ↔ gRPC dispatch.
-        // gRPC dispatch stores oneshot senders here when Runtime requests tool approval;
-        // HTTP handler resolves them when Desktop App user clicks Allow/Deny.
-        let approval_pending: crate::http::approval::ApprovalPendingRequests =
-            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let http_approval_pending = Some(approval_pending.clone());
-        let grpc_approval_pending = Some(approval_pending);
-
         // Task #12: Create shared gRPC session manager for Gateway→Runtime request-response.
         // Both the gRPC server and HTTP server share this instance.
         let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr =
@@ -537,7 +529,6 @@ impl Gateway {
                 http_bridge_tx,
                 http_models_cache,
                 http_session_pending,
-                http_approval_pending,
                 log_reload_handle,
             ).await {
                 tracing::error!("HTTP server failed: {}", e);
@@ -560,7 +551,6 @@ impl Gateway {
                 capability_tx,
                 grpc_bridge_tx,
                 grpc_session_pending,
-                grpc_approval_pending,
             ).await {
                 tracing::error!("gRPC server failed: {}", e);
             }

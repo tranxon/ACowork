@@ -77,6 +77,7 @@ export function AgentSetupTab() {
           maxIterations: data.max_iterations,
           temperature: data.temperature,
           shellApprovalThreshold: data.shell_approval_threshold,
+          approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
           globalMaxTokens: data.global_max_output_tokens,
           availableModels: data.available_models,
           activeModel: data.model,
@@ -120,14 +121,14 @@ export function AgentSetupTab() {
         if (cancelled || !data) return;
         setSearchProviders(data.providers);
       })
-      .catch(() => {});
+      .catch(() => { });
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/search-config`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data: SearchConfigResponse | null) => {
         if (cancelled || !data) return;
         setActiveSearch(data.providers);
       })
-      .catch(() => {});
+      .catch(() => { });
     return () => {
       cancelled = true;
     };
@@ -149,6 +150,7 @@ export function AgentSetupTab() {
               maxIterations: data.max_iterations,
               temperature: data.temperature,
               shellApprovalThreshold: data.shell_approval_threshold,
+              approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
               globalMaxTokens: data.global_max_output_tokens,
               availableModels: data.available_models,
               activeModel: data.model,
@@ -230,6 +232,7 @@ export function AgentSetupTab() {
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
       if (profile.temperature !== undefined) body.temperature = profile.temperature;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
+      if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
       // Always send active_tools — merge manifest tools (always-on) with user-toggled extras
       const allActiveTools = [...new Set([...manifestTools, ...activeTools])];
       if (allActiveTools.length >= 0) body.active_tools = allActiveTools;
@@ -437,6 +440,31 @@ export function AgentSetupTab() {
         </p>
       </div>
 
+      {/* Approval Timeout */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          Approval Timeout (seconds)
+        </label>
+        <input
+          type="number"
+          min={0}
+          max={3600}
+          step={30}
+          value={profile.approvalTimeoutSecs && profile.approvalTimeoutSecs > 0 ? profile.approvalTimeoutSecs : ""}
+          onChange={(e) => {
+            const v = e.target.value;
+            setProfile(selectedAgentId, {
+              approvalTimeoutSecs: v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+            });
+          }}
+          placeholder="300 (5 min)"
+          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+        />
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          Leave empty to use default (300s = 5 min). Tool approval will auto-deny after timeout.
+        </p>
+      </div>
+
       {/* Tools Configuration */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
@@ -509,11 +537,10 @@ export function AgentSetupTab() {
               return (
                 <div
                   key={sp.id}
-                  className={`flex items-center gap-2 py-1 px-1.5 rounded ${
-                    hasKey
-                      ? "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                      : "opacity-50"
-                  }`}
+                  className={`flex items-center gap-2 py-1 px-1.5 rounded ${hasKey
+                    ? "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                    : "opacity-50"
+                    }`}
                   title={hasKey ? undefined : "No API key configured. Add in Harness \u2192 Search."}
                 >
                   <input
@@ -525,11 +552,10 @@ export function AgentSetupTab() {
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5">
-                      <span className={`text-[11px] font-medium ${
-                        hasKey
-                          ? "text-zinc-700 dark:text-zinc-300"
-                          : "text-zinc-400 dark:text-zinc-500"
-                      }`}>
+                      <span className={`text-[11px] font-medium ${hasKey
+                        ? "text-zinc-700 dark:text-zinc-300"
+                        : "text-zinc-400 dark:text-zinc-500"
+                        }`}>
                         {sp.name || sp.id}
                       </span>
                       {isChecked && priority !== undefined && (
@@ -555,7 +581,7 @@ export function AgentSetupTab() {
                       title="Move up (higher priority)"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="m18 15-6-6-6 6"/>
+                        <path d="m18 15-6-6-6 6" />
                       </svg>
                     </button>
                   )}

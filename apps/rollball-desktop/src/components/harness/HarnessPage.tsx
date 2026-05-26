@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ModelCapabilitiesMap, ProviderListEntry, McpServerConfigDef, McpTransportDef, McpPresetDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { inputBase, selectBase } from "../../lib/ui-styles";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
@@ -1199,7 +1200,6 @@ function ProvidersTab() {
 function McpTab() {
   const { catalog, loading, error, loadCatalog, addServer, removeServer } = useMcpStore();
   const [showAddForm, setShowAddForm] = useState(false);
-  const [showPresets, setShowPresets] = useState(false);
 
   // New server form state
   const [newName, setNewName] = useState("");
@@ -1251,11 +1251,11 @@ function McpTab() {
       url: newUrl.trim() || undefined,
       env: newEnv.trim()
         ? Object.fromEntries(
-            newEnv.split(",").map((pair) => {
-              const [k, ...v] = pair.split("=");
-              return [k.trim(), v.join("=").trim()];
-            })
-          )
+          newEnv.split(",").map((pair) => {
+            const [k, ...v] = pair.split("=");
+            return [k.trim(), v.join("=").trim()];
+          })
+        )
         : {},
     };
     addServer(config);
@@ -1273,20 +1273,12 @@ function McpTab() {
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <div className="flex items-center justify-between">
           <h2 className="text-xs font-medium">MCP Server Catalog</h2>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setShowPresets(!showPresets)}
-              className="rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700"
-            >
-              {showPresets ? "Hide Presets" : "Add from Presets"}
-            </button>
-            <button
-              onClick={() => setShowAddForm(!showAddForm)}
-              className="rounded px-2 py-1 text-xs bg-accent text-white hover:opacity-90"
-            >
-              {showAddForm ? "Cancel" : "Add Server"}
-            </button>
-          </div>
+          <button
+            onClick={() => setShowAddForm(true)}
+            className="rounded-md bg-zinc-800 px-3 py-1 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          >
+            Add Server
+          </button>
         </div>
 
         {error && (
@@ -1297,9 +1289,9 @@ function McpTab() {
           <p className="mt-3 text-xs text-zinc-400">Loading catalog...</p>
         )}
 
-        {!loading && catalog.length === 0 && !showPresets && (
+        {!loading && catalog.length === 0 && (
           <p className="mt-3 text-xs text-zinc-400">
-            No MCP servers configured. Add from presets or add a custom server.
+            No MCP servers configured yet.
           </p>
         )}
 
@@ -1337,125 +1329,133 @@ function McpTab() {
         )}
       </div>
 
-      {/* Presets gallery */}
-      {showPresets && (
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
-          <h2 className="text-xs font-medium mb-3">Recommended MCP Servers</h2>
-          <div className="grid grid-cols-2 gap-2">
-            {MCP_PRESETS.map((preset) => {
-              const isInstalled = catalogNames.has(preset.id);
-              return (
-                <div
-                  key={preset.id}
-                  className="rounded border border-zinc-100 p-2 dark:border-zinc-600"
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="text-xs font-medium">{preset.name}</span>
-                      <span className="ml-1.5 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-400 dark:bg-zinc-700">
-                        {preset.category}
-                      </span>
-                    </div>
-                    {isInstalled ? (
-                      <span className="text-[10px] text-green-500">Installed</span>
-                    ) : (
-                      <button
-                        onClick={() => handleAddFromPreset(preset)}
-                        className="rounded px-1.5 py-0.5 text-[10px] bg-accent text-white hover:opacity-90"
-                      >
-                        Add
-                      </button>
-                    )}
+      {/* Presets gallery — always visible */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="text-xs font-medium mb-3">Recommended MCP Servers</h2>
+        <div className="grid grid-cols-2 gap-2">
+          {MCP_PRESETS.map((preset) => {
+            const isInstalled = catalogNames.has(preset.id);
+            return (
+              <div
+                key={preset.id}
+                className="rounded border border-zinc-100 p-2 dark:border-zinc-600"
+              >
+                <div className="flex items-start justify-between">
+                  <div>
+                    <span className="text-xs font-medium">{preset.name}</span>
+                    <span className="ml-1.5 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-400 dark:bg-zinc-700">
+                      {preset.category}
+                    </span>
                   </div>
-                  <p className="mt-1 text-[10px] text-zinc-400 line-clamp-2">
-                    {preset.description}
-                  </p>
-                  {preset.requiredEnv.length > 0 && !isInstalled && (
-                    <p className="mt-1 text-[10px] text-amber-500">
-                      Requires: {preset.requiredEnv.join(", ")}
-                    </p>
+                  {isInstalled ? (
+                    <span className="text-[10px] text-green-500">Installed</span>
+                  ) : (
+                    <button
+                      onClick={() => handleAddFromPreset(preset)}
+                      className="rounded-md bg-zinc-800 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                    >
+                      Add
+                    </button>
                   )}
                 </div>
-              );
-            })}
-          </div>
+                <p className="mt-1 text-[10px] text-zinc-400 line-clamp-2">
+                  {preset.description}
+                </p>
+                {preset.requiredEnv.length > 0 && !isInstalled && (
+                  <p className="mt-1 text-[10px] text-amber-500">
+                    Requires: {preset.requiredEnv.join(", ")}
+                  </p>
+                )}
+              </div>
+            );
+          })}
         </div>
-      )}
+      </div>
 
-      {/* Manual add form (inline, no dialog) */}
+      {/* Add Server dialog */}
       {showAddForm && (
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
-          <h2 className="text-xs font-medium mb-3">Add Custom MCP Server</h2>
-          <div className="space-y-2">
-            <div>
-              <label className="text-[10px] text-zinc-400">Name</label>
-              <input
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
-                placeholder="my-server"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] text-zinc-400">Transport</label>
-              <select
-                value={newTransport}
-                onChange={(e) => setNewTransport(e.target.value as McpTransportDef)}
-                className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
-              >
-                <option value="stdio">stdio</option>
-                <option value="http">http</option>
-                <option value="sse">sse</option>
-              </select>
-            </div>
-            {newTransport === "stdio" ? (
-              <>
-                <div>
-                  <label className="text-[10px] text-zinc-400">Command</label>
-                  <input
-                    value={newCommand}
-                    onChange={(e) => setNewCommand(e.target.value)}
-                    className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
-                    placeholder="npx"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] text-zinc-400">Arguments (space-separated)</label>
-                  <input
-                    value={newArgs}
-                    onChange={(e) => setNewArgs(e.target.value)}
-                    className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
-                    placeholder="-y @modelcontextprotocol/server-filesystem"
-                  />
-                </div>
-              </>
-            ) : (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+            <h3 className="mb-3 text-sm font-semibold">Add Custom MCP Server</h3>
+            <div className="space-y-2">
               <div>
-                <label className="text-[10px] text-zinc-400">URL</label>
+                <label className="mb-1 block text-xs text-zinc-500">Name</label>
                 <input
-                  value={newUrl}
-                  onChange={(e) => setNewUrl(e.target.value)}
-                  className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
-                  placeholder="http://localhost:3000"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  className={inputBase}
+                  placeholder="my-server"
                 />
               </div>
-            )}
-            <div>
-              <label className="text-[10px] text-zinc-400">Environment (KEY=VALUE, comma-separated)</label>
-              <input
-                value={newEnv}
-                onChange={(e) => setNewEnv(e.target.value)}
-                className="w-full rounded border border-zinc-200 px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700"
-                placeholder="API_KEY=sk-xxx, DEBUG=true"
-              />
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">Transport</label>
+                <select
+                  value={newTransport}
+                  onChange={(e) => setNewTransport(e.target.value as McpTransportDef)}
+                  className={selectBase}
+                >
+                  <option value="stdio">stdio</option>
+                  <option value="http">http</option>
+                  <option value="sse">sse</option>
+                </select>
+              </div>
+              {newTransport === "stdio" ? (
+                <>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-500">Command</label>
+                    <input
+                      value={newCommand}
+                      onChange={(e) => setNewCommand(e.target.value)}
+                      className={inputBase}
+                      placeholder="npx"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-500">Arguments (space-separated)</label>
+                    <input
+                      value={newArgs}
+                      onChange={(e) => setNewArgs(e.target.value)}
+                      className={inputBase}
+                      placeholder="-y @modelcontextprotocol/server-filesystem"
+                    />
+                  </div>
+                </>
+              ) : (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-500">URL</label>
+                  <input
+                    value={newUrl}
+                    onChange={(e) => setNewUrl(e.target.value)}
+                    className={inputBase}
+                    placeholder="http://localhost:3000"
+                  />
+                </div>
+              )}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">Environment (KEY=VALUE, comma-separated)</label>
+                <input
+                  value={newEnv}
+                  onChange={(e) => setNewEnv(e.target.value)}
+                  className={inputBase}
+                  placeholder="API_KEY=sk-xxx, DEBUG=true"
+                />
+              </div>
             </div>
-            <button
-              onClick={handleAddManual}
-              disabled={!newName.trim()}
-              className="rounded px-3 py-1 text-xs bg-accent text-white hover:opacity-90 disabled:opacity-50"
-            >
-              Add Server
-            </button>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => { setShowAddForm(false); }}
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAddManual}
+                disabled={!newName.trim()}
+                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+              >
+                Add Server
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -10,6 +10,7 @@ interface RadioGroupProps<T> {
     value: T;
     options: RadioOption<T>[];
     onChange: (value: T) => void;
+    noWrap?: boolean;
 }
 
 export function RadioGroup<T>({
@@ -17,9 +18,10 @@ export function RadioGroup<T>({
     value,
     options,
     onChange,
+    noWrap,
 }: RadioGroupProps<T>) {
     return (
-        <div className="flex flex-wrap gap-[var(--ui-radio-gap)]">
+        <div className={"flex gap-[var(--ui-radio-gap)] " + (noWrap ? "flex-nowrap" : "flex-wrap")}>
             {options.map((opt) => (
                 <label
                     key={String(opt.value)}
