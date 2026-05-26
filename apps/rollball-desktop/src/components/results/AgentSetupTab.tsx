@@ -5,6 +5,7 @@ import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvata
 import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useMcpStore } from "../../stores/mcpStore";
+import type { SearchProviderListItem, AgentSearchProvider } from "../../lib/types";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -20,6 +21,16 @@ interface ToolsResponse {
   tools: AvailableTool[];
   active_tools: string[];
   manifest_tools: string[];
+}
+
+interface SearchProvidersResponse {
+  agent_id: string;
+  providers: SearchProviderListItem[];
+}
+
+interface SearchConfigResponse {
+  agent_id: string;
+  providers: AgentSearchProvider[];
 }
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -45,6 +56,11 @@ export function AgentSetupTab() {
 
   // MCP server activation
   const { catalog, activeServers, loadCatalog, loadActiveServers, toggleServer, activationLoading } = useMcpStore();
+
+  // Search provider configuration
+  const [searchProviders, setSearchProviders] = useState<SearchProviderListItem[]>([]);
+  const [activeSearch, setActiveSearch] = useState<AgentSearchProvider[]>([]);
+  const [searchSaving, setSearchSaving] = useState(false);
 
   useEffect(() => {
     if (!selectedAgentId) return;
@@ -97,6 +113,21 @@ export function AgentSetupTab() {
     // Load MCP catalog and per-agent activation
     loadCatalog();
     loadActiveServers(selectedAgentId);
+    // Fetch search providers and per-agent search config
+    fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/search-providers`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: SearchProvidersResponse | null) => {
+        if (cancelled || !data) return;
+        setSearchProviders(data.providers);
+      })
+      .catch(() => {});
+    fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/search-config`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: SearchConfigResponse | null) => {
+        if (cancelled || !data) return;
+        setActiveSearch(data.providers);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -131,7 +162,65 @@ export function AgentSetupTab() {
     return () => window.removeEventListener('rollball:refresh-agent-config', handler);
   }, [selectedAgentId]);
 
-  // Apply config to Gateway
+  // ── Search config helpers ──────────────────────────────────────────
+
+  /** Save search provider config via PUT /api/agents/{id}/search-config */
+  const saveSearchConfig = async (providers: AgentSearchProvider[]) => {
+    if (!selectedAgentId) return;
+    setSearchSaving(true);
+    try {
+      await fetch(
+        `${getGatewayUrl()}/api/agents/${selectedAgentId}/search-config`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ providers }),
+        },
+      );
+    } catch {
+      // silently ignore network errors
+    } finally {
+      setSearchSaving(false);
+    }
+  };
+
+  /** Toggle a search provider ON/OFF for this agent */
+  const toggleSearchProvider = (providerId: string) => {
+    const current = activeSearch.find((p) => p.provider === providerId);
+    let next: AgentSearchProvider[];
+    if (current) {
+      // Remove from active
+      next = activeSearch.filter((p) => p.provider !== providerId);
+      // Re-number priorities
+      next = next.map((p, i) => ({ ...p, priority: i + 1 }));
+    } else {
+      // Add with next priority
+      const maxPrio = activeSearch.reduce((max, p) => Math.max(max, p.priority), 0);
+      next = [...activeSearch, { provider: providerId, priority: maxPrio + 1 }];
+    }
+    setActiveSearch(next);
+    saveSearchConfig(next);
+  };
+
+  /** Move a provider up in priority (lower number = higher priority) */
+  const moveSearchProviderUp = (providerId: string) => {
+    const idx = activeSearch.findIndex((p) => p.provider === providerId);
+    if (idx <= 0) return;
+    const next = [...activeSearch];
+    // Swap priorities
+    const prevPriority = next[idx - 1].priority;
+    next[idx - 1] = { ...next[idx - 1], priority: next[idx].priority };
+    next[idx] = { ...next[idx], priority: prevPriority };
+    // Sort by priority
+    next.sort((a, b) => a.priority - b.priority);
+    // Re-normalize
+    const normalized = next.map((p, i) => ({ ...p, priority: i + 1 }));
+    setActiveSearch(normalized);
+    saveSearchConfig(normalized);
+  };
+
+  // ── Apply config to Gateway ────────────────────────────────────────
+
   const handleApply = async () => {
     if (!selectedAgentId || !profile) return;
     setConfigSaving(true);
@@ -395,6 +484,88 @@ export function AgentSetupTab() {
         )}
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           Uncheck all to disable all tools; empty = use manifest defaults
+        </p>
+      </div>
+
+      {/* Web Search Providers */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          Web Search Providers
+        </label>
+        {searchProviders.length === 0 ? (
+          <div className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+              No search API keys configured. Add keys in Harness &gt; Search tab first.
+            </span>
+          </div>
+        ) : (
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+            {searchProviders.map((sp) => {
+              const active = activeSearch.find((p) => p.provider === sp.id);
+              const isChecked = !!active;
+              const priority = active?.priority;
+              const hasKey = !!sp.id; // Providers listed here already have vault keys
+              const activeIdx = activeSearch.findIndex((p) => p.provider === sp.id);
+              return (
+                <div
+                  key={sp.id}
+                  className={`flex items-center gap-2 py-1 px-1.5 rounded ${
+                    hasKey
+                      ? "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                      : "opacity-50"
+                  }`}
+                  title={hasKey ? undefined : "No API key configured. Add in Harness \u2192 Search."}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => toggleSearchProvider(sp.id)}
+                    disabled={searchSaving || !hasKey}
+                    className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[11px] font-medium ${
+                        hasKey
+                          ? "text-zinc-700 dark:text-zinc-300"
+                          : "text-zinc-400 dark:text-zinc-500"
+                      }`}>
+                        {sp.name || sp.id}
+                      </span>
+                      {isChecked && priority !== undefined && (
+                        <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
+                          Prio: {priority}
+                        </span>
+                      )}
+                      {!hasKey && (
+                        <span className="rounded bg-amber-50 px-1 py-0.5 text-[9px] text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                          No key
+                        </span>
+                      )}
+                    </div>
+                    <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
+                      {sp.description || sp.base_url || ""}
+                    </span>
+                  </div>
+                  {isChecked && activeIdx > 0 && (
+                    <button
+                      onClick={() => moveSearchProviderUp(sp.id)}
+                      disabled={searchSaving}
+                      className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                      title="Move up (higher priority)"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m18 15-6-6-6 6"/>
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          Select and prioritize search providers for this agent. Higher priority = tried first.
         </p>
       </div>
 

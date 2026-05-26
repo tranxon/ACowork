@@ -75,6 +75,8 @@ message ServerMessage {
     QueryConfig             query_config          = 33;
     WorkspaceConfigUpdate   workspace_config_update = 34;
     SetSessionWorkspace     set_session_workspace  = 35;
+    SearchConfigDelivery    search_config_delivery = 36;
+    UpdateSearchConfig      update_search_config = 37;
   }
 }
 
@@ -95,6 +97,7 @@ message AgentHelloRequest       {
   string connection_role = 3;
   uint64 provider_list_version = 4;
   uint64 mcp_list_version = 5;
+  uint64 search_list_version = 6;
 }
 message ListSessionsRequest     {}
 message GetSessionMessagesRequest { string session_id = 1; string cursor = 2; uint32 limit = 3; string direction = 4; }
@@ -119,6 +122,13 @@ message AgentHelloResult {
 
   // MCP key vault (JSON-serialized Vec<McpKeyEntry>), always full delivery.
   string mcp_key_vault_json = 24;
+
+  // ── Web Search Provider ──
+  // Search provider list (JSON-serialized Vec<SearchProviderListItem>), only when version differs.
+  string search_list_json = 27;
+  uint64 search_list_version = 28;
+  // Search key vault (JSON-serialized Vec<SearchKeyEntry>), always full delivery.
+  string search_key_vault_json = 29;
 
   // Fields 3-10: removed (was provider, model, api_key, base_url, models,
   //   model_capabilities, max_output_tokens_limit, protocol_type).
@@ -161,19 +171,23 @@ message ConfigSnapshot {
   // MCP server configs as JSON strings (one per server)
   repeated string mcp_servers_json = 10;
   repeated string available_models = 11;
+  // Search provider config (JSON-serialized AgentSearchConfig from agent_search.json)
+  optional string search_config_json = 12;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }
 message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; string protocol_type = 8; }
+message SearchConfigDelivery   { string search_list_json = 1; uint64 search_list_version = 2; string search_key_vault_json = 3; }
 message IdentityDelivery        { repeated IdentityEntry entries = 1; }
 message WorkspaceConfigUpdate   { string config_json = 1; }
 message SetSessionWorkspace     { string session_id = 1; string workspace_id = 2; }
 message UpdateWorkspaceConfig   { string config_json = 1; }
+message UpdateSearchConfig      { string providers_json = 1; }
 message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
 message LogLevelUpdate           { string log_level = 1; }
 message LogRotate               {}
-message RuntimeConfigUpdate      { optional uint64 max_output_tokens = 1; optional uint32 max_iterations = 2; optional float temperature = 3; string system_prompt_override = 4; repeated string active_tools = 5; string shell_approval_threshold = 6; repeated string mcp_servers_json = 7; optional string model = 8; optional string provider = 9; }
+message RuntimeConfigUpdate      { optional uint64 max_output_tokens = 1; optional uint32 max_iterations = 2; optional float temperature = 3; string system_prompt_override = 4; repeated string active_tools = 5; string shell_approval_threshold = 6; repeated string mcp_servers_json = 7; optional string model = 8; optional string provider = 9; optional string search_config_json = 10; }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }
 

@@ -3,8 +3,7 @@ import { useMemoryStore } from "../../stores/memoryStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
-import { RefreshCw, Zap, AlertTriangle, Info } from "lucide-react";
-import { cn } from "../../lib/utils";
+import { AlertTriangle, Info } from "lucide-react";
 
 export function MemoryPanel() {
   const { selectedAgentId } = useAgentStore();
@@ -82,25 +81,21 @@ export function MemoryPanel() {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Toolbar */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
-        <div className="flex gap-2">
-          <button
-            onClick={handleConsolidate}
-            disabled={loading}
-            className="inline-flex items-center gap-1 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
-          >
-            <Zap className="h-3 w-3" />
-            Consolidate
-          </button>
-          <button
-            onClick={handleRefresh}
-            disabled={loading}
-            className="inline-flex items-center gap-1 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
-          >
-            <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
-            Refresh
-          </button>
-        </div>
+      <div className="flex gap-3 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+        <button
+          onClick={handleConsolidate}
+          disabled={loading}
+          className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+        >
+          Consolidate
+        </button>
+        <button
+          onClick={handleRefresh}
+          disabled={loading}
+          className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+        >
+          Refresh
+        </button>
       </div>
 
       {/* Filters */}

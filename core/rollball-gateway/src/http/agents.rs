@@ -38,6 +38,8 @@ pub fn agent_routes() -> Router<AppState> {
         .route("/api/agents/{id}/config", get(get_agent_config).put(update_agent_config))
         .route("/api/agents/{id}/tools", get(get_agent_tools))
         .route("/api/agents/{id}/mcp-servers", get(get_agent_mcp_servers).put(update_agent_mcp_servers))
+        .route("/api/agents/{id}/search-providers", get(get_agent_search_providers))
+        .route("/api/agents/{id}/search-config", get(get_agent_search_config).put(update_agent_search_config))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -903,6 +905,7 @@ pub async fn update_agent_config(
                     mcp_servers: req_mcp_servers,
                     model: None,
                     provider: None,
+                    search_config_json: None,
                 })
                 .await;
             if !push_result {
@@ -1268,6 +1271,7 @@ pub async fn update_agent_mcp_servers(
                     shell_approval_threshold: None,
                     model: None,
                     provider: None,
+                    search_config_json: None,
                 })
                 .await;
             if !push_result {
@@ -1282,6 +1286,173 @@ pub async fn update_agent_mcp_servers(
     Ok(Json(AgentMcpServersResponse {
         agent_id,
         active_servers: req.servers,
+    }))
+}
+
+// ── Search provider per-agent config ─────────────────────────────────
+
+/// Response for per-agent search provider list
+#[derive(Serialize)]
+pub struct AgentSearchProvidersResponse {
+    pub agent_id: String,
+    /// All search providers with API keys configured (from Gateway resource cache)
+    pub providers: Vec<rollball_core::protocol::SearchProviderListItem>,
+}
+
+/// Response for per-agent search config
+#[derive(Serialize, Deserialize)]
+pub struct AgentSearchConfigResponse {
+    #[serde(default)]
+    pub agent_id: String,
+    /// Active search providers with priority
+    pub providers: Vec<AgentSearchProviderEntry>,
+}
+
+/// A single active search provider entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSearchProviderEntry {
+    pub provider: String,
+    pub priority: u32,
+}
+
+/// Request body for PUT /api/agents/{id}/search-config
+#[derive(Deserialize)]
+pub struct UpdateAgentSearchConfigRequest {
+    pub providers: Vec<AgentSearchProviderEntry>,
+}
+
+/// `GET /api/agents/{id}/search-providers` — get search provider list for agent
+///
+/// Returns the search provider catalog from Gateway's resource cache.
+/// This tells the frontend which providers have API keys configured.
+pub async fn get_agent_search_providers(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentSearchProvidersResponse>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.installed_agents.contains_key(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+    }
+
+    let gw = state.gateway_state.read().await;
+    let providers = gw.resource_cache.search_list.providers.clone();
+
+    Ok(Json(AgentSearchProvidersResponse {
+        agent_id,
+        providers,
+    }))
+}
+
+/// `GET /api/agents/{id}/search-config` — get per-agent search provider config
+///
+/// Returns the agent's current agent_search.json (active providers + priorities).
+pub async fn get_agent_search_config(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentSearchConfigResponse>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists and is running
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.installed_agents.contains_key(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+        if let Some(info) = gw.running_agents.get(&agent_id) {
+            if !info.ready {
+                return Err(ApiError::service_unavailable(
+                    &format!("Agent '{}' is starting up, please wait", agent_id),
+                ));
+            }
+        } else {
+            return Err(ApiError::service_unavailable(
+                &format!("Agent '{}' is not started", agent_id),
+            ));
+        }
+    }
+
+    // Query Runtime for search config via gRPC ConfigSnapshot
+    let mut providers = Vec::new();
+    if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+        let query = rollball_core::proto::server_message::Payload::QueryConfig(
+            rollball_core::proto::QueryConfig {
+                request_id: uuid::Uuid::new_v4().to_string(),
+            },
+        );
+        if let Some(response) = crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
+            if let Some(rollball_core::proto::client_message::Payload::ConfigSnapshot(snap)) = response.payload {
+                // Parse search_config_json if available
+                if let Some(ref search_json) = snap.search_config_json {
+                    if let Ok(config) = serde_json::from_str::<AgentSearchConfigResponse>(search_json) {
+                        providers = config.providers;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(AgentSearchConfigResponse {
+        agent_id,
+        providers,
+    }))
+}
+
+/// `PUT /api/agents/{id}/search-config` — update per-agent search provider config
+///
+/// Saves the agent's chosen search providers + priorities to agent_search.json
+/// via RuntimeConfigUpdate push to the connected agent.
+pub async fn update_agent_search_config(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<UpdateAgentSearchConfigRequest>,
+) -> Result<Json<AgentSearchConfigResponse>, (StatusCode, Json<ApiError>)> {
+    // Verify agent exists
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.installed_agents.contains_key(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+    }
+
+    let providers_json = serde_json::to_string(
+        &AgentSearchConfigResponse {
+            agent_id: agent_id.clone(),
+            providers: req.providers.clone(),
+        },
+    )
+    .map_err(|e| ApiError::internal(&format!("Failed to serialize search config: {}", e)))?;
+
+    // Push RuntimeConfigUpdate to connected agent (Runtime persists agent_search.json)
+    if let Some(ref session_mgr) = state.session_mgr {
+        let mgr = session_mgr.lock().await;
+        if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+            let push_result = session
+                .push_message(GatewayResponse::RuntimeConfigUpdate {
+                    mcp_servers: None,
+                    max_output_tokens: None,
+                    max_iterations: None,
+                    temperature: None,
+                    system_prompt_override: None,
+                    active_tools: None,
+                    shell_approval_threshold: None,
+                    model: None,
+                    provider: None,
+                    search_config_json: Some(providers_json),
+                })
+                .await;
+            if !push_result {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Failed to push search config update to connected agent"
+                );
+            }
+        }
+    }
+
+    Ok(Json(AgentSearchConfigResponse {
+        agent_id,
+        providers: req.providers,
     }))
 }
 

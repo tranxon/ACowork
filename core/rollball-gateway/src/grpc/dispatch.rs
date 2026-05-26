@@ -158,6 +158,7 @@ pub async fn dispatch_grpc_request(
                 &req.connection_role,
                 req.provider_list_version,
                 req.mcp_list_version,
+                req.search_list_version,
                 conn_id,
                 state,
                 session_mgr,

@@ -466,6 +466,11 @@ impl Gateway {
                     &catalog,
                 );
             }
+            // Rebuild search_list cache from Vault search keys at startup
+            crate::resource_cache::rebuild_and_save_search_cache(
+                &mut gw,
+                &data_dir_path,
+            );
         }
 
         // S3.1: Start cron scheduler tick loop

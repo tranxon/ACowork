@@ -1,7 +1,6 @@
 import { useId, type ComponentType } from "react";
 import type { NavView } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { Settings } from "lucide-react";
 import { UserAvatar } from "../common/UserAvatar";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -13,9 +12,14 @@ interface NavBarProps {
   onAvatarClick: () => void;
 }
 
-const navItems: { view: NavView; icon: ComponentType<{ className?: string }>; label: string }[] = [
+const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; label: string }[] = [
   { view: "chat", icon: OutlineChatIcon, label: "Chat" },
+  { view: "projects", icon: OutlineProjectsIcon, label: "Projects" },
+  { view: "docs", icon: OutlineDocsIcon, label: "Docs" },
   { view: "harness", icon: OutlineHarnessIcon, label: "Harness" },
+];
+
+const bottomNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; label: string }[] = [
   { view: "settings", icon: OutlineSettingsIcon, label: "Settings" },
 ];
 
@@ -91,6 +95,75 @@ function FilledHarnessIcon({ className }: { className?: string }) {
   );
 }
 
+/** Outline document icon */
+function OutlineDocsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      {/* Document */}
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9.5L14 3z" />
+      <polyline points="14,3 14,9 20,9" />
+      <line x1="8" y1="12" x2="16" y2="12" />
+      <line x1="8" y1="15" x2="12" y2="15" />
+    </svg>
+  );
+}
+
+/** Filled document icon */
+function FilledDocsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.75">
+      {/* Document */}
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9.5L14 3z" />
+      <polyline points="14,3 14,9 20,9" fill="none" stroke="white" />
+      <line x1="8" y1="12" x2="16" y2="12" stroke="white" />
+      <line x1="8" y1="15" x2="12" y2="15" stroke="white" />
+    </svg>
+  );
+}
+
+/** Outline Projects icon - light mode (bg: #D8D9DC) */
+function OutlineProjectsIconLight({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="16" cy="11" r="3" />
+      <path d="M16 15c-3 0-5.5 1.2-5.5 3V21h11v-3c0-1.8-2-3-5.5-3z" />
+      <circle cx="9" cy="8" r="3" fill="#D8D9DC" />
+      <path d="M9 12c-3 0-5.5 1.2-5.5 3V18h11v-3c0-1.8-2-3-5.5-3z" fill="#D8D9DC" />
+    </svg>
+  );
+}
+
+/** Outline Projects icon - dark mode (bg: #3D3D3F) */
+function OutlineProjectsIconDark({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="16" cy="11" r="3" />
+      <path d="M16 15c-3 0-5.5 1.2-5.5 3V21h11v-3c0-1.8-2-3-5.5-3z" />
+      <circle cx="9" cy="8" r="3" fill="#3D3D3F" />
+      <path d="M9 12c-3 0-5.5 1.2-5.5 3V18h11v-3c0-1.8-2-3-5.5-3z" fill="#3D3D3F" />
+    </svg>
+  );
+}
+
+/** Outline Kanban/project board icon */
+function OutlineProjectsIcon({ className, isDark }: { className?: string; isDark?: boolean }) {
+  return isDark ? <OutlineProjectsIconDark className={className} /> : <OutlineProjectsIconLight className={className} />;
+}
+
+/** Filled Kanban/project board icon */
+function FilledProjectsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.75">
+      {/* Right person (behind) */}
+      <circle cx="16" cy="11" r="3" />
+      <path d="M16 15c-3 0-5.5 1.2-5.5 3V21h11v-3c0-1.8-2-3-5.5-3z" />
+      {/* Left person (front) */}
+      <circle cx="9" cy="8" r="3" />
+      <path d="M9 12c-3 0-5.5 1.2-5.5 3V18h11v-3c0-1.8-2-3-5.5-3z" />
+    </svg>
+  );
+}
+
 export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps) {
   const profile = useUserProfileStore((s) => s.profile);
   const { opacity, theme } = useSettingsStore();
@@ -100,7 +173,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
 
   return (
     <nav
-      className="flex w-[var(--spacing-nav)] flex-col items-center gap-0 py-2"
+      className="flex w-[var(--spacing-nav)] flex-col items-center gap-2 py-2"
       role="navigation"
       aria-label="Main navigation"
       style={{
@@ -121,15 +194,15 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
         />
       </button>
 
-      {/* Navigation items */}
-      {navItems.map(({ view, icon: Icon, label }) => (
+      {/* Top navigation items */}
+      {topNavItems.map(({ view, icon: Icon, label }) => (
         <button
           key={view}
           onClick={() => onViewChange(view)}
           className={cn(
-            "flex h-12 w-10 items-center justify-center rounded-md transition-colors duration-150",
+            "flex h-10 w-10 items-center justify-center rounded-lg transition-colors duration-150",
             currentView === view
-              ? ""
+              ? "hover:bg-[#D8D9DC] dark:hover:bg-[#3D3D3F]"
               : "text-zinc-500 hover:text-zinc-600 hover:bg-[#D8D9DC] dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-[#3D3D3F]",
           )}
           style={currentView === view ? { color: "var(--color-accent)" } : undefined}
@@ -142,9 +215,44 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
               <FilledChatIcon className="h-6 w-6" />
             ) : view === "harness" ? (
               <FilledHarnessIcon className="h-6 w-6" />
+            ) : view === "docs" ? (
+              <FilledDocsIcon className="h-6 w-6" />
+            ) : view === "projects" ? (
+              <FilledProjectsIcon className="h-6 w-6" />
             ) : (
               <FilledSettingsIcon className="h-6 w-6" />
             )
+          ) : (
+            view === "projects" ? (
+              <OutlineProjectsIcon className="h-6 w-6" isDark={isDark} />
+            ) : (
+              <Icon className="h-6 w-6" />
+            )
+          )}
+        </button>
+      ))}
+
+      {/* Spacer */}
+      <div className="flex-1" />
+
+      {/* Bottom navigation items */}
+      {bottomNavItems.map(({ view, icon: Icon, label }) => (
+        <button
+          key={view}
+          onClick={() => onViewChange(view)}
+          className={cn(
+            "flex h-10 w-10 items-center justify-center rounded-lg transition-colors duration-150",
+            currentView === view
+              ? "hover:bg-[#D8D9DC] dark:hover:bg-[#3D3D3F]"
+              : "text-zinc-500 hover:text-zinc-600 hover:bg-[#D8D9DC] dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-[#3D3D3F]",
+          )}
+          style={currentView === view ? { color: "var(--color-accent)" } : undefined}
+          title={label}
+          aria-label={label}
+          aria-current={currentView === view ? "page" : undefined}
+        >
+          {currentView === view ? (
+            <FilledSettingsIcon className="h-6 w-6" />
           ) : (
             <Icon className="h-6 w-6" />
           )}

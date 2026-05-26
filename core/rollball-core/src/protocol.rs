@@ -200,6 +200,57 @@ pub struct McpKeyEntry {
     pub api_key: Option<String>,
 }
 
+/// ── Web Search Provider types ──
+
+/// Search provider list item — delivered by Gateway to Runtime via AgentHelloResult.
+///
+/// Describes an available web search provider with its metadata.
+/// API keys are NOT included — see SearchKeyEntry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchProviderListItem {
+    /// Provider identifier (e.g. "tavily", "brave", "firecrawl", "searxng")
+    pub id: String,
+    /// Display name (e.g. "Tavily Search")
+    pub name: String,
+    /// Human-readable description
+    pub description: String,
+    /// Whether this provider requires an API key
+    pub requires_api_key: bool,
+    /// Default API base URL
+    pub base_url: String,
+}
+
+/// Search key entry — delivered by Gateway to Runtime via AgentHelloResult.
+///
+/// Always delivered in full on every AgentHello (no version check).
+/// Runtime stores this ONLY in memory, never persisted to disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchKeyEntry {
+    /// Provider identifier (e.g. "tavily")
+    pub provider_id: String,
+    /// Decrypted API key
+    pub api_key: String,
+}
+
+/// Per-agent search provider configuration — persisted to agent_search.json.
+///
+/// Each agent selects a subset of available search providers with priority ordering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSearchProvider {
+    /// Provider identifier (e.g. "tavily")
+    pub provider: String,
+    /// Priority (1 = highest priority, lower number = tried first in fallback chain)
+    pub priority: u32,
+}
+
+/// Per-agent search configuration — persisted to agent_search.json.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentSearchConfig {
+    /// Ordered list of active search providers for this agent
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<AgentSearchProvider>,
+}
+
 /// Context usage info reported by Runtime to Gateway after each LLM call.
 /// Forwarded to Desktop App via WebSocket for UI display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +388,9 @@ pub enum GatewayRequest {
         /// Runtime's cached MCP server list version (0 = never synced)
         #[serde(default)]
         mcp_list_version: u64,
+        /// Runtime's cached search provider list version (0 = never synced)
+        #[serde(default)]
+        search_list_version: u64,
     },
     /// List sessions request (S1.14)
     ///
@@ -416,6 +470,9 @@ pub enum GatewayRequest {
         /// Available models list cached from last Gateway push
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_models: Vec<String>,
+        /// Search provider config (JSON-serialized AgentSearchConfig from agent_search.json)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        search_config_json: Option<String>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -472,6 +529,18 @@ pub enum GatewayResponse {
         /// MCP server keys/tokens — NEVER persisted to workspace disk by Runtime.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_key_vault: Vec<McpKeyEntry>,
+
+        // ── Web Search Provider ──
+        /// Search provider list.
+        /// Only included when search_list_version in AgentHello < Gateway's current version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        search_list: Option<Vec<SearchProviderListItem>>,
+        /// Gateway's current search list version
+        #[serde(default)]
+        search_list_version: u64,
+        /// Search provider API keys — NEVER persisted to workspace disk by Runtime.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        search_key_vault: Vec<SearchKeyEntry>,
 
         // ── Identity (retained from previous protocol) ──
         /// Previously written to .identity_delivery.json in workspace;
@@ -554,6 +623,18 @@ pub enum GatewayResponse {
         /// Protocol type for the LLM API (anthropic/openai/ollama)
         #[serde(default)]
         protocol_type: ProtocolType,
+    },
+    /// Web Search configuration delivery (Gateway → Runtime, hot-push)
+    ///
+    /// Pushed after user modifies search vault keys via Harness/Search Tab.
+    /// Always delivers the full search_list + key vault (not version-diffed).
+    SearchConfigDelivery {
+        /// Full search provider list (with metadata)
+        search_list: Vec<SearchProviderListItem>,
+        /// Current search list version
+        search_list_version: u64,
+        /// Search provider API keys — NEVER persisted to workspace disk by Runtime
+        search_key_vault: Vec<SearchKeyEntry>,
     },
     /// Identity query result from System Agent
     IdentityQueryResult {
@@ -731,6 +812,11 @@ pub enum GatewayResponse {
         /// When set together with `model`, the Runtime switches provider and model.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// Search provider config override (JSON-serialized AgentSearchConfig).
+        /// When Some, replaces the agent's agent_search.json completely.
+        /// Some("") means no search providers active.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        search_config_json: Option<String>,
     },
     /// Query config request (Gateway → Runtime)
     ///

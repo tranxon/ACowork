@@ -8,14 +8,16 @@ import { getGatewayUrl } from "../../lib/config";
 import { Star } from "lucide-react";
 import { useMcpStore } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
+import { SearchTab } from "./SearchTab";
 
-type HarnessTab = "providers" | "mcp";
+type HarnessTab = "providers" | "search" | "mcp";
 
 export function HarnessPage() {
   const [activeTab, setActiveTab] = useState<HarnessTab>("providers");
 
   const tabs: { id: HarnessTab; label: string }[] = [
     { id: "providers", label: "Providers" },
+    { id: "search", label: "Search" },
     { id: "mcp", label: "MCP" },
   ];
 
@@ -42,6 +44,7 @@ export function HarnessPage() {
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto p-6">
         {activeTab === "providers" && <ProvidersTab />}
+        {activeTab === "search" && <SearchTab />}
         {activeTab === "mcp" && <McpTab />}
       </div>
     </div>

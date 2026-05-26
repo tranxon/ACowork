@@ -201,6 +201,7 @@ impl TestServer {
             "1.0.0",
             0,
             0,
+            0,
         )
         .await
         .expect("Failed to connect and register");
@@ -227,7 +228,7 @@ async fn test_t1_agent_hello_success() {
 
         // Send AgentHello
         client
-            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0)
+            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0, 0)
             .await
             .expect("AgentHello should succeed");
 
@@ -248,7 +249,7 @@ async fn test_t2_agent_hello_duplicate_registration() {
 
         // Second registration with same agent_id
         let result = client2
-            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0)
+            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0, 0)
             .await;
         // Whether it returns error depends on handler logic —
         // either way the gRPC communication layer should work.
@@ -1073,6 +1074,7 @@ async fn test_t33_push_request_id_zero() {
                     connection_role: "main".to_string(),
                     provider_list_version: 0,
                     mcp_list_version: 0,
+                    search_list_version: 0,
                 },
             )),
         };

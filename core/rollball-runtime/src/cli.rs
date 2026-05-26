@@ -188,6 +188,8 @@ struct RuntimeResourceCache {
     provider_list_version: u64,
     #[serde(default)]
     mcp_list_version: u64,
+    #[serde(default)]
+    search_list_version: u64,
     /// Cached provider list (without api keys — keys come from vault).
     /// None when no cache exists yet (first start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,9 +262,10 @@ async fn connect_gateway_client(
     // Read locally-cached resource versions for diff sync.
     let work_dir_path = std::path::Path::new(work_dir);
     let resource_cache = read_resource_cache(work_dir_path);
-    let (cached_prov_ver, cached_mcp_ver) = (
+    let (cached_prov_ver, cached_mcp_ver, cached_search_ver) = (
         resource_cache.provider_list_version,
         resource_cache.mcp_list_version,
+        resource_cache.search_list_version,
     );
     match crate::grpc::client::GatewayGrpcClient::connect_and_register(
         endpoint,
@@ -270,6 +273,7 @@ async fn connect_gateway_client(
         version,
         cached_prov_ver,
         cached_mcp_ver,
+        cached_search_ver,
     )
     .await
     {
@@ -367,10 +371,12 @@ async fn async_main(
             let mcp_list_data = cfg.mcp_list.clone();
             let prov_ver = cfg.provider_list_version;
             let mcp_ver = cfg.mcp_list_version;
+            let search_ver = cfg.search_list_version;
             let old_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
             let new_cache = RuntimeResourceCache {
                 provider_list_version: prov_ver,
                 mcp_list_version: mcp_ver,
+                search_list_version: search_ver,
                 providers: prov_list.or(old_cache.providers),
                 mcps: mcp_list_data.or(old_cache.mcps),
             };
@@ -1540,6 +1546,7 @@ async fn run_gateway_loop(
                                         shell_approval_threshold: overrides.shell_approval_threshold.clone(),
                                         mcp_servers_json: mcp_json,
                                         available_models: persisted.available_models,
+                                        search_config_json: None,
                                     },
                                 );
                                 let response = proto::ClientMessage {
@@ -2427,6 +2434,7 @@ async fn process_gateway_recv(
                     mcp_servers,
                     model,
                     provider,
+                    search_config_json: _search_config_json,
                 } => {
                     tracing::info!(
 

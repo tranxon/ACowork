@@ -1,15 +1,16 @@
-//! Resource cache — versioned provider and MCP lists for AgentHello diff sync.
+//! Resource cache — versioned provider, MCP, and search provider lists for AgentHello diff sync.
 //!
-//! Gateway maintains two versioned resource lists on disk:
+//! Gateway maintains three versioned resource lists on disk:
 //! - `provider_list.json`: `{ version: N, providers: [ProviderListItem, ...] }`
 //! - `mcp_list.json`:    `{ version: N, servers: [McpListItem, ...] }`
+//! - `search_list.json`: `{ version: N, providers: [SearchProviderListItem, ...] }`
 //!
 //! These are loaded into memory at startup. HTTP handlers rebuild them
-//! (version+1) when the user modifies providers or MCP catalog entries.
-//! The AgentHello handler reads the in-memory cache and delivers changed
-//! lists to Runtime via version-driven diff sync.
+//! (version+1) when the user modifies providers, MCP catalog entries, or
+//! search provider keys. The AgentHello handler reads the in-memory cache
+//! and delivers changed lists to Runtime via version-driven diff sync.
 //!
-//! ## Key vaults (provider_key_vault / mcp_key_vault)
+//! ## Key vaults (provider_key_vault / mcp_key_vault / search_key_vault)
 //!
 //! Key vaults are NOT versioned — they are always delivered in full on
 //! every AgentHello. They are built on-the-fly from Vault + MCP catalog
@@ -21,16 +22,18 @@ use std::path::Path;
 
 use rollball_core::protocol::{
     McpKeyEntry, McpListItem, ProviderListItem, ProviderModelEntry,
+    SearchKeyEntry, SearchProviderListItem,
 };
 
 /// In-memory resource cache loaded at Gateway startup.
 ///
-/// Provider and MCP lists are versioned; keys are always delivered in full
-/// and are NOT stored here (built on-the-fly from Vault).
+/// Provider, MCP, and Search lists are versioned; keys are always delivered
+/// in full and are NOT stored here (built on-the-fly from Vault).
 #[derive(Debug, Clone)]
 pub struct ResourceCache {
     pub provider_list: ProviderListFile,
     pub mcp_list: McpListFile,
+    pub search_list: SearchListFile,
 }
 
 /// Versioned provider list persisted to disk.
@@ -47,6 +50,13 @@ pub struct McpListFile {
     pub servers: Vec<McpListItem>,
 }
 
+/// Versioned search provider list persisted to disk.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SearchListFile {
+    pub version: u64,
+    pub providers: Vec<SearchProviderListItem>,
+}
+
 // ── File paths ─────────────────────────────────────────────────────────
 
 fn provider_list_path(data_dir: &Path) -> std::path::PathBuf {
@@ -57,6 +67,10 @@ fn mcp_list_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("mcp_list.json")
 }
 
+fn search_list_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("search_list.json")
+}
+
 // ── Loading ────────────────────────────────────────────────────────────
 
 /// Load the resource cache from disk at Gateway startup.
@@ -65,16 +79,20 @@ fn mcp_list_path(data_dir: &Path) -> std::path::PathBuf {
 pub fn load_resource_cache(data_dir: &Path) -> ResourceCache {
     let provider_list = load_provider_list(data_dir);
     let mcp_list = load_mcp_list(data_dir);
+    let search_list = load_search_list(data_dir);
     tracing::info!(
         provider_count = provider_list.providers.len(),
         provider_version = provider_list.version,
         mcp_count = mcp_list.servers.len(),
         mcp_version = mcp_list.version,
+        search_count = search_list.providers.len(),
+        search_version = search_list.version,
         "Resource cache loaded"
     );
     ResourceCache {
         provider_list,
         mcp_list,
+        search_list,
     }
 }
 
@@ -136,6 +154,35 @@ fn load_mcp_list(data_dir: &Path) -> McpListFile {
     }
 }
 
+fn load_search_list(data_dir: &Path) -> SearchListFile {
+    let path = search_list_path(data_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to parse search_list.json, using empty list"
+                );
+                SearchListFile::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("search_list.json not found, initializing empty");
+            SearchListFile::default()
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to read search_list.json, using empty list"
+            );
+            SearchListFile::default()
+        }
+    }
+}
+
 // ── Saving ─────────────────────────────────────────────────────────────
 
 /// Save the provider list to disk.
@@ -162,6 +209,20 @@ pub fn save_mcp_list(data_dir: &Path, list: &McpListFile) -> Result<(), String> 
         version = list.version,
         count = list.servers.len(),
         "MCP list saved"
+    );
+    Ok(())
+}
+
+/// Save the search provider list to disk.
+pub fn save_search_list(data_dir: &Path, list: &SearchListFile) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(list)
+        .map_err(|e| format!("Failed to serialize search list: {}", e))?;
+    std::fs::write(search_list_path(data_dir), &json)
+        .map_err(|e| format!("Failed to write search_list.json: {}", e))?;
+    tracing::info!(
+        version = list.version,
+        count = list.providers.len(),
+        "Search list saved"
     );
     Ok(())
 }
@@ -273,6 +334,116 @@ pub fn rebuild_and_save_mcp_cache(
     gw.resource_cache.mcp_list = new_list;
 }
 
+/// Rebuild search_list.json from search provider configurations.
+///
+/// Called when user adds/updates/removes search API keys in Vault.
+/// Uses the built-in search provider catalog for static metadata, then
+/// applies user-configured API keys from Vault.
+pub fn rebuild_and_save_search_cache(
+    gw: &mut crate::gateway::state::GatewayState,
+    data_dir: &Path,
+) {
+    // Build the search provider list from Vault entries + static catalog
+    let mut providers = Vec::new();
+
+    // Iterate through the built-in catalog and pair with vault keys
+    let catalog = vec![
+        SearchProviderListItem {
+            id: "tavily".to_string(),
+            name: "Tavily Search".to_string(),
+            description: "AI-optimized real-time search API built for AI agents".to_string(),
+            requires_api_key: true,
+            base_url: "https://api.tavily.com".to_string(),
+        },
+        SearchProviderListItem {
+            id: "brave".to_string(),
+            name: "Brave Search".to_string(),
+            description: "Privacy-first web search with independent index".to_string(),
+            requires_api_key: true,
+            base_url: "https://api.search.brave.com".to_string(),
+        },
+        SearchProviderListItem {
+            id: "serper".to_string(),
+            name: "Serper.dev".to_string(),
+            description: "Fast Google Search API with structured results".to_string(),
+            requires_api_key: true,
+            base_url: "https://google.serper.dev".to_string(),
+        },
+        SearchProviderListItem {
+            id: "perplexity".to_string(),
+            name: "Perplexity Sonar".to_string(),
+            description: "AI-powered search with inline citations and answers".to_string(),
+            requires_api_key: true,
+            base_url: "https://api.perplexity.ai".to_string(),
+        },
+        SearchProviderListItem {
+            id: "exa".to_string(),
+            name: "Exa.ai".to_string(),
+            description: "AI search engine with extracted web content for LLMs".to_string(),
+            requires_api_key: true,
+            base_url: "https://api.exa.ai".to_string(),
+        },
+        SearchProviderListItem {
+            id: "google-cse".to_string(),
+            name: "Google CSE".to_string(),
+            description: "Google Custom Search Engine — requires API key + Search Engine ID (CX)".to_string(),
+            requires_api_key: true,
+            base_url: "https://www.googleapis.com".to_string(),
+        },
+        SearchProviderListItem {
+            id: "firecrawl".to_string(),
+            name: "Firecrawl".to_string(),
+            description: "Web scraping and search with markdown output".to_string(),
+            requires_api_key: true,
+            base_url: "https://api.firecrawl.dev".to_string(),
+        },
+        SearchProviderListItem {
+            id: "searxng".to_string(),
+            name: "SearXNG".to_string(),
+            description: "Self-hosted privacy-respecting metasearch engine".to_string(),
+            requires_api_key: false,
+            base_url: String::new(),
+        },
+    ];
+
+    for item in catalog {
+        // Only include providers that have API keys (or don't require one, like SearXNG)
+        let has_key = !item.requires_api_key || gw.vault.get_search_key(&item.id).is_ok();
+        if has_key {
+            providers.push(item);
+        }
+    }
+
+    let new_version = gw.resource_cache.search_list.version.wrapping_add(1);
+    let new_list = SearchListFile {
+        version: new_version,
+        providers,
+    };
+
+    if let Err(e) = save_search_list(data_dir, &new_list) {
+        tracing::error!(error = %e, "Failed to save search_list.json after vault change");
+    }
+    gw.resource_cache.search_list = new_list;
+}
+
+/// Build search key vault from Vault entries.
+///
+/// Reads decrypted API keys from Vault for each configured search provider.
+pub fn build_search_key_vault(
+    gw: &crate::gateway::state::GatewayState,
+) -> Vec<SearchKeyEntry> {
+    let providers = &["tavily", "brave", "firecrawl", "searxng"];
+    providers
+        .iter()
+        .filter_map(|id| {
+            gw.vault.get_search_key(id).ok().map(|entry| SearchKeyEntry {
+                provider_id: id.to_string(),
+                api_key: entry.api_key,
+            })
+        })
+        .collect()
+}
+
 /// Convert MCP catalog entries (McpServerConfigDef) to McpListItem entries.
 ///
 /// MCP keys are built on-the-fly by extracting env vars and headers that
@@ -358,11 +529,21 @@ impl Default for McpListFile {
     }
 }
 
+impl Default for SearchListFile {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            providers: Vec::new(),
+        }
+    }
+}
+
 impl Default for ResourceCache {
     fn default() -> Self {
         Self {
             provider_list: ProviderListFile::default(),
             mcp_list: McpListFile::default(),
+            search_list: SearchListFile::default(),
         }
     }
 }

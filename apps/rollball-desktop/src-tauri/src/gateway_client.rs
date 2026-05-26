@@ -393,6 +393,75 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
+        // ── Search Keys ─────────────────────────────────────────────────────
+
+    /// `GET /api/search/keys` — list search provider keys (masked)
+    pub async fn list_search_keys(&self) -> Result<Vec<SearchVaultKeyEntry>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/search/keys", self.base_url))
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `POST /api/search/keys` — add a search provider key
+    pub async fn add_search_key(
+        &self,
+        provider: &str,
+        key: &str,
+        base_url: Option<&str>,
+    ) -> Result<GenericMessageResponse> {
+        let mut body = serde_json::json!({ "provider": provider, "key": key });
+        if let Some(url) = base_url {
+            if !url.is_empty() {
+                body["base_url"] = serde_json::Value::String(url.to_string());
+            }
+        }
+        let resp = self
+            .client
+            .post(format!("{}/api/search/keys", self.base_url))
+            .json(&body)
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `DELETE /api/search/keys/:provider` — remove a search provider key
+    pub async fn remove_search_key(&self, provider: &str) -> Result<GenericMessageResponse> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/search/keys/{}", self.base_url, provider))
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `PUT /api/search/keys/:provider` — update a search provider key (partial)
+    pub async fn update_search_key(
+        &self,
+        provider: &str,
+        key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Result<GenericMessageResponse> {
+        let mut body = serde_json::Map::new();
+        if let Some(k) = key {
+            if !k.is_empty() {
+                body.insert("key".to_string(), serde_json::Value::String(k.to_string()));
+            }
+        }
+        if let Some(url) = base_url {
+            body.insert("base_url".to_string(), serde_json::Value::String(url.to_string()));
+        }
+        let resp = self
+            .client
+            .put(format!("{}/api/search/keys/{}", self.base_url, provider))
+            .json(&body)
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
     // ── Config ─────────────────────────────────────────────────────────
     //
     // Config and log management are now handled by the frontend directly
@@ -572,6 +641,18 @@ pub struct ModelModalities {
 
 fn default_true() -> bool {
     true
+}
+
+// ── Search key types ─────────────────────────────────────────────────
+
+/// Search vault key entry (masked)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchVaultKeyEntry {
+    pub provider: String,
+    pub key_preview: String,
+    /// Configured base URL (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 // ── Document upload ───────────────────────────────────────────────────

@@ -36,11 +36,13 @@ pub mod content_search;
 pub mod intent_send;
 pub mod rag_query;
 pub mod ask_user_question;
+pub mod search_backends;
 
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
 
 use crate::tools::workspace_resolver::SharedResolver;
+use search_backends::WebSearchEngine;
 
 /// Create the standard built-in tools (without RAG).
 ///
@@ -73,12 +75,16 @@ pub fn all_builtin_tools(
         })
         .collect();
 
+    // Build search engine from agent's configured backends.
+    // Initially empty — backends are populated when search config arrives from Gateway.
+    let search_engine = WebSearchEngine::new(Vec::new());
+
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(memory_recall::MemoryRecallTool::new(agent_id)),
         Arc::new(memory_store::MemoryStoreTool::new(agent_id)),
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::new()),
-        Arc::new(web_search::WebSearchTool::new()),
+        Arc::new(web_search::WebSearchTool::new(search_engine)),
         Arc::new(file_read::FileReadTool::new(&current_dir)),
         Arc::new(file_write::FileWriteTool::new(&current_dir)),
         Arc::new(file_edit::FileEditTool::new(&current_dir)),

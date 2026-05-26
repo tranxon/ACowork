@@ -281,7 +281,7 @@ export interface ContextUsageInfo {
 }
 
 /** Navigation view type */
-export type NavView = "chat" | "harness" | "settings";
+export type NavView = "chat" | "harness" | "docs" | "projects" | "settings";
 
 /** Theme type */
 export type Theme = "light" | "dark" | "system";
@@ -644,6 +644,53 @@ export type McpPresetCategory =
   | "knowledge"
   | "browser"
   | "utility";
+
+// ── Web Search Provider types ────────────────────────────────────────
+
+/** Search key entry — matches Gateway HTTP API Vault search key response */
+export interface SearchKeyEntry {
+  provider: string;
+  key_preview: string;
+  /** Optional base URL override (required for SearXNG) */
+  base_url?: string;
+}
+
+/** Search provider definition — static catalog entry for frontend */
+export interface SearchProviderDef {
+  /** Provider identifier (e.g. "tavily") */
+  id: string;
+  /** Display name */
+  name: string;
+  /** Short description */
+  description: string;
+  /** Whether this provider requires an API key */
+  requires_api_key: boolean;
+  /** Free quota string for display */
+  free_quota: string;
+  /** Default API endpoint */
+  base_url: string;
+}
+
+/** Search provider list item — matched from Gateway search_list */
+export interface SearchProviderListItem {
+  id: string;
+  name: string;
+  description: string;
+  requires_api_key: boolean;
+  base_url: string;
+}
+
+/** Per-agent search provider activation config */
+export interface AgentSearchProvider {
+  provider: string;
+  /** Priority: 1 = highest (tried first) */
+  priority: number;
+}
+
+/** Per-agent search config stored in agent_search.json */
+export interface AgentSearchConfig {
+  providers: AgentSearchProvider[];
+}
 
 /** MCP preset definition (frontend-only, not persisted) */
 export interface McpPresetDef {

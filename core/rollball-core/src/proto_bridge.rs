@@ -449,6 +449,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 connection_role,
                 provider_list_version,
                 mcp_list_version,
+                search_list_version,
             } => {
                 Some(proto::client_message::Payload::AgentHello(
                     proto::AgentHelloRequest {
@@ -457,6 +458,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         connection_role: connection_role.clone(),
                         provider_list_version: *provider_list_version,
                         mcp_list_version: *mcp_list_version,
+                        search_list_version: *search_list_version,
                     },
                 ))
             }
@@ -507,6 +509,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 shell_approval_threshold,
                 mcp_servers,
                 available_models,
+                search_config_json,
             } => {
                 let mcp_json: Vec<String> = mcp_servers
                     .iter()
@@ -525,6 +528,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         shell_approval_threshold: shell_approval_threshold.clone(),
                         mcp_servers_json: mcp_json,
                         available_models: available_models.clone(),
+                        search_config_json: search_config_json.clone(),
                     },
                 ))
             }
@@ -566,6 +570,9 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 mcp_list_version,
                 provider_key_vault,
                 mcp_key_vault,
+                search_list,
+                search_list_version,
+                search_key_vault,
                 identity_entries: _, // ADR-009: consumed by Runtime CLI, not gRPC bridge
             } => {
                 let _ = (provider_list, provider_list_version, mcp_list, mcp_list_version);
@@ -573,8 +580,10 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 // gRPC bridge serializes these as JSON strings for backward compat with proto.
                 let pl_json = provider_list.as_ref().map(|pl| serde_json::to_string(pl).unwrap_or_default());
                 let ml_json = mcp_list.as_ref().map(|ml| serde_json::to_string(ml).unwrap_or_default());
+                let sl_json = search_list.as_ref().map(|sl| serde_json::to_string(sl).unwrap_or_default());
                 let pkv_json = serde_json::to_string(&provider_key_vault).unwrap_or_default();
                 let mkv_json = serde_json::to_string(&mcp_key_vault).unwrap_or_default();
+                let skv_json = serde_json::to_string(&search_key_vault).unwrap_or_default();
                 Some(proto::server_message::Payload::AgentHelloResult(
                     proto::AgentHelloResult {
                         success: *success,
@@ -585,6 +594,9 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         mcp_list_version: *mcp_list_version,
                         provider_key_vault_json: pkv_json,
                         mcp_key_vault_json: mkv_json,
+                        search_list_json: sl_json.unwrap_or_default(),
+                        search_list_version: *search_list_version,
+                        search_key_vault_json: skv_json,
                     },
                 ))
             }
@@ -807,6 +819,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 mcp_servers,
                 model,
                 provider,
+                search_config_json,
             } => {
                 let mcp_servers_json: Vec<String> = mcp_servers
                     .as_ref()
@@ -828,12 +841,28 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         mcp_servers_json,
                         model: model.clone(),
                         provider: provider.clone(),
+                        search_config_json: search_config_json.clone(),
                     },
                 ))
             }
             protocol::GatewayResponse::QueryConfig { request_id: q_request_id } => {
                 Some(proto::server_message::Payload::QueryConfig(
                     proto::QueryConfig { request_id: q_request_id.clone() },
+                ))
+            }
+            protocol::GatewayResponse::SearchConfigDelivery {
+                search_list,
+                search_list_version,
+                search_key_vault,
+            } => {
+                let sl_json = serde_json::to_string(&search_list).unwrap_or_default();
+                let skv_json = serde_json::to_string(&search_key_vault).unwrap_or_default();
+                Some(proto::server_message::Payload::SearchConfigDelivery(
+                    proto::SearchConfigDelivery {
+                        search_list_json: sl_json,
+                        search_list_version: *search_list_version,
+                        search_key_vault_json: skv_json,
+                    },
                 ))
             }
             // Unknown messages have no proto representation — they are

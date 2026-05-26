@@ -567,8 +567,8 @@ pub async fn handle_context_usage_report(
 /// On successful authentication, bundles all handshake-time configuration
 /// (LLM config, workspace context, runtime overrides) into the AgentHelloResult
 /// response.  Resource lists use version-driven diff sync:
-/// - provider_list / mcp_list are only sent when Runtime's cached version < Gateway's.
-/// - provider_key_vault / mcp_key_vault are always sent in full (keys not versioned).
+/// - provider_list / mcp_list / search_list are only sent when Runtime's cached version < Gateway's.
+/// - provider_key_vault / mcp_key_vault / search_key_vault are always sent in full (keys not versioned).
 /// This satisfies PRD GTW-05 and SEC-07: API keys are distributed via IPC,
 /// not environment variables.
 pub async fn handle_agent_hello(
@@ -577,6 +577,7 @@ pub async fn handle_agent_hello(
     connection_role: &str,
     provider_list_version: u64,
     mcp_list_version: u64,
+    search_list_version: u64,
     conn_id: &str,
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
@@ -619,6 +620,15 @@ pub async fn handle_agent_hello(
             (None, gw.resource_cache.mcp_list.version)
         };
 
+        let (search_list, gw_search_version) = if search_list_version < gw.resource_cache.search_list.version {
+            (
+                Some(gw.resource_cache.search_list.providers.clone()),
+                gw.resource_cache.search_list.version,
+            )
+        } else {
+            (None, gw.resource_cache.search_list.version)
+        };
+
         // ── Key vaults (always full, from Vault + MCP catalog) ─────
         let provider_key_vault: Vec<rollball_core::protocol::ProviderKeyEntry> = gw
             .vault
@@ -645,6 +655,9 @@ pub async fn handle_agent_hello(
             Err(_) => Vec::new(),
         };
 
+        // Build search key vault (always full delivery)
+        let search_key_vault = crate::resource_cache::build_search_key_vault(&gw);
+
         drop(gw);
 
         // ADR-009: Get identity entries from RunningAgentInfo (stored at start_agent time)
@@ -664,6 +677,9 @@ pub async fn handle_agent_hello(
             mcp_list_version: gw_mcp_version,
             provider_key_vault,
             mcp_key_vault,
+            search_list,
+            search_list_version: gw_search_version,
+            search_key_vault,
             identity_entries,
         }
     } else {
@@ -677,6 +693,9 @@ pub async fn handle_agent_hello(
             mcp_list_version: 0,
             provider_key_vault: vec![],
             mcp_key_vault: vec![],
+            search_list: None,
+            search_list_version: 0,
+            search_key_vault: vec![],
             identity_entries: vec![],
         }
     }

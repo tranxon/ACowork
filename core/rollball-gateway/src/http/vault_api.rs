@@ -25,6 +25,8 @@ pub fn vault_routes() -> Router<AppState> {
     Router::new()
         .route("/api/vault/keys", get(list_keys).post(add_key))
         .route("/api/vault/keys/{provider}", delete(remove_key).put(update_key))
+        .route("/api/search/keys", get(list_search_keys).post(add_search_key))
+        .route("/api/search/keys/{provider}", delete(remove_search_key).put(update_search_key))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -98,6 +100,29 @@ pub struct UpdateKeyRequest {
 #[derive(Serialize)]
 pub struct MessageResponse {
     pub message: String,
+}
+
+// ── Search key types ──────────────────────────────────────────────────
+
+/// Search key entry response (masked preview)
+#[derive(Serialize)]
+pub struct SearchKeyEntryResponse {
+    pub provider: String,
+    pub key_preview: String,
+}
+
+/// Add search key request
+#[derive(Deserialize)]
+pub struct AddSearchKeyRequest {
+    pub provider: String,
+    pub key: String,
+}
+
+/// Update search key request (partial update — key is optional)
+#[derive(Deserialize)]
+pub struct UpdateSearchKeyRequest {
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -300,6 +325,114 @@ pub async fn update_key(
 
     Ok(Json(MessageResponse {
         message: format!("Key updated for provider: {}", provider),
+    }))
+}
+
+// ── Search key handlers ───────────────────────────────────────────────
+
+/// `GET /api/search/keys` — list stored search provider keys (masked)
+pub async fn list_search_keys(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<SearchKeyEntryResponse>>, (StatusCode, Json<ApiError>)> {
+    let gw = state.gateway_state.read().await;
+    let entries = gw.vault.list_search_keys()
+        .map_err(|e| ApiError::internal(&format!("Failed to list search keys: {}", e)))?;
+
+    let response = entries.iter().map(|k| SearchKeyEntryResponse {
+        provider: k.provider.clone(),
+        key_preview: k.key_preview.clone(),
+    }).collect();
+
+    Ok(Json(response))
+}
+
+/// `POST /api/search/keys` — add a search provider API key
+pub async fn add_search_key(
+    State(state): State<AppState>,
+    Json(body): Json<AddSearchKeyRequest>,
+) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+    if body.provider.is_empty() {
+        return Err(ApiError::bad_request("provider must not be empty"));
+    }
+    if body.key.is_empty() {
+        return Err(ApiError::bad_request("key must not be empty"));
+    }
+
+    let mut gw = state.gateway_state.write().await;
+    gw.vault.store_search_key(&body.provider, &body.key)
+        .map_err(|e| ApiError::internal(&format!("Failed to store search key: {}", e)))?;
+
+    // Rebuild search_list cache so AgentHello picks up the new provider.
+    let data_dir = get_data_dir_from_gw(&gw);
+    resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
+    drop(gw); // Release write lock before hot-push
+
+    // Hot-push search config change to all connected agents
+    if let Some(ref pusher) = state.pusher { pusher.push_search_config().await; }
+
+    Ok((StatusCode::CREATED, Json(MessageResponse {
+        message: format!("Search key stored for provider: {}", body.provider),
+    })))
+}
+
+/// `DELETE /api/search/keys/:provider` — remove a search provider API key
+pub async fn remove_search_key(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+    let mut gw = state.gateway_state.write().await;
+    gw.vault.remove_search_key(&provider)
+        .map_err(|e| ApiError::not_found(&format!("Search key not found for '{}': {}", provider, e)))?;
+
+    // Rebuild search_list cache after removal.
+    let data_dir = get_data_dir_from_gw(&gw);
+    resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
+    drop(gw);
+
+    if let Some(ref pusher) = state.pusher { pusher.push_search_config().await; }
+
+    Ok(Json(MessageResponse {
+        message: format!("Search key removed for provider: {}", provider),
+    }))
+}
+
+/// `PUT /api/search/keys/:provider` — update a search provider API key (partial)
+pub async fn update_search_key(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(body): Json<UpdateSearchKeyRequest>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+    let mut gw = state.gateway_state.write().await;
+
+    // Resolve the API key: use provided key, or preserve existing key
+    let api_key = match body.key {
+        Some(ref k) if !k.is_empty() => k.clone(),
+        _ => {
+            match gw.vault.get_search_key(&provider) {
+                Ok(entry) => entry.api_key,
+                Err(e) => {
+                    return Err(ApiError::not_found(&format!(
+                        "Search key not found for '{}': {}", provider, e
+                    )));
+                }
+            }
+        }
+    };
+
+    // Remove old entry, store new
+    let _ = gw.vault.remove_search_key(&provider);
+    gw.vault.store_search_key(&provider, &api_key)
+        .map_err(|e| ApiError::internal(&format!("Failed to update search key: {}", e)))?;
+
+    // Rebuild search_list cache after update.
+    let data_dir = get_data_dir_from_gw(&gw);
+    resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
+    drop(gw);
+
+    if let Some(ref pusher) = state.pusher { pusher.push_search_config().await; }
+
+    Ok(Json(MessageResponse {
+        message: format!("Search key updated for provider: {}", provider),
     }))
 }
 

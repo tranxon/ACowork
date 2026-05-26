@@ -177,9 +177,13 @@ export function ChatPanel() {
     return grouped;
   }, [messages, streamingMessageId]);
 
-  // Virtual scrolling: only render visible messages
+  // Show thinking indicator below virtualized message list when waiting for first token
+  const showThinkingItem = isReasoning && !streamingMessageId && !thinkingMessageId;
+
+  // Virtual scrolling: only render visible items (messages + optional thinking indicator)
+  const virtualCount = displayMessages.length + (showThinkingItem ? 1 : 0);
   const virtualizer = useVirtualizer({
-    count: displayMessages.length,
+    count: virtualCount,
     getScrollElement: () => messagesContainerRef.current,
     estimateSize: () => 80,
     overscan: 5,
@@ -442,22 +446,22 @@ export function ChatPanel() {
         isLoadingMoreRef.current = false;
         virtualizer.scrollToOffset(prevOffset, { align: "start" });
       }
-      prevDisplayCountRef.current = displayMessages.length;
+      prevDisplayCountRef.current = virtualCount;
       return;
     }
 
-    if (displayMessages.length > 0) {
+    if (virtualCount > 0) {
       if (prevCount === 0) {
         // Agent switch or initial load: jump to bottom instantly (before paint)
-        virtualizer.scrollToIndex(displayMessages.length - 1, { align: "end" });
-      } else if (displayMessages.length > prevCount) {
-        // New message arrived: smooth scroll to bottom
-        virtualizer.scrollToIndex(displayMessages.length - 1, { align: "end", behavior: "smooth" });
+        virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+      } else if (virtualCount > prevCount) {
+        // New message arrived or thinking indicator appeared: smooth scroll to bottom
+        virtualizer.scrollToIndex(virtualCount - 1, { align: "end", behavior: "smooth" });
       }
     }
 
-    prevDisplayCountRef.current = displayMessages.length;
-  }, [messages, displayMessages.length, virtualizer, selectedAgentId, currentSessionId]);
+    prevDisplayCountRef.current = virtualCount;
+  }, [messages, virtualCount, virtualizer, selectedAgentId, currentSessionId, showThinkingItem]);
 
   // Scroll handler: load more messages when scrolled to top
   const handleScroll = useCallback(() => {
@@ -818,7 +822,7 @@ export function ChatPanel() {
             className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
             title="Start Agent"
           >
-            <Play className="h-8 w-8 ml-1" />
+            <Play className="h-8 w-8" />
           </button>
           <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">{agentDisplayName} is sleeping</p>
         </div>
@@ -907,6 +911,30 @@ export function ChatPanel() {
                 }}
               >
                 {virtualizer.getVirtualItems().map((virtualRow) => {
+                  // --- Thinking indicator (extra virtual item below messages) ---
+                  if (showThinkingItem && virtualRow.index === displayMessages.length) {
+                    return (
+                      <div
+                        key={virtualRow.key}
+                        ref={virtualizer.measureElement}
+                        data-index={virtualRow.index}
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          transform: `translateY(${virtualRow.start}px)`,
+                        }}
+                      >
+                        <div className="flex items-center gap-1.5 px-4 py-1.5 select-none">
+                          <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                          <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>thinking ...</span>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // --- Regular message item ---
                   const item = displayMessages[virtualRow.index];
                   const displayItem = item as any;
 
@@ -944,13 +972,6 @@ export function ChatPanel() {
                     </div>
                   );
                 })}
-              </div>
-            )}
-            {/* LLM reasoning indicator — shimmering "thinking ..." shown while waiting for first token */}
-            {isReasoning && !streamingMessageId && !thinkingMessageId && (
-              <div className="flex items-center gap-1.5 px-4 py-1.5 select-none">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>thinking ...</span>
               </div>
             )}
             {/* Iteration limit pause — hint + Continue button */}

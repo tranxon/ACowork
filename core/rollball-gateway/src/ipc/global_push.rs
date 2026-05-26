@@ -126,6 +126,57 @@ impl GlobalResourcePusher {
 
     // ── MCP catalog ─────────────────────────────────────────────────
 
+    /// Push search config changes to all running agents after a vault mutation.
+    #[tracing::instrument(skip(self), name = "push_search_config")]
+    pub async fn push_search_config(&self) {
+        let session_mgr = match &self.session_mgr {
+            Some(mgr) => mgr.clone(),
+            None => {
+                tracing::warn!("No IPC session manager, skipping search config push");
+                return;
+            }
+        };
+
+        let agent_ids: Vec<String> = {
+            let gw = self.gateway_state.read().await;
+            gw.running_agents.keys().cloned().collect()
+        };
+
+        if agent_ids.is_empty() {
+            return;
+        }
+
+        // Build search config payload from Gateway resource cache + vault
+        let (search_list, search_list_version, search_key_vault) = {
+            let gw = self.gateway_state.read().await;
+            let list = gw.resource_cache.search_list.providers.clone();
+            let version = gw.resource_cache.search_list.version;
+            let keys = crate::resource_cache::build_search_key_vault(&gw);
+            (list, version, keys)
+        };
+
+        for agent_id in agent_ids {
+            let mgr = session_mgr.lock().await;
+            if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+                let ok = session
+                    .push_message(GatewayResponse::SearchConfigDelivery {
+                        search_list: search_list.clone(),
+                        search_list_version,
+                        search_key_vault: search_key_vault.clone(),
+                    })
+                    .await;
+
+                if ok {
+                    tracing::info!(agent = %agent_id, "Pushed search config to agent");
+                } else {
+                    tracing::warn!(agent = %agent_id, "Search config push failed (channel closed)");
+                }
+            }
+        }
+    }
+
+    // ── MCP catalog ─────────────────────────────────────────────────
+
     /// Push MCP catalog changes to all running agents after a catalog mutation.
     #[tracing::instrument(skip(self), name = "push_mcp_catalog")]
     pub async fn push_mcp_catalog(&self) {
@@ -210,6 +261,7 @@ impl GlobalResourcePusher {
                         shell_approval_threshold: None,
                         model: None,
                         provider: None,
+                        search_config_json: None,
                     })
                     .await;
                 (aid, result.is_ok())

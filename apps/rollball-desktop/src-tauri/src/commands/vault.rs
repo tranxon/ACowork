@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use tauri::State;
 
-use crate::gateway_client::{GenericMessageResponse, ModelCapabilities, VaultKeyEntry};
+use crate::gateway_client::{GenericMessageResponse, ModelCapabilities, SearchVaultKeyEntry, VaultKeyEntry};
 use crate::state::AppState;
 
 /// List all stored API keys (masked)
@@ -71,6 +71,55 @@ pub async fn update_key(
             models.as_deref(),
             &caps,
         )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ── Search key commands ──────────────────────────────────────────────
+
+/// List all stored search provider API keys (masked)
+#[tauri::command]
+pub async fn list_search_keys(state: State<'_, AppState>) -> Result<Vec<SearchVaultKeyEntry>, String> {
+    let client = state.gateway.read().await;
+    client.list_search_keys().await.map_err(|e| e.to_string())
+}
+
+/// Add a new search provider API key
+#[tauri::command]
+pub async fn add_search_key(
+    state: State<'_, AppState>,
+    provider: String,
+    key: String,
+    base_url: Option<String>,
+) -> Result<GenericMessageResponse, String> {
+    let client = state.gateway.read().await;
+    client
+        .add_search_key(&provider, &key, base_url.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove a search provider API key
+#[tauri::command]
+pub async fn remove_search_key(
+    state: State<'_, AppState>,
+    provider: String,
+) -> Result<GenericMessageResponse, String> {
+    let client = state.gateway.read().await;
+    client.remove_search_key(&provider).await.map_err(|e| e.to_string())
+}
+
+/// Update a search provider API key (supports partial updates)
+#[tauri::command]
+pub async fn update_search_key(
+    state: State<'_, AppState>,
+    provider: String,
+    key: Option<String>,
+    base_url: Option<String>,
+) -> Result<GenericMessageResponse, String> {
+    let client = state.gateway.read().await;
+    client
+        .update_search_key(&provider, key.as_deref(), base_url.as_deref())
         .await
         .map_err(|e| e.to_string())
 }

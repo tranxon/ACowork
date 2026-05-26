@@ -43,6 +43,11 @@ pub struct AgentHelloConfig {
     pub provider_key_vault: Vec<ProviderKeyEntry>,
     pub mcp_key_vault: Vec<McpKeyEntry>,
 
+    // ── Web search providers (version-driven diff sync) ──
+    pub search_list: Option<Vec<rollball_core::protocol::SearchProviderListItem>>,
+    pub search_list_version: u64,
+    pub search_key_vault: Vec<rollball_core::protocol::SearchKeyEntry>,
+
     // ── Runtime Config Overrides (removed Phase 5) ──
     // Per-agent config is now loaded from workspace/config/agent_config.json.
     // AgentHelloResult no longer carries runtime_* fields.
@@ -250,8 +255,9 @@ impl GatewayGrpcClient {
         version: &str,
         cached_provider_version: u64,
         cached_mcp_version: u64,
+        cached_search_version: u64,
     ) -> Result<(Self, AgentHelloConfig), RollballError> {
-        Self::connect_and_register_with_role(endpoint, agent_id, version, "main", cached_provider_version, cached_mcp_version).await
+        Self::connect_and_register_with_role(endpoint, agent_id, version, "main", cached_provider_version, cached_mcp_version, cached_search_version).await
     }
 
     /// Convenience: connect with a specific connection role and send AgentHello.
@@ -264,10 +270,11 @@ impl GatewayGrpcClient {
         connection_role: &str,
         cached_provider_version: u64,
         cached_mcp_version: u64,
+        cached_search_version: u64,
     ) -> Result<(Self, AgentHelloConfig), RollballError> {
         let client = Self::connect(endpoint).await?;
         let config = client
-            .send_agent_hello(agent_id, version, connection_role, cached_provider_version, cached_mcp_version)
+            .send_agent_hello(agent_id, version, connection_role, cached_provider_version, cached_mcp_version, cached_search_version)
             .await?;
         Ok((client, config))
     }
@@ -297,7 +304,7 @@ impl GatewayGrpcClient {
         // On reconnect, request full resource sync (versions = 0) since
         // in-memory state was lost. Resource cache file versions are
         // reloaded by the caller when the Runtime restarts.
-        let _config = self.send_agent_hello(agent_id, version, "main", 0, 0).await?;
+        let _config = self.send_agent_hello(agent_id, version, "main", 0, 0, 0).await?;
         self.flush_pending_reports().await?;
         Ok(())
     }
@@ -420,6 +427,7 @@ impl GatewayGrpcClient {
         connection_role: &str,
         cached_provider_version: u64,
         cached_mcp_version: u64,
+        cached_search_version: u64,
     ) -> Result<AgentHelloConfig, RollballError> {
         let request = GatewayRequest::AgentHello {
             agent_id: agent_id.to_string(),
@@ -427,6 +435,7 @@ impl GatewayGrpcClient {
             connection_role: connection_role.to_string(),
             provider_list_version: cached_provider_version,
             mcp_list_version: cached_mcp_version,
+            search_list_version: cached_search_version,
         };
 
         let resp = self.send_gateway_request(request).await?;
@@ -463,6 +472,17 @@ impl GatewayGrpcClient {
                             vec![]
                         } else {
                             serde_json::from_str(&result.mcp_key_vault_json).unwrap_or_default()
+                        },
+                        search_list: if result.search_list_json.is_empty() {
+                            None
+                        } else {
+                            serde_json::from_str(&result.search_list_json).ok()
+                        },
+                        search_list_version: result.search_list_version,
+                        search_key_vault: if result.search_key_vault_json.is_empty() {
+                            vec![]
+                        } else {
+                            serde_json::from_str(&result.search_key_vault_json).unwrap_or_default()
                         },
                     };
                     Ok(config)
@@ -1050,6 +1070,7 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 mcp_servers,
                 model: rcu.model,
                 provider: rcu.provider,
+                search_config_json: rcu.search_config_json,
             }
         }
         // Response messages (request_id > 0) — included for robustness
@@ -1074,6 +1095,18 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             } else {
                 serde_json::from_str(&r.mcp_key_vault_json).unwrap_or_default()
             };
+            let search_list: Option<Vec<rollball_core::protocol::SearchProviderListItem>> =
+                if r.search_list_json.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&r.search_list_json).ok()
+                };
+            let search_key_vault: Vec<rollball_core::protocol::SearchKeyEntry> =
+                if r.search_key_vault_json.is_empty() {
+                    vec![]
+                } else {
+                    serde_json::from_str(&r.search_key_vault_json).unwrap_or_default()
+                };
             GatewayResponse::AgentHelloResult {
                 success: r.success,
                 error: if r.error.is_empty() { None } else { Some(r.error) },
@@ -1083,6 +1116,9 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 mcp_list_version: r.mcp_list_version,
                 provider_key_vault,
                 mcp_key_vault,
+                search_list,
+                search_list_version: r.search_list_version,
+                search_key_vault,
                 identity_entries: vec![],
             }
         },

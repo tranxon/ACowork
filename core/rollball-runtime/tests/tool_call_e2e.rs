@@ -196,7 +196,19 @@ async fn test_all_builtin_tools_count() {
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
     let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
-    assert_eq!(tools.len(), 16, "Should have 16 builtin tools (14 fixed + 2 shell on Windows)");
+    // 13 fixed built-in tools (memory_recall, memory_store, http_request, web_fetch,
+    // web_search, file_read, file_write, file_edit, doc_reader, glob_search,
+    // content_search, intent_send, ask_user_question) + platform shell tools
+    #[cfg(windows)]
+    let expected = 15; // 13 fixed + 2 shell (Git Bash + PowerShell)
+    #[cfg(not(windows))]
+    let expected = 14; // 13 fixed + 1 shell
+    assert_eq!(
+        tools.len(),
+        expected,
+        "Should have {expected} builtin tools on this platform, got {}",
+        tools.len()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
