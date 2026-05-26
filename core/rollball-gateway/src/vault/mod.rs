@@ -113,6 +113,22 @@ pub struct VaultKeyEntry {
     pub key_preview: String,
 }
 
+/// Search API key entry returned by Vault facade.
+#[derive(Debug, Clone)]
+pub struct SearchKeyStorageEntry {
+    /// Decrypted API key
+    pub api_key: String,
+}
+
+/// Masked search key preview for HTTP API (no decrypted key exposed).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchKeyPreview {
+    /// Search provider identifier (e.g. "tavily")
+    pub provider: String,
+    /// Masked key preview (first 3 + last 3 chars)
+    pub key_preview: String,
+}
+
 /// Vault facade for Gateway
 ///
 /// Delegates to rollball_vault::Vault for encrypted storage.
@@ -295,6 +311,76 @@ impl VaultFacade {
                 provider, candidates
             )));
         }
+        Ok(())
+    }
+
+    // ── Search key CRUD (stored under "_search_" prefix) ─────────────
+
+    const SEARCH_PREFIX: &str = "_search_";
+
+    /// Store a web search provider API key.
+    pub fn store_search_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
+        let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
+        if !self.vault.is_unlocked() {
+            return Err(GatewayError::Vault("Vault is locked".into()));
+        }
+        self.vault.store(&key_name, api_key)
+            .map_err(|e| GatewayError::Vault(format!("Failed to store search key: {e}")))?;
+        Ok(())
+    }
+
+    /// Get a web search provider API key (decrypted).
+    pub fn get_search_key(&self, provider: &str) -> Result<SearchKeyStorageEntry, GatewayError> {
+        if !self.vault.is_unlocked() {
+            return Err(GatewayError::Vault("Vault is locked".into()));
+        }
+        let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
+        let secret = self.vault.retrieve(&key_name)
+            .map_err(|e| GatewayError::Vault(format!("No search key for '{provider}': {e}")))?;
+        Ok(SearchKeyStorageEntry {
+            api_key: secret.expose_secret().to_string(),
+        })
+    }
+
+    /// List all configured search providers with masked key previews.
+    /// Returns entries with provider name and masked API key (first 3 + last 3 chars).
+    pub fn list_search_keys(&self) -> Result<Vec<SearchKeyPreview>, GatewayError> {
+        if !self.vault.is_unlocked() {
+            return Err(GatewayError::Vault("Vault is locked".into()));
+        }
+        let all_keys = self.vault.list()
+            .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {e}")))?;
+        let mut entries = Vec::new();
+        for key_name in &all_keys {
+            if let Some(provider) = key_name.strip_prefix(Self::SEARCH_PREFIX) {
+                let preview = match self.vault.retrieve(key_name) {
+                    Ok(secret) => {
+                        let key = secret.expose_secret();
+                        if key.len() > 6 {
+                            format!("{}...{}", &key[..3], &key[key.len()-3..])
+                        } else {
+                            "***".to_string()
+                        }
+                    }
+                    Err(_) => "***".to_string(),
+                };
+                entries.push(SearchKeyPreview {
+                    provider: provider.to_string(),
+                    key_preview: preview,
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Remove a web search provider API key.
+    pub fn remove_search_key(&mut self, provider: &str) -> Result<(), GatewayError> {
+        let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
+        if !self.vault.exists(&key_name) {
+            return Err(GatewayError::Vault(format!("No search key for '{provider}'")));
+        }
+        self.vault.delete(&key_name)
+            .map_err(|e| GatewayError::Vault(format!("Failed to remove search key: {e}")))?;
         Ok(())
     }
 }
