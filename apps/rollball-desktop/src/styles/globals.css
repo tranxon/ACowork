@@ -53,6 +53,16 @@
   --ui-btn-compact-py: 0.25rem;
   /* 4px — compact toolbar button vertical padding */
 
+  /* Radio group tokens */
+  --ui-radio-size: 1rem;
+  /* 16px — radio circle diameter */
+  --ui-radio-bg: #d4d4d8;
+  /* zinc-300 — unchecked radio fill */
+  --ui-radio-gap: 1.125rem;
+  /* 18px — radio option group item spacing */
+  --ui-radio-label-gap: 0.5rem;
+  /* 8px — gap between radio circle and label text */
+
   /* Font sizes */
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
@@ -102,6 +112,10 @@
   --shimmer-from: hsl(240 5% 40%);
   --shimmer-mid: hsl(240 5% 52%);
   --shimmer-to: hsl(240 5% 82%);
+
+  /* Radio group (dark) */
+  --ui-radio-bg: #52525b;
+  /* zinc-600 — unchecked radio fill in dark */
 }
 
 /* Base styles */
@@ -206,7 +220,7 @@ body {
   border-radius: 6px;
   padding: 0.75em 1em;
   overflow-x: auto;
-  font-size: 0.85em;
+  font-size: 1em;
   line-height: 1.6;
 }
 
@@ -220,7 +234,7 @@ body {
   background-color: hsl(240 5% 92%);
   padding: 0.15em 0.4em;
   border-radius: 4px;
-  font-size: 0.88em;
+  font-size: 0.9em;
   font-weight: 500;
 }
 

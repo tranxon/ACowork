@@ -4,6 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import type { AgentListResponse, GatewayConfig } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
+import { RadioGroup } from "../common/RadioGroup";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
 import { Bug, Monitor } from "lucide-react";
 import { inputReadonly, selectBase, inputBase } from "../../lib/ui-styles";
@@ -268,21 +269,16 @@ function AppearanceTab() {
     <div className="max-w-lg space-y-4">
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">Theme</h2>
-        <div className="flex gap-4">
-          {(["light", "dark", "system"] as const).map((t) => (
-            <label key={t} className="flex items-center gap-2 text-xs">
-              <input
-                type="radio"
-                name="theme"
-                value={t}
-                checked={theme === t}
-                onChange={() => setTheme(t)}
-                className="accent-[var(--color-accent)]"
-              />
-              {t.charAt(0).toUpperCase() + t.slice(1)}
-            </label>
-          ))}
-        </div>
+        <RadioGroup
+          name="theme"
+          value={theme}
+          options={[
+            { label: "Light", value: "light" as const },
+            { label: "Dark", value: "dark" as const },
+            { label: "System", value: "system" as const },
+          ]}
+          onChange={setTheme}
+        />
       </div>
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
@@ -325,38 +321,22 @@ function AppearanceTab() {
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">Content Width</h2>
         <p className="mb-2 text-xs text-zinc-500">聊天消息、工具调用、Thinking 的最大显示宽度</p>
-        <div className="flex gap-1">
-          {contentWidths.map((cw) => (
-            <button
-              key={cw.label}
-              onClick={() => setContentWidth(cw.value)}
-              className={cn(
-                "btn-option",
-                contentWidth === cw.value && "btn-option-active",
-              )}
-            >
-              {cw.label}
-            </button>
-          ))}
-        </div>
+        <RadioGroup
+          name="contentWidth"
+          value={contentWidth}
+          options={contentWidths}
+          onChange={setContentWidth}
+        />
       </div>
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">Font Size</h2>
-        <div className="flex gap-1">
-          {fontSizes.map((fs) => (
-            <button
-              key={fs.label}
-              onClick={() => setFontSize(fs.value)}
-              className={cn(
-                "btn-option",
-                fontSize === fs.value && "btn-option-active",
-              )}
-            >
-              {fs.label}
-            </button>
-          ))}
-        </div>
+        <RadioGroup
+          name="fontSize"
+          value={fontSize}
+          options={fontSizes}
+          onChange={setFontSize}
+        />
       </div>
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
