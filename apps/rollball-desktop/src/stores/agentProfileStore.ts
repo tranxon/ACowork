@@ -24,6 +24,8 @@ export interface AgentProfileSettings {
   activeTools?: string[];
   /** Shell approval threshold: "low" | "medium" | "high" | "never" */
   shellApprovalThreshold?: string;
+  /** Approval timeout in seconds (default 300 = 5 min). 0 = Gateway default. */
+  approvalTimeoutSecs?: number;
   /** Gateway global max_output_tokens limit (informational, from ConfigSnapshot) */
   globalMaxTokens?: number;
   /** Available model names from Gateway (informational, from ConfigSnapshot) */
@@ -48,6 +50,8 @@ const DEFAULT_SETTINGS: AgentProfileSettings = {
   temperature: 0.7,
   systemPrompt: undefined,
   activeTools: undefined,
+  shellApprovalThreshold: undefined,
+  approvalTimeoutSecs: undefined,
 };
 
 // ── Store ──────────────────────────────────────────────────────────────
@@ -78,13 +82,14 @@ function loadProfiles(): Record<string, AgentProfileSettings> {
               ? settings.maxIterations
               // Back-compat: migrate legacy `toolsLimit` field from older localStorage snapshots.
               : typeof (settings as { toolsLimit?: number }).toolsLimit === "number" &&
-                  (settings as { toolsLimit?: number }).toolsLimit! > 0
+                (settings as { toolsLimit?: number }).toolsLimit! > 0
                 ? (settings as { toolsLimit?: number }).toolsLimit!
                 : 0,
           temperature: typeof settings.temperature === "number" ? settings.temperature : 0.7,
           systemPrompt: settings.systemPrompt,
           activeTools: Array.isArray(settings.activeTools) ? settings.activeTools : undefined,
           shellApprovalThreshold: settings.shellApprovalThreshold,
+          approvalTimeoutSecs: typeof settings.approvalTimeoutSecs === "number" && settings.approvalTimeoutSecs > 0 ? settings.approvalTimeoutSecs : undefined,
           globalMaxTokens: typeof settings.globalMaxTokens === "number" ? settings.globalMaxTokens : undefined,
           availableModels: Array.isArray(settings.availableModels) ? settings.availableModels : undefined,
           activeModel: typeof settings.activeModel === "string" ? settings.activeModel : undefined,

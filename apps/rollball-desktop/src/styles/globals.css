@@ -58,8 +58,8 @@
   /* 16px — radio circle diameter */
   --ui-radio-bg: #d4d4d8;
   /* zinc-300 — unchecked radio fill */
-  --ui-radio-gap: 1.125rem;
-  /* 18px — radio option group item spacing */
+  --ui-radio-gap: 1.6rem;
+  /* 25.6px — radio option group item spacing */
   --ui-radio-label-gap: 0.5rem;
   /* 8px — gap between radio circle and label text */
 

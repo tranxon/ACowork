@@ -7,7 +7,7 @@
 
 /** Standard input field (text, number, etc.) */
 export const inputBase =
-  "rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
+  "w-full rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
 
 /** Read-only input field */
 export const inputReadonly =
@@ -15,7 +15,15 @@ export const inputReadonly =
 
 /** Select/dropdown field */
 export const selectBase =
-  "rounded-md border border-zinc-200 bg-white px-3 py-[var(--ui-input-py)] pr-3 text-xs appearance-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
+  "appearance-none rounded-md border border-zinc-200 bg-white px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 bg-[url('data:image/svg+xml,%3csvg xmlns=%27http://www.w3.org/2000/svg%27 fill=%27none%27 viewBox=%270 0 20 20%27%3e%3cpath stroke=%27%236b7280%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27 stroke-width=%271.5%27 d=%27M6 8l4 4 4-4%27/%3e%3c/svg%3e')] bg-[position:right_0.5rem_center] bg-no-repeat bg-[length:1.5em_1.5em]";
+
+export const selectArrowStyle: React.CSSProperties = {
+  backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+  backgroundPosition: "right 0.5rem center",
+  backgroundRepeat: "no-repeat",
+  backgroundSize: "1.5em 1.5em",
+  backgroundColor: "transparent",
+};
 
 /** Font-mono input (for API keys, codes) */
 export const inputMono =

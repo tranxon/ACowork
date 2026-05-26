@@ -78,11 +78,11 @@ fn default_max_iterations() -> u32 {
 }
 
 fn default_iteration_timeout_ms() -> u64 {
-    30000
+    900000
 }
 
 fn default_tool_timeout_ms() -> u64 {
-    10000
+    600000
 }
 
 fn default_history_max_tokens() -> u64 {

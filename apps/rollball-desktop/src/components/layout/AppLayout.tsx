@@ -200,6 +200,14 @@ export function AppLayout() {
         {currentView === "settings" && <SettingsPage initialTab={settingsInitialTab} />}
 
         {currentView === "harness" && <HarnessPage />}
+
+        {(currentView === "projects" || currentView === "docs") && (
+          <div className="flex flex-1 items-center justify-center bg-zinc-100 dark:bg-zinc-900">
+            <div className="rounded-lg border border-zinc-200 bg-white p-8 dark:border-zinc-700 dark:bg-zinc-800">
+              <p className="text-sm text-zinc-400 dark:text-zinc-500">TODO</p>
+            </div>
+          </div>
+        )}
       </div>
 
     </div>

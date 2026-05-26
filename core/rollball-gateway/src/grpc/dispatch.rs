@@ -11,7 +11,6 @@ use rollball_core::proto;
 use rollball_core::proto_bridge::GatewayResponseToProto;
 use rollball_core::protocol::GatewayResponse;
 
-use crate::http::approval::ApprovalPendingRequests;
 use crate::http::routes::{BridgeEvent, SessionPendingRequests};
 use crate::ipc::server::{
     handle_agent_hello, handle_budget_query, handle_capability_query,
@@ -37,7 +36,6 @@ pub async fn dispatch_grpc_request(
     session_mgr: &Arc<Mutex<SessionManager>>,
     bridge_tx: &Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: &Option<SessionPendingRequests>,
-    approval_pending: &Option<ApprovalPendingRequests>,
 ) -> proto::ServerMessage {
     let request_id = client_msg.request_id;
 
@@ -54,7 +52,7 @@ pub async fn dispatch_grpc_request(
             // Create oneshot, send BridgeEvent to Desktop App, await user decision.
             if req.action == "tool_approval_needed" && req.target == "http-api" {
                 return handle_tool_approval_needed_grpc(
-                    &params, bridge_tx, approval_pending,
+                    &params, bridge_tx,
                 ).await;
             }
 
@@ -332,13 +330,11 @@ pub fn is_stream_chunk(msg: &proto::ClientMessage) -> bool {
 ///
 /// Creates a oneshot channel, stores it in ApprovalPendingRequests,
 /// sends a BridgeEvent::ToolApprovalNeeded to the Desktop App via WebSocket,
-/// and awaits the user's decision (Allow/Deny) via the HTTP approval endpoint.
-/// Returns IntentDelivered with message_id encoding the result:
-///   "approved:{request_id}" or "denied:{request_id}:{reason}"
+/// Relay tool_approval_needed to Desktop App via BridgeEvent (pure relay).
+/// No approval_pending map, no oneshot, no blocking — Runtime owns the approval state.
 async fn handle_tool_approval_needed_grpc(
     params: &serde_json::Value,
     bridge_tx: &Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-    approval_pending: &Option<ApprovalPendingRequests>,
 ) -> proto::ServerMessage {
     let approval_request_id = params
         .get("request_id")
@@ -352,23 +348,10 @@ async fn handle_tool_approval_needed_grpc(
     tracing::info!(
         approval_req = %approval_request_id,
         agent_id = %agent_id,
-        "Tool approval requested from Runtime"
+        "Tool approval relayed from Runtime to Desktop App"
     );
 
-    // Step 1: Create oneshot channel and store in pending map
-    let (tx, rx) = tokio::sync::oneshot::channel::<crate::http::approval::ApprovalResult>();
-
-    if let Some(pending) = approval_pending {
-        let mut map = pending.lock().await;
-        map.insert(approval_request_id.to_string(), tx);
-    } else {
-        tracing::error!("No approval_pending map available — rejecting");
-        // No pending map — approval can never be resolved. Return empty
-        // (no request-response correlation in the new unified architecture).
-        return proto::ServerMessage { request_id: 0, payload: None };
-    }
-
-    // Step 2: Send BridgeEvent::ToolApprovalNeeded to Desktop App via WebSocket
+    // Send BridgeEvent::ToolApprovalNeeded to Desktop App via WebSocket
     if let Some(tx_bridge) = bridge_tx {
         let event = BridgeEvent {
             agent_id: agent_id.to_string(),
@@ -382,67 +365,13 @@ async fn handle_tool_approval_needed_grpc(
                 error = %e,
                 "Failed to send ToolApprovalNeeded bridge event — no Desktop App subscribers"
             );
-            // Clean up
-            if let Some(pending) = approval_pending {
-                let mut map = pending.lock().await;
-                map.remove(approval_request_id);
-            }
-            // No subscribers — approval can never be resolved.
-            return proto::ServerMessage { request_id: 0, payload: None };
         }
     } else {
         tracing::warn!("No bridge channel — cannot forward approval request");
-        if let Some(pending) = approval_pending {
-            let mut map = pending.lock().await;
-            map.remove(approval_request_id);
-        }
-        // No bridge — approval can never be resolved.
-        return proto::ServerMessage { request_id: 0, payload: None };
     }
-    // Step 3: Spawn a task to await user decision (do NOT block the gRPC handler).
-    // This keeps the handler free to process other Runtime requests (e.g.
-    // session queries) while the user decides Allow/Deny.
-    //
-    // The approval result flows back to the Runtime via the NEW unified path:
-    //   HTTP approval endpoint → push approval_decision IntentReceived
-    //   → Runtime cli.rs process_gateway_recv → InboundMessage::ApprovalDecision
-    //
-    // The OLD path (IntentDelivered via outbound_tx) is no longer needed:
-    // - The Runtime's IntentSend uses request_id: 0 (fire-and-forget),
-    //   so the IntentDelivered would arrive as a push message and be ignored.
-    // - The new push path is the authoritative delivery mechanism.
-    let approval_req_id = approval_request_id.to_string();
-    let approval_pending_clone = approval_pending.clone();
-    tokio::spawn(async move {
-        // Wait for user decision (no timeout — the user may take as long as needed).
-        let result = rx.await;
 
-        // Clean up the pending entry.
-        // Note: the HTTP approval handler also removes it, but if the oneshot
-        // sender is dropped without the HTTP handler being called (e.g. Gateway
-        // shutdown), we need this cleanup.
-        if let Some(ref pending) = approval_pending_clone {
-            let mut map = pending.lock().await;
-            map.remove(&approval_req_id);
-        }
-
-        match result {
-            Ok(approval_result) => {
-                tracing::info!(
-                    approval_req = %approval_req_id,
-                    action = %approval_result.action,
-                    "Tool approval resolved (result delivered via push path)"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(approval_req = %approval_req_id, "Approval oneshot sender dropped");
-            }
-        }
-        // No outbound.send() — the HTTP approval handler pushes the result
-        // back to the Runtime via the approval_decision IntentReceived path.
-    });
-
-    // Return immediately — the spawned task sends the real response later.
+    // Return immediately — Runtime owns approval state, receives decision via
+    // approval_decision IntentReceived pushed by HTTP handler.
     proto::ServerMessage { request_id: 0, payload: None }
 }
 

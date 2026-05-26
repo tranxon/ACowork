@@ -45,7 +45,7 @@ interface SessionChatState {
   hasMoreMessages: boolean;
   messageCursor: string | null;
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
-  pendingApproval: ToolApprovalNeededEvent | null;
+  pendingApproval: Record<string, ToolApprovalNeededEvent>;
   pendingQuestion: AskQuestionEvent | null;
   isLoadingSession: boolean;
   loadError: string | null;
@@ -71,7 +71,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   hasMoreMessages: false,
   messageCursor: null,
   iterationLimitPaused: null,
-  pendingApproval: null,
+  pendingApproval: {},
   pendingQuestion: null,
   isLoadingSession: false,
   loadError: null,
@@ -269,6 +269,8 @@ interface ChatStore {
   loadAgentProvider: (agentId: string) => string | null;
   continueExecution: (agentId: string) => Promise<void>;
   resolveApproval: (agentId: string) => void;
+  /** Resolve a specific approval by tool_call_id, removing it from the pending map. */
+  resolveApprovalByToolCallId: (agentId: string, toolCallId: string) => void;
   resolveQuestion: (agentId: string) => void;
   loadAgentModel: (agentId: string) => Promise<string | null>;
   loadConversationHistory: (agentId: string) => Promise<void>;
@@ -539,7 +541,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMoreMessages: false,
         messageCursor: null,
         iterationLimitPaused: null,
-        pendingApproval: null,
+        pendingApproval: {},
         currentTurnId: null,
         loadError: null,
         pendingSend: false,
@@ -560,7 +562,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMoreMessages: false,
         messageCursor: null,
         iterationLimitPaused: null,
-        pendingApproval: null,
+        pendingApproval: {},
         currentTurnId: null,
         loadError: null,
         isReasoning: false,
@@ -1022,7 +1024,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   resolveApproval: (agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     if (!sessionId) return;
-    set((state) => updateSessionState(state, agentId, sessionId, { pendingApproval: null }));
+    set((state) => updateSessionState(state, agentId, sessionId, { pendingApproval: {} }));
+  },
+  resolveApprovalByToolCallId: (agentId: string, toolCallId: string) => {
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
+    if (!sessionId) return;
+    set((state) => {
+      const prevPending = getSessionState(state, agentId, sessionId).pendingApproval;
+      const nextPending = { ...prevPending };
+      delete nextPending[toolCallId];
+      return updateSessionState(state, agentId, sessionId, { pendingApproval: nextPending });
+    });
   },
   resolveQuestion: (agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
@@ -1395,6 +1407,11 @@ function handleMessageEvent(
 ) {
   const eventType = data.type as string;
 
+  // ── DIAG: log every incoming WS message ──
+  if (eventType === "tool_approval_needed" || eventType === "tool_call") {
+    console.log("[DIAG:handleMessageEvent]", eventType, JSON.stringify(data));
+  }
+
   // For content events: route to the session specified by event.session_id
   // If no session_id in event, fall back to the agent's active session.
   // This is the core fix: events go directly to their owning session,
@@ -1596,6 +1613,7 @@ function handleMessageEvent(
     case "tool_call": {
       if (!sid) break;
       const toolName = data.name as string;
+      const toolCallId = (data.tool_call_id ?? data.id) as string | undefined;
       const params = data.params as Record<string, unknown>;
 
       const currentState = get();
@@ -1611,6 +1629,7 @@ function handleMessageEvent(
         content: JSON.stringify(params, null, 2),
         timestamp: Date.now(),
         toolName,
+        toolCallId,
         toolData: params,
         turnId,
         startTime: Date.now(),
@@ -1846,13 +1865,38 @@ function handleMessageEvent(
       break;
     }
 
-    case "tool_approval_needed":
+    case "tool_approval_needed": {
+      console.log("[DIAG:tool_approval_needed]", {
+        sid,
+        agentId,
+        "data.tool_call_id": data.tool_call_id,
+        "data.request_id": data.request_id,
+        "data.session_id": data.session_id,
+        "activeSessionId": getAgentState(get(), agentId).activeSessionId,
+      });
       if (sid) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          pendingApproval: data as unknown as ToolApprovalNeededEvent,
-        }));
+        const approvalEvent = data as unknown as ToolApprovalNeededEvent;
+        set((state) => {
+          const agentState = state.agentStates[agentId];
+          const prevPending = agentState?.sessionStates[sid]?.pendingApproval || {};
+          const key = approvalEvent.tool_call_id || approvalEvent.request_id;
+          const newPending = { ...prevPending, [key]: approvalEvent };
+          console.log("[DIAG:tool_approval_needed:set]", {
+            sid,
+            key,
+            prevKeys: Object.keys(prevPending),
+            newKeys: Object.keys(newPending),
+            approvalKeys: Object.keys(agentState?.sessionStates[sid]?.pendingApproval || {}),
+          });
+          return updateSessionState(state, agentId, sid, {
+            pendingApproval: newPending,
+          });
+        });
+      } else {
+        console.warn("[DIAG:tool_approval_needed] DROPPED — sid is null!");
       }
       break;
+    }
 
     case "ask_question":
       if (sid) {
@@ -1916,7 +1960,7 @@ function handleMessageEvent(
 
             // When status transitions TO Idle from non-Idle, clear pending flags
             if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
-              sessionPatch.pendingApproval = null;
+              sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestion = null;
               sessionPatch.iterationLimitPaused = null;
             }

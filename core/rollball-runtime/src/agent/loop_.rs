@@ -38,6 +38,8 @@ pub(crate) struct ApprovalDecision {
     pub approved: bool,
     #[allow(dead_code)]
     pub allow_all_session: bool,
+    /// Human-readable reason for timeout or rejection (for LLM feedback)
+    pub reason: Option<String>,
 }
 
 /// Lightweight handle for spawned tool tasks to request user approval.
@@ -66,11 +68,11 @@ impl ApprovalHandle {
         let (tx, rx) = oneshot::channel();
         if self.request_tx.send((req, tx)).await.is_err() {
             tracing::warn!("ApprovalHandle: request channel closed, auto-rejecting");
-            return ApprovalDecision { approved: false, allow_all_session: false };
+            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
         }
         rx.await.unwrap_or_else(|_| {
             tracing::warn!("ApprovalHandle: oneshot sender dropped, auto-rejecting");
-            ApprovalDecision { approved: false, allow_all_session: false }
+            ApprovalDecision { approved: false, allow_all_session: false, reason: None }
         })
     }
 }
@@ -139,6 +141,10 @@ pub enum ChunkEvent {
         risk_level: String,
         /// Human-readable reason for the risk assessment
         reason: String,
+        /// LLM-generated tool_call.id for frontend matching
+        tool_call_id: String,
+        /// Approval timeout in seconds (for frontend countdown)
+        approval_timeout_secs: u64,
     },
     /// Agent response interrupted by user stop signal
     Interrupted {
@@ -1510,7 +1516,7 @@ impl AgentLoop {
 
             // Execute non-question tools in parallel
             let calls_for_parallel: Vec<ToolCall> = parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
-            let parallel_results = self.execute_tools_parallel(&calls_for_parallel).await;
+            let (parallel_results, was_interrupted) = self.execute_tools_parallel(&calls_for_parallel).await;
 
             // Merge results: ask_question results + parallel results, mapped back to original indices
             // Build a map from original index → result for ask_question calls
@@ -1653,6 +1659,38 @@ impl AgentLoop {
                 // ADR-014: Streaming → Idle (loop detected)
                 self.transition_status(SessionStatus::Idle);
                 return Err(RuntimeError::LoopDetected(msg));
+            }
+
+            // ── Check for interrupt detected during tool execution ──
+            // poll_interrupt() consumed the interrupt inside execute_tools_parallel(),
+            // so we must propagate it here to prevent the loop from continuing.
+            if was_interrupted {
+                tracing::info!("Interrupted during tool execution — saving partial results");
+                // ADR-014: Streaming → Idle (interrupted during tool execution)
+                self.transition_status(SessionStatus::Idle);
+                let content = response.content.clone();
+
+                // Persist assistant message to JSONL (normal tool_call path only
+                // persists think + tool_calls; assistant text needs explicit save).
+                if let Some(ref conversation) = self.session.conversation {
+                    let assistant_text = strip_think_block(&content);
+                    conversation.append_message("assistant", &assistant_text, None);
+                }
+
+                // Notify frontend via chunk channel
+                let _ = self.core.try_send_chunk(ChunkEvent::Interrupted {
+                    content: content.clone(),
+                });
+
+                // Debug: push step event and auto-pause if stepping
+                self.push_debug_step(
+                    crate::debug::protocol::DebugPhase::Idle,
+                    None,
+                    Some(serde_json::json!({"interrupted": true, "content": content})),
+                );
+                self.debug_auto_pause_if_stepping().await;
+
+                return Ok(IterationResult::Interrupted(format!("[Interrupted] {}", content)));
             }
 
             // ⑦ Usage report (async, non-blocking)
@@ -1984,9 +2022,12 @@ impl AgentLoop {
     /// the channel. Each new approval request gets its own `ChunkEvent`
     /// sent to the Gateway before we continue waiting for the current one.
     ///
-    /// Returns `ApprovalDecision` with the user's choice, or auto-rejects
-    /// on `Interrupt` / channel close.
+    /// Returns `ApprovalDecision` with the user's choice, auto-rejects
+    /// on timeout / Interrupt / channel close.
     async fn await_approval_decision(&mut self, request_id: &str) -> ApprovalDecision {
+        // Approval timeout: auto-reject after 5 minutes to prevent deadlock.
+        const APPROVAL_TIMEOUT_SECS: u64 = 300;
+
         loop {
             tokio::select! {
                 // Primary: wait for the matching approval decision from inbound channel
@@ -2004,7 +2045,7 @@ impl AgentLoop {
                                 allow_all_session,
                                 "Approval decision received"
                             );
-                            return ApprovalDecision { approved, allow_all_session };
+                            return ApprovalDecision { approved, allow_all_session, reason: None };
                         }
                         Some(InboundMessage::ApprovalDecision {
                             request_id: rid,
@@ -2033,7 +2074,7 @@ impl AgentLoop {
                                 request_id = %request_id,
                                 "Approval interrupted, auto-rejecting"
                             );
-                            return ApprovalDecision { approved: false, allow_all_session: false };
+                            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
                         }
                         Some(other) => {
                             tracing::debug!(
@@ -2047,7 +2088,7 @@ impl AgentLoop {
                                 request_id = %request_id,
                                 "Inbound channel closed during approval wait, auto-rejecting"
                             );
-                            return ApprovalDecision { approved: false, allow_all_session: false };
+                            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
                         }
                     }
                 }
@@ -2072,18 +2113,33 @@ impl AgentLoop {
                         }
                     }
                 }
+                // Timeout: auto-reject to prevent permanent deadlock when
+                // a concurrent approval request is orphaned.
+                _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
+                    let reason_msg = format!("tool approval timed out after {}s", APPROVAL_TIMEOUT_SECS);
+                    tracing::warn!(
+                        request_id = %request_id,
+                        timeout_secs = APPROVAL_TIMEOUT_SECS,
+                        "Approval timed out, auto-rejecting"
+                    );
+                    return ApprovalDecision { approved: false, allow_all_session: false, reason: Some(reason_msg) };
+                }
             }
         }
     }
 
     /// Send ToolApprovalNeeded chunk event to Gateway (via on_chunk channel).
     fn send_tool_approval_needed(&self, request_id: &str, req: &ApprovalRequest) {
+        // Approval timeout: 300s (5 min) — same as await_approval_decision.
+        const APPROVAL_TIMEOUT_SECS: u64 = 300;
         let _ = self.core.try_send_chunk(ChunkEvent::ToolApprovalNeeded {
             request_id: request_id.to_string(),
             tool_name: req.tool_name.clone(),
             action: req.action.clone(),
             risk_level: req.risk_level.label().to_string(),
             reason: req.reason.clone(),
+            tool_call_id: req.tool_call_id.clone(),
+            approval_timeout_secs: APPROVAL_TIMEOUT_SECS,
         });
     }
 

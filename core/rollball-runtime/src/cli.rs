@@ -1116,6 +1116,8 @@ async fn async_main(
                             action,
                             risk_level,
                             reason,
+                            tool_call_id,
+                            approval_timeout_secs,
                         } => {
                             let params = serde_json::json!({
                                 "request_id": request_id,
@@ -1125,6 +1127,8 @@ async fn async_main(
                                 "risk_level": risk_level,
                                 "reason": reason,
                                 "session_id": sid,
+                                "tool_call_id": tool_call_id,
+                                "approval_timeout_secs": approval_timeout_secs,
                             });
                             relay_intent(&outbound_tx, "tool_approval_needed", &params).await;
                         }
