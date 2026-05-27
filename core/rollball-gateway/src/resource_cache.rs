@@ -407,8 +407,12 @@ pub fn rebuild_and_save_search_cache(
     ];
 
     for item in catalog {
-        // Only include providers that have API keys (or don't require one, like SearXNG)
-        let has_key = !item.requires_api_key || gw.vault.get_search_key(&item.id).is_ok();
+        // Only include providers that have a configured key in the vault.
+        // For providers that require an API key (tavily, brave, etc.), this
+        // checks that the user has stored a key. For SearXNG (requires_api_key:
+        // false), this checks that the user has configured a base_url — without
+        // one, SearXNG cannot function and should not appear in agent setup.
+        let has_key = gw.vault.get_search_key(&item.id).is_ok();
         if has_key {
             providers.push(item);
         }

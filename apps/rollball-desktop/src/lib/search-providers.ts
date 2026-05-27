@@ -87,6 +87,7 @@ export function searchKeyPlaceholder(providerId: string): string {
     exa: "Enter Exa API key...",
     "google-cse": "Enter Google API key...",
     firecrawl: "fc-...",
+    searxng: "Enter SearXNG host URL (e.g. http://localhost:8888)",
   };
   return map[providerId] ?? "Enter API key...";
 }

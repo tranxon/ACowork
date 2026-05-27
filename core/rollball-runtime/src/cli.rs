@@ -553,8 +553,21 @@ async fn async_main(
         Arc::new(std::sync::RwLock::new(
             crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
         ));
+    // Determine if any search provider is configured at startup.
+    // When no providers are configured, skip web_search to avoid wasting
+    // LLM calls on a tool that always returns "Provider not configured".
+    let has_search_providers = hello_config
+        .as_ref()
+        .map(|c| !c.search_key_vault.is_empty())
+        .unwrap_or(false);
+
     let mut registry = ToolRegistry::new();
-    for tool in builtin::all_builtin_tools(&workspace_resolver, &config.agent_id, config.tool_http_timeout_ms) {
+    for tool in builtin::all_builtin_tools(
+        &workspace_resolver,
+        &config.agent_id,
+        config.tool_http_timeout_ms,
+        has_search_providers,
+    ) {
         registry.register(tool);
     }
 

@@ -55,10 +55,14 @@ use search_backends::WebSearchEngine;
 /// * `resolver` - Workspace directory resolver (single source of truth)
 /// * `agent_id` - Agent ID for memory isolation and identity management
 /// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
+/// * `has_search_providers` - Whether at least one search provider is configured.
+///   When false, the `web_search` tool is skipped to avoid wasting LLM calls on
+///   a tool that always returns "Provider not configured".
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
     tool_http_timeout_ms: u64,
+    has_search_providers: bool,
 ) -> Vec<Arc<dyn Tool>> {
     let _work_dir = resolver.read().unwrap().agent_home().to_string();
     let current_dir = resolver.read().unwrap().agent_home().to_string();
@@ -78,17 +82,11 @@ pub fn all_builtin_tools(
         })
         .collect();
 
-    // Build search engine from agent's configured backends.
-    // Initially empty — backends are populated when search config arrives from Gateway.
-    // The timeout is passed through so that build_backend() creates backends with the configured value.
-    let search_engine = WebSearchEngine::new(Vec::new(), Duration::from_millis(tool_http_timeout_ms));
-
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(memory_recall::MemoryRecallTool::new(agent_id)),
         Arc::new(memory_store::MemoryStoreTool::new(agent_id)),
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::with_timeout(Duration::from_millis(tool_http_timeout_ms))),
-        Arc::new(web_search::WebSearchTool::new(search_engine)),
         Arc::new(file_read::FileReadTool::new(&current_dir)),
         Arc::new(file_write::FileWriteTool::new(&current_dir)),
         Arc::new(file_edit::FileEditTool::new(&current_dir)),
@@ -98,6 +96,17 @@ pub fn all_builtin_tools(
         Arc::new(intent_send::IntentSendTool::new()),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
     ];
+
+    // Only register web_search when at least one search provider is configured.
+    // Without providers, the tool always fails with "Provider not configured",
+    // wasting LLM inference tokens on doomed calls.
+    if has_search_providers {
+        // Build search engine from agent's configured backends.
+        // Initially empty — backends are populated when search config arrives from Gateway.
+        // The timeout is passed through so that build_backend() creates backends with the configured value.
+        let search_engine = WebSearchEngine::new(Vec::new(), Duration::from_millis(tool_http_timeout_ms));
+        tools.push(Arc::new(web_search::WebSearchTool::new(search_engine)));
+    }
 
     // Append platform-specific shell tools
     tools.extend(shell_tools);
