@@ -14,6 +14,29 @@ use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_detector::LoopDetector;
 use crate::conversation::ConversationSession;
 
+/// A single item in the session-level todo list.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TodoItem {
+    /// Unique identifier for this todo item (e.g. UUID or short slug)
+    pub id: String,
+    /// Human-readable content of the task
+    pub content: String,
+    /// Current status of the task
+    pub status: TodoStatus,
+}
+
+/// Status of a todo item.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoStatus {
+    /// Task not yet started
+    Pending,
+    /// Task currently being worked on
+    InProgress,
+    /// Task completed
+    Completed,
+}
+
 /// Lifecycle status of a session, managed by Runtime as the source of truth.
 ///
 /// ADR-014: The Runtime owns session status; the frontend is read-only.
@@ -74,6 +97,10 @@ pub struct SessionState {
     /// Current lifecycle status of the session (source of truth).
     /// ADR-014: Runtime owns this; frontend reads it via SessionStateChanged events.
     pub(crate) status: SessionStatus,
+    /// Session-level todo list managed by the `todo_write` built-in tool.
+    /// Memory-only; not persisted to JSONL (conversation history is the
+    /// source of truth for task progress).
+    pub(crate) todos: Vec<TodoItem>,
 }
 
 impl SessionState {
@@ -92,6 +119,7 @@ impl SessionState {
             turn_counter: 0,
             deferred_inbound: Vec::new(),
             status: SessionStatus::Idle,
+            todos: Vec::new(),
         }
     }
 
@@ -149,5 +177,47 @@ impl SessionState {
         tracing::info!(old = ?self.status, new = ?new_status, "Session status changed");
         self.status = new_status;
         true
+    }
+
+    /// Update the todo list from a `todo_write` tool call.
+    ///
+    /// * `merge`: if true, replace the entire list; if false, merge by id
+    ///   (update existing items, append new items, remove items not present).
+    pub fn update_todos(&mut self, items: Vec<TodoItem>, merge: bool) {
+        if merge {
+            // Merge: update existing by id, add new, keep items not in input
+            for incoming in &items {
+                if let Some(existing) = self.todos.iter_mut().find(|t| t.id == incoming.id) {
+                    existing.content = incoming.content.clone();
+                    existing.status = incoming.status.clone();
+                } else {
+                    self.todos.push(incoming.clone());
+                }
+            }
+        } else {
+            // Replace: full swap
+            self.todos = items;
+        }
+    }
+
+    /// Format the current todo list as a markdown text for system prompt injection.
+    /// Returns `None` if the list is empty.
+    pub fn format_todos(&self) -> Option<String> {
+        if self.todos.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = self
+            .todos
+            .iter()
+            .map(|t| {
+                let status_mark = match t.status {
+                    TodoStatus::Pending => " ",
+                    TodoStatus::InProgress => "-",
+                    TodoStatus::Completed => "x",
+                };
+                format!("- [{}] {} ({})", status_mark, t.content, t.id)
+            })
+            .collect();
+        Some(lines.join("\n"))
     }
 }

@@ -1132,6 +1132,12 @@ fn builtin_tool_metadata() -> Vec<AvailableTool> {
             required_permissions: vec![],
             always_on: true,
         },
+        AvailableTool {
+            name: "todo_write".into(),
+            description: "Create and manage a structured task list for the current session".into(),
+            required_permissions: vec![],
+            always_on: false,
+        },
     ]
 }
 

@@ -1227,6 +1227,8 @@ impl AgentLoop {
             self.trim_history_to_budget(&current_model);
 
             // ②.5 Build context (now with trimmed history)
+            // Inject current todo list into system prompt before building
+            context_builder.set_todo_context(self.session.format_todos());
             let mut chat_request = context_builder.build(&self.core.manifest, &self.session.history, self.get_model_capabilities(&current_model), self.core.max_output_tokens_limit);
 
             tracing::info!(
@@ -1513,15 +1515,20 @@ impl AgentLoop {
             )
             .await;
 
-            // ⑤.2 Intercept ask_user_question calls — these require user interaction
-            // and cannot be executed in parallel with other tools. They are processed
-            // sequentially: emit ChunkEvent::AskQuestion → wait for QuestionAnswer.
+            // ⑤.2 Intercept ask_user_question and todo_write calls.
+            // - ask_user_question requires user interaction via ChunkEvent::AskQuestion.
+            // - todo_write mutates SessionState.todos directly (in-memory state).
+            // Both are processed sequentially before parallel tool dispatch.
             let mut ask_question_results: Vec<(usize, String)> = Vec::new();
+            let mut todo_write_results: Vec<(usize, String)> = Vec::new();
             let mut parallel_calls: Vec<(usize, ToolCall)> = Vec::new();
             for (idx, tc) in calls_to_execute.into_iter().enumerate() {
                 if tc.function.name == "ask_user_question" {
                     let result = self.handle_ask_user_question(&tc).await;
                     ask_question_results.push((idx, result));
+                } else if tc.function.name == "todo_write" {
+                    let result = self.handle_todo_write(&tc, context_builder);
+                    todo_write_results.push((idx, result));
                 } else {
                     parallel_calls.push((idx, tc));
                 }
@@ -1531,10 +1538,12 @@ impl AgentLoop {
             let calls_for_parallel: Vec<ToolCall> = parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
             let (parallel_results, was_interrupted) = self.execute_tools_parallel(&calls_for_parallel).await;
 
-            // Merge results: ask_question results + parallel results, mapped back to original indices
+            // Merge results: ask_question + todo_write results + parallel results, mapped back to original indices
             // Build a map from original index → result for ask_question calls
             let ask_result_map: std::collections::HashMap<usize, String> =
                 ask_question_results.into_iter().collect();
+            let todo_result_map: std::collections::HashMap<usize, String> =
+                todo_write_results.into_iter().collect();
 
             // Reconstruct executed_results in the order matching calls_for_parallel
             // Then map back to the original calls_to_execute indices
@@ -1546,6 +1555,10 @@ impl AgentLoop {
             }
             // Add ask_question results
             for (orig_idx, result) in &ask_result_map {
+                final_results.push((*orig_idx, result.clone()));
+            }
+            // Add todo_write results
+            for (orig_idx, result) in &todo_result_map {
                 final_results.push((*orig_idx, result.clone()));
             }
             // Sort by original index to maintain order
@@ -2219,6 +2232,87 @@ impl AgentLoop {
 
         // Return the answer as the tool result
         answer
+    }
+
+    /// Handle a `todo_write` tool call by updating SessionState.todos and
+    /// injecting the updated list into the ContextBuilder for the next build().
+    ///
+    /// This is synchronous (no I/O or user interaction) since todos are
+    /// pure in-memory state on SessionState.
+    fn handle_todo_write(
+        &mut self,
+        tc: &rollball_core::providers::traits::ToolCall,
+        context_builder: &mut ContextBuilder,
+    ) -> String {
+        use crate::agent::session_state::TodoItem;
+
+        let params: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
+            Ok(p) => p,
+            Err(e) => {
+                return format!("Error: todo_write arguments are not valid JSON: {}", e);
+            }
+        };
+
+        let todos_array = match params.get("todos").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => return "Error: todo_write requires a 'todos' array parameter".to_string(),
+        };
+
+        let merge = params
+            .get("merge")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let mut items: Vec<TodoItem> = Vec::with_capacity(todos_array.len());
+        for item in todos_array {
+            let id = match item.get("id").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => return "Error: each todo item must have a string 'id' field".to_string(),
+            };
+            let content = match item.get("content").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    return format!("Error: todo item '{}' missing required 'content' field", id)
+                }
+            };
+            let status = match item.get("status").and_then(|v| v.as_str()) {
+                Some("pending") => crate::agent::session_state::TodoStatus::Pending,
+                Some("in_progress") => crate::agent::session_state::TodoStatus::InProgress,
+                Some("completed") => crate::agent::session_state::TodoStatus::Completed,
+                Some(other) => {
+                    return format!(
+                        "Error: todo item '{}' has invalid status '{}'. Must be one of: pending, in_progress, completed",
+                        id, other
+                    )
+                }
+                None => {
+                    return format!("Error: todo item '{}' missing required 'status' field", id)
+                }
+            };
+            items.push(TodoItem {
+                id,
+                content,
+                status,
+            });
+        }
+
+        // Update the session todos
+        self.session.update_todos(items, merge);
+
+        // Inject the updated list into context builder for the next build()
+        context_builder.set_todo_context(self.session.format_todos());
+
+        // Return formatted list as the tool result
+        match self.session.format_todos() {
+            Some(formatted) => {
+                let count = self.session.todos.len();
+                format!(
+                    "Todo list updated ({} items, merge={}):\n{}",
+                    count, merge, formatted
+                )
+            }
+            None => "Todo list is now empty.".to_string(),
+        }
     }
 
     /// Await user's answer to an ask_user_question prompt.

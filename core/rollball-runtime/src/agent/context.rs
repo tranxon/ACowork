@@ -31,6 +31,9 @@ pub struct ContextBuilder {
     /// Skill instructions override (for debug patching and runtime config).
     /// Injected into system prompt after identity and before memory sections.
     skill_instructions: Option<String>,
+    /// Todo list context for injection into the system prompt.
+    /// Set by AgentLoop before each build() from SessionState.todos.
+    todo_context: Option<String>,
 }
 
 impl ContextBuilder {
@@ -45,6 +48,7 @@ impl ContextBuilder {
             override_model: None,
             retrieved_memory: None,
             skill_instructions: None,
+            todo_context: None,
         }
     }
 
@@ -185,6 +189,12 @@ impl ContextBuilder {
         }
     }
 
+    /// Set todo list context for injection into the system prompt.
+    /// Pass `None` to clear the todo section (when the list is empty).
+    pub fn set_todo_context(&mut self, text: Option<String>) {
+        self.todo_context = text;
+    }
+
     /// Clear skill instructions, removing them from the system prompt.
     /// Called when a ChatMessage arrives without a skill command, preventing
     /// stale skill instructions from leaking across conversation turns.
@@ -321,6 +331,11 @@ impl ContextBuilder {
         // 2.6 Skill instructions (debug patching or runtime config)
         if let Some(ref skills) = self.skill_instructions {
             system_content.push_str(&format!("\n\n## Skill Instructions\n{skills}"));
+        }
+
+        // 2.7 Todo list (session-level task tracking)
+        if let Some(ref todos) = self.todo_context {
+            system_content.push_str(&format!("\n\n## Active Task List\nUse the `todo_write` tool to manage this list. Current tasks:\n{todos}"));
         }
 
         // 3. Environment platform info
