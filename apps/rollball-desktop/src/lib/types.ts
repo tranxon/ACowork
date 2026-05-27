@@ -205,6 +205,16 @@ export interface SendMessageResponse {
 /** Gateway connection status */
 export type GatewayStatus = "connected" | "disconnected" | "error";
 
+/** Todo item status from backend */
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+/** Todo list item (from todo_write built-in tool) */
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: TodoStatus;
+}
+
 /** Chat message types */
 export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "document_upload" | "error";
 

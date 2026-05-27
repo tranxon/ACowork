@@ -395,9 +395,12 @@ export function SnapshotNode({
   return (
     <div className="border-b border-zinc-100 dark:border-zinc-800">
       {/* Iteration header */}
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setCollapsed(!collapsed)}
-        className="flex w-full items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setCollapsed(!collapsed); }}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
       >
         {collapsed ? (
           <ChevronRight className="h-3 w-3 shrink-0 text-zinc-400" />
@@ -420,7 +423,7 @@ export function SnapshotNode({
         >
           <Rewind className="h-3 w-3" />
         </button>
-      </button>
+      </div>
 
       {/* Sections */}
       {!collapsed && (

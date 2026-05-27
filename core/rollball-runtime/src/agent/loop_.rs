@@ -182,6 +182,11 @@ pub enum ChunkEvent {
     SessionStateChanged {
         status: SessionStatus,
     },
+    /// Todo list updated — emitted after a `todo_write` tool call mutates
+    /// SessionState.todos, so the frontend can render the current task list.
+    TodoListUpdated {
+        todos: Vec<crate::agent::session_state::TodoItem>,
+    },
 }
 
 /// Result of executing a single iteration of the agent loop.
@@ -2301,6 +2306,11 @@ impl AgentLoop {
 
         // Inject the updated list into context builder for the next build()
         context_builder.set_todo_context(self.session.format_todos());
+
+        // Emit TodoListUpdated event to frontend for UI rendering
+        let _ = self.core.try_send_chunk(ChunkEvent::TodoListUpdated {
+            todos: self.session.todos.clone(),
+        });
 
         // Return formatted list as the tool result
         match self.session.format_todos() {

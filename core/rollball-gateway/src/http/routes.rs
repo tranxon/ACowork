@@ -60,6 +60,8 @@ pub enum BridgeEventType {
     SessionStateChanged,
     /// LLM asks user a question with options (ask_user_question tool)
     AskQuestion,
+    /// Todo list updated (Runtime → frontend, per-session task tracking)
+    TodoListUpdated,
     /// Unknown/unrecognized action — payload is forwarded as-is so the
     /// frontend can decide what to do. This avoids silently treating new
     /// Runtime event types as "done" (which would break streaming state).
@@ -85,6 +87,7 @@ impl BridgeEventType {
             "agent_reasoning_started" => Some(Self::ReasoningStarted),
             "session_state_changed" => Some(Self::SessionStateChanged),
             "ask_question" => Some(Self::AskQuestion),
+            "todo_list_updated" => Some(Self::TodoListUpdated),
             _ => None,
         }
     }
@@ -114,6 +117,7 @@ impl BridgeEventType {
             Self::ReasoningStarted => "reasoning_started",
             Self::SessionStateChanged => "session_state_changed",
             Self::AskQuestion => "ask_question",
+            Self::TodoListUpdated => "todo_list_updated",
             Self::Unknown => "unknown",
         }
     }

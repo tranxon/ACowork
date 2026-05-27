@@ -599,6 +599,26 @@ async fn async_main(
     let tool_definitions =
         crate::agent::context::build_tool_definitions(&loaded.manifest, &tool_specs);
 
+    // Build full tool specs from ALL registered tools (not just manifest-active ones).
+    // `full_tool_specs` is the complete pool that `apply_active_tools` searches when
+    // the user dynamically enables/disables tools via the Setup panel at runtime.
+    // Without this, tools not declared in manifest.toml (e.g. todo_write) would be
+    // missing from the pool and silently ignored when activated later.
+    let full_tool_specs: Vec<(String, serde_json::Value)> = registry
+        .all()
+        .iter()
+        .map(|t| {
+            let spec = t.spec();
+            let serialized = serde_json::to_value(&spec).unwrap_or_default();
+            (spec.name.clone(), serialized)
+        })
+        .collect();
+    tracing::info!(
+        active_specs = tool_specs.len(),
+        full_specs = full_tool_specs.len(),
+        "Tool specs: active vs full registry"
+    );
+
     // Step 6: Build context builder (with identity injection from Gateway)
     let identity_entries = load_identity_entries(&config.work_dir);
     let user_display_name = identity_entries.as_ref().and_then(|entries| {
@@ -794,7 +814,7 @@ async fn async_main(
             keep_full_results: config.keep_full_results,
             chunk_tx,
             tool_definitions: tool_definitions_for_session,
-            full_tool_specs: tool_specs.clone(),
+            full_tool_specs: full_tool_specs.clone(),
             identity_context: identity_context_for_session,
             override_model,
             protocol_type: protocol_type.clone(),
@@ -1206,6 +1226,14 @@ async fn async_main(
                                 "session_id": sid,
                             });
                             relay_intent(&outbound_tx, "session_state_changed", &params).await;
+                        }
+
+                        crate::agent::loop_::ChunkEvent::TodoListUpdated { todos } => {
+                            let params = serde_json::json!({
+                                "todos": todos,
+                                "session_id": sid,
+                            });
+                            relay_intent(&outbound_tx, "todo_list_updated", &params).await;
                         }
 
                         crate::agent::loop_::ChunkEvent::AskQuestion {

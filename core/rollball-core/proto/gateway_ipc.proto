@@ -130,10 +130,14 @@ message AgentHelloResult {
   // Search key vault (JSON-serialized Vec<SearchKeyEntry>), always full delivery.
   string search_key_vault_json = 29;
 
+  // ── Identity (ADR-009: delivered via IPC, not workspace files) ──
+  // Identity entries as JSON-serialized Vec<IdentityEntry>.
+  string identity_entries_json = 30;
+
   // Fields 3-10: removed (was provider, model, api_key, base_url, models,
   //   model_capabilities, max_output_tokens_limit, protocol_type).
   // Fields 11-18: reserved (was workspace_context_*, runtime_* overrides).
-  reserved 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18;
+  reserved 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 25, 26;
 }
 message KeyReleaseResult        { string api_key = 1; string error = 2; }
 message IntentDelivered         { string message_id = 1; }
@@ -186,7 +190,25 @@ message UpdateSearchConfig      { string providers_json = 1; }
 message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 2; string message = 3; }
 message LogLevelUpdate           { string log_level = 1; }
 message LogRotate               {}
-message RuntimeConfigUpdate      { optional uint64 max_output_tokens = 1; optional uint32 max_iterations = 2; optional float temperature = 3; string system_prompt_override = 4; repeated string active_tools = 5; string shell_approval_threshold = 6; repeated string mcp_servers_json = 7; optional string model = 8; optional string provider = 9; optional string search_config_json = 10; }
+message RuntimeConfigUpdate      {
+    optional uint64 max_output_tokens = 1;
+    optional uint32 max_iterations = 2;
+    optional float temperature = 3;
+    string system_prompt_override = 4;
+    repeated string active_tools = 5;
+    string shell_approval_threshold = 6;
+    repeated string mcp_servers_json = 7;
+    optional string model = 8;
+    optional string provider = 9;
+    optional string search_config_json = 10;
+    // Flags to distinguish "not set" (don't change) from "set to empty" (clear all).
+    // Proto3 repeated/string fields default to empty, so without these flags the
+    // receiver cannot tell whether the sender intentionally sent an empty list or
+    // just omitted the field entirely.
+    bool mcp_servers_set = 11;
+    bool active_tools_set = 12;
+    bool system_prompt_set = 13;
+}
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }
 

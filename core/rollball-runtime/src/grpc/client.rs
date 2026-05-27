@@ -1033,8 +1033,20 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             }
         }
         Some(ServerPayload::RuntimeConfigUpdate(rcu)) => {
+            // When the sender explicitly sets a field (indicated by the *_set flags),
+            // we must preserve the empty value (Some(Vec::new()) / Some("")) rather
+            // than collapsing to None.  Without this, the Runtime cannot distinguish
+            // "clear all MCP servers" from "don't change MCP servers".
             let mcp_servers: Option<Vec<rollball_core::protocol::McpServerConfigDef>> =
-                if rcu.mcp_servers_json.is_empty() {
+                if rcu.mcp_servers_set {
+                    // Sender explicitly set MCP servers, even if the list is empty
+                    let parsed: Vec<rollball_core::protocol::McpServerConfigDef> = rcu
+                        .mcp_servers_json
+                        .iter()
+                        .filter_map(|s| serde_json::from_str(s).ok())
+                        .collect();
+                    Some(parsed)
+                } else if rcu.mcp_servers_json.is_empty() {
                     None
                 } else {
                     let parsed: Vec<rollball_core::protocol::McpServerConfigDef> = rcu
@@ -1052,12 +1064,18 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 max_output_tokens: rcu.max_output_tokens,
                 max_iterations: rcu.max_iterations,
                 temperature: rcu.temperature,
-                system_prompt_override: if rcu.system_prompt_override.is_empty() {
+                system_prompt_override: if rcu.system_prompt_set {
+                    // Sender explicitly set system prompt, even if empty (clears override)
+                    Some(rcu.system_prompt_override)
+                } else if rcu.system_prompt_override.is_empty() {
                     None
                 } else {
                     Some(rcu.system_prompt_override)
                 },
-                active_tools: if rcu.active_tools.is_empty() {
+                active_tools: if rcu.active_tools_set {
+                    // Sender explicitly set active tools, even if the list is empty
+                    Some(rcu.active_tools)
+                } else if rcu.active_tools.is_empty() {
                     None
                 } else {
                     Some(rcu.active_tools)

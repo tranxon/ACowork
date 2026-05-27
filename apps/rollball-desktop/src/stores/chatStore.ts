@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem } from "../lib/types";
 import { useSessionStore } from "./sessionStore";
 import { useAgentStore } from "./agentStore";
 import { useUserProfileStore } from "./userProfileStore";
@@ -57,6 +57,8 @@ interface SessionChatState {
   pendingSend: boolean;
   /** Last accessed timestamp — used for LRU eviction */
   lastAccessed: number;
+  /** Per-session todo list (from todo_write tool) */
+  todos: TodoItem[];
 }
 
 const DEFAULT_SESSION_STATE: SessionChatState = {
@@ -79,6 +81,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   sessionStatus: null,
   pendingSend: false,
   lastAccessed: 0,
+  todos: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -1396,7 +1399,7 @@ function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): Ch
 const CONTENT_EVENT_TYPES = new Set([
   "reasoning_started", "chunk", "tool_call", "tool_result",
   "done", "error", "tool_approval_needed", "ask_question", "iteration_limit_paused",
-  "context_usage", "session_state_changed", "interrupted",
+  "context_usage", "session_state_changed", "interrupted", "todo_list_updated",
 ]);
 
 function handleMessageEvent(
@@ -1967,6 +1970,17 @@ function handleMessageEvent(
 
             return updateSessionState(state, agentId, sid, sessionPatch);
           });
+        }
+      }
+      break;
+    }
+
+    // Todo list updated — from todo_write built-in tool
+    case "todo_list_updated": {
+      if (sid) {
+        const todos = data.todos as TodoItem[] | undefined;
+        if (todos) {
+          set((state) => updateSessionState(state, agentId, sid, { todos }));
         }
       }
       break;

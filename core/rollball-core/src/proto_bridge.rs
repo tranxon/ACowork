@@ -571,7 +571,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 search_list,
                 search_list_version,
                 search_key_vault,
-                identity_entries: _, // ADR-009: consumed by Runtime CLI, not gRPC bridge
+                identity_entries,
             } => {
                 let _ = (provider_list, provider_list_version, mcp_list, mcp_list_version);
                 // AgentHelloResult now carries structured resource lists with version-driven diff sync.
@@ -582,6 +582,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 let pkv_json = serde_json::to_string(&provider_key_vault).unwrap_or_default();
                 let mkv_json = serde_json::to_string(&mcp_key_vault).unwrap_or_default();
                 let skv_json = serde_json::to_string(&search_key_vault).unwrap_or_default();
+                let identity_json = serde_json::to_string(&identity_entries).unwrap_or_default();
                 Some(proto::server_message::Payload::AgentHelloResult(
                     proto::AgentHelloResult {
                         success: *success,
@@ -595,6 +596,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         search_list_json: sl_json.unwrap_or_default(),
                         search_list_version: *search_list_version,
                         search_key_vault_json: skv_json,
+                        identity_entries_json: identity_json,
                     },
                 ))
             }
@@ -819,6 +821,9 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 provider,
                 search_config_json,
             } => {
+                let mcp_servers_set = mcp_servers.is_some();
+                let active_tools_set = active_tools.is_some();
+                let system_prompt_set = system_prompt_override.is_some();
                 let mcp_servers_json: Vec<String> = mcp_servers
                     .as_ref()
                     .map(|servers| {
@@ -840,6 +845,9 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         model: model.clone(),
                         provider: provider.clone(),
                         search_config_json: search_config_json.clone(),
+                        mcp_servers_set,
+                        active_tools_set,
+                        system_prompt_set,
                     },
                 ))
             }

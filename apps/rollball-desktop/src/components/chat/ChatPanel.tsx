@@ -77,6 +77,7 @@ export function ChatPanel() {
   const isReasoning = sessionState?.isReasoning ?? false;
   const isLoadingSession = sessionState?.isLoadingSession ?? false;
   const loadError = sessionState?.loadError ?? null;
+  const todos = sessionState?.todos ?? [];
 
   // Derive sending from current session: pendingSend (optimistic) OR sessionStatus (backend truth).
   // This is per-session — no cross-session state leakage.
@@ -977,16 +978,16 @@ export function ChatPanel() {
                         const nextItem = displayMessages[virtualRow.index + 1];
                         const hasFollowUpReply = nextItem !== undefined && (nextItem as any).type !== 'explore_group';
                         return (
-                        <ExploreBlock
-                          items={displayItem.items}
-                          isStreaming={displayItem.items.some(
-                            (m: ChatMessage) => m.id === streamingMessageId || m.id === thinkingMessageId
-                          )}
-                          pendingApproval={pendingApproval}
-                          currentSessionId={currentSessionId}
-                          onApprove={(action, approval) => handleToolApprove(action, approval)}
-                          hasFollowUpReply={hasFollowUpReply}
-                        />
+                          <ExploreBlock
+                            items={displayItem.items}
+                            isStreaming={displayItem.items.some(
+                              (m: ChatMessage) => m.id === streamingMessageId || m.id === thinkingMessageId
+                            )}
+                            pendingApproval={pendingApproval}
+                            currentSessionId={currentSessionId}
+                            onApprove={(action, approval) => handleToolApprove(action, approval)}
+                            hasFollowUpReply={hasFollowUpReply}
+                          />
                         );
                       })()}
 
@@ -1036,6 +1037,47 @@ export function ChatPanel() {
             <div ref={messagesEndRef} />
           </div>
         </div>
+
+        {/* Todo list box — above the message queue, same collapsible style.
+          Shows current task list from todo_write tool calls. */}
+        {todos.length > 0 && (
+          <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+            <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
+              <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+                任务列表 ({todos.length})
+              </span>
+            </div>
+            <div className="max-h-[7.5rem] overflow-y-auto">
+              {todos.map((item) => {
+                const statusMark = item.status === "completed" ? "x" : item.status === "in_progress" ? "-" : " ";
+                const isCompleted = item.status === "completed";
+                return (
+                  <div
+                    key={item.id}
+                    className="flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-zinc-100 dark:border-zinc-700/30 last:border-b-0"
+                  >
+                    <span className={cn(
+                      "shrink-0 text-[10px] mt-0.5 select-none font-mono",
+                      isCompleted ? "text-zinc-400 dark:text-zinc-500" : "text-zinc-500 dark:text-zinc-400"
+                    )}>
+                      [{statusMark}]
+                    </span>
+                    <span className={cn(
+                      "flex-1 min-w-0 text-xs leading-relaxed",
+                      isCompleted
+                        ? "text-zinc-400 dark:text-zinc-500 line-through"
+                        : item.status === "in_progress"
+                          ? "text-zinc-700 dark:text-zinc-200 font-medium"
+                          : "text-zinc-600 dark:text-zinc-300"
+                    )}>
+                      {item.content}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Queued messages box — separate box above the input area,
           flush against input, slightly narrower for layered depth */}
