@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::protocol::ProtocolType;
+use rollball_core::protocol::{SearchKeyEntry, SearchProviderListItem};
 use rollball_core::tools::traits::Tool;
 use rollball_core::Budget;
 use tokio::sync::mpsc;
@@ -155,6 +156,17 @@ struct CachedLLMConfig {
     max_output_tokens_limit: u64,
 }
 
+/// Cached search configuration from the latest Gateway SearchConfigDelivery push.
+///
+/// Mirrors `CachedLLMConfig`: stores search_key_vault (API keys, never persisted)
+/// and search provider list (metadata) so that sessions created *after* a search
+/// config change can use the latest keys and provider list.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedSearchConfig {
+    pub key_vault: Vec<SearchKeyEntry>,
+    pub provider_list: Vec<SearchProviderListItem>,
+}
+
 /// Lifecycle manager for multiple concurrent sessions.
 ///
 /// Owns a shared `Arc<AgentCore>` template and creates `SessionTask`s
@@ -178,6 +190,10 @@ pub struct SessionManager {
     /// Cached LLM config from LLMConfigDelivery (provider params, caps, limit)
     /// that must be re-applied to every newly created session.
     cached_llm: Option<CachedLLMConfig>,
+    /// Cached search config from SearchConfigDelivery (key vault + provider list).
+    /// Mirrors `cached_llm` — stored so ConfigSnapshot can return current
+    /// search provider metadata for the Agent Setup UI.
+    cached_search_config: Option<CachedSearchConfig>,
     /// The currently active session ID — used as the default routing target
     /// when an incoming message does not specify an explicit session_id.
     /// Owned here (not in cli.rs) so SessionManager is the single source of truth.
@@ -213,6 +229,7 @@ impl SessionManager {
             runtime_overrides: RuntimeConfigOverrides::default(),
             workspace_context: None,
             cached_llm: None,
+            cached_search_config: None,
             current_session_id: initial_session_id,
             mcp_tools: None,
             mcp_manager: McpManager::new(),
@@ -552,8 +569,10 @@ impl SessionManager {
         &mut self,
         active_tools: Option<Vec<String>>,
     ) -> Vec<String> {
-        // Cache the override (or clear it)
-        self.runtime_overrides.active_tools = active_tools.clone();
+        // Cache the override when Some; None preserves existing value.
+        if active_tools.is_some() {
+            self.runtime_overrides.active_tools = active_tools.clone();
+        }
 
         // Build the new tool definitions
         let tool_definitions = match active_tools.as_ref() {
@@ -771,6 +790,32 @@ impl SessionManager {
         self.broadcast(SessionMessage::ModelSwitch {
             model,
         })
+    }
+
+    /// Update web search config from Gateway SearchConfigDelivery hot-push.
+    ///
+    /// Caches the search key vault and provider list (mirrors CachedLLMConfig pattern)
+    /// so that ConfigSnapshot can return current search provider metadata.
+    /// Search keys are NEVER persisted to disk — only held in memory.
+    pub fn update_search_config(
+        &mut self,
+        search_key_vault: Vec<SearchKeyEntry>,
+        search_list: Vec<SearchProviderListItem>,
+    ) {
+        tracing::info!(
+            provider_count = search_list.len(),
+            key_count = search_key_vault.len(),
+            "SessionManager: caching search config"
+        );
+        self.cached_search_config = Some(CachedSearchConfig {
+            key_vault: search_key_vault,
+            provider_list: search_list,
+        });
+    }
+
+    /// Get the current cached search config, if any.
+    pub(crate) fn search_config(&self) -> Option<&CachedSearchConfig> {
+        self.cached_search_config.as_ref()
     }
 
     /// Get all active session IDs.

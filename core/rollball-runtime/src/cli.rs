@@ -1547,17 +1547,15 @@ async fn run_gateway_loop(
                                 let (current_model, current_provider) =
                                     load_agent_model(&work_dir).unwrap_or((String::new(), None));
                                 let overrides = &session_manager.runtime_overrides;
-                                // Read persisted agent config for MCP + available_models.
-                                let persisted = crate::agent_config::load_agent_config(
+                                // Read MCP config from separate agent_mcp.json.
+                                let mcp_json: Vec<String> = crate::agent_config::load_agent_mcp_config(
                                     std::path::Path::new(&work_dir),
                                 )
                                 .unwrap_or_default()
-                                .unwrap_or_default();
-                                let mcp_json: Vec<String> = persisted
-                                    .mcp_servers
-                                    .iter()
-                                    .map(|s| serde_json::to_string(s).unwrap_or_default())
-                                    .collect();
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|s| serde_json::to_string(s).unwrap_or_default())
+                                .collect();
                                 let snapshot = proto::client_message::Payload::ConfigSnapshot(
                                     proto::ConfigSnapshot {
                                         request_id: String::new(),
@@ -1570,8 +1568,11 @@ async fn run_gateway_loop(
                                         active_tools: overrides.active_tools.clone().unwrap_or_default(),
                                         shell_approval_threshold: overrides.shell_approval_threshold.clone(),
                                         mcp_servers_json: mcp_json,
-                                        available_models: persisted.available_models,
-                                        search_config_json: None,
+                                        search_config_json: crate::agent_config::load_agent_search_config(
+                                            std::path::Path::new(&work_dir),
+                                        )
+                                        .unwrap_or_default()
+                                        .and_then(|cfg| serde_json::to_string(&cfg).ok()),
                                     },
                                 );
                                 let response = proto::ClientMessage {
@@ -2280,29 +2281,41 @@ async fn process_gateway_recv(
                     // AND broadcasts to all existing sessions. Follows the same
                     // cache+broadcast pattern as RuntimeConfigOverrides.
                     session_manager.update_llm_config(
-                        provider,
+                        provider.clone(),
                         protocol_type,
                         api_key,
                         base_url,
-                        resolved_model,
+                        resolved_model.clone(),
                         model_capabilities,
                         max_output_tokens_limit,
                     );
 
-                    // Persist available_models to agent_config.json so that
-                    // ConfigSnapshot responses (served via QueryConfig IPC)
-                    // always return the latest model list from Gateway.
-                    {
-                        let mut persisted =
-                            crate::agent_config::load_agent_config(std::path::Path::new(&work_dir))
-                                .unwrap_or_default()
-                                .unwrap_or_default();
-                        persisted.available_models = available_models;
-                        let _ = crate::agent_config::save_agent_config(
-                            std::path::Path::new(&work_dir),
-                            &persisted,
-                        );
-                    }
+                    // Persist selected model/provider to agent_model.json.
+                    save_agent_model(&work_dir, &resolved_model, Some(&provider));
+
+                    return LoopAction::Continue;
+                }
+
+                GatewayResponse::SearchConfigDelivery {
+                    search_key_vault,
+                    search_list,
+                    search_list_version,
+                } => {
+                    tracing::info!(
+                        provider_count = search_list.len(),
+                        key_count = search_key_vault.len(),
+                        version = search_list_version,
+                        "Received SearchConfigDelivery at runtime — caching search config"
+                    );
+
+                    // Cache in SessionManager for ConfigSnapshot queries
+                    session_manager.update_search_config(search_key_vault, search_list);
+
+                    // Persist search_list_version to resource_cache.json
+                    // for next startup's AgentHello diff sync.
+                    let mut cache = read_resource_cache(std::path::Path::new(&work_dir));
+                    cache.search_list_version = search_list_version;
+                    save_resource_cache(std::path::Path::new(&work_dir), &cache);
 
                     return LoopAction::Continue;
                 }
@@ -2461,7 +2474,7 @@ async fn process_gateway_recv(
                     mcp_servers,
                     model,
                     provider,
-                    search_config_json: _search_config_json,
+                    search_config_json,
                 } => {
                     tracing::info!(
 
@@ -2491,13 +2504,10 @@ async fn process_gateway_recv(
                     );
 
                     // Handle MCP server config changes: connect, disconnect, or reconnect.
+                    // Clone before the `if let` so the full configs survive for persistence below.
+                    let mcp_for_persist = mcp_servers.clone();
                     if let Some(mcp_configs) = mcp_servers {
-                        // Extract names before move for persistence
-                        let mcp_names: Vec<String> =
-                            mcp_configs.iter().map(|c| c.name.clone()).collect();
                         session_manager.apply_mcp_servers(mcp_configs).await;
-                        // Persist active MCP server names to workspace for recovery
-                        save_mcp_server_names(&work_dir, &mcp_names);
                     }
 
                     // Handle model/provider switch from Gateway (same pattern as model_switch action)
@@ -2522,13 +2532,46 @@ async fn process_gateway_recv(
                         session_manager.apply_active_tools(active_tools);
                     }
 
+                    // Handle per-agent search config persistence.
+                    // When `search_config_json` is Some, parse and save to agent_search.json.
+                    // When None, preserve existing (no change).
+                    if let Some(ref search_json) = search_config_json {
+                        if search_json.is_empty() {
+                            // Remove agent_search.json when empty config is pushed
+                            let search_path = std::path::Path::new(&work_dir)
+                                .join("config")
+                                .join("agent_search.json");
+                            if search_path.exists() {
+                                let _ = std::fs::remove_file(&search_path);
+                                tracing::info!("Removed agent_search.json (empty config)");
+                            }
+                        } else {
+                            match serde_json::from_str::<
+                                rollball_core::protocol::AgentSearchConfig,
+                            >(search_json) {
+                                Ok(search_cfg) => {
+                                    let _ = crate::agent_config::save_agent_search_config(
+                                        std::path::Path::new(&work_dir),
+                                        &search_cfg,
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to parse search_config_json in RuntimeConfigUpdate"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     // Persist per-agent config to workspace/config/agent_config.json.
                     // This consolidates all overrides into a single file owned by Runtime,
                     // replacing the former Gateway-side data/agent_configs/{agent_id}.json.
                     // MUST run AFTER apply_active_tools so that runtime_overrides.active_tools
                     // has the latest value before serialization.
                     {
-                        // Preserve available_models written by LLMConfigDelivery hot-push.
+                        // Preserve active_tools from previous persisted config.
                         let persisted_before =
                             crate::agent_config::load_agent_config(std::path::Path::new(&work_dir))
                                 .unwrap_or_default()
@@ -2539,15 +2582,20 @@ async fn process_gateway_recv(
                             max_iterations: overrides.max_iterations,
                             temperature: overrides.temperature,
                             system_prompt_override: overrides.system_prompt_override.clone(),
-                            active_tools: overrides.active_tools.clone().unwrap_or_default(),
+                            active_tools: overrides.active_tools.clone().unwrap_or_else(|| persisted_before.active_tools),
                             shell_approval_threshold: overrides.shell_approval_threshold.clone(),
-                            mcp_servers: vec![],
-                            available_models: persisted_before.available_models,
                         };
                         let _ = crate::agent_config::save_agent_config(
                             std::path::Path::new(&work_dir),
                             &agent_cfg,
                         );
+                        // Persist MCP config separately to agent_mcp.json.
+                        if let Some(ref mcp_servers) = mcp_for_persist {
+                            let _ = crate::agent_config::save_agent_mcp_config(
+                                std::path::Path::new(&work_dir),
+                                mcp_servers,
+                            );
+                        }
                     }
 
                     return LoopAction::Continue;
@@ -3490,9 +3538,8 @@ fn load_agent_model(work_dir: &str) -> Option<(String, Option<String>)> {
 
 /// Save the per-agent model preference to the workspace.
 ///
-/// Called when a model_switch message is received. Overwrites any existing entry.
-/// The provider is saved alongside the model so that the correct provider can be
-/// restored when the agent restarts or when the frontend queries the model info.
+/// Called when a model_switch message is received. Updates the model and
+/// provider, overwriting any existing entry.
 fn save_agent_model(work_dir: &str, model: &str, provider: Option<&str>) {
     let entry = AgentModelEntry {
         model: model.to_string(),
@@ -3562,58 +3609,6 @@ async fn try_reconnect_gateway(
                 "gRPC reconnect failed: {}",
                 e
             )))
-        }
-    }
-}
-
-// ── MCP server name persistence ─────────────────────────────────────
-
-const MCP_SERVERS_FILE: &str = "config/mcp_servers.json";
-
-/// Save the list of active MCP server names to the workspace.
-///
-/// Called after successfully applying MCP server config from Gateway.
-/// The names reference entries in the Gateway's global MCP catalog.
-fn save_mcp_server_names(work_dir: &str, names: &[String]) {
-    let path = std::path::Path::new(work_dir).join(MCP_SERVERS_FILE);
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!(
-                "Failed to create config dir for {}: {}",
-                MCP_SERVERS_FILE,
-                e
-            );
-            return;
-        }
-    }
-    match serde_json::to_string_pretty(names) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                tracing::warn!("Failed to write {}: {}", MCP_SERVERS_FILE, e);
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to serialize {}: {}", MCP_SERVERS_FILE, e);
-        }
-    }
-}
-
-/// Load the list of active MCP server names from the workspace.
-///
-/// Returns `None` if the file does not exist or cannot be parsed.
-/// The names reference entries in the Gateway's global MCP catalog;
-/// the actual server definitions are provided by Gateway via IPC.
-#[allow(dead_code)]
-fn load_mcp_server_names(work_dir: &str) -> Option<Vec<String>> {
-    let path = std::path::Path::new(work_dir).join(MCP_SERVERS_FILE);
-    if !path.exists() {
-        return None;
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&raw).ok(),
-        Err(e) => {
-            tracing::warn!("Failed to read {}: {}", MCP_SERVERS_FILE, e);
-            None
         }
     }
 }

@@ -28,8 +28,6 @@ export interface AgentProfileSettings {
   approvalTimeoutSecs?: number;
   /** Gateway global max_output_tokens limit (informational, from ConfigSnapshot) */
   globalMaxTokens?: number;
-  /** Available model names from Gateway (informational, from ConfigSnapshot) */
-  availableModels?: string[];
   /** Current active model name (from ConfigSnapshot) */
   activeModel?: string;
   /** Current active provider name (from ConfigSnapshot) */
@@ -91,7 +89,6 @@ function loadProfiles(): Record<string, AgentProfileSettings> {
           shellApprovalThreshold: settings.shellApprovalThreshold,
           approvalTimeoutSecs: typeof settings.approvalTimeoutSecs === "number" && settings.approvalTimeoutSecs > 0 ? settings.approvalTimeoutSecs : undefined,
           globalMaxTokens: typeof settings.globalMaxTokens === "number" ? settings.globalMaxTokens : undefined,
-          availableModels: Array.isArray(settings.availableModels) ? settings.availableModels : undefined,
           activeModel: typeof settings.activeModel === "string" ? settings.activeModel : undefined,
           activeProvider: typeof settings.activeProvider === "string" ? settings.activeProvider : undefined,
         };

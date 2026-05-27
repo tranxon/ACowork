@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use rollball_core::protocol::McpServerConfigDef;
+use rollball_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 use rollball_core::ShellApprovalThreshold;
 
 /// Effective (merged) config returned to API consumers.
@@ -33,12 +33,6 @@ pub struct AgentConfigResponse {
     /// Effective shell approval threshold
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell_approval_threshold: Option<String>,
-    /// Effective MCP server configurations (JSON strings from ConfigSnapshot)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<String>,
-    /// Available models list (from Gateway global resources)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub available_models: Vec<String>,
     /// Current model name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -47,6 +41,12 @@ pub struct AgentConfigResponse {
     pub provider: Option<String>,
     /// Gateway global max_output_tokens limit
     pub global_max_output_tokens: u64,
+    /// Active MCP server names for this agent (from workspace config)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_mcp_servers: Vec<String>,
+    /// Per-agent search provider config (from workspace agent_search.json)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_config: Option<AgentSearchConfig>,
 }
 
 /// PUT request body for updating agent config.
