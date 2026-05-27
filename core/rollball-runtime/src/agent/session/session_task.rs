@@ -557,11 +557,13 @@ impl SessionTask {
                         model = %model,
                         "SessionTask: updating provider"
                     );
+                    let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&agent_loop.core.config));
                     let new_provider = crate::providers::router::create_provider(
                         &provider_name,
                         &protocol_type,
                         api_key.as_deref(),
                         base_url.as_deref(),
+                        timeouts,
                     );
                     agent_loop.update_provider(new_provider, model);
                 }

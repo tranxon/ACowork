@@ -8,6 +8,7 @@ use futures_core::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::time::Duration;
 use std::task::{Context, Poll};
 
 use rollball_core::providers::traits::{
@@ -22,16 +23,29 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    /// Create a new Ollama provider with default base URL
+    /// Create a new Ollama provider with default base URL and default timeouts
     pub fn new() -> Self {
         Self::with_base_url(None)
     }
 
-    /// Create provider with custom base URL
+    /// Create provider with custom base URL and default timeouts
     pub fn with_base_url(base_url: Option<&str>) -> Self {
+        Self::with_base_url_and_timeouts(
+            base_url,
+            Duration::from_secs(300),
+            Duration::from_secs(5),
+        )
+    }
+
+    /// Create provider with fully configurable timeouts
+    pub fn with_base_url_and_timeouts(
+        base_url: Option<&str>,
+        request_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Self {
         let http_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout)
             .build()
             .expect("Failed to build HTTP client");
 

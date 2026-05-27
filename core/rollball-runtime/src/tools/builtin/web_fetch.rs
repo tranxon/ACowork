@@ -3,11 +3,25 @@
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
+use std::time::Duration;
+
+use crate::config::DEFAULT_TOOL_HTTP_TIMEOUT;
 
 pub struct WebFetchTool { client: reqwest::Client }
 
 impl WebFetchTool {
-    pub fn new() -> Self { Self { client: reqwest::Client::new() } }
+    pub fn new() -> Self {
+        Self::with_timeout(DEFAULT_TOOL_HTTP_TIMEOUT)
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("Failed to build WebFetch HTTP client"),
+        }
+    }
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "web_fetch".to_string(),

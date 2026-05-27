@@ -13,17 +13,16 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 use tokio::sync::mpsc;
-
-/// Per-chunk read timeout: if no data arrives within this duration,
-/// the stream is considered stalled and we emit a StreamTimeout error.
-const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
+use std::time::Duration;
 
 use rollball_core::providers::traits::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall,
     MessageRole, Provider, StreamEvent, ToolCall, UsageInfo,
 };
+
+/// Default per-chunk read timeout (45s) — used by backwards-compatible constructors.
+const DEFAULT_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
 
 // ── Provider struct ──────────────────────────────────────────────────────
 
@@ -32,19 +31,37 @@ pub struct OpenAIProvider {
     base_url: String,
     api_key: Option<String>,
     http_client: Client,
+    stream_read_timeout: Duration,
 }
 
 impl OpenAIProvider {
-    /// Create a new OpenAI provider with default base URL
+    /// Create a new OpenAI provider with default base URL and default timeouts
     pub fn new(api_key: Option<&str>) -> Self {
         Self::with_base_url(None, api_key)
     }
 
-    /// Create a provider with a custom base URL
+    /// Create a provider with a custom base URL and default timeouts
     pub fn with_base_url(base_url: Option<&str>, api_key: Option<&str>) -> Self {
+        Self::with_base_url_and_timeouts(
+            base_url,
+            api_key,
+            Duration::from_secs(600),
+            Duration::from_secs(10),
+            DEFAULT_STREAM_READ_TIMEOUT,
+        )
+    }
+
+    /// Create a provider with fully configurable timeouts
+    pub fn with_base_url_and_timeouts(
+        base_url: Option<&str>,
+        api_key: Option<&str>,
+        request_timeout: Duration,
+        connect_timeout: Duration,
+        stream_read_timeout: Duration,
+    ) -> Self {
         let http_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(600)) // 10 min: LLM streaming can be long (thinking + generation)
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout)
             .build()
             .expect("Failed to build HTTP client");
 
@@ -54,6 +71,7 @@ impl OpenAIProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             api_key: api_key.map(ToString::to_string),
             http_client,
+            stream_read_timeout,
         }
     }
 
@@ -543,7 +561,7 @@ impl Provider for OpenAIProvider {
                         rollball_core::ProviderError::from_status_code(s.as_u16(), format!("OpenAI API error: {s} - {b}"))
                     ));
                 }
-                return Ok(Self::sse_to_stream(retry_response));
+                return Ok(Self::sse_to_stream(retry_response, self.stream_read_timeout));
             }
 
             // Detailed diagnostics for 400 Bad Request errors
@@ -571,7 +589,7 @@ impl Provider for OpenAIProvider {
             ));
         }
 
-        Ok(Self::sse_to_stream(response))
+        Ok(Self::sse_to_stream(response, self.stream_read_timeout))
     }
 
     async fn chat_token_count(&self, messages: &[ChatMessage]) -> rollball_core::error::Result<u64> {
@@ -605,7 +623,10 @@ impl OpenAIProvider {
     }
 
     /// Convert an HTTP SSE response into a Stream of StreamEvent.
-    fn sse_to_stream(response: reqwest::Response) -> Box<dyn Stream<Item = StreamEvent> + Send> {
+    fn sse_to_stream(
+        response: reqwest::Response,
+        stream_read_timeout: Duration,
+    ) -> Box<dyn Stream<Item = StreamEvent> + Send> {
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
@@ -613,7 +634,7 @@ impl OpenAIProvider {
 
             use futures_util::StreamExt;
             loop {
-                match tokio::time::timeout(STREAM_READ_TIMEOUT, stream.next()).await {
+                match tokio::time::timeout(stream_read_timeout, stream.next()).await {
                     Ok(Some(Ok(bytes))) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
                         while let Some(newline_pos) = buffer.find('\n') {
@@ -646,12 +667,12 @@ impl OpenAIProvider {
                     Err(_) => {
                         // Stream silence — no data received within read timeout
                         tracing::warn!(
-                            timeout_secs = STREAM_READ_TIMEOUT.as_secs(),
+                            timeout_secs = stream_read_timeout.as_secs(),
                             "Stream silence detected, no data received within timeout"
                         );
                         let _ = tx.send(Some(StreamEvent::Error(
                             rollball_core::providers::StreamError::stream_timeout(
-                                STREAM_READ_TIMEOUT.as_secs(),
+                                stream_read_timeout.as_secs(),
                             ),
                         ))).await;
                         return;

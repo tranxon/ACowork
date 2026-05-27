@@ -509,11 +509,13 @@ async fn async_main(
                         gateway_max_output_tokens_limit = m.max_output_tokens_limit;
                     }
 
+                    let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&config));
                     let provider = crate::providers::router::create_provider(
                         &prov.id,
                         &prov.protocol_type,
                         api_key,
                         Some(&prov.base_url),
+                        timeouts,
                     );
                     tracing::info!(
                         provider = %prov.id,
@@ -552,7 +554,7 @@ async fn async_main(
             crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
         ));
     let mut registry = ToolRegistry::new();
-    for tool in builtin::all_builtin_tools(&workspace_resolver, &config.agent_id) {
+    for tool in builtin::all_builtin_tools(&workspace_resolver, &config.agent_id, config.tool_http_timeout_ms) {
         registry.register(tool);
     }
 
@@ -1216,6 +1218,7 @@ async fn async_main(
             skill_registry,
             workspace_resolver.clone(),
             initial_session_id,
+            config.session_idle_timeout_secs,
         )
         .await;
 
@@ -1317,6 +1320,7 @@ fn build_runtime_provider(
             &infer_protocol_type(&manifest.llm.suggested_provider),
             default_api_key,
             default_base_url,
+            None,
         );
     }
 
@@ -1333,7 +1337,7 @@ fn build_runtime_provider(
     for (name, config) in &manifest.llm.providers {
         let api_key = config.api_key_ref.as_deref().or(default_api_key);
         let base_url = config.base_url.as_deref().or(default_base_url);
-        let provider = create_provider(name, &infer_protocol_type(name), api_key, base_url);
+        let provider = create_provider(name, &infer_protocol_type(name), api_key, base_url, None);
         let models = vec![config.model.clone()];
         registry.register_provider(name, provider, models);
     }
@@ -1349,6 +1353,7 @@ fn build_runtime_provider(
             &infer_protocol_type(&manifest.llm.suggested_provider),
             default_api_key,
             default_base_url,
+            None,
         );
         registry.register_provider(
             &manifest.llm.suggested_provider,
@@ -1379,6 +1384,7 @@ fn build_runtime_provider(
                 &infer_protocol_type(&manifest.llm.suggested_provider),
                 default_api_key,
                 default_base_url,
+                None,
             )
         }
     }
@@ -1487,6 +1493,7 @@ async fn run_gateway_loop(
     skill_registry: crate::skills::parser::SkillRegistry,
     resolver: crate::tools::workspace_resolver::SharedResolver,
     _initial_session_id: String,
+    session_idle_timeout_secs: u64,
 ) -> Result<()> {
     // Retrieve the provider name for budget queries
     let budget_provider = session_manager.provider_name();
@@ -1512,6 +1519,7 @@ async fn run_gateway_loop(
                         &skill_registry,
                         &budget_provider,
                         &log_reload_handle,
+                        session_idle_timeout_secs,
                     ).await {
                         LoopAction::Continue => continue,
                         LoopAction::Break => break,
@@ -1598,6 +1606,7 @@ async fn run_gateway_loop(
                 &skill_registry,
                 &budget_provider,
                 &log_reload_handle,
+                session_idle_timeout_secs,
             )
             .await
             {
@@ -1655,6 +1664,7 @@ async fn process_gateway_recv(
     skill_registry: &crate::skills::parser::SkillRegistry,
     budget_provider: &str,
     log_reload_handle: &Option<LogReloadHandle>,
+    session_idle_timeout_secs: u64,
 ) -> LoopAction {
     use rollball_core::protocol::GatewayResponse;
     match recv_result {
@@ -1953,7 +1963,7 @@ async fn process_gateway_recv(
                         // Evict idle sessions before activating — amortized cleanup
                         // that runs on every session switch without a separate timer.
                         session_manager
-                            .evict_idle_sessions(std::time::Duration::from_secs(300))
+                            .evict_idle_sessions(std::time::Duration::from_secs(session_idle_timeout_secs))
                             .await;
 
                         // Lazy resume: if the session is not in memory (e.g. a historical

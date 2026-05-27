@@ -40,6 +40,7 @@ pub mod search_backends;
 
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::tools::workspace_resolver::SharedResolver;
 use search_backends::WebSearchEngine;
@@ -53,9 +54,11 @@ use search_backends::WebSearchEngine;
 /// # Arguments
 /// * `resolver` - Workspace directory resolver (single source of truth)
 /// * `agent_id` - Agent ID for memory isolation and identity management
+/// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
+    tool_http_timeout_ms: u64,
 ) -> Vec<Arc<dyn Tool>> {
     let _work_dir = resolver.read().unwrap().agent_home().to_string();
     let current_dir = resolver.read().unwrap().agent_home().to_string();
@@ -77,13 +80,14 @@ pub fn all_builtin_tools(
 
     // Build search engine from agent's configured backends.
     // Initially empty — backends are populated when search config arrives from Gateway.
-    let search_engine = WebSearchEngine::new(Vec::new());
+    // The timeout is passed through so that build_backend() creates backends with the configured value.
+    let search_engine = WebSearchEngine::new(Vec::new(), Duration::from_millis(tool_http_timeout_ms));
 
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(memory_recall::MemoryRecallTool::new(agent_id)),
         Arc::new(memory_store::MemoryStoreTool::new(agent_id)),
         Arc::new(http_request::HttpRequestTool::new()),
-        Arc::new(web_fetch::WebFetchTool::new()),
+        Arc::new(web_fetch::WebFetchTool::with_timeout(Duration::from_millis(tool_http_timeout_ms))),
         Arc::new(web_search::WebSearchTool::new(search_engine)),
         Arc::new(file_read::FileReadTool::new(&current_dir)),
         Arc::new(file_write::FileWriteTool::new(&current_dir)),

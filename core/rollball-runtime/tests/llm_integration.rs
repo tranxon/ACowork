@@ -20,6 +20,7 @@ use rollball_core::providers::traits::{
 };
 use rollball_core::tools::traits::Tool;
 use rollball_runtime::providers::openai::OpenAIProvider;
+use rollball_runtime::config::DEFAULT_TOOL_HTTP_TIMEOUT_MS;
 use rollball_runtime::tools::builtin;
 use rollball_runtime::tools::workspace_resolver::WorkspaceResolver;
 use futures_util::StreamExt;
@@ -59,7 +60,7 @@ fn system_message(content: &str) -> ChatMessage {
 ///   ToolSpec → serde_json::to_value (produces "parameters" field) → Vec<Value>
 fn serialize_builtin_tools(work_dir: &str, agent_id: &str) -> Vec<serde_json::Value> {
     let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(work_dir)));
-    let tools = builtin::all_builtin_tools(&resolver, agent_id);
+    let tools = builtin::all_builtin_tools(&resolver, agent_id, DEFAULT_TOOL_HTTP_TIMEOUT_MS);
     tools
         .iter()
         .map(|t| {
@@ -111,7 +112,7 @@ fn build_tool_definitions_by_names(
     names: &[&str],
 ) -> Vec<serde_json::Value> {
     let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(work_dir)));
-    let tools = builtin::all_builtin_tools(&resolver, agent_id);
+    let tools = builtin::all_builtin_tools(&resolver, agent_id, DEFAULT_TOOL_HTTP_TIMEOUT_MS);
     let tool_jsons: Vec<serde_json::Value> = tools
         .iter()
         .filter(|t| names.iter().any(|n| *n == t.name()))
