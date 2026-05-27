@@ -1612,7 +1612,30 @@ impl AgentLoop {
                 }
             }
 
-            // ⑥ Append ALL tool results to history first (must be contiguous after assistant tool_calls)
+            // ⑥ Pre-trim: make room for tool results before appending.
+            // Large tool outputs (e.g. content_search returning 320+ results)
+            // can blow up the context window.  Trimming BEFORE the append
+            // ensures the LLM request remains within budget on the next
+            // iteration.  Threshold: 70 % of the usable context window.
+            let result_tokens_estimate: u64 = tool_results
+                .iter()
+                .map(|r| (r.len() / 4) as u64)
+                .sum();
+            let usable_budget = self.context_trim_budget(current_model);
+            let trim_threshold = (usable_budget as f64 * 0.70) as u64;
+            let current_tokens = self.session.history.token_count();
+            if current_tokens.saturating_add(result_tokens_estimate) > trim_threshold {
+                tracing::info!(
+                    current_tokens,
+                    result_tokens_estimate,
+                    trim_threshold,
+                    usable_budget,
+                    "Pre-trimming history before appending tool results"
+                );
+                self.trim_history_to_budget(current_model);
+            }
+
+            // ── ⑦ Append ALL tool results to history (must be contiguous after assistant tool_calls)
             for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
                 let tool_result_message = ChatMessage {
                     name: Some(tc.function.name.clone()),
