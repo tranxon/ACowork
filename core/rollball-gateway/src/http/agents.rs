@@ -22,7 +22,7 @@ use crate::error::GatewayError;
 use crate::http::agent_config::{self, AgentConfigResponse, UpdateAgentConfigRequest};
 use crate::http::routes::{ApiError, AppState};
 use rollball_core::protocol::GatewayResponse;
-use rollball_core::protocol::{AvailableTool, AvailableToolsResponse, McpServerConfigDef};
+use rollball_core::protocol::{AgentSearchConfig, AvailableTool, AvailableToolsResponse, McpServerConfigDef};
 use rollball_core::AgentManifest;
 
 /// Build the agent management router
@@ -804,7 +804,7 @@ pub async fn get_agent_config(
     // Query Runtime workspace config via IPC (QueryConfig → ConfigSnapshot roundtrip).
     let (model, provider, max_output_tokens, max_iterations, temperature,
          system_prompt_override, active_tools, shell_approval_threshold,
-         mcp_servers, available_models) =
+         mcp_servers, search_config_json) =
         if let Some(ref grpc_mgr) = state.grpc_session_mgr {
             let query = rollball_core::proto::server_message::Payload::QueryConfig(
                 rollball_core::proto::QueryConfig {
@@ -820,18 +820,26 @@ pub async fn get_agent_config(
                          if snap.active_tools.is_empty() { None } else { Some(snap.active_tools) },
                          snap.shell_approval_threshold,
                          snap.mcp_servers_json,
-                         snap.available_models)
+                         snap.search_config_json)
                     } else {
-                        (None, None, None, None, None, None, None, None, vec![], vec![])
+                        (None, None, None, None, None, None, None, None, vec![], None)
                     }
                 }
-                None => (None, None, None, None, None, None, None, None, vec![], vec![]),
+                None => (None, None, None, None, None, None, None, None, vec![], None),
             }
         } else {
-            (None, None, None, None, None, None, None, None, vec![], vec![])
+            (None, None, None, None, None, None, None, None, vec![], None)
         };
 
     // Build the effective config from ConfigSnapshot data
+    let active_mcp_servers: Vec<String> = mcp_servers.iter()
+        .filter_map(|j| serde_json::from_str::<McpServerConfigDef>(j).ok())
+        .map(|s| s.name)
+        .collect();
+    let search_config: Option<AgentSearchConfig> = search_config_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok());
+
     let effective = AgentConfigResponse {
         agent_id,
         max_output_tokens: max_output_tokens,
@@ -844,8 +852,8 @@ pub async fn get_agent_config(
         active_tools: active_tools.unwrap_or_default(),
         system_prompt_override,
         shell_approval_threshold,
-        mcp_servers,
-        available_models,
+        active_mcp_servers,
+        search_config,
         global_max_output_tokens,
     };
 
@@ -893,7 +901,12 @@ pub async fn update_agent_config(
     // Push RuntimeConfigUpdate to connected agent
     if let Some(ref session_mgr) = state.session_mgr {
         let mgr = session_mgr.lock().await;
-        if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+        if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+            tracing::info!(
+                agent_id = %agent_id,
+                conn_id = %conn_id,
+                "Pushing RuntimeConfigUpdate (config) to agent"
+            );
             let push_result = session
                 .push_message(GatewayResponse::RuntimeConfigUpdate {
                     max_output_tokens: req.max_output_tokens,
@@ -911,10 +924,28 @@ pub async fn update_agent_config(
             if !push_result {
                 tracing::warn!(
                     agent_id = %agent_id,
-                    "Failed to push RuntimeConfigUpdate to connected agent"
+                    conn_id = %conn_id,
+                    "Failed to push RuntimeConfigUpdate to connected agent (push_tx closed or missing)"
+                );
+            } else {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    "RuntimeConfigUpdate pushed successfully to agent"
                 );
             }
+        } else {
+            tracing::warn!(
+                agent_id = %agent_id,
+                session_count = mgr.session_count(),
+                authenticated_count = mgr.authenticated_count(),
+                "Cannot push RuntimeConfigUpdate: agent not found in IPC session manager"
+            );
         }
+    } else {
+        tracing::warn!(
+            agent_id = %agent_id,
+            "Cannot push RuntimeConfigUpdate: session_mgr is None (IPC session manager not initialized)"
+        );
     }
 
     // Return echo of submitted config (the actual persisted values will be
@@ -928,10 +959,10 @@ pub async fn update_agent_config(
         system_prompt_override: req.system_prompt_override,
         active_tools: req.active_tools.unwrap_or_default(),
         shell_approval_threshold: req_shell_approval_threshold.map(|t| format!("{:?}", t).to_lowercase()),
-        mcp_servers: vec![],
-        available_models: vec![],
         model: None,
         provider: None,
+        active_mcp_servers: vec![],
+        search_config: None,
         global_max_output_tokens,
     };
 
@@ -1255,7 +1286,13 @@ pub async fn update_agent_mcp_servers(
     // Push RuntimeConfigUpdate to connected agent (Runtime persists per-agent config)
     if let Some(ref session_mgr) = state.session_mgr {
         let mgr = session_mgr.lock().await;
-        if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+        if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+            tracing::info!(
+                agent_id = %agent_id,
+                conn_id = %conn_id,
+                mcp_server_count = resolved_servers.len(),
+                "Pushing RuntimeConfigUpdate (MCP) to agent"
+            );
             let push_result = session
                 .push_message(GatewayResponse::RuntimeConfigUpdate {
                     mcp_servers: if resolved_servers.is_empty() {
@@ -1277,10 +1314,28 @@ pub async fn update_agent_mcp_servers(
             if !push_result {
                 tracing::warn!(
                     agent_id = %agent_id,
-                    "Failed to push MCP config update to connected agent"
+                    conn_id = %conn_id,
+                    "Failed to push MCP config update to connected agent (push_tx closed or missing)"
+                );
+            } else {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    "MCP config update pushed successfully to agent"
                 );
             }
+        } else {
+            tracing::warn!(
+                agent_id = %agent_id,
+                session_count = mgr.session_count(),
+                authenticated_count = mgr.authenticated_count(),
+                "Cannot push MCP config: agent not found in IPC session manager. "
+            );
         }
+    } else {
+        tracing::warn!(
+            agent_id = %agent_id,
+            "Cannot push MCP config: session_mgr is None (IPC session manager not initialized)"
+        );
     }
 
     Ok(Json(AgentMcpServersResponse {

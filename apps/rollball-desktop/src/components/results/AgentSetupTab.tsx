@@ -28,11 +28,6 @@ interface SearchProvidersResponse {
   providers: SearchProviderListItem[];
 }
 
-interface SearchConfigResponse {
-  agent_id: string;
-  providers: AgentSearchProvider[];
-}
-
 // ── Component ───────────────────────────────────────────────────────────
 
 export function AgentSetupTab() {
@@ -55,7 +50,7 @@ export function AgentSetupTab() {
   const [toolsLoading, setToolsLoading] = useState(false);
 
   // MCP server activation
-  const { catalog, activeServers, loadCatalog, loadActiveServers, toggleServer, activationLoading } = useMcpStore();
+  const { catalog, activeServers, loadCatalog, toggleServer, activationLoading } = useMcpStore();
 
   // Search provider configuration
   const [searchProviders, setSearchProviders] = useState<SearchProviderListItem[]>([]);
@@ -79,10 +74,12 @@ export function AgentSetupTab() {
           shellApprovalThreshold: data.shell_approval_threshold,
           approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
           globalMaxTokens: data.global_max_output_tokens,
-          availableModels: data.available_models,
           activeModel: data.model,
           activeProvider: data.provider,
         });
+        // Sync MCP and search config from the unified response
+        useMcpStore.setState({ agentId: selectedAgentId, activeServers: data.active_mcp_servers ?? [] });
+        setActiveSearch(data.search_config?.providers ?? []);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -111,22 +108,14 @@ export function AgentSetupTab() {
       .finally(() => {
         if (!cancelled) setToolsLoading(false);
       });
-    // Load MCP catalog and per-agent activation
+    // Load MCP catalog
     loadCatalog();
-    loadActiveServers(selectedAgentId);
-    // Fetch search providers and per-agent search config
+    // Fetch search providers catalog
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/search-providers`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data: SearchProvidersResponse | null) => {
         if (cancelled || !data) return;
         setSearchProviders(data.providers);
-      })
-      .catch(() => { });
-    fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/search-config`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: SearchConfigResponse | null) => {
-        if (cancelled || !data) return;
-        setActiveSearch(data.providers);
       })
       .catch(() => { });
     return () => {
@@ -152,10 +141,12 @@ export function AgentSetupTab() {
               shellApprovalThreshold: data.shell_approval_threshold,
               approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
               globalMaxTokens: data.global_max_output_tokens,
-              availableModels: data.available_models,
               activeModel: data.model,
               activeProvider: data.provider,
             });
+            // Sync MCP and search config from the unified response
+            useMcpStore.setState({ agentId: selectedAgentId, activeServers: data.active_mcp_servers ?? [] });
+            setActiveSearch(data.search_config?.providers ?? []);
           })
           .catch(() => { });
       }

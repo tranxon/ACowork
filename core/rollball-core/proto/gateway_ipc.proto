@@ -170,7 +170,6 @@ message ConfigSnapshot {
   optional string shell_approval_threshold = 9;
   // MCP server configs as JSON strings (one per server)
   repeated string mcp_servers_json = 10;
-  repeated string available_models = 11;
   // Search provider config (JSON-serialized AgentSearchConfig from agent_search.json)
   optional string search_config_json = 12;
 }

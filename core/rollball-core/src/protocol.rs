@@ -467,9 +467,6 @@ pub enum GatewayRequest {
         /// Active MCP server configurations (full defs, from agent_config.json)
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<McpServerConfigDef>,
-        /// Available models list cached from last Gateway push
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        available_models: Vec<String>,
         /// Search provider config (JSON-serialized AgentSearchConfig from agent_search.json)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         search_config_json: Option<String>,

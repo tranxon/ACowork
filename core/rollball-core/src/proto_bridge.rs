@@ -508,7 +508,6 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 active_tools,
                 shell_approval_threshold,
                 mcp_servers,
-                available_models,
                 search_config_json,
             } => {
                 let mcp_json: Vec<String> = mcp_servers
@@ -527,7 +526,6 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         active_tools: active_tools.clone().unwrap_or_default(),
                         shell_approval_threshold: shell_approval_threshold.clone(),
                         mcp_servers_json: mcp_json,
-                        available_models: available_models.clone(),
                         search_config_json: search_config_json.clone(),
                     },
                 ))
