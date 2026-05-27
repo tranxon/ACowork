@@ -93,13 +93,6 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
   // Check if this block has any pending shell approval for current session
   const pendingKeys = pendingApproval ? Object.keys(pendingApproval) : [];
   const itemToolCallIds = items.filter(m => m.type === "tool_call").map(m => m.toolCallId);
-  console.log("[DIAG:ExploreBlock:hasPending]", {
-    pendingKeys,
-    itemToolCallIds,
-    itemsCount: items.length,
-    currentSessionId,
-    isStreaming,
-  });
   const hasPendingApproval = pendingApproval && Object.values(pendingApproval).some(
     (ev) => {
       const sessionMatch = approvalMatchesSession(ev, currentSessionId);
@@ -108,12 +101,6 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
           (r) => r.type === "tool_result" && r.toolName === m.toolName
         )
       );
-      console.log("[DIAG:ExploreBlock:matchCheck]", {
-        "ev.tool_call_id": ev.tool_call_id,
-        "ev.request_id": ev.request_id,
-        sessionMatch,
-        toolMatch,
-      });
       return sessionMatch && toolMatch;
     }
   );
@@ -269,15 +256,6 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
   const needsApproval = specificApproval
     ? approvalMatchesSession(specificApproval, currentSessionId) && isPendingResult
     : false;
-  console.log("[DIAG:ToolCallItem]", {
-    "call.toolCallId": call.toolCallId,
-    "call.toolName": call.toolName,
-    hasSpecific: !!specificApproval,
-    needsApproval,
-    isPendingResult,
-    pendingKeys: pendingApproval ? Object.keys(pendingApproval) : [],
-    currentSessionId,
-  });
 
   // Countdown timer for approval timeout
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);

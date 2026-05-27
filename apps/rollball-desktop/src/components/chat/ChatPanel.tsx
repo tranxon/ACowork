@@ -73,11 +73,6 @@ export function ChatPanel() {
   const thinkingMessageId = sessionState?.thinkingMessageId ?? null;
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
   const pendingApproval = sessionState?.pendingApproval ?? {};
-  console.log("[DIAG:ChatPanel:pendingApproval]", {
-    keys: Object.keys(pendingApproval),
-    activeSessionId: agentState?.activeSessionId,
-    sessionKeys: sessionState ? Object.keys(sessionState.messages || []) : null,
-  });
   const pendingQuestion = sessionState?.pendingQuestion ?? null;
   const isReasoning = sessionState?.isReasoning ?? false;
   const isLoadingSession = sessionState?.isLoadingSession ?? false;

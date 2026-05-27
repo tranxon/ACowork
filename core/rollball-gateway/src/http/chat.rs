@@ -1025,17 +1025,21 @@ pub async fn list_sessions(
     Path(agent_id): Path<String>,
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<SessionsListResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify agent exists and is running
+    // Verify agent exists
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
         }
+        // If agent is not running, return empty list instead of error.
+        // This is friendlier for clients like AgentList that fetch the latest session title
+        // for every installed agent, regardless of whether it's running.
         if !gw.is_running(&agent_id) {
-            return Err(ApiError::bad_request(&format!(
-                "Agent {} is not running",
-                agent_id
-            )));
+            return Ok(Json(SessionsListResponse {
+                sessions: vec![],
+                total_count: 0,
+                total_pages: 0,
+            }));
         }
     }
 

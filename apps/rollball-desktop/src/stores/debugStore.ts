@@ -376,11 +376,16 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
           // Discard any event whose iteration is more than one step
           // ahead of the last known snapshot — such events are from
           // before the rewind and must not be re-added.
+          //
+          // Only apply this guard when snapshots already exist.
+          // When snapshots is empty (e.g., after frontend restart/reconnect
+          // to an already-running debug session), accept events to bootstrap
+          // the snapshot list.
           const currentSnapshots = get().snapshots;
           const maxExisting = currentSnapshots.length > 0
             ? Math.max(...currentSnapshots.map((sn) => sn.iteration))
             : 0;
-          if (iteration > maxExisting + 1) {
+          if (currentSnapshots.length > 0 && iteration > maxExisting + 1) {
             console.log("[debugStore] onContextBuilt: discarding stale event iteration=", iteration, "maxExisting=", maxExisting);
             break;
           }

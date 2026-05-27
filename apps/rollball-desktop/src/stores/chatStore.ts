@@ -1408,9 +1408,9 @@ function handleMessageEvent(
   const eventType = data.type as string;
 
   // ── DIAG: log every incoming WS message ──
-  if (eventType === "tool_approval_needed" || eventType === "tool_call") {
-    console.log("[DIAG:handleMessageEvent]", eventType, JSON.stringify(data));
-  }
+  // if (eventType === "tool_approval_needed" || eventType === "tool_call") {
+  //   console.log("[DIAG:handleMessageEvent]", eventType, JSON.stringify(data));
+  // }
 
   // For content events: route to the session specified by event.session_id
   // If no session_id in event, fall back to the agent's active session.
