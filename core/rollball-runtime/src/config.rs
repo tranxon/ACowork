@@ -1,8 +1,15 @@
 //! Agent Runtime configuration
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::cli::Cli;
+
+/// Default HTTP timeout for built-in tools (30 seconds).
+pub const DEFAULT_TOOL_HTTP_TIMEOUT_MS: u64 = 30_000;
+
+/// Default HTTP timeout for built-in tools as Duration.
+pub const DEFAULT_TOOL_HTTP_TIMEOUT: Duration = Duration::from_millis(DEFAULT_TOOL_HTTP_TIMEOUT_MS);
 
 /// Runtime configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +66,24 @@ pub struct RuntimeConfig {
     /// Default: "medium" — Medium and High risk commands need approval.
     #[serde(default = "default_shell_approval_threshold")]
     pub shell_approval_threshold: String,
+
+    // ── Timeout configuration ──
+
+    /// LLM provider HTTP request timeout in milliseconds
+    #[serde(default = "default_provider_request_timeout_ms")]
+    pub provider_request_timeout_ms: u64,
+    /// LLM provider TCP connect timeout in milliseconds
+    #[serde(default = "default_provider_connect_timeout_ms")]
+    pub provider_connect_timeout_ms: u64,
+    /// LLM provider stream read per-chunk timeout in milliseconds
+    #[serde(default = "default_provider_stream_read_timeout_ms")]
+    pub provider_stream_read_timeout_ms: u64,
+    /// Default HTTP timeout for built-in tools in milliseconds
+    #[serde(default = "default_tool_http_timeout_ms")]
+    pub tool_http_timeout_ms: u64,
+    /// Session idle timeout in seconds before eviction
+    #[serde(default = "default_session_idle_timeout_secs")]
+    pub session_idle_timeout_secs: u64,
 }
 
 fn default_log_level() -> String {
@@ -97,6 +122,26 @@ fn default_shell_approval_threshold() -> String {
     "medium".to_string()
 }
 
+fn default_provider_request_timeout_ms() -> u64 {
+    600000 // 10 min: LLM streaming can be long (thinking + generation)
+}
+
+fn default_provider_connect_timeout_ms() -> u64 {
+    10000 // 10 sec
+}
+
+fn default_provider_stream_read_timeout_ms() -> u64 {
+    45000 // 45 sec per-chunk interval
+}
+
+fn default_tool_http_timeout_ms() -> u64 {
+    DEFAULT_TOOL_HTTP_TIMEOUT_MS
+}
+
+fn default_session_idle_timeout_secs() -> u64 {
+    300 // 5 min
+}
+
 impl Default for RuntimeConfig {
     #[allow(deprecated)]
     fn default() -> Self {
@@ -118,6 +163,11 @@ impl Default for RuntimeConfig {
             history_max_tokens: default_history_max_tokens(),
             keep_full_results: default_keep_full_results(),
             shell_approval_threshold: default_shell_approval_threshold(),
+            provider_request_timeout_ms: default_provider_request_timeout_ms(),
+            provider_connect_timeout_ms: default_provider_connect_timeout_ms(),
+            provider_stream_read_timeout_ms: default_provider_stream_read_timeout_ms(),
+            tool_http_timeout_ms: default_tool_http_timeout_ms(),
+            session_idle_timeout_secs: default_session_idle_timeout_secs(),
         }
     }
 }

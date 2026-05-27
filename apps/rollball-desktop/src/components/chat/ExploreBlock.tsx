@@ -10,6 +10,9 @@ interface ExploreBlockProps {
   pendingApproval?: Record<string, ToolApprovalNeededEvent> | null;
   currentSessionId?: string | null;
   onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void;
+  /** True when an assistant reply message follows this explore block in display order.
+   *  This is the ONLY condition that triggers auto-collapse. */
+  hasFollowUpReply?: boolean;
 }
 
 const SHELL_TOOLS = ["bash", "powershell", "shell"];
@@ -37,22 +40,28 @@ function approvalMatchesSession(
  * ExploreBlock: aggregates consecutive think + tool_call + tool_result
  * messages into a single collapsible block with full rendering inside.
  *
- * - Default: expanded when streaming, collapsed for history.
+ * - Default: expanded (for new active blocks).
  * - Collapsed: "Exploring... (N steps)" + chevron.
  * - Expanded: max-height 240px container with ThinkBlock and ToolCallItem.
  * - Streaming: auto-scrolls to bottom.
+ * - Collapse (auto): ONLY when hasFollowUpReply=true — an assistant reply
+ *   message appears after this explore block in display order.
+ * - Collapse (manual): user can collapse at any time.
  */
-export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove }: ExploreBlockProps) {
-  const [expanded, setExpanded] = useState(isStreaming);
+export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply }: ExploreBlockProps) {
+  // Start collapsed only if this block already has a follow-up reply (historical/loaded).
+  // For new active blocks, always start expanded — collapses ONLY when
+  // an assistant reply appears after it.
+  const [expanded, setExpanded] = useState(!hasFollowUpReply);
   const contentRef = useRef<HTMLDivElement>(null);
   const manuallyCollapsed = useRef(false);
 
-  // Auto-scroll to bottom when streaming and expanded
+  // Auto-scroll to bottom when expanded and new items arrive
   useEffect(() => {
-    if (expanded && isStreaming && contentRef.current) {
+    if (expanded && contentRef.current) {
       contentRef.current.scrollTop = contentRef.current.scrollHeight;
     }
-  }, [expanded, isStreaming, items]);
+  }, [expanded, items]);
 
   const pairedItems = buildPairedItems(items);
   const stepCount = pairedItems.length;
@@ -64,20 +73,22 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
 
   const isExploring = isStreaming || hasPendingTools;
 
-  // Auto-expand when exploring starts (respect user manual collapse)
+  // Auto-expand when exploring starts (respect user manual collapse),
+  // but only if no follow-up reply has appeared (once collapsed by reply, stay collapsed)
   useEffect(() => {
-    if (isExploring && !manuallyCollapsed.current) {
+    if (isExploring && !hasFollowUpReply && !manuallyCollapsed.current) {
       setExpanded(true);
     }
-  }, [isExploring]);
+  }, [isExploring, hasFollowUpReply]);
 
-  // Auto-collapse when exploring ends → reset manual state for next cycle
+  // Auto-collapse when agent response appears after this explore block.
+  // This is the ONLY auto-collapse condition — tools finishing alone does NOT collapse.
   useEffect(() => {
-    if (!isExploring) {
+    if (hasFollowUpReply) {
       setExpanded(false);
       manuallyCollapsed.current = false;
     }
-  }, [isExploring]);
+  }, [hasFollowUpReply]);
 
   // Check if this block has any pending shell approval for current session
   const pendingKeys = pendingApproval ? Object.keys(pendingApproval) : [];
@@ -140,7 +151,7 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
         <span className="font-medium text-zinc-400 dark:text-zinc-500">
-          {isExploring ? "Exploring..." : "Explored"}
+          {hasFollowUpReply ? "Explored" : "Exploring..."}
         </span>
         <span className="text-zinc-400 dark:text-zinc-500">
           ({stepCount} {stepCount === 1 ? "step" : "steps"})

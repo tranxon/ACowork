@@ -6,6 +6,8 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::config::DEFAULT_TOOL_HTTP_TIMEOUT;
+
 use super::{SearchBackend, SearchBackendError, SearchResult};
 
 /// Internal SearXNG search API response structure.
@@ -26,12 +28,18 @@ struct SearxngResultItem {
 
 pub struct SearXngBackend {
     client: reqwest::Client,
+    search_timeout: std::time::Duration,
 }
 
 impl SearXngBackend {
     pub fn new() -> Self {
+        Self::with_timeout(DEFAULT_TOOL_HTTP_TIMEOUT)
+    }
+
+    pub fn with_timeout(timeout: std::time::Duration) -> Self {
         Self {
             client: reqwest::Client::new(),
+            search_timeout: timeout,
         }
     }
 }
@@ -70,7 +78,7 @@ impl SearchBackend for SearXngBackend {
                 ("format", "json"),
                 ("categories", "general"),
             ])
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(self.search_timeout)
             .send()
             .await
             .map_err(|e| SearchBackendError::Http(format!("SearXNG request failed: {e}")))?;

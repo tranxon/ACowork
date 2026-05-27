@@ -8,6 +8,8 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::config::DEFAULT_TOOL_HTTP_TIMEOUT;
+
 use super::{SearchBackend, SearchBackendError, SearchResult};
 
 /// Internal Perplexity chat completions response.
@@ -32,12 +34,18 @@ struct PerplexityMessage {
 
 pub struct PerplexityBackend {
     client: reqwest::Client,
+    search_timeout: std::time::Duration,
 }
 
 impl PerplexityBackend {
     pub fn new() -> Self {
+        Self::with_timeout(DEFAULT_TOOL_HTTP_TIMEOUT)
+    }
+
+    pub fn with_timeout(timeout: std::time::Duration) -> Self {
         Self {
             client: reqwest::Client::new(),
+            search_timeout: timeout,
         }
     }
 }
@@ -92,7 +100,7 @@ impl SearchBackend for PerplexityBackend {
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {api_key}"))
             .json(&body)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(self.search_timeout)
             .send()
             .await
             .map_err(|e| SearchBackendError::Http(format!("Perplexity request failed: {e}")))?;

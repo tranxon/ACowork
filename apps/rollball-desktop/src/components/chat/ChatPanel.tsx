@@ -978,7 +978,10 @@ export function ChatPanel() {
                       className=""
                     >
                       {/* Explore group - aggregated think + tool calls/results */}
-                      {displayItem.type === 'explore_group' && (
+                      {displayItem.type === 'explore_group' && (() => {
+                        const nextItem = displayMessages[virtualRow.index + 1];
+                        const hasFollowUpReply = nextItem !== undefined && (nextItem as any).type !== 'explore_group';
+                        return (
                         <ExploreBlock
                           items={displayItem.items}
                           isStreaming={displayItem.items.some(
@@ -987,8 +990,10 @@ export function ChatPanel() {
                           pendingApproval={pendingApproval}
                           currentSessionId={currentSessionId}
                           onApprove={(action, approval) => handleToolApprove(action, approval)}
+                          hasFollowUpReply={hasFollowUpReply}
                         />
-                      )}
+                        );
+                      })()}
 
                       {/* Regular message */}
                       {displayItem.type !== 'explore_group' && (

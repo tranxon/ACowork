@@ -9,6 +9,8 @@ use rollball_core::protocol::SearchKeyEntry;
 use rollball_runtime::tools::builtin::search_backends::{
     SearchBackend, SearchBackendError, SearchResult, WebSearchEngine,
 };
+use rollball_runtime::config::DEFAULT_TOOL_HTTP_TIMEOUT;
+use std::time::Duration;
 
 // ── Mock backends for testing fallback chain ───────────────────────
 
@@ -87,7 +89,7 @@ impl SearchBackend for ApiErrorBackend {
 
 #[tokio::test]
 async fn test_empty_engine_returns_not_configured() {
-    let engine = WebSearchEngine::new(vec![]);
+    let engine = WebSearchEngine::new(vec![], DEFAULT_TOOL_HTTP_TIMEOUT);
     assert!(engine.is_empty());
 
     let result = engine.search("test query", 5).await;
@@ -112,7 +114,7 @@ async fn test_successful_search_no_fallback_needed() {
             api_key: "key-123".into(),
         }),
         None,
-    )]);
+    )], DEFAULT_TOOL_HTTP_TIMEOUT);
 
     let result = engine.search("test", 3).await.unwrap();
     assert_eq!(result.len(), 1);
@@ -141,7 +143,7 @@ async fn test_fallback_no_api_key_then_success() {
             }),
             None,
         ),
-    ]);
+    ], DEFAULT_TOOL_HTTP_TIMEOUT);
 
     let result = engine.search("test", 3).await.unwrap();
     assert_eq!(result.len(), 1);
@@ -173,7 +175,7 @@ async fn test_fallback_api_error_then_success() {
             }),
             None,
         ),
-    ]);
+    ], DEFAULT_TOOL_HTTP_TIMEOUT);
 
     let result = engine.search("test", 3).await.unwrap();
     assert_eq!(result.len(), 1);
@@ -200,7 +202,7 @@ async fn test_all_backends_fail_returns_last_error() {
             }),
             None,
         ),
-    ]);
+    ], DEFAULT_TOOL_HTTP_TIMEOUT);
 
     let result = engine.search("test", 3).await;
     assert!(result.is_err());
@@ -242,7 +244,7 @@ async fn test_fallback_chain_three_levels() {
             }),
             None,
         ),
-    ]);
+    ], DEFAULT_TOOL_HTTP_TIMEOUT);
 
     let result = engine.search("deep fallback test", 5).await.unwrap();
     assert_eq!(result.len(), 1);

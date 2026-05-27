@@ -5,6 +5,8 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::config::DEFAULT_TOOL_HTTP_TIMEOUT;
+
 use super::{SearchBackend, SearchBackendError, SearchResult};
 
 /// Internal Brave Search API response structure.
@@ -27,12 +29,18 @@ struct BraveWebResult {
 
 pub struct BraveBackend {
     client: reqwest::Client,
+    search_timeout: std::time::Duration,
 }
 
 impl BraveBackend {
     pub fn new() -> Self {
+        Self::with_timeout(DEFAULT_TOOL_HTTP_TIMEOUT)
+    }
+
+    pub fn with_timeout(timeout: std::time::Duration) -> Self {
         Self {
             client: reqwest::Client::new(),
+            search_timeout: timeout,
         }
     }
 }
@@ -73,7 +81,7 @@ impl SearchBackend for BraveBackend {
             .header("Accept", "application/json")
             .header("Accept-Encoding", "gzip")
             .header("X-Subscription-Token", api_key)
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(self.search_timeout)
             .send()
             .await
             .map_err(|e| SearchBackendError::Http(format!("Brave request failed: {e}")))?;

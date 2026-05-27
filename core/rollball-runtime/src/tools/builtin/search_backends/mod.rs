@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use rollball_core::protocol::{SearchKeyEntry, SearchProviderListItem};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 pub mod brave;
 pub mod exa;
@@ -90,16 +91,38 @@ impl std::fmt::Display for SearchBackendError {
 /// Ordered list of backends with API keys for fallback chain execution.
 pub struct WebSearchEngine {
     backends: Vec<(Box<dyn SearchBackend>, Option<SearchKeyEntry>, Option<String>)>, // (backend, key, base_url)
+    search_timeout: Duration,
 }
 
 impl WebSearchEngine {
     /// Create a new engine from configured providers.
     ///
-    /// Providers are tried in the given order (first = highest priority).
+    /// # Arguments
+    /// * `backends` - Pre-built backends with their keys and base URLs.
+    ///   Providers are tried in the given order (first = highest priority).
+    /// * `search_timeout` - HTTP timeout applied to every search request.
     pub fn new(
         backends: Vec<(Box<dyn SearchBackend>, Option<SearchKeyEntry>, Option<String>)>,
+        search_timeout: Duration,
     ) -> Self {
-        Self { backends }
+        Self { backends, search_timeout }
+    }
+
+    /// Create a `SearchBackend` box for the given provider id, using this engine's timeout.
+    ///
+    /// Returns `None` if the provider id is not recognized.
+    pub fn build_backend(&self, provider_id: &str) -> Option<Box<dyn SearchBackend>> {
+        match provider_id {
+            "brave" => Some(Box::new(brave::BraveBackend::with_timeout(self.search_timeout))),
+            "serper" => Some(Box::new(serper::SerperBackend::with_timeout(self.search_timeout))),
+            "tavily" => Some(Box::new(tavily::TavilyBackend::with_timeout(self.search_timeout))),
+            "exa" => Some(Box::new(exa::ExaBackend::with_timeout(self.search_timeout))),
+            "google-cse" => Some(Box::new(google_cse::GoogleCseBackend::with_timeout(self.search_timeout))),
+            "perplexity" => Some(Box::new(perplexity::PerplexityBackend::with_timeout(self.search_timeout))),
+            "firecrawl" => Some(Box::new(firecrawl::FirecrawlBackend::with_timeout(self.search_timeout))),
+            "searxng" => Some(Box::new(searxng::SearXngBackend::with_timeout(self.search_timeout))),
+            _ => None,
+        }
     }
 
     /// Execute a search with automatic fallback.

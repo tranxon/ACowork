@@ -17,6 +17,7 @@ use rollball_core::Budget;
 use rollball_runtime::agent::context::ContextBuilder;
 use rollball_runtime::agent::loop_::AgentLoop;
 use rollball_runtime::config::RuntimeConfig;
+use rollball_runtime::config::DEFAULT_TOOL_HTTP_TIMEOUT_MS;
 use rollball_runtime::tools::builtin;
 use rollball_runtime::tools::wrappers::{PathGuardedTool, WorkspaceAccess, WorkspaceDir};
 use rollball_runtime::tools::workspace_resolver::{SharedResolver, WorkspaceResolver};
@@ -127,7 +128,7 @@ async fn test_tool_definition_parameters_serialization() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS);
 
     for tool in &tools {
         let spec = tool.spec();
@@ -174,7 +175,7 @@ async fn test_all_builtin_tools_have_unique_names() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS);
 
     let names: Vec<String> = tools.iter().map(|t| t.name()).collect();
     let mut unique = names.clone();
@@ -195,7 +196,7 @@ async fn test_all_builtin_tools_count() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS);
     // 13 fixed built-in tools (memory_recall, memory_store, http_request, web_fetch,
     // web_search, file_read, file_write, file_edit, doc_reader, glob_search,
     // content_search, intent_send, ask_user_question) + platform shell tools
@@ -1249,7 +1250,7 @@ fn test_convert_tools_preserves_all_builtin_tools() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e");
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS);
 
     // Serialize each tool's spec
     let tool_jsons: Vec<Value> = tools

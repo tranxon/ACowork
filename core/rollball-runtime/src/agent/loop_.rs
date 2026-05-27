@@ -1491,7 +1491,7 @@ impl AgentLoop {
                 );
                 self.debug_auto_pause_if_stepping().await;
 
-                return Ok(IterationResult::Interrupted(format!("[Interrupted] {}", content)));
+                return Ok(IterationResult::Interrupted(format!("...Stopped by User...\n{}", content)));
             }
 
             // Debug: enter ToolExecution phase
@@ -1690,7 +1690,7 @@ impl AgentLoop {
                 );
                 self.debug_auto_pause_if_stepping().await;
 
-                return Ok(IterationResult::Interrupted(format!("[Interrupted] {}", content)));
+                return Ok(IterationResult::Interrupted(format!("...Stopped by User...\n{}", content)));
             }
 
             // ⑦ Usage report (async, non-blocking)
