@@ -37,6 +37,7 @@ pub mod intent_send;
 pub mod rag_query;
 pub mod ask_user_question;
 pub mod search_backends;
+pub mod todo_write;
 
 use rollball_core::tools::traits::Tool;
 use std::sync::Arc;
@@ -95,6 +96,7 @@ pub fn all_builtin_tools(
         Arc::new(content_search::ContentSearchTool::new(resolver)),
         Arc::new(intent_send::IntentSendTool::new()),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
+        Arc::new(todo_write::TodoWriteTool::new()),
     ];
 
     // Only register web_search when at least one search provider is configured.
