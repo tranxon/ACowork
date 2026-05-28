@@ -45,6 +45,7 @@ async fn execute_shell_with_security<G: ApprovalGate>(
             reason: assessment.reason.clone(),
             executable_paths: assessment.executable_paths.clone(),
             provenance_elevated: assessment.provenance_elevated,
+            tool_call_id: String::new(),
         };
 
         let response = gate.request_approval(&request).await;

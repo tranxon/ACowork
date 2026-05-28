@@ -291,4 +291,54 @@ impl GlobalResourcePusher {
             tracing::info!(pushed, failed, "MCP catalog push complete");
         }
     }
+
+    // ── User profile ────────────────────────────────────────────────
+
+    /// Push active user profile to all running agents after a profile change.
+    #[tracing::instrument(skip(self), name = "push_user_profile")]
+    pub async fn push_user_profile(&self) {
+        let session_mgr = match &self.session_mgr {
+            Some(mgr) => mgr.clone(),
+            None => {
+                tracing::warn!("No IPC session manager, skipping user profile push");
+                return;
+            }
+        };
+
+        let agent_ids: Vec<String> = {
+            let gw = self.gateway_state.read().await;
+            gw.running_agents.keys().cloned().collect()
+        };
+
+        if agent_ids.is_empty() {
+            return;
+        }
+
+        let (user_identity, version) = {
+            let gw = self.gateway_state.read().await;
+            let active_user = gw.resource_cache.user_profile_list.users
+                .iter()
+                .find(|u| u.is_active)
+                .cloned();
+            (active_user, gw.resource_cache.user_profile_list.version)
+        };
+
+        for agent_id in agent_ids {
+            let mgr = session_mgr.lock().await;
+            if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+                let ok = session
+                    .push_message(GatewayResponse::UserProfileUpdate {
+                        user_identity: user_identity.clone(),
+                        version,
+                    })
+                    .await;
+
+                if ok {
+                    tracing::info!(agent = %agent_id, version, "Pushed user profile to agent");
+                } else {
+                    tracing::warn!(agent = %agent_id, "User profile push failed (channel closed)");
+                }
+            }
+        }
+    }
 }

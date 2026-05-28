@@ -15,7 +15,7 @@ use crate::http::routes::{BridgeEvent, SessionPendingRequests};
 use crate::ipc::server::{
     handle_agent_hello, handle_budget_query, handle_capability_query,
     handle_context_usage_report, handle_cron_list, handle_cron_register,
-    handle_cron_unregister, handle_identity_query, handle_intent_send,
+    handle_cron_unregister, handle_intent_send,
     handle_key_release, handle_rate_acquire,
     handle_usage_report, handle_agent_ready, SharedState,
 };
@@ -105,10 +105,6 @@ pub async fn dispatch_grpc_request(
             handle_rate_acquire(&req.provider, state).await
         }
 
-        Some(proto::client_message::Payload::IdentityQuery(req)) => {
-            handle_identity_query(&req.fields, conn_id, session_mgr).await
-        }
-
         Some(proto::client_message::Payload::CapabilityQuery(req)) => {
             let agent_id = if req.agent_id.is_empty() {
                 None
@@ -157,6 +153,7 @@ pub async fn dispatch_grpc_request(
                 req.provider_list_version,
                 req.mcp_list_version,
                 req.search_list_version,
+                req.user_profile_version,
                 conn_id,
                 state,
                 session_mgr,

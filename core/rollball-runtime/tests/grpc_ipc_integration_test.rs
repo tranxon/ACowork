@@ -20,7 +20,6 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use rollball_core::budget;
-use rollball_core::identity;
 use rollball_core::proto;
 use rollball_core::protocol::{GatewayResponse, ProtocolType};
 
@@ -99,7 +98,6 @@ fn mark_agent_running(state: &mut GatewayState, agent_id: &str) {
         ready: false,
         dev_mode: false,
         debug_port: None,
-        identity_entries: vec![],
         workspace_config_json: None,
     });
 }
@@ -134,9 +132,6 @@ impl TestServer {
         let (bridge_tx, _) = tokio::sync::broadcast::channel::<BridgeEvent>(256);
         let session_pending: SessionPendingRequests =
             Arc::new(Mutex::new(HashMap::new()));
-        let approval_pending: rollball_gateway::http::approval::ApprovalPendingRequests =
-            Arc::new(Mutex::new(HashMap::new()));
-
         // Listen on 127.0.0.1:0 for OS-assigned port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -149,7 +144,6 @@ impl TestServer {
         let capability_tx_clone = capability_tx.clone();
         let bridge_tx_clone = bridge_tx.clone();
         let session_pending_clone = session_pending.clone();
-        let approval_pending_clone = approval_pending.clone();
 
         let server_handle = tokio::spawn(async move {
             let _ = rollball_gateway::grpc::start_grpc_server(
@@ -160,7 +154,6 @@ impl TestServer {
                 capability_tx_clone,
                 Some(bridge_tx_clone),
                 Some(session_pending_clone),
-                Some(approval_pending_clone),
             )
             .await;
         });
@@ -202,6 +195,7 @@ impl TestServer {
             0,
             0,
             0,
+            0,
         )
         .await
         .expect("Failed to connect and register");
@@ -228,7 +222,7 @@ async fn test_t1_agent_hello_success() {
 
         // Send AgentHello
         client
-            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0, 0)
+            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0, 0, 0)
             .await
             .expect("AgentHello should succeed");
 
@@ -249,7 +243,7 @@ async fn test_t2_agent_hello_duplicate_registration() {
 
         // Second registration with same agent_id
         let result = client2
-            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0, 0)
+            .send_agent_hello("com.test.agent", "1.0.0", "main", 0, 0, 0, 0)
             .await;
         // Whether it returns error depends on handler logic —
         // either way the gRPC communication layer should work.
@@ -778,9 +772,9 @@ async fn test_t25_llm_config_delivery_push() {
     assert!(result.is_ok(), "T25 timed out");
 }
 
-/// T26: IdentityDelivery push.
+/// T26: UserProfileUpdate push.
 #[tokio::test]
-async fn test_t26_identity_delivery_push() {
+async fn test_t26_user_profile_update_push() {
     let server = TestServer::start().await;
     let result = tokio::time::timeout(TEST_TIMEOUT, async {
         let mut client = server.connect_and_register("com.test.agent").await;
@@ -789,16 +783,22 @@ async fn test_t26_identity_delivery_push() {
             let mgr = server.session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id("com.test.agent") {
                 let pushed = session
-                    .push_message(GatewayResponse::IdentityDelivery {
-                        entries: vec![identity::IdentityEntry {
-                            field: "name".to_string(),
-                            value: "Alice".to_string(),
-                            confidence: 0.95,
-                            category: identity::IdentityCategory::Identity,
-                            privacy: identity::PrivacyLevel::Personal,
-                            source: "user_input".to_string(),
-                            updated_at: "2026-05-04T00:00:00Z".to_string(),
-                        }],
+                    .push_message(GatewayResponse::UserProfileUpdate {
+                        user_identity: Some(rollball_core::protocol::UserProfile {
+                            user_id: "test-user-1".to_string(),
+                            display_name: "Alice".to_string(),
+                            language: "zh-CN".to_string(),
+                            timezone: "Asia/Shanghai".to_string(),
+                            city: Some("Shanghai".to_string()),
+                            country: Some("CN".to_string()),
+                            occupation: None,
+                            communication_style: None,
+                            custom: std::collections::HashMap::new(),
+                            created_at: "2026-01-01T00:00:00Z".to_string(),
+                            updated_at: "2026-01-01T00:00:00Z".to_string(),
+                            is_active: true,
+                        }),
+                        version: 1,
                     })
                     .await;
                 assert!(pushed, "Push should succeed");
@@ -806,10 +806,10 @@ async fn test_t26_identity_delivery_push() {
         }
 
         match tokio::time::timeout(Duration::from_secs(5), client.recv_message()).await {
-            Ok(Ok(Some(GatewayResponse::IdentityDelivery { entries }))) => {
-                assert_eq!(entries.len(), 1);
-                assert_eq!(entries[0].field, "name");
-                assert_eq!(entries[0].value, "Alice");
+            Ok(Ok(Some(GatewayResponse::UserProfileUpdate { user_identity, version }))) => {
+                assert!(user_identity.is_some());
+                assert_eq!(user_identity.unwrap().display_name, "Alice");
+                assert_eq!(version, 1);
             }
             Ok(Ok(Some(other))) => {
                 let _ = other;
@@ -1075,6 +1075,7 @@ async fn test_t33_push_request_id_zero() {
                     provider_list_version: 0,
                     mcp_list_version: 0,
                     search_list_version: 0,
+                    user_profile_version: 0,
                 },
             )),
         };

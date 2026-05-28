@@ -79,6 +79,8 @@ pub enum SessionMessage {
     UpdateSessionTitle { title: String },
     /// Persist the per-session workspace_id to the JSONL conversation file
     SetWorkspaceId { workspace_id: String },
+    /// Update identity context from Gateway UserProfileUpdate push
+    UpdateIdentityContext { identity_context: Option<String> },
     /// Interrupt signal to stop the current agent loop iteration
     Interrupt { reason: String },
     /// Stop the session gracefully
@@ -141,6 +143,10 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::SetWorkspaceId { workspace_id } => f
                 .debug_struct("SetWorkspaceId")
                 .field("workspace_id", workspace_id)
+                .finish(),
+            SessionMessage::UpdateIdentityContext { identity_context } => f
+                .debug_struct("UpdateIdentityContext")
+                .field("has_identity", &identity_context.is_some())
                 .finish(),
             SessionMessage::Interrupt { reason } => f
                 .debug_struct("Interrupt")
@@ -717,6 +723,14 @@ impl SessionTask {
                         "SessionTask: persisting workspace_id to JSONL"
                     );
                     agent_loop.update_session_workspace_id(&workspace_id);
+                }
+                Some(SessionMessage::UpdateIdentityContext { identity_context }) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        has_context = identity_context.is_some(),
+                        "SessionTask: updating identity context"
+                    );
+                    context_builder.set_identity_context(identity_context.unwrap_or_default());
                 }
                 Some(SessionMessage::Interrupt { reason }) => {
                     tracing::info!(

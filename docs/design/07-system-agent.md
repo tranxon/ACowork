@@ -1,5 +1,14 @@
 # 系统 Agent（com.rollball.system）
 
+> **⚠️ 此文档已废弃**
+>
+> 用户身份管理已从 System Agent 的工具链模式重构为 Gateway 集中管理的公共资源模式。
+> 详见 `18-user-identity-simplified.md`。用户身份现在由 Gateway 通过 `user_profiles.json`
+> 统一管理，通过 AgentHello 版本驱动差量同步和 UserProfileUpdate 热推送。
+> System Agent 不再是身份数据的提供者——Gateway 直接管理 UserProfile。
+>
+> ~~以下为历史文档，仅供参考。~~
+
 > 版本：v3.5 | 更新日期：2026-04-17
 
 ---

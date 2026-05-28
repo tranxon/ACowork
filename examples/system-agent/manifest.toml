@@ -56,8 +56,5 @@ idle_timeout_secs = 0   # System Agent never auto-stops
 enabled = false
 
 # ContentProvider-style capabilities for other agents
-[capabilities."identity:query"]
-description = "Query user identity fields (name, city, language, timezone, etc.)"
-
-[capabilities."identity:observe"]
-description = "Subscribe to identity field changes"
+# identity:query and identity:observe have been removed — user identity
+# is now managed by Gateway via UserProfile (see 18-user-identity-simplified.md)

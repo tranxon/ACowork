@@ -22,18 +22,19 @@ use std::path::Path;
 
 use rollball_core::protocol::{
     McpKeyEntry, McpListItem, ProviderListItem, ProviderModelEntry,
-    SearchKeyEntry, SearchProviderListItem,
+    SearchKeyEntry, SearchProviderListItem, UserProfileListFile,
 };
 
 /// In-memory resource cache loaded at Gateway startup.
 ///
-/// Provider, MCP, and Search lists are versioned; keys are always delivered
-/// in full and are NOT stored here (built on-the-fly from Vault).
+/// Provider, MCP, Search, and User Profile lists are versioned; keys are
+/// always delivered in full and are NOT stored here (built on-the-fly from Vault).
 #[derive(Debug, Clone)]
 pub struct ResourceCache {
     pub provider_list: ProviderListFile,
     pub mcp_list: McpListFile,
     pub search_list: SearchListFile,
+    pub user_profile_list: UserProfileListFile,
 }
 
 /// Versioned provider list persisted to disk.
@@ -71,6 +72,10 @@ fn search_list_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("search_list.json")
 }
 
+fn user_profile_list_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("user_profiles.json")
+}
+
 // ── Loading ────────────────────────────────────────────────────────────
 
 /// Load the resource cache from disk at Gateway startup.
@@ -80,6 +85,7 @@ pub fn load_resource_cache(data_dir: &Path) -> ResourceCache {
     let provider_list = load_provider_list(data_dir);
     let mcp_list = load_mcp_list(data_dir);
     let search_list = load_search_list(data_dir);
+    let user_profile_list = load_user_profile_list(data_dir);
     tracing::info!(
         provider_count = provider_list.providers.len(),
         provider_version = provider_list.version,
@@ -87,12 +93,15 @@ pub fn load_resource_cache(data_dir: &Path) -> ResourceCache {
         mcp_version = mcp_list.version,
         search_count = search_list.providers.len(),
         search_version = search_list.version,
+        user_profile_count = user_profile_list.users.len(),
+        user_profile_version = user_profile_list.version,
         "Resource cache loaded"
     );
     ResourceCache {
         provider_list,
         mcp_list,
         search_list,
+        user_profile_list,
     }
 }
 
@@ -183,6 +192,35 @@ fn load_search_list(data_dir: &Path) -> SearchListFile {
     }
 }
 
+fn load_user_profile_list(data_dir: &Path) -> UserProfileListFile {
+    let path = user_profile_list_path(data_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to parse user_profiles.json, using empty list"
+                );
+                UserProfileListFile { version: 0, users: Vec::new() }
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("user_profiles.json not found, initializing empty");
+            UserProfileListFile { version: 0, users: Vec::new() }
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to read user_profiles.json, using empty list"
+            );
+            UserProfileListFile { version: 0, users: Vec::new() }
+        }
+    }
+}
+
 // ── Saving ─────────────────────────────────────────────────────────────
 
 /// Save the provider list to disk.
@@ -223,6 +261,20 @@ pub fn save_search_list(data_dir: &Path, list: &SearchListFile) -> Result<(), St
         version = list.version,
         count = list.providers.len(),
         "Search list saved"
+    );
+    Ok(())
+}
+
+/// Save the user profile list to disk.
+pub fn save_user_profile_list(data_dir: &Path, list: &UserProfileListFile) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(list)
+        .map_err(|e| format!("Failed to serialize user profile list: {}", e))?;
+    std::fs::write(user_profile_list_path(data_dir), &json)
+        .map_err(|e| format!("Failed to write user_profiles.json: {}", e))?;
+    tracing::info!(
+        version = list.version,
+        count = list.users.len(),
+        "User profile list saved"
     );
     Ok(())
 }
@@ -430,6 +482,23 @@ pub fn rebuild_and_save_search_cache(
     gw.resource_cache.search_list = new_list;
 }
 
+/// Rebuild user_profiles.json with a bumped version and save to disk.
+///
+/// Called by users_api.rs handlers after create/update/activate.
+/// The caller updates the users Vec before calling this function.
+pub fn rebuild_and_save_user_profile_cache(
+    gw: &mut crate::gateway::state::GatewayState,
+    data_dir: &Path,
+) {
+    let new_version = gw.resource_cache.user_profile_list.version.wrapping_add(1);
+    gw.resource_cache.user_profile_list.version = new_version;
+    let list = gw.resource_cache.user_profile_list.clone();
+
+    if let Err(e) = save_user_profile_list(data_dir, &list) {
+        tracing::error!(error = %e, "Failed to save user_profiles.json after profile change");
+    }
+}
+
 /// Build search key vault from Vault entries.
 ///
 /// Reads decrypted API keys from Vault for each configured search provider.
@@ -548,6 +617,7 @@ impl Default for ResourceCache {
             provider_list: ProviderListFile::default(),
             mcp_list: McpListFile::default(),
             search_list: SearchListFile::default(),
+            user_profile_list: UserProfileListFile { version: 0, users: Vec::new() },
         }
     }
 }

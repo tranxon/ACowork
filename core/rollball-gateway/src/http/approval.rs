@@ -29,7 +29,7 @@ pub struct ApprovalRequest {
 }
 
 /// Response body for the approval endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ApprovalResponse {
     pub request_id: String,
     pub action: String,

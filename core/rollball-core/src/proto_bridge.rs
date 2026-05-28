@@ -1,11 +1,10 @@
 //! Bridge conversions between domain types and generated proto types.
 //!
-//! Implements `From` traits so existing business logic (protocol.rs, budget.rs,
-//! identity.rs) can seamlessly convert to/from the tonic-generated proto types.
+//! Implements `From` traits so existing business logic (protocol.rs, budget.rs)
+//! can seamlessly convert to/from the tonic-generated proto types.
 //! This keeps the old JSON-based protocol intact while adding gRPC support.
 
 use crate::budget;
-use crate::identity;
 use crate::proto;
 use crate::protocol;
 
@@ -283,56 +282,6 @@ impl From<proto::CronEntryInfo> for protocol::CronEntryInfo {
     }
 }
 
-// ── IdentityEntry ↔ IdentityEntry ────────────────────────────────────────
-
-impl From<&identity::IdentityEntry> for proto::IdentityEntry {
-    fn from(e: &identity::IdentityEntry) -> Self {
-        Self {
-            field: e.field.clone(),
-            value: e.value.clone(),
-            confidence: e.confidence,
-            category: e.category.as_str().to_string(),
-            privacy: e.privacy.as_str().to_string(),
-            source: e.source.clone(),
-            updated_at: e.updated_at.clone(),
-        }
-    }
-}
-
-impl From<proto::IdentityEntry> for identity::IdentityEntry {
-    fn from(e: proto::IdentityEntry) -> Self {
-        Self {
-            field: e.field,
-            value: e.value,
-            confidence: e.confidence,
-            category: e.category.parse().unwrap_or(identity::IdentityCategory::Identity),
-            privacy: e.privacy.parse().unwrap_or(identity::PrivacyLevel::Personal),
-            source: e.source,
-            updated_at: e.updated_at,
-        }
-    }
-}
-
-// ── IdentityQueryResult ↔ IdentityQueryResult ────────────────────────────
-
-impl From<&identity::IdentityQueryResult> for proto::IdentityQueryResult {
-    fn from(r: &identity::IdentityQueryResult) -> Self {
-        Self {
-            values: r.values.clone(),
-            confidence: r.confidence.clone(),
-        }
-    }
-}
-
-impl From<proto::IdentityQueryResult> for identity::IdentityQueryResult {
-    fn from(r: proto::IdentityQueryResult) -> Self {
-        Self {
-            values: r.values,
-            confidence: r.confidence,
-        }
-    }
-}
-
 // ── BudgetInfo bridge (extracted from GatewayResponse::BudgetInfo) ───────
 
 /// Intermediate struct for BudgetInfo conversion.
@@ -397,11 +346,6 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                     proto::RateAcquireRequest { provider: provider.clone() },
                 ))
             }
-            protocol::GatewayRequest::IdentityQuery { fields } => {
-                Some(proto::client_message::Payload::IdentityQuery(
-                    proto::IdentityQueryRequest { fields: fields.clone() },
-                ))
-            }
             protocol::GatewayRequest::CapabilityQuery { agent_id } => {
                 Some(proto::client_message::Payload::CapabilityQuery(
                     proto::CapabilityQueryRequest {
@@ -450,6 +394,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 provider_list_version,
                 mcp_list_version,
                 search_list_version,
+                user_profile_version,
             } => {
                 Some(proto::client_message::Payload::AgentHello(
                     proto::AgentHelloRequest {
@@ -459,6 +404,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         provider_list_version: *provider_list_version,
                         mcp_list_version: *mcp_list_version,
                         search_list_version: *search_list_version,
+                        user_profile_version: *user_profile_version,
                     },
                 ))
             }
@@ -571,7 +517,8 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 search_list,
                 search_list_version,
                 search_key_vault,
-                identity_entries,
+                user_identity,
+                user_profile_version,
             } => {
                 let _ = (provider_list, provider_list_version, mcp_list, mcp_list_version);
                 // AgentHelloResult now carries structured resource lists with version-driven diff sync.
@@ -582,7 +529,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 let pkv_json = serde_json::to_string(&provider_key_vault).unwrap_or_default();
                 let mkv_json = serde_json::to_string(&mcp_key_vault).unwrap_or_default();
                 let skv_json = serde_json::to_string(&search_key_vault).unwrap_or_default();
-                let identity_json = serde_json::to_string(&identity_entries).unwrap_or_default();
+                let identity_json = serde_json::to_string(&user_identity).unwrap_or_default();
                 Some(proto::server_message::Payload::AgentHelloResult(
                     proto::AgentHelloResult {
                         success: *success,
@@ -596,7 +543,8 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         search_list_json: sl_json.unwrap_or_default(),
                         search_list_version: *search_list_version,
                         search_key_vault_json: skv_json,
-                        identity_entries_json: identity_json,
+                        user_identity_json: identity_json,
+                        user_profile_version: *user_profile_version,
                     },
                 ))
             }
@@ -652,13 +600,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     },
                 ))
             }
-            protocol::GatewayResponse::IdentityDelivery { entries } => {
-                Some(proto::server_message::Payload::IdentityDelivery(
-                    proto::IdentityDelivery {
-                        entries: entries.iter().map(|e| e.into()).collect(),
-                    },
-                ))
-            }
             protocol::GatewayResponse::LLMConfigDelivery {
                 provider,
                 model,
@@ -679,14 +620,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         model_capabilities: model_capabilities.as_ref().map(|m| m.into()),
                         max_output_tokens_limit: *max_output_tokens_limit,
                         protocol_type: format!("{:?}", protocol_type).to_lowercase(),
-                    },
-                ))
-            }
-            protocol::GatewayResponse::IdentityQueryResult { values, confidence } => {
-                Some(proto::server_message::Payload::IdentityQueryResult(
-                    proto::IdentityQueryResult {
-                        values: values.clone(),
-                        confidence: confidence.clone(),
                     },
                 ))
             }
@@ -871,6 +804,31 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     },
                 ))
             }
+            protocol::GatewayResponse::UserProfileUpdate {
+                user_identity,
+                version,
+            } => {
+                let ui = user_identity.as_ref().map(|u| proto::UserProfile {
+                    user_id: u.user_id.clone(),
+                    display_name: u.display_name.clone(),
+                    language: u.language.clone(),
+                    timezone: u.timezone.clone(),
+                    city: u.city.clone(),
+                    country: u.country.clone(),
+                    occupation: u.occupation.clone(),
+                    communication_style: u.communication_style.clone(),
+                    custom: u.custom.clone(),
+                    created_at: u.created_at.clone(),
+                    updated_at: u.updated_at.clone(),
+                    is_active: u.is_active,
+                });
+                Some(proto::server_message::Payload::UserProfileUpdate(
+                    proto::UserProfileUpdate {
+                        user_identity: ui,
+                        version: *version,
+                    },
+                ))
+            }
             // Unknown messages have no proto representation — they are
             // generated on the Runtime side when incoming proto messages
             // are malformed or unrecognized. Mapping them to UsageReportAck
@@ -941,28 +899,6 @@ mod tests {
         assert_eq!(restored.max_input_tokens, original.max_input_tokens);
         assert_eq!(restored.usable_context, original.usable_context);
         assert_eq!(restored.usage_percent, original.usage_percent);
-    }
-
-    #[test]
-    fn test_identity_entry_roundtrip() {
-        let original = identity::IdentityEntry {
-            field: "city".to_string(),
-            value: "Shanghai".to_string(),
-            confidence: 0.9,
-            category: identity::IdentityCategory::Identity,
-            privacy: identity::PrivacyLevel::Personal,
-            source: "user_input".to_string(),
-            updated_at: "2026-04-24T00:00:00Z".to_string(),
-        };
-
-        let proto_msg: proto::IdentityEntry = (&original).into();
-        let restored: identity::IdentityEntry = proto_msg.into();
-
-        assert_eq!(restored.field, original.field);
-        assert_eq!(restored.value, original.value);
-        assert!((restored.confidence - original.confidence).abs() < f32::EPSILON);
-        assert_eq!(restored.category, original.category);
-        assert_eq!(restored.privacy, original.privacy);
     }
 
     #[test]

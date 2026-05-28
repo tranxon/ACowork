@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
-import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
+import { fetchProviderModels, fetchProviders, createUser } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 import type { ModelInfo } from "../../lib/types";
 
@@ -41,10 +41,23 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
   }, []);
 
   const completeOnboarding = useCallback(() => {
+    // Persist user identity to Gateway if name was provided in Step 4.
+    // Fire-and-forget — don't block onboarding completion on API result.
+    if (state.name.trim()) {
+      createUser({
+        display_name: state.name.trim(),
+        language: state.language,
+        timezone: state.timezone,
+        city: state.city.trim() || undefined,
+        occupation: state.occupation.trim() || undefined,
+      }).catch((err) => {
+        console.warn("Failed to create user profile during onboarding:", err);
+      });
+    }
     localStorage.setItem("rollball_onboarding", "completed");
     setState((prev) => ({ ...prev, completed: true }));
     onComplete?.();
-  }, [onComplete]);
+  }, [onComplete, state.name, state.language, state.timezone, state.city, state.occupation]);
 
   const nextStep = () => setState((prev) => ({ ...prev, currentStep: Math.min(prev.currentStep + 1, TOTAL_STEPS) }));
   const prevStep = () => setState((prev) => ({ ...prev, currentStep: Math.max(prev.currentStep - 1, 1) }));

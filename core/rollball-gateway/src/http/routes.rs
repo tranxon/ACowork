@@ -10,7 +10,7 @@ use axum::{
     routing::get,
     Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -275,6 +275,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::question::question_routes())
         .merge(crate::http::documents::documents_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
+        .merge(crate::http::users_api::users_routes())
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
@@ -451,7 +452,7 @@ pub async fn system_status(
 // ── Error response helpers ────────────────────────────────────────────
 
 /// Standard API error response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
     pub code: u16,

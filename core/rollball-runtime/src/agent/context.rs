@@ -166,12 +166,20 @@ impl ContextBuilder {
 
     /// Set identity context in-place (for debug patching).
     pub fn set_identity_context(&mut self, identity: String) {
-        tracing::info!(
-            old_len = self.identity_context.as_ref().map(|s| s.len()).unwrap_or(0),
-            new_len = identity.len(),
-            "ContextBuilder identity context updated via debug patch"
-        );
-        self.identity_context = Some(identity);
+        if identity.is_empty() {
+            tracing::info!(
+                old_len = self.identity_context.as_ref().map(|s| s.len()).unwrap_or(0),
+                "ContextBuilder identity context cleared"
+            );
+            self.identity_context = None;
+        } else {
+            tracing::info!(
+                old_len = self.identity_context.as_ref().map(|s| s.len()).unwrap_or(0),
+                new_len = identity.len(),
+                "ContextBuilder identity context updated via debug patch"
+            );
+            self.identity_context = Some(identity);
+        }
     }
 
     /// Set skill instructions (for debug patching and runtime skill injection).

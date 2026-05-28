@@ -43,9 +43,9 @@ Tool Dispatcher
 | `glob_search` | 文件名模式搜索 | `filesystem:read:<path>` | 支持 glob 模式匹配，返回文件路径列表 |
 | `content_search` | 文件内容搜索 | `filesystem:read:<path>` | 类似 grep，支持正则表达式，返回匹配行及上下文 |
 | `intent_send` | 发送 Intent 到其他 Agent | `intent:send:<target>` | 通过 Gateway 路由 |
-| `identity_store` | 写入用户身份信息 | `identity:write` | 系统 Agent 专用，写入/更新用户身份字段（display_name/language/timezone/city 等），带 confidence 和 source 标记，触发 `identity:changed` 通知 |
-| `identity_query` | 查询用户身份信息 | `identity:read` | 查询指定身份字段的值和 confidence，Agent 通过 identity_deps 声明的字段可查询 |
-| `identity_observe` | 订阅身份变更通知 | `identity:observe` | 订阅指定身份字段的变更通知，字段变化时收到 identity:changed 回调 |
+| ~~`identity_store`~~ | ~~写入用户身份信息~~ | ~~`identity:write`~~ | **已删除** — 用户身份管理已迁移至 Gateway UserProfile，详见 `18-user-identity-simplified.md` |
+| ~~`identity_query`~~ | ~~查询用户身份信息~~ | ~~`identity:read`~~ | **已删除** — 用户身份管理已迁移至 Gateway UserProfile |
+| ~~`identity_observe`~~ | ~~订阅身份变更通知~~ | ~~`identity:observe`~~ | **已删除** — 用户身份管理已迁移至 Gateway UserProfile |
 
 ### 2.1 平台支持矩阵
 
@@ -63,9 +63,9 @@ Tool Dispatcher
 | `glob_search` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | 全平台，移动端受限 |
 | `content_search` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | 全平台，移动端受限 |
 | `intent_send` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台 |
-| `identity_store` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台，系统 Agent 专用 |
-| `identity_query` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台，identity_deps 声明的 Agent 可用 |
-| `identity_observe` | ✅ | ✅ | ✅ | ✅ | ✅ | 全平台，订阅身份变更通知 |
+| ~~`identity_store`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **已删除** |
+| ~~`identity_query`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **已删除** |
+| ~~`identity_observe`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **已删除** |
 
 > ✅ 完整支持 | ⚠️ 受限支持（行为降级） | ❌ 不可用
 

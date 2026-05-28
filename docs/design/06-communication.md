@@ -114,7 +114,7 @@ Agent Runtime 启动时通过参数接收 endpoint 字符串，内部根据 sche
         {
             "agent_id": "com.rollball.system",
             "running": true,
-            "capabilities": ["identity:query", "identity:observe"]
+            "capabilities": []
         },
         {
             "agent_id": "com.example.calendar",
@@ -413,6 +413,13 @@ struct IntentError {
 
 **异步 Intent**：
 
+> **⚠️ 已废弃** — 以下 identity:observe / identity:changed 示例已不再适用。
+> 用户身份管理已迁移至 Gateway UserProfile，通过 UserProfileUpdate 推送。
+> 详见 `18-user-identity-simplified.md`。
+
+<details>
+<summary>历史 identity Intent 示例（点击展开）</summary>
+
 ```json
 // 请求
 {
@@ -443,7 +450,9 @@ struct IntentError {
 }
 ```
 
-**observe 模式（ContentProvider）**：
+</details>
+
+
 
 ```json
 // 订阅请求
@@ -580,7 +589,7 @@ Agent Runtime 握手时，Gateway 主动推送当前已安装的所有 Agent 及
         {
             "agent_id": "com.rollball.system",
             "running": true,
-            "capabilities": ["identity:query", "identity:observe"]
+            "capabilities": []
         },
         {
             "agent_id": "com.example.calendar",

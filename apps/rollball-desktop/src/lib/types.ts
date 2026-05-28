@@ -610,6 +610,54 @@ export interface UserProfile {
   avatarColors: string[];
 }
 
+// ── Backend User Profile (Gateway /api/users) ─────────────────────────
+
+/** Backend UserProfile — matches rollball_core::protocol::UserProfile */
+export interface BackendUserProfile {
+  user_id: string;
+  display_name: string;
+  language: string;
+  timezone: string;
+  city?: string;
+  country?: string;
+  occupation?: string;
+  communication_style?: string;
+  custom?: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+  is_active: boolean;
+}
+
+/** Response from GET /api/users */
+export interface UserProfileListResponse {
+  version: number;
+  users: BackendUserProfile[];
+}
+
+/** Request body for POST /api/users */
+export interface CreateUserRequest {
+  display_name: string;
+  language: string;
+  timezone: string;
+  city?: string;
+  country?: string;
+  occupation?: string;
+  communication_style?: string;
+  custom?: Record<string, string>;
+}
+
+/** Request body for PUT /api/users/{user_id} */
+export interface UpdateUserRequest {
+  display_name?: string;
+  language?: string;
+  timezone?: string;
+  city?: string;
+  country?: string;
+  occupation?: string;
+  communication_style?: string;
+  custom?: Record<string, string>;
+}
+
 // ── MCP types ────────────────────────────────────────────────────────
 
 /** MCP transport type — matches McpTransportDef in rollball_core::protocol */

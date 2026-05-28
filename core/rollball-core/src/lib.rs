@@ -18,7 +18,6 @@ pub mod manifest;
 pub mod protocol;
 pub mod intent;
 pub mod permission;
-pub mod identity;
 pub mod budget;
 pub mod tools;
 pub mod providers;
@@ -34,7 +33,6 @@ pub use protocol::{GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, Model
 
 pub use intent::Intent;
 pub use permission::{Permission, ShellApprovalThreshold};
-pub use identity::{Identity, IdentityCategory, IdentityEntry, IdentityQueryResult, IdentityStore, IdentitySubscription, PrivacyLevel};
 pub use budget::{Budget, UsageReport};
 pub use tools::{Tool, ToolSpec, ToolResult};
 pub use providers::{Provider, ChatMessage, ChatRequest, ChatResponse, ContentPart, ImageUrlPart, StreamEvent, ProviderError, ProviderErrorType};

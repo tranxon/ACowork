@@ -70,7 +70,7 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
 
             {/* Code content — div directly fills the expanded area, no nested pre */}
             {!collapsed && (
-                <div className="overflow-x-auto whitespace-pre-wrap bg-zinc-200/40 p-3 font-mono text-sm leading-relaxed text-zinc-500 dark:bg-zinc-900/60 dark:text-zinc-400">
+                <div className="overflow-x-auto whitespace-pre-wrap bg-zinc-200/40 p-3 font-mono leading-relaxed text-zinc-500 dark:bg-zinc-900/60 dark:text-zinc-400" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}>
                     {code}
                 </div>
             )}

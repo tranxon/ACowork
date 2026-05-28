@@ -821,6 +821,29 @@ impl SessionManager {
         });
     }
 
+    /// Update user identity from Gateway UserProfileUpdate push.
+    ///
+    /// Formats the `UserProfile` into an `identity_context` text block
+    /// and broadcasts it to all active sessions via their ContextBuilder.
+    pub fn update_user_identity(
+        &mut self,
+        profile: Option<rollball_core::protocol::UserProfile>,
+    ) {
+        let identity_context = profile.as_ref().map(|p| format_user_profile_context(p));
+        tracing::info!(
+            has_profile = profile.is_some(),
+            ctx_len = identity_context.as_ref().map(|s| s.len()).unwrap_or(0),
+            "SessionManager: updating user identity"
+        );
+        self.config.identity_context = identity_context.clone();
+        // Broadcast updated identity to all active sessions
+        for (_sid, handle) in &self.sessions {
+            let _ = handle.send(SessionMessage::UpdateIdentityContext {
+                identity_context: identity_context.clone(),
+            });
+        }
+    }
+
     /// Get the current cached search config, if any.
     pub(crate) fn search_config(&self) -> Option<&CachedSearchConfig> {
         self.cached_search_config.as_ref()
@@ -1084,6 +1107,39 @@ impl SessionManager {
     pub fn pending_workspace_id(&self, session_id: &str) -> Option<&str> {
         self.pending_workspaces.get(session_id).map(|s| s.as_str())
     }
+}
+
+/// Format a `UserProfile` into an identity context text block for the LLM system prompt.
+///
+/// Produces a human-readable summary like:
+///   - Display Name: Alice
+///   - Language: zh-CN
+///   - Timezone: Asia/Shanghai
+///   - City: Shanghai
+///   - Country: CN
+///   - Occupation: Software Engineer
+///   - Communication Style: concise
+pub(crate) fn format_user_profile_context(profile: &rollball_core::protocol::UserProfile) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("- Display Name: {}", profile.display_name));
+    lines.push(format!("- Language: {}", profile.language));
+    lines.push(format!("- Timezone: {}", profile.timezone));
+    if let Some(ref city) = profile.city {
+        lines.push(format!("- City: {}", city));
+    }
+    if let Some(ref country) = profile.country {
+        lines.push(format!("- Country: {}", country));
+    }
+    if let Some(ref occupation) = profile.occupation {
+        lines.push(format!("- Occupation: {}", occupation));
+    }
+    if let Some(ref style) = profile.communication_style {
+        lines.push(format!("- Communication Style: {}", style));
+    }
+    for (key, value) in &profile.custom {
+        lines.push(format!("- {}: {}", key, value));
+    }
+    lines.join("\n")
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

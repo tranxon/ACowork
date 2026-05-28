@@ -15,7 +15,6 @@ message ClientMessage {
     BudgetQueryRequest      budget_query          = 4;
     UsageReportRequest      usage_report          = 5;
     RateAcquireRequest      rate_acquire          = 6;
-    IdentityQueryRequest    identity_query        = 8;
     CapabilityQueryRequest  capability_query      = 9;
     CronRegisterRequest     cron_register         = 10;
     CronUnregisterRequest   cron_unregister       = 11;
@@ -49,7 +48,6 @@ message ServerMessage {
     UsageReportAck          usage_report_ack      = 6;
     ContextUsageAck         context_usage_ack     = 7;
     RateToken               rate_token            = 8;
-    IdentityQueryResult     identity_query_result = 10;
     CapabilityOverview      capability_overview   = 11;
     CronRegisterResult      cron_register_result  = 12;
     CronUnregisterResult    cron_unregister_result = 13;
@@ -62,7 +60,7 @@ message ServerMessage {
     IntentReceived          intent_received       = 19;
     CapabilityUpdate        capability_update     = 20;
     LLMConfigDelivery       llm_config_delivery   = 21;
-    IdentityDelivery        identity_delivery     = 22;
+    // Field 22: reserved (was IdentityDelivery)
     // Field 23: reserved (was WorkspaceContextUpdate)
     IterationLimitPaused    iteration_limit_paused = 24;
     LogLevelUpdate          log_level_update     = 25;
@@ -77,7 +75,30 @@ message ServerMessage {
     SetSessionWorkspace     set_session_workspace  = 35;
     SearchConfigDelivery    search_config_delivery = 36;
     UpdateSearchConfig      update_search_config = 37;
+    UserProfileUpdate       user_profile_update  = 38;
   }
+}
+
+// ── User Identity ──
+
+message UserProfile {
+  string user_id = 1;
+  string display_name = 2;
+  string language = 3;
+  string timezone = 4;
+  optional string city = 5;
+  optional string country = 6;
+  optional string occupation = 7;
+  optional string communication_style = 8;
+  map<string, string> custom = 9;
+  string created_at = 10;
+  string updated_at = 11;
+  bool is_active = 12;
+}
+
+message UserProfileUpdate {
+  UserProfile user_identity = 1;
+  uint64 version = 2;
 }
 
 message KeyReleaseRequest       { string provider = 1; }
@@ -85,7 +106,6 @@ message IntentSendRequest       { string target = 1; string action = 2; string p
 message BudgetQueryRequest      { string provider = 1; }
 message UsageReportRequest      { string agent_id = 1; string provider = 2; uint64 tokens_used = 3; double cost_usd = 4; string timestamp = 5; string error = 6; }
 message RateAcquireRequest      { string provider = 1; }
-message IdentityQueryRequest    { repeated string fields = 1; }
 message CapabilityQueryRequest  { string agent_id = 1; }
 message CronRegisterRequest     { string agent_id = 1; string schedule = 2; string action = 3; string params_json = 4; }
 message CronUnregisterRequest   { string cron_id = 1; }
@@ -98,6 +118,7 @@ message AgentHelloRequest       {
   uint64 provider_list_version = 4;
   uint64 mcp_list_version = 5;
   uint64 search_list_version = 6;
+  uint64 user_profile_version = 7;
 }
 message ListSessionsRequest     {}
 message GetSessionMessagesRequest { string session_id = 1; string cursor = 2; uint32 limit = 3; string direction = 4; }
@@ -130,10 +151,12 @@ message AgentHelloResult {
   // Search key vault (JSON-serialized Vec<SearchKeyEntry>), always full delivery.
   string search_key_vault_json = 29;
 
-  // ── Identity (ADR-009: delivered via IPC, not workspace files) ──
-  // Identity entries as JSON-serialized Vec<IdentityEntry>.
-  string identity_entries_json = 30;
-
+  // ── User Identity (version-driven diff sync) ──
+  // Active user profile, only when Runtime's cached version is stale.
+  // JSON-serialized UserProfile.
+  string user_identity_json = 31;
+  uint64 user_profile_version = 32;
+  
   // Fields 3-10: removed (was provider, model, api_key, base_url, models,
   //   model_capabilities, max_output_tokens_limit, protocol_type).
   // Fields 11-18: reserved (was workspace_context_*, runtime_* overrides).
@@ -145,7 +168,6 @@ message BudgetInfo              { uint64 remaining_tokens = 1; double remaining_
 message UsageReportAck          {}
 message ContextUsageAck         {}
 message RateToken               { bool granted = 1; uint64 retry_after_ms = 2; }
-message IdentityQueryResult     { map<string, string> values = 1; map<string, float> confidence = 2; }
 message CapabilityOverview      { map<string, StringList> capabilities = 1; }
 message StringList              { repeated string items = 1; }
 message CronRegisterResult      { string cron_id = 1; string error = 2; }
@@ -182,7 +204,6 @@ message IntentReceived          { string from = 1; string action = 2; string par
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }
 message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; string protocol_type = 8; }
 message SearchConfigDelivery   { string search_list_json = 1; uint64 search_list_version = 2; string search_key_vault_json = 3; }
-message IdentityDelivery        { repeated IdentityEntry entries = 1; }
 message WorkspaceConfigUpdate   { string config_json = 1; }
 message SetSessionWorkspace     { string session_id = 1; string workspace_id = 2; }
 message UpdateWorkspaceConfig   { string config_json = 1; }
@@ -216,7 +237,6 @@ message ModelCostInfo           { double input_per_million = 1; double output_pe
 message ModelModalities         { repeated string input = 1; repeated string output = 2; }
 message ModelCapabilitiesInfo   { uint64 context_window = 1; uint64 max_output_tokens = 2; uint64 max_input_tokens = 3; bool supports_tool_calling = 4; bool supports_reasoning = 5; bool supports_attachment = 6; bool supports_temperature = 7; ModelCostInfo cost = 8; ModelModalities modalities = 9; string name = 10; string family = 11; string knowledge_cutoff = 12; }
 message ContextUsageInfo        { uint64 context_window = 1; uint64 input_tokens = 2; uint64 output_tokens = 3; uint64 total_tokens = 4; uint64 max_input_tokens = 5; uint64 usable_context = 6; uint32 usage_percent = 7; }
-message IdentityEntry           { string field = 1; string value = 2; float confidence = 3; string category = 4; string privacy = 5; string source = 6; string updated_at = 7; }
 message CronEntryInfo           { string id = 1; string agent_id = 2; string schedule = 3; string action = 4; string params_json = 5; }
 message SessionInfoDto          { string session_id = 1; string created_at = 2; uint32 message_count = 3; string title = 4; bool corrupted = 5; string status_json = 6; string workspace_id = 7; }
 message ConversationEntryDto    { string id = 1; string ts = 2; string role = 3; string content = 4; string metadata_json = 5; }

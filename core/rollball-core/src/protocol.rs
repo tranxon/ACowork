@@ -8,7 +8,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::budget::UsageReport;
-pub use crate::identity::IdentityEntry;
 
 /// Default connection role for backward compatibility
 fn default_connection_role() -> String {
@@ -251,6 +250,59 @@ pub struct AgentSearchConfig {
     pub providers: Vec<AgentSearchProvider>,
 }
 
+/// ── User Identity types ──
+
+/// A single user's identity profile.
+///
+/// Persisted in `user_profiles.json` in Gateway's data directory.
+/// Each profile is keyed by a UUID `user_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserProfile {
+    /// Unique user identifier (UUID v4)
+    pub user_id: String,
+    /// Display name — what the user wants to be called
+    pub display_name: String,
+    /// Preferred language (BCP 47, e.g. "zh-CN", "en-US")
+    pub language: String,
+    /// Timezone (IANA, e.g. "Asia/Shanghai", "UTC")
+    pub timezone: String,
+    /// City (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    /// Country (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// Occupation / domain (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupation: Option<String>,
+    /// Communication style preference (optional)
+    /// e.g. "concise", "detailed", "casual"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub communication_style: Option<String>,
+    /// Free-form extension fields (optional)
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub custom: HashMap<String, String>,
+    /// When this profile was created (ISO 8601)
+    pub created_at: String,
+    /// When this profile was last updated (ISO 8601)
+    pub updated_at: String,
+    /// Whether this user is currently the active / online user.
+    /// Only the active user's profile is pushed to Runtime.
+    #[serde(default)]
+    pub is_active: bool,
+}
+
+/// Versioned user profile list persisted to disk.
+///
+/// Follows the same pattern as ProviderListFile, McpListFile, SearchListFile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserProfileListFile {
+    /// Monotonic version counter — bumped on every create/update/delete
+    pub version: u64,
+    /// All known user profiles (historical + current)
+    pub users: Vec<UserProfile>,
+}
+
 /// Context usage info reported by Runtime to Gateway after each LLM call.
 /// Forwarded to Desktop App via WebSocket for UI display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,8 +376,6 @@ pub enum GatewayRequest {
     UsageReport(UsageReport),
     /// Acquire a rate limit token
     RateAcquire { provider: String },
-    /// Query identity fields from System Agent
-    IdentityQuery { fields: Vec<String> },
     /// Query capabilities for a specific agent or all agents
     CapabilityQuery {
         /// Optional agent ID filter (None = all agents)
@@ -391,6 +441,9 @@ pub enum GatewayRequest {
         /// Runtime's cached search provider list version (0 = never synced)
         #[serde(default)]
         search_list_version: u64,
+        /// Runtime's cached user profile version (0 = never synced)
+        #[serde(default)]
+        user_profile_version: u64,
     },
     /// List sessions request (S1.14)
     ///
@@ -539,11 +592,14 @@ pub enum GatewayResponse {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         search_key_vault: Vec<SearchKeyEntry>,
 
-        // ── Identity (retained from previous protocol) ──
-        /// Previously written to .identity_delivery.json in workspace;
-        /// now delivered via IPC to avoid Gateway writing to agent workspace.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        identity_entries: Vec<IdentityEntry>,
+        // ── User Identity ──
+        /// Active user profile. Only included when user_profile_version in
+        /// AgentHello request is stale. None when no active user exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_identity: Option<UserProfile>,
+        /// Gateway's current user profile list version
+        #[serde(default)]
+        user_profile_version: u64,
     },
     /// API key release result
     KeyReleaseResult {
@@ -578,11 +634,6 @@ pub enum GatewayResponse {
     RateToken {
         granted: bool,
         retry_after_ms: Option<u64>,
-    },
-    /// Identity delivery (Gateway → Runtime, cold-start injection)
-    IdentityDelivery {
-        /// List of identity entries from System Agent
-        entries: Vec<IdentityEntry>,
     },
     /// LLM configuration delivery (Gateway → Runtime, handshake)
     ///
@@ -633,12 +684,15 @@ pub enum GatewayResponse {
         /// Search provider API keys — NEVER persisted to workspace disk by Runtime
         search_key_vault: Vec<SearchKeyEntry>,
     },
-    /// Identity query result from System Agent
-    IdentityQueryResult {
-        /// Field values
-        values: std::collections::HashMap<String, String>,
-        /// Confidence scores per field
-        confidence: std::collections::HashMap<String, f32>,
+    /// User profile update (Gateway → Runtime, hot push)
+    ///
+    /// Pushed to all running agents when the user profile is created,
+    /// updated, or when the active user is switched.
+    UserProfileUpdate {
+        /// Updated active user profile (None = no active user)
+        user_identity: Option<UserProfile>,
+        /// New version
+        version: u64,
     },
     /// Capability overview (handshake step ⑤ and CapabilityQuery response)
     CapabilityOverview {

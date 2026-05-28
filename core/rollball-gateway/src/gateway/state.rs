@@ -34,8 +34,6 @@ pub struct RunningAgentInfo {
     pub dev_mode: bool,
     /// Debug WebSocket port (set when dev_mode is true)
     pub debug_port: Option<u16>,
-    /// Identity entries for cold-start injection (ADR-009: delivered via IPC, not file)
-    pub identity_entries: Vec<rollball_core::protocol::IdentityEntry>,
     /// In-memory cache of the agent's workspace config JSON (ADR-009: pass-through).
     /// Populated by Runtime via UpdateWorkspaceConfig IPC after AgentHello.
     /// Cleared when agent disconnects. NOT persisted to disk.
@@ -253,7 +251,6 @@ mod tests {
             ready: false,
             dev_mode: false,
             debug_port: None,
-            identity_entries: vec![],
             workspace_config_json: None,
         });
         assert!(state.is_running("com.example.weather"));

@@ -335,39 +335,6 @@ pub async fn handle_rate_acquire(provider: &str, state: &SharedState) -> Gateway
     }
 }
 
-/// Handle IdentityQuery request from Runtime.
-///
-/// S3.3/S3.4: Queries the System Agent for identity fields.
-/// In Phase 2, this returns an empty result — actual query requires
-/// the System Agent to be running and accessible via IPC.
-pub async fn handle_identity_query(
-    fields: &[String],
-    conn_id: &str,
-    session_mgr: &SharedSessionMgr,
-) -> GatewayResponse {
-    let agent_id = {
-        let mgr = session_mgr.lock().await;
-        mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
-    };
-
-    tracing::info!(
-        "IdentityQuery from agent={:?}, fields={:?}",
-        agent_id,
-        fields
-    );
-
-    // Phase 2: Return empty result.
-    // When System Agent IPC is fully connected, this will:
-    // 1. Forward the query to the System Agent via Intent
-    // 2. Wait for the response
-    // 3. Apply PrivacyLevel filtering based on requester
-    // 4. Return the filtered result
-    GatewayResponse::IdentityQueryResult {
-        values: std::collections::HashMap::new(),
-        confidence: std::collections::HashMap::new(),
-    }
-}
-
 /// Handle CapabilityQuery request from Runtime.
 ///
 /// S4.2.4: Returns the capability registry for the requested agent
@@ -578,13 +545,14 @@ pub async fn handle_agent_hello(
     provider_list_version: u64,
     mcp_list_version: u64,
     search_list_version: u64,
+    user_profile_version: u64,
     conn_id: &str,
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
     tracing::info!(
-        "AgentHello received: agent_id={} version={} conn={} role={} prov_ver={} mcp_ver={}",
-        agent_id, version, conn_id, connection_role, provider_list_version, mcp_list_version
+        "AgentHello received: agent_id={} version={} conn={} role={} prov_ver={} mcp_ver={} user_ver={}",
+        agent_id, version, conn_id, connection_role, provider_list_version, mcp_list_version, user_profile_version
     );
 
     let mut mgr = session_mgr.lock().await;
@@ -660,12 +628,14 @@ pub async fn handle_agent_hello(
 
         drop(gw);
 
-        // ADR-009: Get identity entries from RunningAgentInfo (stored at start_agent time)
-        let identity_entries = {
+        // ── User identity (version-driven diff sync) ──
+        let (user_identity, gw_user_version) = {
             let gw = state.read().await;
-            gw.running_agents.get(agent_id)
-                .map(|info| info.identity_entries.clone())
-                .unwrap_or_default()
+            let active_user = gw.resource_cache.user_profile_list.users
+                .iter()
+                .find(|u| u.is_active)
+                .cloned();
+            (active_user, gw.resource_cache.user_profile_list.version)
         };
 
         GatewayResponse::AgentHelloResult {
@@ -680,7 +650,8 @@ pub async fn handle_agent_hello(
             search_list,
             search_list_version: gw_search_version,
             search_key_vault,
-            identity_entries,
+            user_identity,
+            user_profile_version: gw_user_version,
         }
     } else {
         tracing::warn!("AgentHello from unknown connection {}", conn_id);
@@ -696,7 +667,8 @@ pub async fn handle_agent_hello(
             search_list: None,
             search_list_version: 0,
             search_key_vault: vec![],
-            identity_entries: vec![],
+            user_identity: None,
+            user_profile_version: 0,
         }
     }
 }
@@ -1047,7 +1019,6 @@ mod tests {
                 ready: false,
                 dev_mode: false,
                 debug_port: None,
-                identity_entries: vec![],
                 workspace_config_json: None,
             });
         }

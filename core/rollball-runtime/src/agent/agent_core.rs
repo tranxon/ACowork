@@ -480,6 +480,16 @@ impl AgentCore {
         &self.shell_approval_threshold
     }
 
+    /// Set the user display name from Gateway identity delivery.
+    pub fn set_user_display_name(&mut self, name: Option<String>) {
+        tracing::info!(
+            old = ?self.user_display_name,
+            new = ?name,
+            "AgentCore user_display_name updated"
+        );
+        self.user_display_name = name;
+    }
+
     /// Get the usable context budget for history trimming.
     /// Uses Gateway model capabilities if available: subtracts max_output_tokens
     /// (capped at 20K) from context_window, consistent with compute_context_usage().

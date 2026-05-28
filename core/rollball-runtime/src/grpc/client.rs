@@ -48,6 +48,10 @@ pub struct AgentHelloConfig {
     pub search_list_version: u64,
     pub search_key_vault: Vec<rollball_core::protocol::SearchKeyEntry>,
 
+    // ── User identity (version-driven diff sync) ──
+    pub user_identity: Option<rollball_core::protocol::UserProfile>,
+    pub user_profile_version: u64,
+
     // ── Runtime Config Overrides (removed Phase 5) ──
     // Per-agent config is now loaded from workspace/config/agent_config.json.
     // AgentHelloResult no longer carries runtime_* fields.
@@ -256,8 +260,9 @@ impl GatewayGrpcClient {
         cached_provider_version: u64,
         cached_mcp_version: u64,
         cached_search_version: u64,
+        cached_user_profile_version: u64,
     ) -> Result<(Self, AgentHelloConfig), RollballError> {
-        Self::connect_and_register_with_role(endpoint, agent_id, version, "main", cached_provider_version, cached_mcp_version, cached_search_version).await
+        Self::connect_and_register_with_role(endpoint, agent_id, version, "main", cached_provider_version, cached_mcp_version, cached_search_version, cached_user_profile_version).await
     }
 
     /// Convenience: connect with a specific connection role and send AgentHello.
@@ -271,10 +276,11 @@ impl GatewayGrpcClient {
         cached_provider_version: u64,
         cached_mcp_version: u64,
         cached_search_version: u64,
+        cached_user_profile_version: u64,
     ) -> Result<(Self, AgentHelloConfig), RollballError> {
         let client = Self::connect(endpoint).await?;
         let config = client
-            .send_agent_hello(agent_id, version, connection_role, cached_provider_version, cached_mcp_version, cached_search_version)
+            .send_agent_hello(agent_id, version, connection_role, cached_provider_version, cached_mcp_version, cached_search_version, cached_user_profile_version)
             .await?;
         Ok((client, config))
     }
@@ -304,7 +310,7 @@ impl GatewayGrpcClient {
         // On reconnect, request full resource sync (versions = 0) since
         // in-memory state was lost. Resource cache file versions are
         // reloaded by the caller when the Runtime restarts.
-        let _config = self.send_agent_hello(agent_id, version, "main", 0, 0, 0).await?;
+        let _config = self.send_agent_hello(agent_id, version, "main", 0, 0, 0, 0).await?;
         self.flush_pending_reports().await?;
         Ok(())
     }
@@ -428,6 +434,7 @@ impl GatewayGrpcClient {
         cached_provider_version: u64,
         cached_mcp_version: u64,
         cached_search_version: u64,
+        cached_user_profile_version: u64,
     ) -> Result<AgentHelloConfig, RollballError> {
         let request = GatewayRequest::AgentHello {
             agent_id: agent_id.to_string(),
@@ -436,6 +443,7 @@ impl GatewayGrpcClient {
             provider_list_version: cached_provider_version,
             mcp_list_version: cached_mcp_version,
             search_list_version: cached_search_version,
+            user_profile_version: cached_user_profile_version,
         };
 
         let resp = self.send_gateway_request(request).await?;
@@ -450,6 +458,12 @@ impl GatewayGrpcClient {
                     }
                     tracing::info!(agent_id = %agent_id, "Gateway registered agent via gRPC");
 
+                    let user_identity: Option<rollball_core::protocol::UserProfile> =
+                        if result.user_identity_json.is_empty() {
+                            None
+                        } else {
+                            serde_json::from_str(&result.user_identity_json).ok()
+                        };
                     let config = AgentHelloConfig {
                         provider_list: if result.provider_list_json.is_empty() {
                             None
@@ -484,6 +498,8 @@ impl GatewayGrpcClient {
                         } else {
                             serde_json::from_str(&result.search_key_vault_json).unwrap_or_default()
                         },
+                        user_identity,
+                        user_profile_version: result.user_profile_version,
                     };
                     Ok(config)
                 } else {
@@ -757,28 +773,6 @@ impl GatewayGrpcClient {
         }
     }
 
-    /// Query identity fields from the Gateway.
-    pub async fn query_identity(
-        &self,
-        fields: &[String],
-    ) -> Result<rollball_core::identity::IdentityQueryResult, RollballError> {
-        let request = GatewayRequest::IdentityQuery {
-            fields: fields.to_vec(),
-        };
-
-        let resp = self.send_gateway_request(request).await?;
-        match resp.payload {
-            Some(ServerPayload::IdentityQueryResult(result)) => Ok(result.into()),
-            Some(other) => Err(RollballError::Ipc(format!(
-                "Unexpected response: {:?}",
-                other
-            ))),
-            None => Err(RollballError::Ipc(
-                "Empty response payload".to_string(),
-            )),
-        }
-    }
-
     /// Register a cron job with the Gateway.
     ///
     /// Returns `Ok(cron_id)` on success, `Err(error_message)` on failure.
@@ -1011,9 +1005,6 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 _ => ProtocolType::OpenAI,
             },
         },
-        Some(ServerPayload::IdentityDelivery(id)) => GatewayResponse::IdentityDelivery {
-            entries: id.entries.into_iter().map(|e| e.into()).collect(),
-        },
         Some(ServerPayload::WorkspaceConfigUpdate(wcu)) => {
             GatewayResponse::WorkspaceConfigUpdate {
                 config_json: wcu.config_json,
@@ -1137,7 +1128,8 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 search_list,
                 search_list_version: r.search_list_version,
                 search_key_vault,
-                identity_entries: vec![],
+                user_identity: None,
+                user_profile_version: r.user_profile_version,
             }
         },
         Some(ServerPayload::KeyReleaseResult(r)) => GatewayResponse::KeyReleaseResult {
@@ -1168,10 +1160,6 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             } else {
                 Some(r.retry_after_ms)
             },
-        },
-        Some(ServerPayload::IdentityQueryResult(r)) => GatewayResponse::IdentityQueryResult {
-            values: r.values,
-            confidence: r.confidence,
         },
         Some(ServerPayload::CapabilityOverview(r)) => GatewayResponse::CapabilityOverview {
             capabilities: r
@@ -1232,6 +1220,27 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             log_level: lu.log_level,
         },
         Some(ServerPayload::LogRotate(_)) => GatewayResponse::LogRotate,
+
+        Some(ServerPayload::UserProfileUpdate(update)) => {
+            let user_identity = update.user_identity.map(|u| rollball_core::protocol::UserProfile {
+                user_id: u.user_id,
+                display_name: u.display_name,
+                language: u.language,
+                timezone: u.timezone,
+                city: u.city,
+                country: u.country,
+                occupation: u.occupation,
+                communication_style: u.communication_style,
+                custom: u.custom,
+                created_at: u.created_at,
+                updated_at: u.updated_at,
+                is_active: u.is_active,
+            });
+            GatewayResponse::UserProfileUpdate {
+                user_identity,
+                version: update.version,
+            }
+        }
 
         None => {
             tracing::warn!("Received ServerMessage with empty payload");

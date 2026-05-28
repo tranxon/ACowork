@@ -13,6 +13,7 @@ pub mod question;
 pub mod documents;
 pub mod chat;
 pub mod vault_api;
+pub mod users_api;
 pub mod config_api;
 pub mod cron_api;
 pub mod models_api;

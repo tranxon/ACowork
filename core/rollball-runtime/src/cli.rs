@@ -194,6 +194,8 @@ struct RuntimeResourceCache {
     mcp_list_version: u64,
     #[serde(default)]
     search_list_version: u64,
+    #[serde(default)]
+    user_profile_version: u64,
     /// Cached provider list (without api keys — keys come from vault).
     /// None when no cache exists yet (first start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,10 +268,11 @@ async fn connect_gateway_client(
     // Read locally-cached resource versions for diff sync.
     let work_dir_path = std::path::Path::new(work_dir);
     let resource_cache = read_resource_cache(work_dir_path);
-    let (cached_prov_ver, cached_mcp_ver, cached_search_ver) = (
+    let (cached_prov_ver, cached_mcp_ver, cached_search_ver, cached_user_profile_ver) = (
         resource_cache.provider_list_version,
         resource_cache.mcp_list_version,
         resource_cache.search_list_version,
+        resource_cache.user_profile_version,
     );
     match crate::grpc::client::GatewayGrpcClient::connect_and_register(
         endpoint,
@@ -278,6 +281,7 @@ async fn connect_gateway_client(
         cached_prov_ver,
         cached_mcp_ver,
         cached_search_ver,
+        cached_user_profile_ver,
     )
     .await
     {
@@ -381,6 +385,7 @@ async fn async_main(
                 provider_list_version: prov_ver,
                 mcp_list_version: mcp_ver,
                 search_list_version: search_ver,
+                user_profile_version: cfg.user_profile_version,
                 providers: prov_list.or(old_cache.providers),
                 mcps: mcp_list_data.or(old_cache.mcps),
             };
@@ -623,41 +628,17 @@ async fn async_main(
         "Tool specs: active vs full registry"
     );
 
-    // Step 6: Build context builder (with identity injection from Gateway)
-    let identity_entries = load_identity_entries(&config.work_dir);
-    let user_display_name = identity_entries.as_ref().and_then(|entries| {
-        entries
-            .iter()
-            .find(|e| e.field == "display_name")
-            .and_then(|e| {
-                if e.value.is_empty() {
-                    None
-                } else {
-                    Some(e.value.clone())
-                }
-            })
-    });
-    let identity_context = identity_entries.as_ref().map(|entries| {
-        if entries.is_empty() {
-            return "".to_string();
-        }
-
-        let mut formatted = String::from("User identity information:\n");
-        for entry in entries {
-            if !entry.value.is_empty() {
-                formatted.push_str(&format!(
-                    "- {}: {} (confidence: {}%%)\n",
-                    entry.field,
-                    entry.value,
-                    (entry.confidence * 100.0) as u32
-                ));
-            } else {
-                formatted.push_str(&format!("- {}: (not yet provided)\n", entry.field));
-            }
-        }
-
-        formatted
-    });
+    // Step 6: Build context builder
+    // User identity is delivered via AgentHelloResult (Gateway IPC),
+    // formatted from the active UserProfile. Falls back to None in standalone mode.
+    let user_display_name: Option<String> = hello_config
+        .as_ref()
+        .and_then(|cfg| cfg.user_identity.as_ref())
+        .map(|u| u.display_name.clone());
+    let identity_context: Option<String> = hello_config
+        .as_ref()
+        .and_then(|cfg| cfg.user_identity.as_ref())
+        .map(|u| crate::agent::session::session_manager::format_user_profile_context(u));
 
     // Clone tool_definitions and identity_context for SessionManagerConfig
     // (Gateway mode) before they are moved into the standalone ContextBuilder.
@@ -1317,48 +1298,6 @@ async fn async_main(
 
         agent_loop.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
         run_chat_loop(&mut agent_loop, &mut context_builder).await
-    }
-}
-
-/// Load identity delivery from the Gateway-injected `.identity_delivery.json`
-/// in the agent workspace.
-///
-/// When Gateway spawns an Agent, it writes identity entries to this file
-/// based on the agent's `identity_deps` manifest declaration.
-/// The Runtime reads this file during cold start and formats it for
-/// System Prompt injection.
-fn load_identity_entries(work_dir: &str) -> Option<Vec<rollball_core::identity::IdentityEntry>> {
-    let identity_path = std::path::Path::new(work_dir).join(".identity_delivery.json");
-    if !identity_path.exists() {
-        return None;
-    }
-
-    match std::fs::read_to_string(&identity_path) {
-        Ok(content) => {
-            match serde_json::from_str::<Vec<rollball_core::identity::IdentityEntry>>(&content) {
-                Ok(entries) => {
-                    if entries.is_empty() {
-                        return None;
-                    }
-
-                    tracing::info!(
-                        entries = entries.len(),
-                        "Identity delivery loaded from workspace"
-                    );
-                    Some(entries)
-                }
-
-                Err(e) => {
-                    tracing::warn!("Failed to parse identity delivery: {}", e);
-                    None
-                }
-            }
-        }
-
-        Err(e) => {
-            tracing::warn!("Failed to read identity delivery: {}", e);
-            None
-        }
     }
 }
 
@@ -2367,6 +2306,24 @@ async fn process_gateway_recv(
                     // for next startup's AgentHello diff sync.
                     let mut cache = read_resource_cache(std::path::Path::new(&work_dir));
                     cache.search_list_version = search_list_version;
+                    save_resource_cache(std::path::Path::new(&work_dir), &cache);
+
+                    return LoopAction::Continue;
+                }
+
+                GatewayResponse::UserProfileUpdate { user_identity, version } => {
+                    tracing::info!(
+                        has_profile = user_identity.is_some(),
+                        version = version,
+                        "Received UserProfileUpdate at runtime — updating identity context"
+                    );
+
+                    session_manager.update_user_identity(user_identity);
+
+                    // Persist user_profile_version to resource_cache.json
+                    // for next startup's AgentHello diff sync.
+                    let mut cache = read_resource_cache(std::path::Path::new(&work_dir));
+                    cache.user_profile_version = version;
                     save_resource_cache(std::path::Path::new(&work_dir), &cache);
 
                     return LoopAction::Continue;
