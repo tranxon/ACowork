@@ -113,6 +113,7 @@ ZeroClaw is a complete Agent implementation. RollBall may reuse its code under t
 ```
 // Adapted from zeroclaw/src/xxx.rs
 // Rollball deviation: <reason if significantly modified>
+// SPDX-License-Identifier: MIT OR Apache-2.0
 ```
 
 **Do NOT** reference zeroclaw as a workspace dependency. Copy and adapt instead.

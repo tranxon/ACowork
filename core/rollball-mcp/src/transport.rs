@@ -2,6 +2,7 @@
 //!
 //! Adapted from zeroclaw/src/tools/mcp_transport.rs
 //! Rollball deviation: simplified for Phase 1 (no SSE transport)
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::HashMap;
 use std::time::Duration;

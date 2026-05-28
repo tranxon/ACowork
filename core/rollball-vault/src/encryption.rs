@@ -3,6 +3,7 @@
 //! Adapted from zeroclaw/src/security/secrets.rs
 //! Rollball deviation: uses password-derived master key (Argon2id) instead of
 //! a random key stored in a file. File format: nonce (12B) + ciphertext + tag (16B).
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, Nonce};

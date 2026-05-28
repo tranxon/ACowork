@@ -4,6 +4,7 @@
 //! Adapted from ZeroClaw agent/loop_detector.rs
 //! Rollball deviation: uses rollball-core ToolCall types; result includes
 //! recommended action level.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::{HashMap, VecDeque};
 

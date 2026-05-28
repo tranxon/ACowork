@@ -3,6 +3,7 @@
 //! Adapted from zeroclaw/src/agent/history.rs
 //! Rollball deviation: uses rollball-core ChatMessage types; token estimation
 //! uses char-based approximation instead of tiktoken.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::HashSet;
 

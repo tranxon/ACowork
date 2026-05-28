@@ -3,6 +3,7 @@
 //! Adapted from zeroclaw/src/tools/memory_store.rs
 //! Rollball deviation: uses rollball_core::Tool trait;
 //! adds agent_id isolation via Grafeo backend.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};

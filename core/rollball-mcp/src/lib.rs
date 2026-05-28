@@ -2,6 +2,7 @@
 //!
 //! Provides protocol types, transport abstraction, and a client for connecting
 //! to MCP tool servers. Adapted from zeroclaw's MCP implementation.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 pub mod config;
 pub mod client;

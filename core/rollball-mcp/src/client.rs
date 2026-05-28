@@ -1,5 +1,6 @@
 // Adapted from zeroclaw/src/tools/mcp_client.rs
 // Rollball deviation: uses rollball-mcp's own transport/protocol modules
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::HashMap;
 use std::sync::Arc;

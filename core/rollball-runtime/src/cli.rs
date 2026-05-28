@@ -79,6 +79,10 @@ pub struct Cli {
 impl Cli {
     /// Run the CLI
     pub fn run(self) -> Result<()> {
+        // Print version info
+        let version = env!("CARGO_PKG_VERSION");
+        println!("RollBall Runtime v{version}");
+
         // Initialize tracing/logging and obtain reload handle
         let reload_handle = self.init_tracing();
 

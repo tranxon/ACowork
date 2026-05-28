@@ -2,6 +2,7 @@
 //!
 //! Adapted from zeroclaw/src/providers/reliable.rs
 //! Rollball deviation: uses rollball-core Provider trait instead of ZeroClaw's.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::sync::Arc;
 use std::time::Duration;

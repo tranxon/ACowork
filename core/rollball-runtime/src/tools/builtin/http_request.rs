@@ -4,6 +4,7 @@
 //! Rollball deviation: uses rollball_core::Tool trait; no SecurityPolicy dependency;
 //! adds PUT/DELETE methods for flexibility; method parameter controls request type
 //! with permission-level granularity via Permission enum.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};

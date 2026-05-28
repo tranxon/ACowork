@@ -1,5 +1,6 @@
 // Adapted from zeroclaw/src/tools/mcp_tool.rs
 // Rollball deviation: implements rollball_core::tools::Tool trait instead
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::sync::Arc;
 

@@ -13,6 +13,7 @@
 //! Adapted from zeroclaw/src/schema.rs
 //! Rollball deviation: split into a standalone function per crate instead of
 //! ZeroClaw's monolithic 572KB schema.rs
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use serde_json::{Map, Value};
 

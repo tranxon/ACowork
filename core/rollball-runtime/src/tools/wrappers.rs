@@ -3,6 +3,7 @@
 //! Adapted from ZeroClaw's RateLimitedTool + PathGuardedTool pattern.
 //! Rollball deviation: uses manifest-driven permission checking
 //! instead of ZeroClaw's config-driven security policy.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};

@@ -98,6 +98,7 @@ pub struct SessionChunkEvent {
 /// Adapted from ZeroClaw's DraftEvent, simplified for RollBall's IPC architecture.
 /// Each delta is forwarded to the Gateway via `StreamChunk` gRPC message,
 /// which maps to a BridgeEventType for the Desktop App WebSocket.
+/// SPDX-License-Identifier: MIT OR Apache-2.0
 #[derive(Debug, Clone)]
 pub enum ChunkEvent {
     /// LLM reasoning phase started — the provider.stream() call has been

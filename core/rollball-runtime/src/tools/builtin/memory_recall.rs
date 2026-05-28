@@ -4,6 +4,7 @@
 //! Rollball deviation: uses rollball_core::Tool trait; replaces Memory trait
 //! with Phase 1 placeholder; adds agent_id isolation; supports search_mode
 //! parameter for future embedding/hybrid search.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use async_trait::async_trait;
 use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};

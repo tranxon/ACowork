@@ -10,9 +10,9 @@ use crate::gateway::Gateway;
 
 /// Print RollBall logo with cyan (宝蓝) ANSI color on startup.
 fn print_logo() {
-    // Cyan ANSI escape code: \x1b[36m (宝蓝色)
     let color = "\x1b[36m";
     let reset = "\x1b[0m";
+    let version = env!("CARGO_PKG_VERSION");
     let logo = format!(
         r#"{color}
 
@@ -25,9 +25,11 @@ fn print_logo() {
   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═╝ ╚═╝  ╚═╝╚═╝
 ═════════════════════════════════════════════════════════════════════════════════════
 {reset}{color}                                      Gateway{reset}
+{color}                                      v{version}{reset}
 "#,
         color = color,
-        reset = reset
+        reset = reset,
+        version = version
     );
     println!("{}", logo);
 }

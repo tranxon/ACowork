@@ -1,5 +1,6 @@
 // Adapted from zeroclaw/src/tools/mcp_protocol.rs
 // Rollball deviation: uses rollball_core::error::Result instead of anyhow
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use serde::{Deserialize, Serialize};
 

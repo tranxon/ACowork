@@ -6,6 +6,7 @@
 //! Adapted from zeroclaw/src/providers/openai.rs
 //! Rollball deviation: uses rollball-core Provider trait instead of ZeroClaw's;
 //! streaming uses futures_core::Stream instead of custom async stream.
+//! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use async_trait::async_trait;
 use futures_core::Stream;
