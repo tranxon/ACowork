@@ -202,7 +202,7 @@ message ConfigSnapshot {
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }
-message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; string protocol_type = 8; optional string compact_model = 9; }
+message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; string protocol_type = 8; reserved 9; optional string compact_model = 10; }
 message SearchConfigDelivery   { string search_list_json = 1; uint64 search_list_version = 2; string search_key_vault_json = 3; }
 message WorkspaceConfigUpdate   { string config_json = 1; }
 message SetSessionWorkspace     { string session_id = 1; string workspace_id = 2; }

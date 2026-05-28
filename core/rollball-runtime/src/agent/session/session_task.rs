@@ -47,6 +47,8 @@ pub enum SessionMessage {
         api_key: Option<String>,
         base_url: Option<String>,
         model: String,
+        /// Compact/distillation model for this provider (from Vault via LLMConfigDelivery).
+        compact_model: Option<String>,
     },
     /// Update gateway model capabilities at runtime
     UpdateCapabilities {
@@ -100,7 +102,7 @@ impl std::fmt::Debug for SessionMessage {
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::ModelSwitch { model } => f.debug_struct("ModelSwitch").field("model", model).finish(),
-            SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model } => f
+            SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model, .. } => f
                 .debug_struct("UpdateProvider")
                 .field("provider_name", provider_name)
                 .field("protocol_type", protocol_type)
@@ -629,13 +631,16 @@ impl SessionTask {
                     );
                     context_builder.set_override_model(model);
                 }
-                Some(SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model }) => {
+                Some(SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model, compact_model }) => {
                     tracing::info!(
                         session_id = %session_id,
                         provider = %provider_name,
                         model = %model,
                         "SessionTask: updating provider"
                     );
+                    // Update the in-memory compact_model cache for this provider
+                    // so distillation can pick it up without disk I/O.
+                    agent_loop.core.provider_compact_models.insert(provider_name.clone(), compact_model.clone());
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&agent_loop.core.config));
                     let new_provider = crate::providers::router::create_provider(
                         &provider_name,
@@ -644,7 +649,7 @@ impl SessionTask {
                         base_url.as_deref(),
                         timeouts,
                     );
-                    agent_loop.update_provider(new_provider, model);
+                    agent_loop.update_provider(new_provider, model, Some(provider_name));
                 }
                 Some(SessionMessage::UpdateCapabilities { caps }) => {
                     tracing::info!(

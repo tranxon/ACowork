@@ -151,6 +151,7 @@ struct CachedLLMConfig {
     model: String,
     capabilities: Option<ModelCapabilitiesInfo>,
     max_output_tokens_limit: u64,
+    compact_model: Option<String>,
 }
 
 /// Cached search configuration from the latest Gateway SearchConfigDelivery push.
@@ -400,6 +401,7 @@ impl SessionManager {
                     api_key: Some(cached.api_key.clone()),
                     base_url: cached.base_url.clone(),
                     model: cached.model.clone(),
+                    compact_model: cached.compact_model.clone(),
                 });
                 if let Some(ref caps) = cached.capabilities {
                     let _ = handle.send(SessionMessage::UpdateCapabilities {
@@ -711,11 +713,13 @@ impl SessionManager {
         model: String,
         capabilities: Option<ModelCapabilitiesInfo>,
         max_output_tokens_limit: u64,
+        compact_model: Option<String>,
     ) -> Vec<String> {
         tracing::info!(
             provider = %provider_name,
             model = %model,
             max_output_tokens_limit = max_output_tokens_limit,
+            compact_model = ?compact_model,
             "SessionManager: caching LLM config"
         );
         self.cached_llm = Some(CachedLLMConfig {
@@ -726,6 +730,7 @@ impl SessionManager {
             model: model.clone(),
             capabilities: capabilities.clone(),
             max_output_tokens_limit,
+            compact_model: compact_model.clone(),
         });
 
         // Broadcast to existing sessions (matching broadcast() pattern:
@@ -739,6 +744,7 @@ impl SessionManager {
                 api_key: Some(api_key.clone()),
                 base_url: base_url.clone(),
                 model: model.clone(),
+                compact_model: compact_model.clone(),
             }).is_err() {
                 failed.push(sid.clone());
             }

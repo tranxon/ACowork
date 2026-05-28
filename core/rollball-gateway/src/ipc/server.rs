@@ -701,7 +701,6 @@ pub struct ResolvedLlmConfig {
     pub base_url: Option<String>,
     pub models: Vec<String>,
     pub stored_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo>,
-    /// Compact model for LLM summarization (ADR-010). None = use current model.
     pub compact_model: Option<String>,
 }
 

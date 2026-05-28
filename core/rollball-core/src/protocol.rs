@@ -127,6 +127,12 @@ pub struct ProviderListItem {
     /// Available models for this provider with full capabilities
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ProviderModelEntry>,
+    /// Compact model for LLM summarization / context compression (ADR-010).
+    /// When set, the Runtime uses this model for context summarization instead
+    /// of the main chat model. Set by the user in frontend Provider Settings.
+    /// None = fall back to the session's current model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_model: Option<String>,
 }
 
 /// Individual model entry within a provider's model list.
@@ -671,10 +677,8 @@ pub enum GatewayResponse {
         /// Protocol type for the LLM API (anthropic/openai/ollama)
         #[serde(default)]
         protocol_type: ProtocolType,
-        /// Compact model for LLM summarization / context compression (ADR-010).
-        /// When set, the Runtime uses this model for context summarization instead
-        /// of the main chat model. When None, the Runtime falls back to the current model.
-        /// Set by the user in frontend Provider Settings.
+        /// Compact/distillation model for this provider (from Vault).
+        /// Used by the Runtime as Path 1 in distillation model selection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compact_model: Option<String>,
     },

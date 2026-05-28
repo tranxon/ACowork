@@ -430,6 +430,7 @@ async fn async_main(
     // In Standalone mode: use manifest suggested_provider + env vars (development only).
     let mut gateway_model_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo> =
         None;
+    let mut gateway_current_provider_id: Option<String> = None;
     let mut gateway_max_output_tokens_limit: u64 = 32_768;
 
     // FIXME(Task10): Process provider_list, mcp_list, key_vault from AgentHelloConfig.
@@ -481,6 +482,9 @@ async fn async_main(
                 let chosen_prov =
                     chosen_prov.or_else(|| providers.iter().find(|p| has_api_key(&p.id)));
                 if let Some(prov) = chosen_prov {
+                    // Capture current provider ID for compact_model lookup at distillation time
+                    gateway_current_provider_id = Some(prov.id.clone());
+
                     // Resolve API key from fresh key vault (never cached to disk).
                     let api_key = cfg
                         .provider_key_vault
@@ -768,6 +772,9 @@ async fn async_main(
             }
 
             c.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
+            if let Some(pid) = gateway_current_provider_id {
+                c.current_provider_id = Some(pid);
+            }
             c.user_display_name = user_display_name.clone();
 
             // Initialize Grafeo memory store at agent workspace
@@ -2247,7 +2254,7 @@ async fn process_gateway_recv(
                     model_capabilities,
                     max_output_tokens_limit,
                     protocol_type,
-                    ..
+                    compact_model,
                 } => {
                     tracing::info!(
                         provider = %provider,
@@ -2278,6 +2285,7 @@ async fn process_gateway_recv(
                         resolved_model.clone(),
                         model_capabilities,
                         max_output_tokens_limit,
+                        compact_model,
                     );
 
                     // Persist selected model/provider to agent_model.json.

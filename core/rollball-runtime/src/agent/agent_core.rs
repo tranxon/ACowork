@@ -51,12 +51,17 @@ pub struct AgentCore {
     /// When Gateway delivers capabilities for a model, they are stored here
     /// so that ContextBuilder can look them up at build() time.
     pub(crate) gateway_model_capabilities: HashMap<String, ModelCapabilitiesInfo>,
+    /// Provider→compact_model mapping from provider_list at AgentHello.
+    /// Keyed by Vault provider ID.  Static after init — provider changes
+    /// (add/remove model, compact_model) require agent restart.
+    pub(crate) provider_compact_models: HashMap<String, Option<String>>,
+    /// The Vault provider ID currently in use (updated on model_switch / AgentHello).
+    /// Used with `provider_compact_models` to resolve compact_model in memory.
+    pub(crate) current_provider_id: Option<String>,
     /// Global max output tokens limit from Gateway config.
     /// When a model's max_output_tokens exceeds this value, the value is capped.
     /// Default: 32768 (32K). Set to 0 to disable the limit.
     pub(crate) max_output_tokens_limit: u64,
-    /// Compact model for LLM summarization (ADR-010). None = use current model.
-    pub(crate) compact_model: Option<String>,
     /// LLM temperature override (from Gateway config).
     /// None = use model/provider default.
     pub(crate) temperature_override: Option<f32>,
@@ -142,8 +147,9 @@ impl AgentCore {
             mcp_tools: None,
             all_tools: tools,
             gateway_model_capabilities: HashMap::new(),
+            provider_compact_models: HashMap::new(),
+            current_provider_id: None,
             max_output_tokens_limit: 32_768,
-            compact_model: None,
             temperature_override: None,
             system_prompt_override: None,
             session_id: None,
@@ -398,8 +404,9 @@ impl AgentCore {
             mcp_tools: self.mcp_tools.clone(),
             all_tools: self.all_tools.clone(),
             gateway_model_capabilities: self.gateway_model_capabilities.clone(),
+            provider_compact_models: self.provider_compact_models.clone(),
+            current_provider_id: self.current_provider_id.clone(),
             max_output_tokens_limit: self.max_output_tokens_limit,
-            compact_model: self.compact_model.clone(),
             temperature_override: self.temperature_override,
             system_prompt_override: self.system_prompt_override.clone(),
             session_id: Some(session_id),

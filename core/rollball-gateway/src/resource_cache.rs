@@ -350,6 +350,7 @@ pub(crate) async fn rebuild_and_save_provider_cache(
             base_url,
             protocol_type,
             models,
+            compact_model: entry.compact_model.clone(),
         });
     }
 
@@ -651,6 +652,7 @@ mod tests {
                 id: "openai".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 protocol_type: rollball_core::protocol::ProtocolType::OpenAI,
+                compact_model: None,
                 models: vec![ProviderModelEntry {
                     id: "gpt-4o".to_string(),
                     capabilities: rollball_core::protocol::ModelCapabilitiesInfo {

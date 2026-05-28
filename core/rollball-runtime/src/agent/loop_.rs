@@ -307,8 +307,18 @@ impl AgentLoop {
 
     /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
     /// LLMConfigDelivery from Gateway).
-    pub fn update_provider(&mut self, new_provider: Arc<dyn Provider>, model: String) {
+    /// `provider_id` is the Vault provider ID (not protocol name) for
+    /// compact_model lookup.
+    pub fn update_provider(
+        &mut self,
+        new_provider: Arc<dyn Provider>,
+        model: String,
+        provider_id: Option<String>,
+    ) {
         self.core.update_provider(new_provider, model);
+        if let Some(pid) = provider_id {
+            self.core.current_provider_id = Some(pid);
+        }
     }
 
     /// Update gateway model capabilities at runtime (e.g., after receiving a
@@ -666,6 +676,62 @@ impl AgentLoop {
         self.close_session_inner().await
     }
 
+    /// Resolve the model to use for session distillation.
+    ///
+    /// Priority order:
+    /// 1. Provider's configured `compact_model` from provider_list (read from disk)
+    /// 2. Cheapest model whose context_window fits
+    /// 3. Model with the largest context_window (last resort)
+    fn resolve_distill_model(&self, content_size_bytes: u64) -> String {
+        let estimated_tokens = (content_size_bytes / 4) as u64;
+
+        // Path 1: resolve compact_model from current provider (in-memory)
+        let compact_model = self
+            .core
+            .current_provider_id
+            .as_ref()
+            .and_then(|pid| self.core.provider_compact_models.get(pid))
+            .and_then(|cm| cm.clone());
+        if let Some(ref compact_model) = compact_model {
+            if let Some(cap) = self
+                .core
+                .gateway_model_capabilities
+                .get(compact_model)
+            {
+                if cap.context_window >= estimated_tokens {
+                    tracing::info!(
+                        compact_model = %compact_model,
+                        context_window = cap.context_window,
+                        estimated_tokens,
+                        "Using provider's compact model for distillation"
+                    );
+                    return compact_model.clone();
+                }
+                tracing::warn!(
+                    compact_model = %compact_model,
+                    context_window = cap.context_window,
+                    estimated_tokens,
+                    "Provider compact model context_window too small, falling back"
+                );
+            } else {
+                tracing::warn!(
+                    compact_model = %compact_model,
+                    "Provider compact model not found in capabilities, falling back"
+                );
+            }
+        }
+
+        // Path 2: compact model unavailable or context too small —
+        // fall back to the session's current model.
+        let current_model = self.resolve_current_model(None);
+        tracing::info!(
+            current_model = %current_model,
+            estimated_tokens,
+            "Compact model not available or insufficient, using current model for distillation"
+        );
+        current_model
+    }
+
     /// Switch to a new conversation session.
     ///
     /// **Legacy: In Gateway multi-session mode, each session runs in its own
@@ -717,16 +783,11 @@ impl AgentLoop {
             let session_id = old.session_id().to_string();
             let session_path = old.session_path().to_path_buf();
             let provider = self.core.provider.clone();
-            let model_name = self
-                .core.gateway_model_capabilities
-                .values()
-                .min_by(|a, b| {
-                    let cost_a = crate::episode_distill::model_cost_score(a);
-                    let cost_b = crate::episode_distill::model_cost_score(b);
-                    cost_a.partial_cmp(&cost_b).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .and_then(|m| m.name.clone())
-                .unwrap_or_else(|| "default".to_string());
+            // Estimate content size from JSONL file; fallback to 0 if file is unavailable.
+            let content_size = std::fs::metadata(&session_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let model_name = self.resolve_distill_model(content_size);
             let memory_store = self.core.memory_store().cloned();
 
             tokio::spawn(async move {
@@ -769,18 +830,10 @@ impl AgentLoop {
             let session_id = conversation.session_id().to_string();
             let session_path = conversation.session_path().to_path_buf();
             let provider = self.core.provider.clone();
-            let model_name = self
-                .core.gateway_model_capabilities
-                .values()
-                .min_by(|a, b| {
-                    let cost_a = crate::episode_distill::model_cost_score(a);
-                    let cost_b = crate::episode_distill::model_cost_score(b);
-                    cost_a
-                        .partial_cmp(&cost_b)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .and_then(|m| m.name.clone())
-                .unwrap_or_else(|| "default".to_string());
+            let content_size = std::fs::metadata(&session_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let model_name = self.resolve_distill_model(content_size);
             let memory_store = self.core.memory_store().cloned();
 
             tracing::info!(

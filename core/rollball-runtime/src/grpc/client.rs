@@ -1343,6 +1343,7 @@ mod tests {
                     model_capabilities: None,
                     max_output_tokens_limit: 32768,
                     protocol_type: "openai".to_string(),
+                    compact_model: None,
                 },
             )),
         };

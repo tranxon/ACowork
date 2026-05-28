@@ -490,22 +490,8 @@ function ProvidersTab() {
                 return (
                   <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center flex-nowrap gap-2">
-                        <span className="shrink-0 text-xs font-medium">{providerName}</span>
-                        {keyEntry.models?.length ? (
-                          <span className="shrink-0 text-xs" style={{ color: "var(--color-accent)" }}>{keyEntry.models.join(", ")}</span>
-                        ) : keyEntry.default_model ? (
-                          <span className="shrink-0 text-xs" style={{ color: "var(--color-accent)" }}>{keyEntry.default_model}</span>
-                        ) : (
-                          <span className="shrink-0 text-xs text-zinc-400">—</span>
-                        )}
-                        {keyEntry.compact_model && (
-                          <span className="shrink-0 rounded bg-purple-100 px-1.5 py-0.5 text-xs text-purple-700 dark:bg-purple-900 dark:text-purple-300" title="Compact model for summarization">
-                            compact: {keyEntry.compact_model}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
+                      <span className="shrink-0 text-xs font-medium">{providerName}</span>
+                      <div className="flex items-center gap-2 shrink-0">
                         <button
                           onClick={() => handleSetDefaultProvider(keyEntry.provider)}
                           className={cn(
@@ -533,6 +519,20 @@ function ProvidersTab() {
                           Remove
                         </button>
                       </div>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                      {keyEntry.models?.length ? (
+                        <span className="text-xs" style={{ color: "var(--color-accent)" }}>{keyEntry.models.join(", ")}</span>
+                      ) : keyEntry.default_model ? (
+                        <span className="text-xs" style={{ color: "var(--color-accent)" }}>{keyEntry.default_model}</span>
+                      ) : (
+                        <span className="text-xs text-zinc-400">—</span>
+                      )}
+                      {keyEntry.compact_model && (
+                        <span className="rounded bg-purple-100 px-1.5 py-0.5 text-xs text-purple-700 dark:bg-purple-900 dark:text-purple-300" title="Compact model for summarization">
+                          compact: {keyEntry.compact_model}
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
