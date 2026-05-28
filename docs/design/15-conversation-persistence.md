@@ -1,15 +1,16 @@
 # 对话持久化与 Session 机制设计
 
-> 版本：v3.12 | 更新日期：2026-05-06
+> 版本：v3.13 | 更新日期：2026-05-28
 
-> 本文档定义 RollBall Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Grafeo Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。主要变更（v3.12）：**Token 预算分配策略**（§1.8）：per-session 隔离 + 全局上限；**JSONL 安全性保证**（§1.9）：轮转事务性、并发读写保护、Episode offset 原子更新；IPC 消息格式见通信协议文档（§06-communication.md §1.5）。主要变更（v3.11）：Session Actor 多会话并发模型（§1.7）、selectedSession 前端模型（§1.7）、配置作用域矩阵（§1.8）。主要变更（v3.10）：Grafeo private.grafeo、Session 选择器、打包数据隔离、异步扫描、Episode consolidated 状态、巩固产出三类节点。
+> 本文档定义 RollBall Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Grafeo Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。主要变更（v3.13）：**上下文压缩策略简化**（§1.8）：放弃程序化折叠策略，压缩简化为三阶段（70% 告警 → 80% LLM 摘要 → 95% emergency_trim），移除 BudgetGuard per-session 配额机制——见 [ADR-010](../adr/ADR-010-context-compression-simplification.md)。主要变更（v3.12）：**Token 预算分配策略**（§1.8）：per-session 隔离 + 全局上限；**JSONL 安全性保证**（§1.9）：轮转事务性、并发读写保护、Episode offset 原子更新；IPC 消息格式见通信协议文档（§06-communication.md §1.5）。主要变更（v3.11）：Session Actor 多会话并发模型（§1.7）、selectedSession 前端模型（§1.7）、配置作用域矩阵（§1.8）。主要变更（v3.10）：Grafeo private.grafeo、Session 选择器、打包数据隔离、异步扫描、Episode consolidated 状态、巩固产出三类节点。
 
 **交叉引用**：
 - Session Actor 架构：本文档 §1.7
 - Agent 运行时主循环：`03-agent-runtime.md` §2
 - Session IPC 消息格式：`06-communication.md` §1.5
-- Episode 提炼触发点：`03-agent-runtime.md` §2（主循环图 §②.5 和 §⑦）
-- Token 预算分配策略：本文档 §1.8
+- Episode 提炼触发点：`03-agent-runtime.md` §2（主循环图 §②.5 LLM 摘要时 和 §⑦ Session 结束时）
+- Token 预算管理策略：本文档 §1.8
+- 上下文压缩简化决策：[ADR-010](../adr/ADR-010-context-compression-simplification.md)
 - JSONL 安全保证（轮转事务性/并发读写/offset）：本文档 §1.9
 - 会话管理 gRPC Proto 定义：`06-communication.md` §1.5
 
@@ -539,34 +540,25 @@ loop {
 | Token 用量统计 | Session | — | 独立 |
 | 迭代计数器 | Session | — | 独立 |
 
-#### Token 预算分配策略（per-session 隔离 + 全局上限）
+#### Token 预算管理策略（v3.13 简化）
+
+> **v3.13 变更**：上下文压缩策略大幅简化——放弃程序化折叠策略（Tool Result 折叠、内容折叠、弹性分区），压缩简化为 LLM 摘要作为唯一正常路径手段。因此之前的 per-session BudgetGuard 配额机制不再适用——LLM 摘要用 Compact Model（独立计费，成本极低），对话模型 token 消耗通过 LLM 摘要直接控制而非配额切断。
+
+**简化后的策略**：
 
 ```
-AgentCore: BudgetGuard
-├── total_tokens: u64      // 来自 Gateway 的总预算上限
-├── remaining: u64        // 当前剩余总量
-└── per_session_quota: u64 // 每个 Session 的默认配额（如 128K）
+Token 监控：
+  每轮 LLM 调用后用 API 返回的 prompt_tokens 更新计数器
+  使用率 = prompt_tokens / model.context_window
 
-SessionState:
-├── budget_quota: u64      // 该 Session 的配额
-├── current_usage: u64     // 该 Session 已用
-└── budget_guard: Arc<tokio::sync::Mutex<BudgetGuard>> // 共享引用
+压缩触发：
+  70%     → 日志记录，不干预
+  80%     → Compact Model 做 LLM 摘要（完整上下文，不折叠）
+  95%     → emergency_trim 安全网
+  API报错 → emergency_trim + 重试
 ```
 
-
-**分配规则**：
-
-| 场景 | 行为 |
-|------|------|
-| Session A 用完配额 | 该 Session 停止并通知前端，其他 Session 不受影响 |
-| 所有 Session 共享总预算耗尽 | 所有 Session 停止，拒绝新消息 |
-| Session 长时间空闲 | 配额可超时回收（可选项，减少资源占用） |
-| 某 Session 超过 per_session_quota | 仅该 Session 停止，总预算中剩余量仍可供其他 Session 使用 |
-
-**实现要点**：
-- 预算使用 `tokio::sync::Mutex` 保护，保证并发安全
-- 每条 LLM 调用前检查 `remaining >= min_cost`，不足则拒绝
-- Episode 提炼使用 cost 最低的模型，不计入对话预算（后台任务）
+**不再维护 per-session BudgetGuard 配额机制**。Token 消耗由 LLM 摘要自然控制——摘要后上下文大幅缩小，后续对话 token 消耗自然降低。Episode 提炼使用成本最低的模型，不计入对话预算（后台任务）。
 
 ### 1.9 JSONL 安全性与事务性保证
 

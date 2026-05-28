@@ -6,7 +6,7 @@
 
 Agent Runtime 是平台提供的唯一二进制可执行文件，类似 Android 的 ART 虚拟机。Gateway 为每个 Agent 启动一个 Agent Runtime 进程，将 .agent 包路径和 Gateway endpoint 作为启动参数传入。
 
-> **v3.6 变更**：引入 Session Actor 多会话并发模型——每个 Session 独立运行在独立的 tokio task 中，互不阻塞；AgentLoop 拆分为 AgentCore（共享）+ SessionState（per-session）；前端 selectedSession 替代 currentSession。详见 `15-conversation-persistence.md` §1.7。Episode 提炼触发点：Preemptive Trim 时（§②.5）、Session 结束时、离线巩固定时器触发（详见 `15-conversation-persistence.md` §3.3）。
+> **v3.7 变更（2026-05-28）**：上下文压缩策略大幅简化——见 [ADR-010](../adr/ADR-010-context-compression-simplification.md)。核心变更：放弃程序化折叠策略（Tool Result 折叠、内容折叠 Phase 1），上下文压缩回归 LLM 摘要作为唯一正常路径手段。日常压缩流程简化为：70% 告警 → 80% LLM 摘要（完整上下文，不折叠） → 95% emergency_trim 安全网。
 
 **交叉引用**：
 - 运行时内部结构：本文档 §2
@@ -121,38 +121,45 @@ Agent Runtime 的核心是 LLM 交互循环（参考 ZeroClaw 的 `run_tool_call
 │     ├─ IntentMessage → 追加到 History         │
 │     └─ 无新消息 → 跳过                       │
 │                                               │
-│  ① 预算预检 + 上下文预估校验                   │
-│     ├─ 本地预算缓存不足 → 按 action_on_exhaust │
-│     │   处理（stop / fallback / warn）         │
-│     └─ 预算耗尽且无 fallback → 终止循环  ──► END│
-│                                               │
-│  ② 构建上下文（按优先级拼接，见 3.1）          │
-│     ├─ System Prompt (from prompts/)          │
-│     ├─ Identity Context (from Gateway 注入)   │
-│     ├─ Autobiographical (History Manager 触发  │
-│     │   压缩，详见 3.1)                       │
-│     ├─ Workspace Context (from Gateway 推送)  │
-│     ├─ Tool Definitions (from manifest.tools) │
-│     │   └─ 仅含 manifest 声明的工具（含 RAG 工具，│
-│     │      仅 manifest 声明 type=rag 时注册） │
-│     ├─ Capability Overview (from Gateway 推送) │
-│     ├─ Skill Instructions (from skills/)      │
-│     ├─ Memory Retrieve → MemoryManager.retrieve() │
-│     │   ├─ Grafeo 通道（始终执行）             │
-│     │   │   hybrid_search + graph_expand      │
-│     │   └─ RAG 通道（仅 manifest 声明 rag 时） │
-│     │       RagClient.query(用户消息, top_k=3) │
-│     │       超时(5s)/不可达 → 跳过，不阻塞     │
-│     ├─ Memory Inject → MemoryManager.inject()   │
-│     │   按 token 预算裁剪并格式化记忆上下文      │
-│     │   结果按来源标注 [Grafeo] / [RAG:<name>] │
-│     └─ 对话历史 (from History Manager)        │
-│                                               │
-│  ②.5 Preemptive Trim（上下文溢出预防）         │
-│     └─ 估算总 token 超预算 → HistoryPruner    │
-│        先折叠旧 tool result，再 FIFO 裁剪历史  │
-│        → ⚡ 触发 Episode 提炼（裁剪消息）         │
-│          （见 `15-conversation-persistence.md` §3.3）│
+│  ① 预算预检
+│     ├─ 本地预算缓存不足 → 按 action_on_exhaust
+│     │   处理（stop / fallback / warn）
+│     └─ 预算耗尽且无 fallback → 终止循环  ──► END
+│
+│  ② 构建上下文（按优先级拼接，见 3.1）
+│     ├─ System Prompt (from prompts/)
+│     ├─ Identity Context (from Gateway 注入)
+│     ├─ Autobiographical (History Manager 触发
+│     │   压缩，详见 3.1)
+│     ├─ Workspace Context (from Gateway 推送)
+│     ├─ Tool Definitions (from manifest.tools)
+│     │   └─ 仅含 manifest 声明的工具（含 RAG 工具，
+│     │      仅 manifest 声明 type=rag 时注册）
+│     ├─ Capability Overview (from Gateway 推送)
+│     ├─ Skill Instructions (from skills/)
+│     ├─ Memory Retrieve → MemoryManager.retrieve()
+│     │   ├─ Grafeo 通道（始终执行）
+│     │   │   hybrid_search + graph_expand
+│     │   └─ RAG 通道（仅 manifest 声明 rag 时）
+│     │       RagClient.query(用户消息, top_k=3)
+│     │       超时(5s)/不可达 → 跳过，不阻塞
+│     ├─ Memory Inject → MemoryManager.inject()   
+│     │   按 token 预算裁剪并格式化记忆上下文
+│     │   结果按来源标注 [Grafeo] / [RAG:<name>]
+│     └─ 对话历史 (from History Manager)
+│
+│  ②.5 上下文压缩（Token 预算管理）
+│     ├─ Token 使用率 < 70% → 日志记录，不干预
+│     ├─ Token 使用率 ≥ 80% → LLM 摘要（Compact Model）
+│     │   ├─ 完整上下文输入（不折叠/截断任何内容）
+│     │   ├─ 保护 system prompt + 最近 2-3 轮
+│     │   ├─ 压缩中间段为结构化摘要
+│     │   ├─ 完整历史归档至临时文件
+│     │   └─ ⚡ 触发 Episode 提炼（被压缩的消息）
+│     └─ Token 使用率 ≥ 95% / API 报 ContextOverflow
+│         → emergency_trim（保留最后 N 条非 system）
+│         → 重建请求，重试
+│
 │                                               │
 │  ③ 调用 LLM (直连 API)                        │
 │     ├─ RateAcquire 速率协调                    │
@@ -256,16 +263,15 @@ All listed directories are authorized for access at the indicated permission lev
 - Agent 启动时 Gateway 主动推送一次
 - 用户通过 Desktop App 切换当前工作区时实时推送更新
 
-**Token 预算分配与截断策略：** 当上下文总长度超过模型限制时，使用两条独立流水线裁剪：
+**Token 预算分配与截断策略：** 当上下文总长度接近模型限制时，采用三阶段策略：
 
-1. **对话历史 FIFO**：从最早的消息开始丢弃，动态计算保留数量（N 不是固定值，而是丢弃早期消息直到总 token 满足预算），优先保留最近的用户消息和 assistant 回复
-2. **检索结果按优先级砍**：Memory RAG 结果按检索得分排序，从最低分开始丢弃；Skill Instructions 从最不相关的开始丢弃
+1. **70% 监控**：日志记录 token 使用率，不做任何干预。
+2. **80% LLM 摘要**：使用 Compact Model（独立配置的便宜模型）对整个对话历史做 LLM 摘要。完整上下文输入，不做任何工具结果折叠或截断。保护 system prompt + 最近 2-3 轮完整保留，中间段压缩为结构化摘要。完整对话历史归档至临时文件，agent 可随时取回。触发 Episode 提炼（被压缩的消息写入经历层）。
+3. **95% / API ContextOverflow 紧急裁剪**：保留 system prompt + 最后 N 条非 system 消息（默认 4 条），作为安全网。仅在 LLM 摘要本身无法执行（API 报 context exceeded）时使用。
+
+> **设计决策**：上下文压缩是一个语义理解任务，只有 LLM 能可靠判断哪些信息可以丢弃。程序化策略（字符截断、FIFO、角色折叠）本质是用 proxy 指标替代语义理解，必然失效。因此所有日常程序化折叠策略已被放弃。详见 [ADR-010](../adr/ADR-010-context-compression-simplification.md)。
 
 System Prompt（1）、Identity Context（2）、Autobiographical（2.5）、Workspace Context（2.8）、Tool Definitions（3）始终保留，不参与裁剪。
-
-**Tool Result 折叠（HistoryPruner）：** 在 FIFO 裁剪之前，HistoryPruner 先对旧的 tool result 对（调用 + 返回）做规则引擎折叠——保留最近 4 轮（轮 = 迭代 iteration，同一迭代中的多个 tool_calls 都完整保留）的完整 tool result，更早的折叠为单行摘要（"[tool_name] 返回 {前200字符摘要}"）。折叠不计入裁剪，只是用更少的 token 表示相同信息。这是 ZeroClaw `fast_trim_tool_results` 的简化版，Phase 1 用规则引擎实现，Phase 3 升级为 LLM 辅助压缩（见 05-memory.md §9 Phase 3）。
-
-**Preemptive Trim（步骤 ②.5）：** 上下文构建完成后、LLM 调用前，Runtime 用 tokenizer 做一次精确 token 计数。如果总 token 超过模型 context window 的 90%，先执行 Tool Result 折叠 + FIFO 裁剪，再进入步骤③。这是"预防性"裁剪，避免 LLM API 返回 context exceeded 错误。
 
 ### 3.2 循环检测策略
 
@@ -469,7 +475,7 @@ let tool_results: Vec<ToolResult> = (0..total)
 | 单轮迭代超时 | 步骤 ③/⑤ | 超时后终止当前迭代 |
 | Gateway 停止信号 | 任意步骤 | 优雅退出，保存当前状态 |
 | LLM 调用重试耗尽 | 步骤 ③ | 无 fallback provider 时终止 |
-| Context exceeded 恢复失败 | 步骤 ③ | Preemptive trim 和 reactive recovery 均无法满足时终止（见 §7.1） |
+| Context exceeded 恢复失败 | 步骤 ③ | emergency_trim 安全网无法满足时终止（见 §7.1） |
 
 ## 4. Runtime 默认配置
 
@@ -484,8 +490,6 @@ let tool_results: Vec<ToolResult> = (0..total)
 | `loop_detection.ping_pong_threshold` | 4 | Ping-Pong 交替周期阈值 |
 | `loop_detection.no_progress_threshold` | 5 | No Progress 无进展阈值 |
 | `loop_detection.no_progress.enabled` | true | No Progress 检测开关（需计算结果哈希） |
-| `pruner.keep_full_results` | 4 | Tool Result 折叠：保留最近 N 轮完整 tool result |
-| `pruner.fold_summary_length` | 200 | 折叠摘要最大字符数 |
 | `llm.routing.retry.max_attempts` | 3 | LLM 调用重试次数 |
 | `llm.routing.retry.backoff` | "exponential" | 重试退避策略 |
 | `llm.routing.retry.max_wait_ms` | 30000 | 重试最大等待时间（RateAcquire retry_after 上限） |
@@ -549,26 +553,21 @@ LLM 调用失败（网络超时 / API 错误 / token 超限）
 
 **Context Exceeded Reactive Recovery（上下文溢出恢复）：**
 
-当 LLM API 返回 context window exceeded 错误时，Runtime 尝试渐进式恢复（借鉴 ZeroClaw 的 `compress_on_error`）：
+当 LLM API 返回 context window exceeded 错误时，Runtime 尝试恢复：
 
 ```
 Context Window Exceeded 错误
        │
        ▼
-Step 1: Tool Result 折叠（保留最近 4 轮 → 折叠更早的为摘要）
+Step 1: Emergency History Trim（删除最早的非 system 消息，保留最近 4 条）
        │
        ├─ 重新估算 token → 满足 → 重试 LLM
        │
        ▼
-Step 2: Emergency History Trim（删除最早的非 system 消息，保留最近 4 条）
-       │
-       ├─ 重新估算 token → 满足 → 重试 LLM
-       │
-       ▼
-Step 3: 报错终止，提示用户对话过长
+Step 2: 报错终止，提示用户对话过长
 ```
 
-Reactive recovery 与步骤 ②.5 的 Preemptive Trim 互补：Preemptive 在调用前预防（覆盖 90% 场景），Reactive 在 API 报错后兜底（覆盖极端场景）。Recovery 最多执行 1 次（不循环恢复），避免无限重试。
+Reactive recovery 与步骤 ②.5 的三阶段压缩互补：LLM 摘要（80%）和 emergency_trim（95%）在调用前预防（覆盖大部分场景），Reactive 在 API 报错后兜底。Recovery 最多执行 1 次（不循环恢复），避免无限重试。
 
 ### 7.2 工具执行失败
 
@@ -645,7 +644,7 @@ Permission Check 通过 → Approval Gate 检查
 | 工具执行失败处理 | 返回错误给 LLM 决策 | LLM 有能力自主调整策略，比直接终止更灵活 |
 | Gateway 断连 | 优雅降级而非立即退出 | 保留本地推理能力，短暂断连不影响体验 |
 | 循环检测 | 三种模式 + 三级渐进响应（借鉴 ZeroClaw） | 比单阈值 terminate 更精细：Warning 让 LLM 自主修正，Block 阻止无意义的重复，Break 作为最后手段。Ping-Pong 和 No Progress 覆盖更复杂的死循环模式 |
-| 上下文裁剪 | 双流水线 + preemptive trim + reactive recovery | Preemptive 预防 90% 的溢出，Reactive 兜底极端场景。Tool Result 折叠在裁剪前用更少的 token 表示相同信息（借鉴 ZeroClaw） |
+| 上下文裁剪 | 三阶段 LLM 驱动：70% 告警 → 80% LLM 摘要（Compact Model）→ 95% emergency_trim | 仅 LLM 能可靠判断信息可丢弃性，程序化策略不可靠（ADR-010） |
 | Approval 机制 | Gateway 转发 → Desktop App 确认 | 高风险操作需用户知情同意；CLI 模式下降级为 manifest 配置的默认策略 |
 | Tool Call 去重 | 单轮 HashSet 去重 | 成本极低，防御 LLM 单次响应内重复调用 |
 | Rate Limit 分层 | 区分可重试限流 / 不可重试余额不足 | 避免对余额不足的错误做无意义重试（借鉴 ZeroClaw reliable.rs） |
@@ -667,6 +666,7 @@ Permission Check 通过 → Approval Gate 检查
 | v3.3 | §3.1 补充 Autobiographical 压缩触发方、动态 N 计算、token 预估 | MiniMax M2.7 Review |
 | v3.4 | 主循环记忆触发点改为 MemoryManager 生命周期阶段调用 | Runtime 可扩展性设计准则 |
 | v3.4 | 新增 §9 Runtime 可扩展性设计准则 + 紧耦合审计 | 架构审查 |
+| v3.7 | 上下文压缩策略大幅简化：移除所有程序化折叠，改为三阶段 LLM 驱动 | ADR-010 |
 
 ## 9. Runtime 可扩展性设计准则
 

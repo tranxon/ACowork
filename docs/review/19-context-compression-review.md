@@ -266,3 +266,23 @@ Runtime 的上下文压缩体系**骨架已经建立**：Tool Result 折叠、FI
 **主要薄弱环节是"中级压缩能力缺失"**——内容折叠 Phase 1 的缺失意味着长文件/代码开发场景下 token 过早耗尽；BudgetAllocation 未接入导致 history 与 retrieval 间的资源竞争无机制调节；Token 估算的分裂使裁剪阈值定位不准确。
 
 建议优先补齐内容折叠（P0）和统一 Token 计数（P0），在此基础上再对齐 BudgetAllocation 和检索优先级。
+
+---
+
+## 11. 后续决策：ADR-010 大幅简化
+
+> **2026-05-28 补充**：本报告完成后的架构讨论中，上述 P0/P1 修复建议被重新审视。经过对业界主流编程 Agent（Claude Code、OpenCode、OpenDev、Aider、Cursor）的上下文压缩策略调研，得出根本结论：
+
+**上下文压缩是一个语义理解任务，只有 LLM 能可靠判断哪些内容可以丢弃。程序化策略（字符截断、FIFO、角色折叠）本质是用 proxy 指标替代语义理解，必然失效。**
+
+基于此结论，决策 [ADR-010](../adr/ADR-010-context-compression-simplification.md) 将压缩策略简化为三阶段：
+
+```
+70% 告警 → 80% LLM 摘要（完整上下文） → 95% emergency_trim
+```
+
+**明确放弃的策略**：Tool result 日常折叠、内容折叠 Phase 1、检索结果 8 级优先级、BudgetAllocation 程序化分区。
+
+**保留的策略**：LLM 摘要、emergency_trim 安全网、Episode 蒸馏、Token 监控与阈值触发。
+
+本报告中标记为 P0/P1 的大多数修复建议因此不再适用——不是"需要修复"，而是"应该砍掉"。对应的代码和设计文档更新已在 ADR-010 中规划。
