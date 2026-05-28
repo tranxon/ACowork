@@ -524,10 +524,10 @@ function TabButton({
     <button
       onClick={onClick}
       className={cn(
-        "border-b-2 px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)] font-medium transition-colors",
+        "border-b-2 px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)] transition-colors",
         active
-          ? "border-[var(--color-accent)] text-zinc-700 dark:text-zinc-200"
-          : "border-transparent text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
+          ? "border-[var(--color-accent)] font-semibold text-zinc-700 dark:text-zinc-200"
+          : "border-transparent font-normal text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
       )}
     >
       {children}
