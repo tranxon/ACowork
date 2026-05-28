@@ -1,8 +1,9 @@
 # ADR-008: 上下文阈值动态化
 
-**日期**: 2026-05-15
-**状态**: 已实施
-**关联**: review/15-stream-error-retry-implementation-review.md
+**日期**: 2026-05-15  
+**状态**: 已实施  
+**关联**: review/15-stream-error-retry-implementation-review.md  
+**后续**: [ADR-010](../adr/ADR-010-context-compression-simplification.md)（2026-05-28）—— 阈值 70%/80%/95% 保留，但触发的不再是程序化折叠策略，而是 LLM 摘要。本文档中提及的"Preemptive Trim 触发折叠+FIFO"描述已过时。
 
 ## 背景
 

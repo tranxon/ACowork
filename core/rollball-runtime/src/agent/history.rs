@@ -1,9 +1,17 @@
-//! Conversation history management (FIFO trimming + Tool Result folding + Sanitization)
+//! Conversation history management (FIFO trimming + Sanitization + Emergency trim)
 //!
 //! Adapted from zeroclaw/src/agent/history.rs
 //! Rollball deviation: uses rollball-core ChatMessage types; token estimation
 //! uses char-based approximation instead of tiktoken.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
+//!
+//! ## Design note (2026-05-28)
+//!
+//! Programmatic folding strategies (Tool Result folding, content folding) have been
+//! removed per [ADR-010](../../../../docs/adr/ADR-010-context-compression-simplification.md).
+//! Context compression is a semantic understanding task — only an LLM can reliably
+//! decide what to discard. The remaining strategies (trim_fifo, emergency_trim) are
+//! safety nets for when the LLM-based compaction itself cannot execute.
 
 use std::collections::HashSet;
 
@@ -17,8 +25,6 @@ pub struct HistoryManager {
     messages: Vec<ChatMessage>,
     /// Maximum token budget for history
     max_tokens: u64,
-    /// Number of full tool result iterations to keep
-    keep_full_results: usize,
     /// Current estimated token count
     current_tokens: u64,
     /// LLM protocol type for image token estimation.
@@ -27,12 +33,11 @@ pub struct HistoryManager {
 }
 
 impl HistoryManager {
-    /// Create new history manager with token budget
-    pub fn new(max_tokens: u64, keep_full_results: usize) -> Self {
+    /// Create new history manager with token budget.
+    pub fn new(max_tokens: u64) -> Self {
         Self {
             messages: Vec::new(),
             max_tokens,
-            keep_full_results,
             current_tokens: 0,
             protocol_type: ProtocolType::default(),
         }
@@ -128,7 +133,7 @@ impl HistoryManager {
         if self.current_tokens <= self.max_tokens {
             return 0;
         }
-
+    
         let mut removed = 0;
         // Never remove system messages; start from first user/assistant message
         let first_removable = self
@@ -136,7 +141,7 @@ impl HistoryManager {
             .iter()
             .position(|m| !matches!(m.role, MessageRole::System))
             .unwrap_or(0);
-
+    
         while self.current_tokens > self.max_tokens && first_removable + removed < self.messages.len() - 1 {
             let idx = first_removable + removed;
             if idx < self.messages.len() {
@@ -147,158 +152,19 @@ impl HistoryManager {
                 break;
             }
         }
-
+    
         if removed > 0 {
             // Actually remove the messages
             let end = first_removable + removed;
             self.messages.drain(first_removable..end.min(self.messages.len()));
             tracing::debug!(removed, remaining_tokens = self.current_tokens, "FIFO trimmed");
         }
-
+    
         removed
     }
-
-    /// Fold old tool results — keep last N iterations complete, summarize older ones.
-    /// A "tool result iteration" is a pair of (assistant with tool_calls, tool response).
-    pub fn fold_tool_results(&mut self) -> usize {
-        if self.keep_full_results == 0 {
-            return 0;
-        }
-
-        // Find all tool result pairs
-        let tool_iterations: Vec<usize> = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| matches!(m.role, MessageRole::Tool))
-            .map(|(i, _)| i)
-            .collect();
-
-        if tool_iterations.len() <= self.keep_full_results {
-            return 0;
-        }
-
-        let fold_count = tool_iterations.len() - self.keep_full_results;
-        let mut folded = 0;
-
-        // Fold older tool results into summaries
-        for &idx in &tool_iterations[..fold_count] {
-            if idx < self.messages.len() {
-                let content = &self.messages[idx].content;
-                let summary = if content.len() > 200 {
-                    let trunc: String = content.chars().take(200).collect();
-                    format!("[folded] {}", trunc)
-                } else {
-                    format!("[folded] {content}")
-                };
-
-                let old_tokens = estimate_text_tokens(content);
-                let new_tokens = estimate_text_tokens(&summary);
-                self.current_tokens = self
-                    .current_tokens
-                    .saturating_sub(old_tokens)
-                    .saturating_add(new_tokens);
-
-                self.messages[idx].content = summary;
-                folded += 1;
-            }
-        }
-
-        tracing::debug!(folded, "Tool results folded");
-        folded
-    }
-
-    /// Preemptive trim — fold + FIFO if over 90% of budget
-    pub fn preemptive_trim(&mut self, context_budget: u64) {
-        let threshold = (context_budget as f64 * 0.9) as u64;
-        if self.current_tokens > threshold {
-            tracing::warn!(
-                current = self.current_tokens,
-                threshold,
-                "Preemptive trim triggered"
-            );
-            self.fold_tool_results();
-            if self.current_tokens > threshold {
-                self.trim_fifo();
-            }
-        }
-    }
-
-    /// Like `preemptive_trim` but returns the messages removed by FIFO.
-    ///
-    /// This is used by `trim_history_to_budget` to capture evicted messages
-    /// for episode distillation. The returned messages are the originals
-    /// (before any folding), so they contain the full conversation content
-    /// that would otherwise be lost.
-    pub fn preemptive_trim_drain(&mut self, context_budget: u64) -> Vec<ChatMessage> {
-        let threshold = (context_budget as f64 * 0.9) as u64;
-        if self.current_tokens <= threshold {
-            return Vec::new();
-        }
-
-        tracing::warn!(
-            current = self.current_tokens,
-            threshold,
-            "Preemptive trim triggered (draining)"
-        );
-
-        // Capture messages before folding so distillation gets original content
-        let first_removable = self
-            .messages
-            .iter()
-            .position(|m| !matches!(m.role, MessageRole::System))
-            .unwrap_or(0);
-
-        self.fold_tool_results();
-
-        if self.current_tokens <= threshold {
-            return Vec::new();
-        }
-
-        // Drain FIFO — same logic as trim_fifo but returns removed messages
-        self.drain_fifo(first_removable)
-    }
-
-    /// FIFO trim that returns the removed messages.
-    ///
-    /// `first_removable` is the index of the first non-system message.
-    fn drain_fifo(&mut self, first_removable: usize) -> Vec<ChatMessage> {
-        if self.current_tokens <= self.max_tokens {
-            return Vec::new();
-        }
-
-        let mut removed_messages = Vec::new();
-        let mut removed_count = 0;
-
-        while self.current_tokens > self.max_tokens
-            && first_removable + removed_count < self.messages.len() - 1
-        {
-            let idx = first_removable + removed_count;
-            if idx < self.messages.len() {
-                let tokens = estimate_text_tokens(&self.messages[idx].content);
-                self.current_tokens = self.current_tokens.saturating_sub(tokens);
-                removed_messages.push(self.messages[idx].clone());
-                removed_count += 1;
-            } else {
-                break;
-            }
-        }
-
-        if removed_count > 0 {
-            let end = first_removable + removed_count;
-            self.messages.drain(first_removable..end.min(self.messages.len()));
-            tracing::debug!(
-                removed = removed_count,
-                remaining_tokens = self.current_tokens,
-                "FIFO trimmed (drained)"
-            );
-        }
-
-        removed_messages
-    }
-
-    /// Emergency trim — drastic measure for context overflow recovery
-    /// Keeps only the last 4 non-system messages
+    
+    /// Emergency trim — drastic measure for context overflow recovery.
+    /// Keeps only the last 4 non-system messages.
     pub fn emergency_trim(&mut self) -> usize {
         let system_count = self
             .messages
@@ -565,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_append_and_count() {
-        let mut hm = HistoryManager::new(1000, 4);
+        let mut hm = HistoryManager::new(1000);
         hm.append(make_message(MessageRole::User, "Hello world"));
         assert_eq!(hm.len(), 1);
         assert!(hm.token_count() > 0);
@@ -573,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_fifo_trim() {
-        let mut hm = HistoryManager::new(50, 4); // Very small budget
+        let mut hm = HistoryManager::new(50); // Very small budget
         hm.append(make_message(MessageRole::System, "System prompt"));
         for i in 0..10 {
             hm.append(make_message(MessageRole::User, &format!("Message {i} with some content to fill tokens")));
@@ -585,23 +451,8 @@ mod tests {
     }
 
     #[test]
-    fn test_fold_tool_results() {
-        let mut hm = HistoryManager::new(10000, 2);
-        hm.append(make_message(MessageRole::System, "System"));
-        hm.append(make_message(MessageRole::User, "Query"));
-
-        // Add 5 tool result pairs
-        for i in 0..5 {
-            hm.append(make_message(MessageRole::Tool, &format!("Tool result {i}: This is a long result with lots of content that should be folded when it gets old enough to save tokens in the conversation history.")));
-        }
-
-        let folded = hm.fold_tool_results();
-        assert_eq!(folded, 3); // 5 - keep_full_results(2) = 3
-    }
-
-    #[test]
     fn test_emergency_trim() {
-        let mut hm = HistoryManager::new(10000, 4);
+        let mut hm = HistoryManager::new(10000);
         hm.append(make_message(MessageRole::System, "System"));
         for i in 0..10 {
             hm.append(make_message(MessageRole::User, &format!("Msg {i}")));
@@ -613,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_truncate_large_messages() {
-        let mut hm = HistoryManager::new(100000, 4);
+        let mut hm = HistoryManager::new(100000);
         hm.append(make_message(MessageRole::System, "System prompt"));
         // Add a message with very long content (simulating shell output)
         let long_content: String = "x".repeat(100_000); // 100K chars = ~25K tokens

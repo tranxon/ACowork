@@ -796,7 +796,6 @@ async fn async_main(
             system_prompt: system_prompt.clone(),
             per_session_budget: budget,
             history_max_tokens: config.history_max_tokens,
-            keep_full_results: config.keep_full_results,
             chunk_tx,
             tool_definitions: tool_definitions_for_session,
             full_tool_specs: full_tool_specs.clone(),

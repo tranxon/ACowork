@@ -330,6 +330,15 @@ impl Default for TokenCounter {
 /// Divides the available context window into:
 /// - Fixed zone: system prompt + output reserve
 /// - Distributable space: split between history and retrieval
+///
+/// Deprecated per [ADR-010]: programmatic budget partitioning has been
+/// replaced by LLM-based summarization as the sole compression mechanism.
+/// This struct is retained for reference but no longer connected to the
+/// compression pipeline.
+#[deprecated(
+    since = "0.1.0",
+    note = "Programmatic budget partitioning replaced by LLM summarization (ADR-010)"
+)]
 #[derive(Debug, Clone)]
 pub struct BudgetAllocation {
     /// Total context window size in tokens
@@ -348,6 +357,7 @@ pub struct BudgetAllocation {
     pub history_min_turns: usize,
 }
 
+#[allow(deprecated)]
 impl BudgetAllocation {
     /// Create a new budget allocation with default ratios
     pub fn new(context_window: u64) -> Self {
@@ -412,6 +422,7 @@ impl BudgetAllocation {
     }
 }
 
+#[allow(deprecated)]
 impl Default for BudgetAllocation {
     fn default() -> Self {
         Self::new(128000) // Default GPT-4 context window
@@ -422,6 +433,7 @@ impl Default for BudgetAllocation {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
     use super::*;
     use rollball_core::providers::traits::{FunctionCall, ToolCall};
 

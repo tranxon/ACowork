@@ -244,11 +244,10 @@ impl AgentLoop {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
         let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
         let max_tokens = config.history_max_tokens;
-        let keep_full = config.keep_full_results;
         let approval_handle = ApprovalHandle::new(approval_tx);
         let mut loop_ = Self {
             core: AgentCore::new(config, manifest, provider, tools, on_chunk),
-            session: SessionState::new(max_tokens, keep_full, budget, conversation),
+            session: SessionState::new(max_tokens, budget, conversation),
             inbound_rx,
             approval_rx,
             approval_handle: approval_handle.clone(),
@@ -636,84 +635,24 @@ impl AgentLoop {
     /// Trim history to fit within the context window budget.
     /// Reserves 20% of the budget for new response + overhead.
     ///
-    /// When messages are evicted, they are captured and asynchronously
-    /// distilled into a `DistilledEpisode` via `EpisodeDistiller`, so that
-    /// the semantic content is preserved in Grafeo even after the messages
-    /// are removed from the context window.
+    /// Per [ADR-010], programmatic folding strategies have been removed.
+    /// This is a safety net only; LLM-based summarization at 80% token usage
+    /// is the primary compression mechanism.
     fn trim_history_to_budget(&mut self, model_name: &str) {
         let budget = self.context_trim_budget(model_name);
         // Reserve 20% of context window for new response + overhead
         let trim_budget = (budget as f64 * 0.8) as u64;
-        let trimmed_messages = self.session.history.preemptive_trim_drain(trim_budget);
 
-        // Spawn async distillation for evicted messages (best-effort, non-blocking)
-        if !trimmed_messages.is_empty() {
-            self.spawn_trim_distillation(trimmed_messages);
+        // Stage 1: FIFO trim oldest non-system messages until within budget
+        self.session.history.trim_fifo();
+
+        // Stage 2: If still over budget after FIFO, use emergency trim as safety net
+        if self.session.history.token_count() > trim_budget {
+            self.session.history.emergency_trim();
         }
 
         // Also truncate any single message that exceeds per-message limit
         self.session.history.truncate_large_messages(trim_budget / 4);
-    }
-
-    /// Spawn an asynchronous episode distillation task for trimmed messages.
-    ///
-    /// The task runs in the background and writes the distilled episode
-    /// to Grafeo. Failures are logged but never panic or block the main loop.
-    fn spawn_trim_distillation(&self, trimmed_messages: Vec<ChatMessage>) {
-        let session_id = self
-            .session.conversation
-            .as_ref()
-            .map(|c| c.session_id().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let provider = self.core.provider.clone();
-        let model_name = self
-            .core.gateway_model_capabilities
-            .values()
-            .min_by(|a, b| {
-                let cost_a = crate::episode_distill::model_cost_score(a);
-                let cost_b = crate::episode_distill::model_cost_score(b);
-                cost_a
-                    .partial_cmp(&cost_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .and_then(|m| m.name.clone())
-            .unwrap_or_else(|| "default".to_string());
-        let memory_store = self.core.memory_store().cloned();
-
-        let msg_count = trimmed_messages.len();
-        tracing::info!(
-            msg_count,
-            session_id = %session_id,
-            model = %model_name,
-            "Spawning episode distillation for trimmed messages"
-        );
-
-        tokio::spawn(async move {
-            match crate::episode_distill::EpisodeDistiller::distill_on_trim(
-                &trimmed_messages,
-                &session_id,
-                provider.as_ref(),
-                &model_name,
-            )
-            .await
-            {
-                Ok(episode) => {
-                    // Write distilled episode to Grafeo memory store (P2-1: using shared helper)
-                    Self::write_distilled_to_grafeo(&memory_store, &episode, "trimmed");
-                    tracing::info!(
-                        summary = %episode.summary,
-                        importance = episode.importance,
-                        "Episode distillation completed for trimmed messages"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Episode distillation failed for trimmed messages (non-fatal)"
-                    );
-                }
-            }
-        });
     }
 
     /// Close the conversation session and trigger session-level distillation.

@@ -609,59 +609,19 @@ total = 模型 context_window
     history 最少保留最近 3 轮对话
 ```
 
-### 6.6 注入策略：对话历史三阶段裁剪（2026-04-21）
+### 6.6 注入策略：对话历史裁剪（2026-04-21）
+
+> **⚠️ 已废弃（2026-05-28）**：本节描述的三阶段渐进裁剪（内容折叠 → FIFO → 摘要替代）已被 [ADR-010](../adr/ADR-010-context-compression-simplification.md) 取代。核心结论：上下文压缩是语义理解任务，程序化折叠策略不可靠。新策略简化为：70% 告警 → 80% LLM 摘要（完整上下文） → 95% emergency_trim。以下原文保留作为历史记录。
+
+---
+
+**原文：**
 
 **问题**：对话超过预算时如何裁剪，特别是包含大量文件内容的代码开发/文档处理场景。
 
 **决策**：**三阶段渐进裁剪：内容折叠 → FIFO → 摘要替代**。
 
-**第一阶段：内容折叠（无损压缩，优先执行）**
-
-扫描历史消息中的大段内容（单块 > 200 tokens），折叠为紧凑引用：
-
-```
-折叠规则：
-
-1. 文件内容（tool_result 中的 file_read 输出）
-   原文：[150行代码] → 折叠为：📎 src/main.rs@L1..L150
-
-2. 工具长输出（grep/search 结果、命令输出等）
-   原文：[35条匹配] → 折叠为：📎 tool:grep_code("pattern") → 35 matches
-
-3. 用户粘贴的大段文本（> 500 tokens）
-   原文：[长配置文件] → 折叠为：📎 inline#a3f2 (TOML, 2800 tokens)
-
-统一引用格式：
-  文件：  📎 <path>@L<start>..L<end>
-  工具：  📎 tool:<name>(<args>) → <summary>
-  内联：  📎 inline#<hash> (<type>, <tokens> tokens)
-
-折叠元数据（不显示在上下文中，用于召回）：
-  FoldedRef {
-    ref_id, source_type, source_path,
-    line_range, original_tokens,
-    content_hash,    // 用于检测文件是否变更
-    folded_at_turn,  // 在哪一轮被折叠
-  }
-```
-
-**折叠时机**：不是消息产生时立即折叠，而是 token 预算紧张时才触发。最近 3 轮不折叠。优先折叠最早轮次中的最大内容块。
-
-**召回机制**：
-- 主要路径：System Prompt 告知 LLM "带 📎 标记的内容已折叠，如需查看请用 file_read 工具"，LLM 自然通过 tool_call 召回
-- 补充路径：检索结果关联到 FoldedRef 源文件时，检查 content_hash，未修改则自动展开（如预算允许）
-
-**Token 节省估算**：代码开发场景 30 轮对话，文件内容约占 60%+，折叠后节省 50-60% 的 history tokens，很可能不再需要触发 FIFO 裁剪。
-
-**与 ArtifactRef 的关系**：FoldedRef 用于对话历史（瞬态层），ArtifactRef 用于经历层存储。两者格式可统一，会话结束后 FoldedRef 可转为 ArtifactRef 存入经历层。
-
-**第二阶段：FIFO 裁剪（有损）**
-
-折叠后仍超预算时，从最早的消息对（user+assistant）开始移除。保留：最近 3 轮对话 + 包含 tool_call 结果的消息对。
-
-**第三阶段：摘要替代（Phase 3）**
-
-Phase 2 不实现。Phase 3 对被 FIFO 裁剪的消息生成摘要（~100 tokens），保留核心决策信息。
+（以下内容已被 ADR-010 取代，不再生效）
 
 ### 6.7 注入策略：检索触发时机（2026-04-21）
 

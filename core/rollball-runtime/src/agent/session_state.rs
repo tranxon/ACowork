@@ -107,12 +107,11 @@ impl SessionState {
     /// Create a new SessionState with the given history parameters and budget.
     pub fn new(
         max_tokens: u64,
-        keep_full_results: usize,
         budget: rollball_core::Budget,
         conversation: Option<ConversationSession>,
     ) -> Self {
         Self {
-            history: HistoryManager::new(max_tokens, keep_full_results),
+            history: HistoryManager::new(max_tokens),
             conversation,
             loop_detector: LoopDetector::with_defaults(),
             budget_guard: BudgetGuard::new(budget),

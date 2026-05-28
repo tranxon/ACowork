@@ -37,8 +37,6 @@ pub struct SessionManagerConfig {
     pub per_session_budget: Budget,
     /// History max tokens per session
     pub history_max_tokens: u64,
-    /// Number of full tool results to keep per session
-    pub keep_full_results: usize,
     /// Optional streaming chunk sender shared across all sessions.
     /// When set, each session's AgentLoop forwards ChunkEvents here
     /// so the caller can relay them to Gateway.
@@ -71,7 +69,6 @@ impl Default for SessionManagerConfig {
                 exceeded_action: "warn".to_string(),
             },
             history_max_tokens: 128_000,
-            keep_full_results: 4,
             chunk_tx: None,
             tool_definitions: Vec::new(),
             full_tool_specs: Vec::new(),
@@ -276,7 +273,6 @@ impl SessionManager {
 
         let session_state = SessionState::new(
             self.config.history_max_tokens,
-            self.config.keep_full_results,
             self.config.per_session_budget.clone(),
             conversation,
         );

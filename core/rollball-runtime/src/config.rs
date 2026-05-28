@@ -58,9 +58,6 @@ pub struct RuntimeConfig {
     /// Maximum history tokens
     #[serde(default = "default_history_max_tokens")]
     pub history_max_tokens: u64,
-    /// Tool result folding: keep last N iterations complete
-    #[serde(default = "default_keep_full_results")]
-    pub keep_full_results: usize,
     /// Shell approval threshold: Low / Medium / High / Never
     /// Controls which shell commands require user confirmation.
     /// Default: "medium" — Medium and High risk commands need approval.
@@ -114,10 +111,6 @@ fn default_history_max_tokens() -> u64 {
     128000
 }
 
-fn default_keep_full_results() -> usize {
-    4
-}
-
 fn default_shell_approval_threshold() -> String {
     "medium".to_string()
 }
@@ -161,7 +154,6 @@ impl Default for RuntimeConfig {
             iteration_timeout_ms: default_iteration_timeout_ms(),
             tool_timeout_ms: default_tool_timeout_ms(),
             history_max_tokens: default_history_max_tokens(),
-            keep_full_results: default_keep_full_results(),
             shell_approval_threshold: default_shell_approval_threshold(),
             provider_request_timeout_ms: default_provider_request_timeout_ms(),
             provider_connect_timeout_ms: default_provider_connect_timeout_ms(),

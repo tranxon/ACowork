@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn test_context_builder_basic() {
         let manifest = test_manifest();
-        let mut history = HistoryManager::new(10000, 4);
+        let mut history = HistoryManager::new(10000);
         history.append(ChatMessage::user("Hello"));
 
         let builder = ContextBuilder::new("You are a helpful assistant.".to_string());
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn test_context_builder_with_identity() {
         let manifest = test_manifest();
-        let history = HistoryManager::new(10000, 4);
+        let history = HistoryManager::new(10000);
 
         let builder = ContextBuilder::new("You are a helper.".to_string())
             .with_identity(Some("Name: Alice, City: Shanghai".to_string()));
