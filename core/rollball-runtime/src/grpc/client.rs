@@ -1005,6 +1005,7 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 _ => ProtocolType::OpenAI,
             },
             compact_model: cfg.compact_model,
+            provider_list_version: cfg.provider_list_version,
         },
         Some(ServerPayload::WorkspaceConfigUpdate(wcu)) => {
             GatewayResponse::WorkspaceConfigUpdate {
@@ -1344,6 +1345,7 @@ mod tests {
                     max_output_tokens_limit: 32768,
                     protocol_type: "openai".to_string(),
                     compact_model: None,
+                    provider_list_version: 5,
                 },
             )),
         };

@@ -681,6 +681,11 @@ pub enum GatewayResponse {
         /// Used by the Runtime as Path 1 in distillation model selection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compact_model: Option<String>,
+        /// Current provider list version from Gateway.
+        /// Runtime should persist this to resource_cache.json for
+        /// next-startup AgentHello diff sync.
+        #[serde(default)]
+        provider_list_version: u64,
     },
     /// Web Search configuration delivery (Gateway → Runtime, hot-push)
     ///

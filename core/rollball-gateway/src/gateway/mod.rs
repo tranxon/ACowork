@@ -12,6 +12,7 @@ use crate::config::GatewayConfig;
 use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
+use crate::ipc::global_push::GlobalResourcePusher;
 use crate::ipc::server::SharedState;
 use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
@@ -518,6 +519,18 @@ impl Gateway {
         let http_state = shared_state.clone();
         let http_socket_path = socket_path.clone();
         let http_models_cache = models_cache.clone();
+        
+        // Create unified global resource pusher for hot-push of provider_list,
+        // search_config, MCP catalog, and user profile changes to running agents.
+        let pusher: Option<Arc<GlobalResourcePusher>> = Some(Arc::new(
+            GlobalResourcePusher::new(
+                http_grpc_session_mgr.clone(),
+                http_state.clone(),
+                data_dir_path.clone(),
+                http_models_cache.clone(),
+            ),
+        ));
+        
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -530,6 +543,7 @@ impl Gateway {
                 http_models_cache,
                 http_session_pending,
                 log_reload_handle,
+                pusher,
             ).await {
                 tracing::error!("HTTP server failed: {}", e);
             }

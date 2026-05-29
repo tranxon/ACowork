@@ -1489,6 +1489,8 @@ async fn push_llm_config_on_switch(
     if let Some(session_mgr) = &state.session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
+            let provider_list_version = state.gateway_state.read().await
+                .resource_cache.provider_list.version;
             let push_result = session.push_message(GatewayResponse::LLMConfigDelivery {
                 provider: provider_name.to_string(),
                 model: Some(model.to_string()),
@@ -1499,6 +1501,7 @@ async fn push_llm_config_on_switch(
                 max_output_tokens_limit,
                 protocol_type,
                 compact_model: entry.compact_model.clone(),
+                provider_list_version,
             }).await;
             if push_result {
                 tracing::info!(

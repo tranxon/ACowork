@@ -15,6 +15,7 @@ use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
 use crate::http::routes::{self, AppState, SharedSessionMgr, BridgeEvent, SessionPendingRequests};
+use crate::ipc::global_push::GlobalResourcePusher;
 
 /// PID file content for Desktop App discovery
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -126,6 +127,7 @@ pub(crate) async fn start_http_server(
     models_cache: crate::http::models_api::ModelsCache,
     session_pending: Option<SessionPendingRequests>,
     log_reload_handle: Option<crate::LogReloadHandle>,
+    pusher: Option<Arc<GlobalResourcePusher>>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -147,6 +149,7 @@ pub(crate) async fn start_http_server(
         log_reload_handle,
     );
     app_state.grpc_session_mgr = grpc_session_mgr;
+    app_state.pusher = pusher;
     app_state.cors_enabled = http_config.cors_enabled;
 
     // S5.9: Clean up stale pidfile from a previous Gateway run before writing a new one.

@@ -777,6 +777,22 @@ async fn async_main(
             }
             c.user_display_name = user_display_name.clone();
 
+            // Populate provider_compact_models from cached provider_list
+            // (resource_cache).  Each ProviderListItem carries a compact_model
+            // field that maps provider_id → distillation model.  This ensures
+            // compact_model survives agent restarts — without it, the map would
+            // stay empty until the next LLMConfigDelivery hot-push.
+            if let Some(ref providers) = resource_cache.providers {
+                for p in providers {
+                    c.provider_compact_models
+                        .insert(p.id.clone(), p.compact_model.clone());
+                }
+                tracing::info!(
+                    count = c.provider_compact_models.len(),
+                    "Populated provider_compact_models from resource cache"
+                );
+            }
+
             // Initialize Grafeo memory store at agent workspace
             c.init_memory_store(work_dir_path);
         }
@@ -2255,11 +2271,13 @@ async fn process_gateway_recv(
                     max_output_tokens_limit,
                     protocol_type,
                     compact_model,
+                    provider_list_version,
                 } => {
                     tracing::info!(
                         provider = %provider,
                         model = ?model,
                         max_output_tokens_limit = max_output_tokens_limit,
+                        provider_list_version = provider_list_version,
                         "Received LLMConfigDelivery at runtime — caching and broadcasting to all sessions"
                     );
 
@@ -2285,11 +2303,34 @@ async fn process_gateway_recv(
                         resolved_model.clone(),
                         model_capabilities,
                         max_output_tokens_limit,
-                        compact_model,
+                        compact_model.clone(),
                     );
 
                     // Persist selected model/provider to agent_model.json.
                     save_agent_model(&work_dir, &resolved_model, Some(&provider));
+
+                    // Persist provider_list_version + compact_model to
+                    // resource_cache.json for next-startup AgentHello diff sync
+                    // and distillation model resolution.
+                    if provider_list_version > 0 || compact_model.is_some() {
+                        let mut cache = read_resource_cache(std::path::Path::new(&work_dir));
+                        if provider_list_version > 0 {
+                            cache.provider_list_version = provider_list_version;
+                        }
+                        // Update compact_model in the cached provider list so
+                        // it survives agent restarts (populated into
+                        // provider_compact_models at startup).
+                        if let Some(ref cm) = compact_model {
+                            if let Some(ref mut providers) = cache.providers {
+                                if let Some(p) =
+                                    providers.iter_mut().find(|p| p.id == provider)
+                                {
+                                    p.compact_model = Some(cm.clone());
+                                }
+                            }
+                        }
+                        save_resource_cache(std::path::Path::new(&work_dir), &cache);
+                    }
 
                     return LoopAction::Continue;
                 }

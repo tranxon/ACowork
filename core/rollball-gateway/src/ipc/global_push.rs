@@ -15,14 +15,15 @@
 
 use std::path::PathBuf;
 
+use crate::grpc::SharedGrpcSessionMgr;
 use crate::http::models_api::ModelsCache;
-use crate::http::routes::{SharedHttpState, SharedSessionMgr};
+use crate::http::routes::SharedHttpState;
 use rollball_core::protocol::GatewayResponse;
 
 /// Unified pusher for global resource changes (provider/model, MCP catalog, …).
 #[derive(Clone)]
 pub struct GlobalResourcePusher {
-    session_mgr: Option<SharedSessionMgr>,
+    grpc_session_mgr: Option<SharedGrpcSessionMgr>,
     gateway_state: SharedHttpState,
     data_dir: PathBuf,
     models_cache: ModelsCache,
@@ -31,39 +32,51 @@ pub struct GlobalResourcePusher {
 impl GlobalResourcePusher {
     #[allow(dead_code)]
     pub(crate) fn new(
-        session_mgr: Option<SharedSessionMgr>,
+        grpc_session_mgr: Option<SharedGrpcSessionMgr>,
         gateway_state: SharedHttpState,
         data_dir: PathBuf,
         models_cache: ModelsCache,
     ) -> Self {
-        Self { session_mgr, gateway_state, data_dir, models_cache }
+        Self { grpc_session_mgr, gateway_state, data_dir, models_cache }
     }
 
     // ── LLM config (provider/model change) ──────────────────────────
 
     /// Push LLM configuration to all running agents after a Vault change
     /// (add/update/delete provider key).
+    ///
+    /// Pushes config for ALL vault providers (not just the default one)
+    /// so that per-provider fields like compact_model are updated for
+    /// every provider, not just the active one.
     #[tracing::instrument(skip(self), name = "push_llm_config")]
     pub async fn push_llm_config(&self) {
-        use crate::ipc::server::resolve_llm_config_for_agent;
 
-        let session_mgr = match &self.session_mgr {
+        let grpc_session_mgr = match &self.grpc_session_mgr {
             Some(mgr) => mgr.clone(),
             None => {
-                tracing::warn!("No IPC session manager, skipping LLM config push");
+                tracing::warn!("No gRPC session manager, skipping LLM config push");
                 return;
             }
         };
 
-        let agent_ids: Vec<String> = {
+        let (agent_ids, provider_ids): (Vec<String>, Vec<String>) = {
             let gw = self.gateway_state.read().await;
-            gw.running_agents.keys().cloned().collect()
+            (
+                gw.running_agents.keys().cloned().collect(),
+                gw.vault.list_providers(),
+            )
         };
 
-        for agent_id in agent_ids {
-            if let Some(cfg) =
-                resolve_llm_config_for_agent(&agent_id, &self.gateway_state).await
-            {
+        for agent_id in &agent_ids {
+            for provider_id in &provider_ids {
+                let cfg = match self
+                    .build_llm_config_for_provider(provider_id)
+                    .await
+                {
+                    Some(c) => c,
+                    None => continue,
+                };
+
                 let model_capabilities = if cfg.stored_capabilities.is_some() {
                     cfg.stored_capabilities
                 } else if let Some(ref m) = cfg.model {
@@ -83,17 +96,25 @@ impl GlobalResourcePusher {
 
                 let effective_base_url = api_override.or(cfg.base_url.clone());
 
-                let mgr = session_mgr.lock().await;
-                if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                    let max_output_tokens_limit = self
-                        .gateway_state
-                        .read()
-                        .await
-                        .config
-                        .as_ref()
-                        .map(|c| c.max_output_tokens_limit)
-                        .unwrap_or(32_768);
+                let max_output_tokens_limit = self
+                    .gateway_state
+                    .read()
+                    .await
+                    .config
+                    .as_ref()
+                    .map(|c| c.max_output_tokens_limit)
+                    .unwrap_or(32_768);
 
+                let provider_list_version = self
+                    .gateway_state
+                    .read()
+                    .await
+                    .resource_cache
+                    .provider_list
+                    .version;
+
+                let mgr = grpc_session_mgr.lock().await;
+                if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
                     let ok = session
                         .push_message(GatewayResponse::LLMConfigDelivery {
                             provider: cfg.provider.clone(),
@@ -105,6 +126,7 @@ impl GlobalResourcePusher {
                             max_output_tokens_limit,
                             protocol_type,
                             compact_model: cfg.compact_model.clone(),
+                            provider_list_version,
                         })
                         .await;
 
@@ -125,15 +147,41 @@ impl GlobalResourcePusher {
         }
     }
 
+    /// Build a ResolvedLlmConfig for a specific provider (not just the default).
+    async fn build_llm_config_for_provider(
+        &self,
+        provider_id: &str,
+    ) -> Option<crate::ipc::server::ResolvedLlmConfig> {
+        let gw = self.gateway_state.read().await;
+        let entry = match gw.vault.get_provider(provider_id) {
+            Ok(e) => e,
+            Err(_) => return None,
+        };
+
+        Some(crate::ipc::server::ResolvedLlmConfig {
+            provider: provider_id.to_string(),
+            model: entry.default_model.clone(),
+            api_key: entry.api_key.clone(),
+            base_url: entry.base_url.clone(),
+            models: entry.models.clone(),
+            stored_capabilities: entry
+                .default_model
+                .as_ref()
+                .and_then(|m| entry.model_capabilities.get(m))
+                .map(|c| rollball_core::protocol::ModelCapabilitiesInfo::from(c.clone())),
+            compact_model: entry.compact_model.clone(),
+        })
+    }
+
     // ── MCP catalog ─────────────────────────────────────────────────
 
     /// Push search config changes to all running agents after a vault mutation.
     #[tracing::instrument(skip(self), name = "push_search_config")]
     pub async fn push_search_config(&self) {
-        let session_mgr = match &self.session_mgr {
+        let grpc_session_mgr = match &self.grpc_session_mgr {
             Some(mgr) => mgr.clone(),
             None => {
-                tracing::warn!("No IPC session manager, skipping search config push");
+                tracing::warn!("No gRPC session manager, skipping search config push");
                 return;
             }
         };
@@ -157,7 +205,7 @@ impl GlobalResourcePusher {
         };
 
         for agent_id in agent_ids {
-            let mgr = session_mgr.lock().await;
+            let mgr = grpc_session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
                 let ok = session
                     .push_message(GatewayResponse::SearchConfigDelivery {
@@ -183,12 +231,11 @@ impl GlobalResourcePusher {
     pub async fn push_mcp_catalog(&self) {
         use crate::http::mcp_catalog_api;
         use rollball_core::protocol::McpServerConfigDef;
-        use tokio::task::JoinSet;
 
-        let session_mgr = match &self.session_mgr {
+        let grpc_session_mgr = match &self.grpc_session_mgr {
             Some(mgr) => mgr.clone(),
             None => {
-                tracing::warn!("No IPC session manager, skipping MCP catalog push");
+                tracing::warn!("No gRPC session manager, skipping MCP catalog push");
                 return;
             }
         };
@@ -223,37 +270,19 @@ impl GlobalResourcePusher {
             return;
         }
 
-        // ── Phase 3: Clone senders under brief lock ──
-        let senders: Vec<(String, crate::ipc::session::PushSender)> = {
-            let mgr = session_mgr.lock().await;
-            push_targets
-                .iter()
-                .filter_map(|(aid, _)| {
-                    mgr.find_by_agent_id(aid)
-                        .and_then(|(_, session)| session.push_sender().cloned())
-                        .map(|tx| (aid.clone(), tx))
-                })
-                .collect()
-        };
-
-        if senders.is_empty() {
-            return;
-        }
-
-        let payload_map: std::collections::HashMap<String, Vec<McpServerConfigDef>> =
-            push_targets.into_iter().collect();
-
-        // ── Phase 4: Concurrent push (lock-free) ──
-        let mut join_set = JoinSet::new();
-        for (aid, sender) in senders {
-            let merged = match payload_map.get(&aid) {
-                Some(s) => s.clone(),
+        // Phase 3: Push to all running agents via gRPC
+        let mut pushed = 0u32;
+        let mut failed = 0u32;
+        for aid in push_targets.iter().map(|(aid, _)| aid.clone()) {
+            let servers = match push_targets.iter().find_map(|(a, s)| if a == &aid { Some(s.clone()) } else { None }) {
+                Some(s) => s,
                 None => continue,
             };
-            join_set.spawn(async move {
-                let result = sender
-                    .send(GatewayResponse::RuntimeConfigUpdate {
-                        mcp_servers: Some(merged),
+            let mgr = grpc_session_mgr.lock().await;
+            if let Some((_conn_id, session)) = mgr.find_by_agent_id(&aid) {
+                let ok = session
+                    .push_message(GatewayResponse::RuntimeConfigUpdate {
+                        mcp_servers: Some(servers),
                         max_output_tokens: None,
                         max_iterations: None,
                         temperature: None,
@@ -265,24 +294,11 @@ impl GlobalResourcePusher {
                         search_config_json: None,
                     })
                     .await;
-                (aid, result.is_ok())
-            });
-        }
-
-        let mut pushed = 0u32;
-        let mut failed = 0u32;
-        while let Some(res) = join_set.join_next().await {
-            match res {
-                Ok((aid, true)) => {
+                if ok {
                     tracing::info!(agent = %aid, "Pushed MCP config to agent");
                     pushed += 1;
-                }
-                Ok((aid, false)) => {
+                } else {
                     tracing::warn!(agent = %aid, "MCP config push failed (channel closed)");
-                    failed += 1;
-                }
-                Err(e) => {
-                    tracing::warn!("MCP config push task panicked: {}", e);
                     failed += 1;
                 }
             }
@@ -298,10 +314,10 @@ impl GlobalResourcePusher {
     /// Push active user profile to all running agents after a profile change.
     #[tracing::instrument(skip(self), name = "push_user_profile")]
     pub async fn push_user_profile(&self) {
-        let session_mgr = match &self.session_mgr {
+        let grpc_session_mgr = match &self.grpc_session_mgr {
             Some(mgr) => mgr.clone(),
             None => {
-                tracing::warn!("No IPC session manager, skipping user profile push");
+                tracing::warn!("No gRPC session manager, skipping user profile push");
                 return;
             }
         };
@@ -325,7 +341,7 @@ impl GlobalResourcePusher {
         };
 
         for agent_id in agent_ids {
-            let mgr = session_mgr.lock().await;
+            let mgr = grpc_session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
                 let ok = session
                     .push_message(GatewayResponse::UserProfileUpdate {
