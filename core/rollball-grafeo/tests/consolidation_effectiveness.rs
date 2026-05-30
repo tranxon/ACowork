@@ -11,7 +11,7 @@ use chrono::{TimeDelta, Utc};
 use rollball_grafeo::{
     GeneralizationConfig, GrafeoStore, OfflineConsolidationConfig,
     KnowledgeNode, KnowledgeSubType, NodeStatus,
-    Episode, ContentType, EMBEDDING_DIM,
+    Episode, EMBEDDING_DIM,
     precision_at_k, recall_at_k,
 };
 
@@ -168,12 +168,10 @@ async fn test_generalization_improves_retrieval_coverage() {
             turn_index: i % 2,
             role: "assistant".to_string(),
             content: "Let me check the weather for you.\n{\"name\": \"http_request\", \"arguments\": {\"url\": \"weather-api\"}}".to_string(),
-            content_type: ContentType::Informational,
             embedding: Some(test_embedding(&format!("weather check request {}", i))),
             timestamp: Utc::now() - TimeDelta::hours(6 - i as i64),
             consolidated: false,
             metadata: HashMap::new(),
-            artifact_refs: vec![],
             importance: 0.7,
         };
         store.store_episode(&ep).unwrap();

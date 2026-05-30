@@ -7,8 +7,7 @@ use grafeo_engine::GrafeoDB;
 
 use crate::types::labels;
 use crate::types::{
-    ArtifactRef as GrafeoArtifactRef, AutobiographicalNode as GrafeoAutobiographicalNode,
-    ContentType as GrafeoContentType, Episode as GrafeoEpisode,
+    AutobiographicalNode as GrafeoAutobiographicalNode, Episode as GrafeoEpisode,
     KnowledgeNode as GrafeoKnowledgeNode, KnowledgeSubType as GrafeoKnowledgeSubType,
     ProceduralNode as GrafeoProceduralNode,
     AutobioCategory as GrafeoAutobioCategory, NodeStatus as GrafeoNodeStatus,
@@ -169,21 +168,10 @@ impl MemoryStore for GrafeoStore {
             turn_index: episode.turn_index,
             role: episode.role.clone(),
             content: episode.content.clone(),
-            content_type: match episode.content_type {
-                rollball_memory::ContentType::Informational => GrafeoContentType::Informational,
-                rollball_memory::ContentType::Artifact => GrafeoContentType::Artifact,
-                rollball_memory::ContentType::Structural => GrafeoContentType::Structural,
-            },
             embedding: episode.embedding.clone(),
             timestamp: episode.timestamp,
             consolidated: episode.consolidated,
             metadata: episode.metadata.clone(),
-            artifact_refs: episode.artifact_refs.iter().map(|r| GrafeoArtifactRef {
-                path: r.path.clone(),
-                hash: r.hash.clone(),
-                description: r.description.clone(),
-                line_range: r.line_range,
-            }).collect(),
             importance: episode.importance,
         };
         GrafeoStore::store_episode(self, &grafeo_episode)
@@ -270,25 +258,10 @@ impl MemoryStore for GrafeoStore {
                 turn_index: ep.turn_index,
                 role: ep.role,
                 content: ep.content,
-                content_type: match ep.content_type {
-                    crate::types::ContentType::Informational => rollball_memory::ContentType::Informational,
-                    crate::types::ContentType::Artifact => rollball_memory::ContentType::Artifact,
-                    crate::types::ContentType::Structural => rollball_memory::ContentType::Structural,
-                },
                 embedding: ep.embedding,
                 timestamp: ep.timestamp,
                 consolidated: ep.consolidated,
                 metadata: ep.metadata,
-                artifact_refs: ep
-                    .artifact_refs
-                    .into_iter()
-                    .map(|r| rollball_memory::ArtifactRef {
-                        path: r.path,
-                        hash: r.hash,
-                        description: r.description,
-                        line_range: r.line_range,
-                    })
-                    .collect(),
                 importance: ep.importance,
             })
             .collect())

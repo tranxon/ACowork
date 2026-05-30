@@ -89,7 +89,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 - **即时提取**：LLM 自主判断是否调用 memory_store、评估 confidence（high/medium/low），Runtime 不做语义层面的二次检查
 - **离线巩固**：三元组提取、冲突分类、证据验证由 LLM 在有完整上下文时执行，而非实时阶段的规则近似
 - **Runtime 仅做机械护栏**：内容长度限制、调用频率限制、安全过滤——这些是 LLM 无法自我约束的机械性限制
-- **检索辅助**：memory_hint 结构化输出（实体提取 + 查询分类）由 LLM 顺手完成，Runtime 规则仅在 LLM 未输出时提供冷启动降级
+- **摘要时实体/三元组提取**：Compaction 触发时，Compact Model 在生成摘要的同时提取实体和三元组。不再每轮提取（v3.10 简化）
 
 ## 1. 瞬态层：工作记忆
 
@@ -114,18 +114,35 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 └──────────────────────────────────────────┘
 ```
 
-**Memory Hint 指令（Phase 2 新增）：**
+**实体与三元组提取（v3.10 简化）：**
 
-System Prompt 末尾注入约 40 tokens 的结构化输出约束，要求 LLM 每轮回复末尾附加极简的记忆提示元数据：
+不再每轮通过 memory_hint 提取实体——改为在 Compaction 触发时由 Compact Model 一次性完成。Compact Model 输出格式：
 
 ```
-每次回复末尾附加记忆提示，格式：<mh>{"e":[实体],"t":类型}</mh>
-- e: 本轮对话涉及的核心实体，最多3个
-- t: s=语义联想 f=精确事实 r=关联扩散（relational） i=身份偏好
-示例：<mh>{"e":["React","性能优化"],"t":"s"}</mh>
+<summary>
+自然语言摘要文本...
+</summary>
+<entities>
+Entity1, Entity2, Entity3
+</entities>
+<triples>
+subject | predicate | object
+subject | predicate | object
+</triples>
 ```
 
-该指令仅包含 2 个字段（`e` 实体列表 + `t` 查询类型单字符），设计原则是"LLM 顺手就能做的事"，不增加额外认知负担。Runtime 解析 `<mh>` 块后用于优化下一轮的检索策略（调整 RRF 权重、增强 BM25 关键词）。对话历史存储时剥离 `<mh>` 块，不占后续上下文空间。解析失败时静默降级为默认检索策略。详见 review/04-p2-s2-design-review.md §6.1。
+- **entities**：跨轮持续出现的核心实体（人、地点、技术、项目、概念），最多 10 个，逗号分隔
+- **triples**：显式事实知识，subject|predicate|object 格式，一行一个
+
+设计理由：
+- 每轮提取的成本（~65 tokens/轮）在 ADR-011 之后不再合理——经历层不再逐轮写入，存储目的已消失
+- Compact Model 有完整对话上下文，实体和三元组的提取质量高于逐轮快照
+- Compaction 是低频操作（每 80% 触发），边际成本可忽略
+- 检索策略始终使用默认权重，不做类型驱动的动态调整——经评估 f/r 类型的微调收益未被验证
+
+**检索策略（v3.10 简化）：**
+
+所有检索统一使用默认 RRF 权重（vector: 0.7, text: 0.3），不再基于 memory_hint 类型动态调整。HintType 枚举保留但仅在 `memory_store` 工具调用时由 LLM 显式指定（用于即时提取管道的 sub_type 分类）。
 
 **瞬态层的管理策略（v3.8 简化）**：
 
@@ -148,95 +165,23 @@ Grafeo Episodic Store
 ├── episode_id: String              // 唯一 ID
 ├── timestamp: DateTime             // 发生时间
 ├── role: Role                      // user / agent / tool
-├── content: String                 // 内容（信息性内容原样存储；工件性内容仅存摘要）
-├── content_type: ContentType       // Informational / Artifact / Structural
-├── artifact_refs: Vec<ArtifactRef> // 工件引用（仅 Artifact 类型有值）
-├── embedding: Vec<f32>             // 语义向量（基于 content 而非原始代码生成）
+├── content: String                 // 内容（对话原文或 Compaction 后的摘要）
+├── embedding: Vec<f32>             // 语义向量
 ├── metadata: HashMap<String, Value>  // 上下文元数据（话题、情感倾向等）；不预存关联 node_id，跨层扩散通过 source_episode 反向查询实现
 ├── session_id: String              // 所属会话
 ├── consolidated: bool              // 是否已巩固到沉淀层
 └── importance: f32                 // 重要性评分（写入时 LLM 打分 0.0-1.0）
 ```
 
-**内容分类与压缩：**
+> **v3.10 设计简化**：已移除 Episode 的 `content_type`（ContentType）和 `artifact_refs`（ArtifactRef）字段。
+> Episode 内容不再做分类压缩——原始对话直接存储，Compaction 时由 Compact Model 输出摘要。
+> 理由详见 [ADR-011](../adr/ADR-011-compaction-as-distillation.md)：Compaction = Distillation，摘要即蒸馏。
 
-Episode 不是原样存储对话全文。写入前按内容类型分类处理，避免代码/文件等"工件性内容"膨胀 Grafeo 体积。
+**关键设计决策：Episode 内容存储策略**
 
-| 内容类型 | 判断规则 | 存储策略 | 示例 |
-|---------|---------|---------|------|
-| Informational（信息性） | 自然语言对话、Agent 决策解释 | 原样存储 | "我喜欢简洁的回复" |
-| Artifact（工件性） | Tool Call 中 file_read/shell_exec/code_write 的输出；单条消息中超过 2000 字符的连续代码块 | 仅存 LLM 生成的摘要 + artifact_refs | 800 行 Rust 代码 → "修改了 process_data 函数，增加输入验证" |
-| Structural（结构性） | Tool Call 参数/元数据、JSON 结构 | 精简摘要 | file_read → "读取 src/main.rs，共 200 行" |
-
-**ArtifactRef 结构：**
-
-```rust
-struct ArtifactRef {
-    path: String,           // 文件路径（如 "src/processor.rs"）
-    hash: String,           // 内容哈希（sha256，用于判断是否已变更）
-    description: String,    // LLM 生成的 1-3 句内容摘要
-    line_range: Option<(u32, u32)>,  // 涉及的行范围
-    modified_at: DateTime,  // 文件最后修改时间
-}
-```
-
-**为什么代码不属于 Grafeo：** 代码住在文件系统里，不住在记忆里。人类不会把代码全文记在脑子里——你记住的是"上次用了 React Hooks 模式"，不是具体的 800 行代码。Grafeo 存"关于代码的描述"，需要实际代码时通过 artifact_refs 的 path + hash 在文件系统/版本控制中查找。
-
-**Tool Result 摘要规则：**
-
-| 工具 | 原始结果 | 摘要存储 | 摘要生成方式 |
-|------|---------|---------|-------------|
-| file_read | 文件全文 | "读取 [path]，共 [N] 行，首行: [首行前100字符]" + ArtifactRef | Runtime 模板提取 |
-| shell_exec | 命令输出 | "执行 [cmd]，退出码 [N]，输出前200字符: [...]" | Runtime 模板提取 |
-| web_fetch | 网页全文 | "获取 [url]，标题 [title]，内容前200字符: [...]" | Runtime 模板提取 |
-| code_write | 写入的代码 | "写入 [path]，共 [N] 行" + ArtifactRef | Runtime 模板提取 |
-
-**摘要生成的实现方式——零 LLM 调用，纯 Runtime 逻辑：**
-
-内容分类压缩不需要额外 LLM 调用，全部由 Runtime 的确定性逻辑完成。具体分两个管道：
-
-**管道 A：Tool Call 结果的摘要（结构化模板提取）**
-
-Tool Call 的返回结果本身就是结构化 JSON，Runtime 按工具类型做模板化字符串拼接，零推理成本：
-
-```
-file_read 返回 { path: "src/main.rs", content: "..." }
-  → content_type = Artifact
-  → content = "读取 src/main.rs，共 200 行，首行: fn main() {"
-  → artifact_refs = [{ path: "src/main.rs", hash: "sha256:abc...", description: "读取 src/main.rs，共 200 行", line_range: "1-200", modified_at: <now> }]
-
-shell_exec 返回 { cmd: "cargo test", exit_code: 0, output: "..." }
-  → content_type = Structural
-  → content = "执行 cargo test，退出码 0，输出前200字符: running 42 tests..."
-```
-
-**管道 B：Agent 回复中代码块的分离（Markdown 正则提取）**
-
-Agent 回复是 Markdown 格式，代码块有明确的 ``` 围栏标记。Runtime 用正则分离代码和自然语言：
-
-```
-Agent 回复原文：
-  "这是重构后的文件：\n```rust\nfn process_data(input: &str) -> Result<Data> {\n  // 800行...\n}\n```\n主要改动是增加了输入验证。"
-
-分离过程：
-  1. 正则提取 ```rust\n...\n``` 代码块
-  2. 代码块替换为占位符：[代码输出: 写入 src/processor.rs，800 行]
-  3. 自然语言保留："这是重构后的文件：[代码输出: ...] 主要改动是增加了输入验证。"
-  4. content_type = Artifact
-  5. artifact_refs = [{ path: "src/processor.rs", hash: "sha256:def...", ... }]
-
-描述来源的优先级：
-  1. 代码块前的自然语言上下文（Agent 通常会说"这是重构后的文件"之类的话）
-  2. 代码块语言标记 + 行数（fallback："rust 代码，800 行"）
-  3. 无描述时仅存 "[代码输出: {行数} 行]"
-```
-
-**关键设计决策：为什么不用 LLM 生成摘要？**
-
-- 确定性：模板提取和正则分离的结果是确定性的，不会因 LLM 幻觉导致摘要失真
-- 零成本：不增加任何 API 调用或推理延迟
-- 足够用：episode 的目的是让 Agent "记住有过这次交互"，而非替代文件系统存储精确代码。下次需要精确代码时，走 artifact_refs 的 path + hash 查文件系统
-- 如果未来需要更精细的语义摘要（如"这个函数做了 X"），可在 Phase 3 离线巩固时用 LLM 补充，不阻塞 Phase 1
+- **v3.10**：Episode 内容不再做分类压缩。对话原文直接完整存储，摘要由 Compaction 阶段的 Compact Model 生成。
+- **Compaction**：当上下文使用率达 80% 时，Compact Model 对完整上下文做自然语言摘要（含实体和三元组提取），摘要写入 Grafeo 蒸馏 Episode。
+- 理由详见 [ADR-011](../adr/ADR-011-compaction-as-distillation.md)：Compaction = Distillation，摘要即蒸馏。
 
 **检索能力（基于 grafeo-engine 原生 API）：**
 
@@ -1199,71 +1144,18 @@ pub struct MemoryQuery {
 - 学习型 Agent（如知识库助手）：min_score = 0.7（严格匹配，宁缺毋滥）
 - 默认值从 manifest.toml `[memory.retrieval]` 节读取
 
-### 6.6 检索权重动态调整（v3.7 新增）
+### 6.6 检索权重（v3.10 简化）
 
-**设计动机**：不同检索场景对向量/关键词/图扩散三种检索通道的依赖程度不同。`memory_hint.type` 提供了场景信号，应驱动检索权重的动态调整，而非始终使用固定的 RRF 权重。
+**原设计（v3.7）**：通过 memory_hint.type 动态调整 RRF 权重和 graph_expand 参数。四种模式（s/f/r/i）各有不同权重配置。
 
-**memory_hint.type 驱动权重**：
+**v3.10 简化**：移除 per-round memory_hint 提取和规则引擎类型检测。所有检索统一使用默认权重（vector: 0.7, text: 0.3, graph: 0.0），graph_expand 使用保守阈值 [0.15, 0.2, 0.25]。
 
-| type | 含义 | 向量权重 | 关键词权重 | 图扩散权重 | 说明 |
-|------|------|---------|----------|----------|------|
-| `s` | 语义搜索 | 0.8 | 0.2 | 0.0 | 默认模式，向量检索为主 |
-| `f` | 事实查找 | 0.5 | 0.5 | 0.0 | 精确匹配优先，向量和关键词同等重要 |
-| `r` | 关联扩散 | 0.6 | 0.2 | 0.2 | 探索模式，启用图扩散通道 |
-| `i` | 身份查询 | 0.3 | 0.7 | 0.0 | AutobiographicalNode 精确匹配，关键词为主 |
+**简化理由**：
+- f/r 类型的权重微调收益未被 benchmark 验证，不值得引入规则复杂度
+- i（Identity）类型虽然理论上有意义（仅搜 Autobiographical），但需要在检索质量损失（漏掉其他层相关知识）和性能优化之间权衡——当前默认搜全部 4 个 Label 是更安全的选择
+- graph_expand 的激进阈值依赖图质量，当前图结构尚未经过充分验证
 
-**权重实现机制**：
-
-权重通过 `MemoryQuery` 传入 GrafeoStore，在 `hybrid_search` 调用时影响 RRF 融合参数：
-
-```rust
-// weight_vector / weight_keyword / weight_graph are derived from memory_hint.type
-// They influence the RRF fusion weights in Grafeo hybrid_search
-let results = db.hybrid_search(
-    label,
-    "content",
-    "embedding",
-    query_text,
-    Some(query_embedding),
-    k,
-    Some(hybrid_filters),
-    // RRF weights influenced by memory_hint.type
-    Some(RetrievalWeights { vector: 0.8, keyword: 0.2, graph: 0.0 }),
-)?;
-```
-
-**graph_expand 早期终止阈值联动**：
-
-不同 type 对 graph_expand 的激进程度也不同：
-
-| type | 早期终止阈值（每跳） | 说明 |
-|------|---------------------|------|
-| `s` | [0.15, 0.2, 0.25] | 保守扩散，每跳递增，语义搜索不依赖扩散 |
-| `r` | [0.1, 0.12, 0.15] | 更激进扩散，关联探索模式核心依赖图扩散 |
-| `f` | 不启用 graph_expand | 精确匹配不需要扩散 |
-| `i` | 不启用 graph_expand | 身份查询精确匹配不需要扩散 |
-
-**与检索流程的集成**：
-
-```
-用户输入 / Agent 内部查询
-   │
-   ▼
-解析 memory_hint.type（s / f / r / i）
-   │
-   ▼
-根据 type 设定检索权重 + graph_expand 参数
-   │
-   ▼
-进入 §6.1 检索流程（并行检索 + graph_expand + min_score 过滤）
-   │
-   ▼
-Abstention 判断（§6.5）
-```
-
-- `s` 型（默认）：memory_hint 解析失败时回退到此模式
-- `r` 型：graph_expand 权重 0.2 + 更激进阈值，最大化关联发现
-- `f`/`i` 型：关闭 graph_expand，减少不必要的检索延迟和 Token 消耗
+HintType 枚举和相关权重查找函数（`get_hint_weights`, `config_from_hint`）保留在代码中，供将来需要时使用。
 
 ## 7. 跨 Agent 知识共享
 

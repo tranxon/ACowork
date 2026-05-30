@@ -18,7 +18,7 @@ use rollball_grafeo::{
     OnlineRetrievalMetrics, HintType,
     ConflictResolutionRecord,
     KnowledgeNode, KnowledgeSubType, NodeStatus,
-    Episode, ContentType, EMBEDDING_DIM,
+    Episode, EMBEDDING_DIM,
 };
 use rollball_grafeo::consolidation::triple_extraction::{LlmMessage, LlmResponse, TripleExtractorLlm};
 
@@ -162,12 +162,10 @@ async fn test_consolidation_with_generalization() {
             turn_index: i,
             role: "assistant".to_string(),
             content: "Let me check the weather for you.\n{\"name\": \"http_request\", \"arguments\": {\"url\": \"weather-api\"}}".to_string(),
-            content_type: ContentType::Informational,
             embedding: Some(test_embedding(&format!("weather check {}", i))),
             timestamp: Utc::now(),
             consolidated: false,
             metadata: HashMap::new(),
-            artifact_refs: vec![],
             importance: 0.7,
         };
         store.store_episode(&ep).unwrap();
@@ -424,12 +422,10 @@ async fn test_e2e_consolidation_pipeline() {
             turn_index: 0,
             role: "assistant".to_string(),
             content: "Checking the weather now.\n{\"name\": \"http_request\"}".to_string(),
-            content_type: ContentType::Informational,
             embedding: Some(test_embedding(&format!("weather {}", i))),
             timestamp: Utc::now(),
             consolidated: false,
             metadata: HashMap::new(),
-            artifact_refs: vec![],
             importance: 0.7,
         };
         store.store_episode(&ep).unwrap();

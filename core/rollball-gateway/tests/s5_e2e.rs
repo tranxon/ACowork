@@ -247,12 +247,10 @@ async fn test_s5_gql_injection_session_id() {
         turn_index: 0,
         role: "user".to_string(),
         content: "Hello world".to_string(),
-        content_type: rollball_grafeo::ContentType::Informational,
         metadata: Default::default(),
         embedding: Some(vec![0.0f32; rollball_grafeo::EMBEDDING_DIM]),
         timestamp: chrono::Utc::now(),
         consolidated: false,
-        artifact_refs: vec![],
         importance: 0.5,
     };
     store.store_episode(&episode).unwrap();
@@ -387,12 +385,10 @@ async fn test_s5_gql_injection_drop_attempt() {
         turn_index: 0,
         role: "user".to_string(),
         content: "Test data".to_string(),
-        content_type: rollball_grafeo::ContentType::Informational,
         metadata: Default::default(),
         embedding: Some(vec![0.0f32; rollball_grafeo::EMBEDDING_DIM]),
         timestamp: chrono::Utc::now(),
         consolidated: false,
-        artifact_refs: vec![],
         importance: 0.5,
     };
     store.store_episode(&episode).unwrap();
