@@ -21,13 +21,15 @@ impl GrafeoStore {
     /// These are candidates for the offline consolidation pipeline.
     pub fn get_unconsolidated_episodes(&self, limit: usize) -> Result<Vec<crate::types::Episode>> {
         let session = self.db.session();
+        // Note: GQL ORDER BY / WHERE returns bare Int64 IDs instead of full node maps
+        // in the current grafeo-engine version. Fetch all and filter/sort in Rust.
         let gql = format!(
-            "MATCH (e:Episodic) WHERE e.consolidated = false RETURN e ORDER BY e.timestamp ASC LIMIT {}",
+            "MATCH (e:Episodic) RETURN e LIMIT {}",
             limit
         );
         let result = session.execute(&gql)?;
 
-        let mut episodes = Vec::new();
+        let mut episodes: Vec<crate::types::Episode> = Vec::new();
         for row in result.rows() {
             if let Some(Value::Map(map)) = row.first() {
                 if let Ok(ep) = crate::episodic::value_to_episode(&Value::Map(map.clone())) {
@@ -35,6 +37,10 @@ impl GrafeoStore {
                 }
             }
         }
+        // Filter and sort in Rust (GQL ORDER BY + WHERE changes return format)
+        episodes.retain(|ep| !ep.consolidated);
+        episodes.sort_by_key(|ep| ep.timestamp);
+        episodes.truncate(limit);
         Ok(episodes)
     }
 
@@ -74,7 +80,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ContentType, EMBEDDING_DIM, Episode};
+    use crate::types::{EMBEDDING_DIM, Episode};
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
 
@@ -93,12 +99,10 @@ mod tests {
             turn_index: 0,
             role: "user".to_string(),
             content: content.to_string(),
-            content_type: ContentType::Informational,
             embedding: Some(vec![0.1f32; EMBEDDING_DIM]),
             timestamp: ts,
             consolidated: false,
             metadata: HashMap::new(),
-            artifact_refs: vec![],
             importance: 0.5,
         }
     }
@@ -121,10 +125,23 @@ mod tests {
         let base = test_dt();
 
         let ep1 = make_episode("s1", "first", base);
+        store.store_episode(&ep1).unwrap();
+
         let mut ep2 = make_episode("s1", "second", base + TimeDelta::minutes(1));
         ep2.consolidated = true;
-        store.store_episode(&ep1).unwrap();
         store.store_episode(&ep2).unwrap();
+
+        // Verify both episodes were stored by retrieving directly
+        let node1 = store.db.get_node(grafeo_common::types::NodeId::new(0)).unwrap();
+        let node2 = store.db.get_node(grafeo_common::types::NodeId::new(1)).unwrap();
+        let props1: Vec<(String, Value)> = node1.properties_as_btree().into_iter().map(|(k, v)| (k.as_str().to_string(), v)).collect();
+        let props2: Vec<(String, Value)> = node2.properties_as_btree().into_iter().map(|(k, v)| (k.as_str().to_string(), v)).collect();
+        let ep1_restored = Episode::from_properties(grafeo_common::types::NodeId::new(0), &props1).unwrap();
+        let ep2_restored = Episode::from_properties(grafeo_common::types::NodeId::new(1), &props2).unwrap();
+        assert_eq!(ep1_restored.content, "first");
+        assert!(!ep1_restored.consolidated);
+        assert_eq!(ep2_restored.content, "second");
+        assert!(ep2_restored.consolidated);
 
         let results = store.get_unconsolidated_episodes(10).unwrap();
         assert_eq!(results.len(), 1);

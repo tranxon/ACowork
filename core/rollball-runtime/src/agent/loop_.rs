@@ -681,7 +681,8 @@ impl AgentLoop {
                 .await
             {
                 Ok(summary) => {
-                    let removed = self.session.history.replace_middle_with_summary(&summary, KEEP_LAST_ROUNDS);
+                    let stripped = crate::episode_distill::strip_metadata_blocks(&summary);
+                    let removed = self.session.history.replace_middle_with_summary(&stripped, KEEP_LAST_ROUNDS);
 
                     // Write compaction summary to Grafeo
                     let session_id = self

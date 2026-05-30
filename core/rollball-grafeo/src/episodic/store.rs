@@ -1,174 +1,19 @@
-//! Episode write operations with automatic content classification and artifact compression.
-#![allow(clippy::collapsible_if)]
+//! Episode write operations.
 
 use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, edge_types, ArtifactRef, ContentType, Episode};
-
-// ---------------------------------------------------------------------------
-// Content auto-classification
-// ---------------------------------------------------------------------------
-
-/// Classify episode content using deterministic heuristics (no LLM).
-///
-/// - **Artifact**: code blocks, file paths, diff format.
-/// - **Structural**: markdown lists, tables.
-/// - **Informational**: default fallback.
-pub fn classify_content(content: &str) -> ContentType {
-    let has_code_block = content.contains("```");
-    let has_diff_format = content.contains("diff\n")
-        || content.contains("@@ ")
-        || (content.lines().any(|l| l.starts_with("+ "))
-            && content.lines().any(|l| l.starts_with("- ")));
-    let has_file_path = content.lines().any(|l| {
-        let t = l.trim();
-        (t.starts_with("src/")
-            || t.starts_with("lib/")
-            || t.starts_with("tests/")
-            || t.starts_with("docs/")
-            || t.starts_with("examples/")
-            || t.starts_with("core/")
-            || t.starts_with("apps/")
-            || t.ends_with(".rs")
-            || t.ends_with(".py")
-            || t.ends_with(".js")
-            || t.ends_with(".toml")
-            || t.ends_with(".md")
-            || t.ends_with(".json"))
-            && !t.contains(' ')
-            && t.len() < 200
-    });
-
-    if has_code_block || has_diff_format || has_file_path {
-        return ContentType::Artifact;
-    }
-
-    let has_markdown_list = content
-        .lines()
-        .any(|l| l.starts_with("- ") || l.starts_with("* ") || l.starts_with("1. "));
-    let has_table = content.contains("| ") && content.contains(" |");
-
-    if has_markdown_list || has_table {
-        return ContentType::Structural;
-    }
-
-    ContentType::Informational
-}
-
-// ---------------------------------------------------------------------------
-// Artifact compression
-// ---------------------------------------------------------------------------
-
-/// Extract artifact references from content heuristically.
-///
-/// Detects file paths and generates [`ArtifactRef`] entries with
-/// line ranges when available.
-pub fn extract_artifact_refs(content: &str) -> Vec<ArtifactRef> {
-    let mut refs = Vec::new();
-    let lines: Vec<&str> = content.lines().collect();
-
-    for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        // Scan tokens inside the line to tolerate surrounding text.
-        for token in trimmed.split_whitespace() {
-            let t = token.trim_matches(|c: char| {
-                c == '`' || c == '*' || c == '_' || c == '(' || c == ')' || c == '[' || c == ']' || c == '<' || c == '>' || c == ':' || c == ',' || c == '.' || c == ';'
-            });
-            let is_path = t.starts_with("src/")
-                || t.starts_with("lib/")
-                || t.starts_with("tests/")
-                || t.starts_with("docs/")
-                || t.starts_with("examples/")
-                || t.starts_with("core/")
-                || t.starts_with("apps/")
-                || t.ends_with(".rs")
-                || t.ends_with(".py")
-                || t.ends_with(".js")
-                || t.ends_with(".toml")
-                || t.ends_with(".md")
-                || t.ends_with(".json");
-            if !is_path || t.contains(' ') || t.len() >= 200 {
-                continue;
-            }
-
-            // Try to infer a line range from surrounding context.
-            let line_range = if content.contains("```") {
-                // Look for code block boundaries near this line.
-                let start = lines[..idx]
-                    .iter()
-                    .rposition(|l| l.trim().starts_with("```"))
-                    .map(|s| (s + 2) as u32);
-                let end = lines[idx..]
-                    .iter()
-                    .position(|l| l.trim().starts_with("```"))
-                    .map(|e| (idx + e) as u32);
-                match (start, end) {
-                    (Some(s), Some(e)) if s <= e => Some((s, e)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            refs.push(ArtifactRef {
-                path: t.to_string(),
-                hash: None,
-                description: "Artifact referenced in episode".to_string(),
-                line_range,
-            });
-        }
-    }
-
-    // Deduplicate by path.
-    refs.sort_by(|a, b| a.path.cmp(&b.path));
-    refs.dedup_by(|a, b| a.path == b.path);
-
-    refs
-}
-
-/// Compress artifact-type content to a summary + artifact references.
-///
-/// The summary is the first 200 characters of the original content,
-/// truncated with "..." if longer. Uses UTF-8-safe truncation to avoid
-/// panicking on multi-byte character boundaries.
-pub fn compress_artifact_content(content: &str) -> (String, Vec<ArtifactRef>) {
-    let refs = extract_artifact_refs(content);
-
-    let summary = if content.chars().count() > 200 {
-        // UTF-8 safe truncation: take first 200 chars, then find byte boundary
-        let truncated: String = content.chars().take(200).collect();
-        format!("{}...", truncated)
-    } else {
-        content.to_string()
-    };
-
-    (summary, refs)
-}
+use crate::types::{labels, edge_types, Episode};
 
 // ---------------------------------------------------------------------------
 // GrafeoStore episode writes
 // ---------------------------------------------------------------------------
 
 impl GrafeoStore {
-    /// Store an Episode node, automatically classifying its content type.
-    ///
-    /// Artifact content is compressed to a summary + [`ArtifactRef`] list.
+    /// Store an Episode node in the graph database.
     /// Returns the newly created [`NodeId`].
     pub fn store_episode(&self, episode: &Episode) -> Result<NodeId> {
-        let mut episode = episode.clone();
-
-        // Auto-classify content.
-        episode.content_type = classify_content(&episode.content);
-
-        // Compress artifact content.
-        if episode.content_type == ContentType::Artifact {
-            let (compressed, refs) = compress_artifact_content(&episode.content);
-            episode.content = compressed;
-            episode.artifact_refs = refs;
-        }
-
         let props = episode.to_properties();
         let embedding = props.iter().find(|(k, _)| k == "embedding").map(|(_, v)| v.clone());
         let non_emb_props: Vec<_> = props.into_iter().filter(|(k, _)| k != "embedding").collect();
@@ -241,7 +86,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ContentType, EMBEDDING_DIM, Episode};
+    use crate::types::{EMBEDDING_DIM, Episode};
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
 
@@ -260,49 +105,12 @@ mod tests {
             turn_index: 0,
             role: "user".to_string(),
             content: content.to_string(),
-            content_type: ContentType::Informational,
             embedding: Some(vec![0.1f32; EMBEDDING_DIM]),
             timestamp: test_dt(),
             consolidated: false,
             metadata: HashMap::new(),
-            artifact_refs: vec![],
             importance: 0.5,
         }
-    }
-
-    #[test]
-    fn test_classify_content_informational() {
-        let text = "Hello, how are you today?";
-        assert_eq!(classify_content(text), ContentType::Informational);
-    }
-
-    #[test]
-    fn test_classify_content_artifact() {
-        let text = "```rust\nfn main() {}\n```";
-        assert_eq!(classify_content(text), ContentType::Artifact);
-    }
-
-    #[test]
-    fn test_classify_content_structural() {
-        let text = "- item one\n- item two";
-        assert_eq!(classify_content(text), ContentType::Structural);
-    }
-
-    #[test]
-    fn test_extract_artifact_refs() {
-        let text = "Check src/main.rs for the entry point.";
-        let refs = extract_artifact_refs(text);
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].path, "src/main.rs");
-    }
-
-    #[test]
-    fn test_compress_artifact_content() {
-        let text = "a".repeat(250);
-        let (summary, refs) = compress_artifact_content(&text);
-        assert!(summary.ends_with("..."));
-        assert_eq!(summary.len(), 203); // 200 + "..."
-        assert!(refs.is_empty());
     }
 
     #[test]
@@ -342,23 +150,5 @@ mod tests {
         let gql = "MATCH (s:Session)-[:HAS_MEMORY]->(e:Episodic) WHERE s.session_id = 'sess-42' RETURN e";
         let result = session.execute(gql).unwrap();
         assert_eq!(result.rows().len(), 1);
-    }
-
-    #[test]
-    fn test_store_episode_auto_classifies_artifact() {
-        let store = test_store();
-        let mut ep = make_episode("```rust\nsrc/main.rs\nfn main() {}\n```");
-        ep.content_type = ContentType::Informational; // will be overridden
-        let id = store.store_episode(&ep).unwrap();
-
-        let node = store.db.get_node(id).unwrap();
-        let props: Vec<(String, Value)> = node
-            .properties_as_btree()
-            .into_iter()
-            .map(|(k, v)| (k.as_str().to_string(), v))
-            .collect();
-        let restored = Episode::from_properties(id, &props).unwrap();
-        assert_eq!(restored.content_type, ContentType::Artifact);
-        assert!(!restored.artifact_refs.is_empty());
     }
 }

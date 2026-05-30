@@ -50,7 +50,7 @@ pub use spreading::{
 pub use export::FilteredNode;
 pub use types::{
     labels, edge_types, EMBEDDING_DIM,
-    ArtifactRef, AutobioCategory, AutobiographicalNode,
-    ContentType, Episode, KnowledgeNode, KnowledgeSubType,
+    AutobioCategory, AutobiographicalNode,
+    Episode, KnowledgeNode, KnowledgeSubType,
     NodeStatus, ProceduralNode,
 };

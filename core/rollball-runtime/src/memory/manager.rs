@@ -406,7 +406,6 @@ impl MemoryManager {
             ("turn_index", Value::from(i64::from(record.turn_index))),
             ("role", Value::from("conversation")),
             ("content", Value::from(content.as_str())),
-            ("content_type", Value::from("Informational")),
             (
                 "timestamp",
                 Value::from(Timestamp::from_micros(
@@ -442,12 +441,17 @@ impl MemoryManager {
     ///
     /// Per [ADR-011], the episode contains a natural-language summary.
     /// The summary text IS the distillation result.
+    /// Entities and triples extracted during compaction are stored as
+    /// node properties for later consolidation.
     pub fn record_distilled(&self, store: &GrafeoStore, episode: &DistilledEpisode) -> Result<()> {
+        let entities_str = episode.entities.join(", ");
+        let triples_json = serde_json::to_string(&episode.triples)
+            .unwrap_or_else(|_| "[]".to_string());
+
         let props = vec![
             ("session_id", Value::from(episode.session_id.as_str())),
             ("role", Value::from("distilled")),
             ("content", Value::from(episode.summary.as_str())),
-            ("content_type", Value::from("Informational")),
             (
                 "timestamp",
                 Value::from(Timestamp::from_micros(
@@ -460,6 +464,8 @@ impl MemoryManager {
                 "source_session_id",
                 Value::from(episode.source_session_id.as_str()),
             ),
+            ("entities", Value::from(entities_str.as_str())),
+            ("triples", Value::from(triples_json.as_str())),
         ];
 
         store
@@ -469,6 +475,8 @@ impl MemoryManager {
         tracing::debug!(
             session_id = %episode.session_id,
             summary_len = episode.summary.len(),
+            entity_count = episode.entities.len(),
+            triple_count = episode.triples.len(),
             "Recorded distilled episode"
         );
 

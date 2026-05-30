@@ -11,8 +11,8 @@ pub mod types;
 // Re-exports for convenience
 pub use store::MemoryStore;
 pub use types::{
-    AutobioCategory, AutobiographicalNode, ArtifactRef, ConflictSignal, ConflictType,
-    ContentType, ContextSource, DecayConfig, DecayScanResult, Episode,
+    AutobioCategory, AutobiographicalNode, ConflictSignal, ConflictType,
+    ContextSource, DecayConfig, DecayScanResult, Episode,
     KnowledgeNode, KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery,
     NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource,
     RetrievalMetrics, SearchResult, StoreHealth, StoreStats,

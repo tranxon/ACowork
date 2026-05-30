@@ -172,7 +172,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ContentType, EMBEDDING_DIM};
+    use crate::types::EMBEDDING_DIM;
     use chrono::TimeDelta;
     use std::collections::HashMap;
 
@@ -191,12 +191,10 @@ mod tests {
             turn_index: 0,
             role: "user".to_string(),
             content: content.to_string(),
-            content_type: ContentType::Informational,
             embedding: Some(vec![0.1f32; EMBEDDING_DIM]),
             timestamp: ts,
             consolidated: false,
             metadata: HashMap::new(),
-            artifact_refs: vec![],
             importance: 0.5,
         }
     }

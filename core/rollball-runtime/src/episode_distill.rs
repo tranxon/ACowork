@@ -30,11 +30,22 @@ use crate::error::{Result, RuntimeError};
 // Data types
 // ---------------------------------------------------------------------------
 
+/// A simple subject-predicate-object triple extracted during compaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Triple {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+}
+
 /// A compacted/distilled episode — natural-language summary of a conversation segment.
 ///
 /// Per [ADR-011], the summary is plain natural language text. No structured JSON
 /// fields (intent_type, decision, keywords, etc.) — the summary text IS the
 /// distillation result and is directly suitable for Grafeo semantic retrieval.
+///
+/// Entities and triples are extracted during compaction by the compact model
+/// (replaces per-round memory_hint LLM extraction).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistilledEpisode {
     /// Session that produced this episode.
@@ -46,6 +57,10 @@ pub struct DistilledEpisode {
     /// Whether this episode has been consolidated to the semantic layer.
     /// Initial value is always `false`.
     pub consolidated: bool,
+    /// Entities extracted during compaction (max 10, comma-separated in prompt output).
+    pub entities: Vec<String>,
+    /// Knowledge triples (subject|predicate|object) extracted during compaction.
+    pub triples: Vec<Triple>,
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +68,92 @@ pub struct DistilledEpisode {
 // ---------------------------------------------------------------------------
 
 // Prompt moved to crate::prompt::COMPACT_PROMPT.
+
+// ---------------------------------------------------------------------------
+// Parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Parsed result from compact model output containing summary, entities, and triples.
+#[derive(Debug, Clone)]
+pub struct CompactOutput {
+    pub summary: String,
+    pub entities: Vec<String>,
+    pub triples: Vec<Triple>,
+}
+
+/// Parse the compact model's raw output (which may contain `<summary>`,
+/// `<entities>`, and `<triples>` blocks) into structured components.
+///
+/// If the output does not contain the expected block markers, the entire text
+/// is treated as the summary (backwards-compatible with pre-entity extraction).
+pub fn parse_compact_output(raw: &str) -> CompactOutput {
+    let summary = extract_block(raw, "summary").unwrap_or_else(|| raw.trim().to_string());
+    let entities_str = extract_block(raw, "entities").unwrap_or_default();
+    let triples_str = extract_block(raw, "triples").unwrap_or_default();
+
+    let entities: Vec<String> = entities_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let triples: Vec<Triple> = triples_str
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let parts: Vec<&str> = line.split('|').map(|s| s.trim()).collect();
+            if parts.len() >= 3 {
+                Some(Triple {
+                    subject: parts[0].to_string(),
+                    predicate: parts[1].to_string(),
+                    object: parts[2].to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    CompactOutput {
+        summary,
+        entities,
+        triples,
+    }
+}
+
+/// Extract the text content between `<tag>` and `</tag>` markers.
+fn extract_block(text: &str, tag: &str) -> Option<String> {
+    let start_marker = format!("<{}>", tag);
+    let end_marker = format!("</{}>", tag);
+    let start = text.find(&start_marker)? + start_marker.len();
+    let end = text[start..].find(&end_marker)?;
+    Some(text[start..start + end].trim().to_string())
+}
+
+/// Strip entity and triple metadata blocks from compact output, leaving only
+/// the summary. Used before inserting compact model output into in-memory
+/// context (the main LLM should not see the metadata blocks).
+pub fn strip_metadata_blocks(raw: &str) -> String {
+    let mut text = raw.to_string();
+    // Remove <entities>...</entities> block
+    if let Some(start) = text.find("<entities>") {
+        if let Some(end) = text[start..].find("</entities>") {
+            let end = start + end + "</entities>".len();
+            text.replace_range(start..end, "");
+        }
+    }
+    // Remove <triples>...</triples> block
+    if let Some(start) = text.find("<triples>") {
+        if let Some(end) = text[start..].find("</triples>") {
+            let end = start + end + "</triples>".len();
+            text.replace_range(start..end, "");
+        }
+    }
+    text.trim().to_string()
+}
 
 // ---------------------------------------------------------------------------
 // EpisodeDistiller
@@ -137,14 +238,16 @@ impl EpisodeDistiller {
             summary,
             source_session_id: session_id.to_string(),
             consolidated: false,
+            entities: Vec::new(),
+            triples: Vec::new(),
         })
     }
 
     /// Write a natural-language summary directly to Grafeo as an episodic memory.
     ///
     /// This is the unified write path for both compaction summaries and
-    /// session-close tail distillations. Creates a DistilledEpisode from the
-    /// summary text and delegates to `MemoryManager::record_distilled`.
+    /// session-close tail distillations. Parses entity and triple metadata
+    /// from the compact model output and creates a DistilledEpisode.
     pub fn write_summary_to_grafeo(
         summary_text: &str,
         session_id: &str,
@@ -156,11 +259,14 @@ impl EpisodeDistiller {
         let manager = crate::memory::MemoryManager::new(
             crate::memory::MemoryManagerConfig::default(),
         );
+        let parsed = parse_compact_output(summary_text);
         let episode = DistilledEpisode {
             session_id: session_id.to_string(),
-            summary: summary_text.to_string(),
+            summary: parsed.summary,
             source_session_id: session_id.to_string(),
             consolidated: false,
+            entities: parsed.entities,
+            triples: parsed.triples,
         };
         if let Err(e) = manager.record_distilled(store, &episode) {
             tracing::warn!(
@@ -352,6 +458,8 @@ mod tests {
             summary: "User asked about Rust async programming".to_string(),
             source_session_id: "sess-1".to_string(),
             consolidated: false,
+            entities: vec!["Rust".to_string()],
+            triples: Vec::new(),
         };
         assert_eq!(episode.session_id, "sess-1");
         assert!(!episode.summary.is_empty());
