@@ -406,7 +406,7 @@ impl HistoryManager {
         }
 
         let prompt =
-            crate::episode_distill::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
+            crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
 
         let request = ChatRequest {
             model: model_name.to_string(),

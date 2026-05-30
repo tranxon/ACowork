@@ -138,6 +138,9 @@ pub(crate) async fn start_http_server(
     let auth = Arc::new(HttpAuth::new(http_config.auth_enabled));
     auth.write_token_file(data_dir)?;
 
+    // Set data directory for offline_providers.json search & persistence
+    crate::http::models_api::set_data_dir(data_dir);
+
     // Build app state
     let mut app_state = AppState::with_models_cache(
         gateway_state,

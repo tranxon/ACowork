@@ -66,13 +66,13 @@ stop_process() {
 }
 
 # Step 1: Stop running processes
-echo -e "${YELLOW}[1/4] Stopping running Gateway and Runtime processes...${NC}"
+echo -e "${YELLOW}[1/5] Stopping running Gateway and Runtime processes...${NC}"
 stop_process "rollball-gateway" "Gateway"
 stop_process "rollball-runtime" "Runtime"
 echo ""
 
 # Step 2: Build Gateway
-echo -e "${YELLOW}[2/4] Building Gateway (release mode)...${NC}"
+echo -e "${YELLOW}[2/5] Building Gateway (release mode)...${NC}"
 cd "$CORE_DIR"
 if cargo build --release -p rollball-gateway 2>&1 | tee /tmp/gateway_build.log; then
     if grep -q "error" /tmp/gateway_build.log 2>/dev/null; then
@@ -87,7 +87,7 @@ fi
 echo ""
 
 # Step 3: Build Runtime
-echo -e "${YELLOW}[3/4] Building Runtime (release mode)...${NC}"
+echo -e "${YELLOW}[3/5] Building Runtime (release mode)...${NC}"
 if cargo build --release -p rollball-runtime 2>&1 | tee /tmp/runtime_build.log; then
     if grep -q "error" /tmp/runtime_build.log 2>/dev/null; then
         echo -e "${RED}  Runtime build failed with errors.${NC}"
@@ -100,8 +100,24 @@ else
 fi
 echo ""
 
-# Step 4: Start Gateway
-echo -e "${YELLOW}[4/4] Starting Gateway in daemon mode (debug logging)...${NC}"
+# Step 4: Copy offline_providers.json from assets to target dirs
+echo -e "${YELLOW}[4/5] Copying offline_providers.json to target directories...${NC}"
+OFFLINE_SRC="$WORKSPACE_ROOT/assets/offline_providers.json"
+RELEASE_DIR="$WORKSPACE_ROOT/target/release"
+DEBUG_DIR="$WORKSPACE_ROOT/target/debug"
+if [ -f "$OFFLINE_SRC" ]; then
+    cp "$OFFLINE_SRC" "$RELEASE_DIR/"
+    echo -e "${GREEN}  Copied to $RELEASE_DIR${NC}"
+    cp "$OFFLINE_SRC" "$DEBUG_DIR/"
+    echo -e "${GREEN}  Copied to $DEBUG_DIR${NC}"
+else
+    echo -e "${RED}  WARNING: offline_providers.json not found at $OFFLINE_SRC${NC}"
+fi
+
+echo ""
+
+# Step 5: Start Gateway
+echo -e "${YELLOW}[5/5] Starting Gateway in daemon mode (debug logging)...${NC}"
 export ROLLBALL_GATEWAY_DAEMON="true"
 export ROLLBALL_GATEWAY_LOG_LEVEL="debug"
 

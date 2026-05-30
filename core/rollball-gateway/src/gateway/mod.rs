@@ -447,6 +447,11 @@ impl Gateway {
             gw.models_cache = Some(models_cache.clone());
         }
 
+        // Note: models.dev data is NOT eagerly fetched at startup.
+        // The first API request to /api/models triggers a background fetch
+        // and returns offline data immediately. Network data is persisted to
+        // disk so reset/reload doesn't require re-fetching.
+
         // Rebuild resource cache from Vault and MCP catalog at startup.
         // provider_list.json / mcp_list.json are only persisted when explicitly
         // modified via HTTP API; they won't exist if Gateway never saved them.

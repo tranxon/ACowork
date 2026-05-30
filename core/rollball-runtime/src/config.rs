@@ -81,6 +81,14 @@ pub struct RuntimeConfig {
     /// Session idle timeout in seconds before eviction
     #[serde(default = "default_session_idle_timeout_secs")]
     pub session_idle_timeout_secs: u64,
+    /// Minimum character length of formatted conversation text before we
+    /// bother running LLM summarization on session close. Shorter sessions
+    /// use the raw text directly as their episode summary.
+    #[serde(default = "default_min_distill_chars")]
+    pub min_distill_chars: usize,
+    /// Max output tokens for LLM summarization calls (compaction + distillation).
+    #[serde(default = "default_distill_max_tokens")]
+    pub distill_max_tokens: u32,
 }
 
 fn default_log_level() -> String {
@@ -135,6 +143,14 @@ fn default_session_idle_timeout_secs() -> u64 {
     300 // 5 min
 }
 
+fn default_min_distill_chars() -> usize {
+    8000
+}
+
+fn default_distill_max_tokens() -> u32 {
+    2048
+}
+
 impl Default for RuntimeConfig {
     #[allow(deprecated)]
     fn default() -> Self {
@@ -160,6 +176,8 @@ impl Default for RuntimeConfig {
             provider_stream_read_timeout_ms: default_provider_stream_read_timeout_ms(),
             tool_http_timeout_ms: default_tool_http_timeout_ms(),
             session_idle_timeout_secs: default_session_idle_timeout_secs(),
+            min_distill_chars: default_min_distill_chars(),
+            distill_max_tokens: default_distill_max_tokens(),
         }
     }
 }

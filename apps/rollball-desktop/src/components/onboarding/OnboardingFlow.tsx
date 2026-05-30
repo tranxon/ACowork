@@ -139,6 +139,20 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
     checkHealth();
   }, [checkHealth]);
 
+  // Preload provider list as soon as Gateway is connected.
+  // This triggers an early /api/models request, which starts the background
+  // models.dev refresh (5+ second network call) while the user is still on
+  // Step 2-4, so by the time they reach Step 3 (ApiKeyStep), the cache
+  // may already be populated with fresh network data.
+  useEffect(() => {
+    if (status === "connected") {
+      // Fire-and-forget — don't block the UI
+      fetchProviders().catch(() => {
+        // Ignore errors — offline fallback will be used in Step 3
+      });
+    }
+  }, [status]);
+
   const handleRetry = async () => {
     setChecking(true);
     await checkHealth();

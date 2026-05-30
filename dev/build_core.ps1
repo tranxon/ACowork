@@ -68,13 +68,16 @@ try {
 
 Write-Host ""
 
-# Step 4: Copy offline_providers.json to release dir
-Write-Host "[4/5] Copying offline_providers.json to release directory..." -ForegroundColor Yellow
-$offlineSrc = Join-Path $CoreDir "rollball-gateway\src\http\offline_providers.json"
+# Step 4: Copy offline_providers.json from assets to target dirs
+Write-Host "[4/5] Copying offline_providers.json to target directories..." -ForegroundColor Yellow
+$offlineSrc = Join-Path $WorkspaceRoot "assets\offline_providers.json"
 $releaseDir = Join-Path $WorkspaceRoot "target\release"
+$debugDir = Join-Path $WorkspaceRoot "target\debug"
 if (Test-Path $offlineSrc) {
     Copy-Item -Path $offlineSrc -Destination $releaseDir -Force
     Write-Host "  Copied to $releaseDir" -ForegroundColor Green
+    Copy-Item -Path $offlineSrc -Destination $debugDir -Force
+    Write-Host "  Copied to $debugDir" -ForegroundColor Green
 } else {
     Write-Host "  WARNING: offline_providers.json not found at $offlineSrc" -ForegroundColor Red
 }

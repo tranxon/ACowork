@@ -81,7 +81,7 @@ impl SearchBackend for PerplexityBackend {
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a web search assistant. Search the web and return results with citations. Be concise."
+                    "content": crate::prompt::SEARCH_SYSTEM_PROMPT
                 },
                 {
                     "role": "user",

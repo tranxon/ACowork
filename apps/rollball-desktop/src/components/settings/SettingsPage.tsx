@@ -483,7 +483,7 @@ function GeneralTab() {
                   setConfig((prev) => (prev ? { ...prev, log_file_size_mb: val } : prev));
                 } catch { /* ignore */ }
               }}
-              className={`w-24 ${inputBase} text-xs`}
+              className="w-16 rounded-md border border-zinc-200 px-2 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
             />
             <span className="text-xs text-zinc-400">
               {currentLogFileSize === 0 ? "No split" : `Auto-split at ${currentLogFileSize} MB`}
@@ -548,6 +548,30 @@ function GeneralTab() {
           <p>Rollball Desktop v0.1.0</p>
           <p className="mt-1">Built with Tauri v2 + React 19</p>
         </div>
+      </div>
+
+      {/* Reset Onboarding */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <h2 className="text-xs font-medium">Reset Onboarding</h2>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Reset the onboarding wizard to reconfigure your Gateway connection and API keys.
+          Gateway models cache will be reloaded from disk (no re-download needed).
+        </p>
+        <button
+          onClick={async () => {
+            try {
+              const { resetOnboarding } = await import("../../lib/gateway-api");
+              await resetOnboarding();
+              alert("Onboarding has been reset. Please reload the page to start again.");
+              window.location.reload();
+            } catch (e) {
+              alert(`Failed to reset: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }}
+          className="mt-3 rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
+        >
+          Reset Onboarding
+        </button>
       </div>
     </div>
   );

@@ -12,7 +12,9 @@
   "app": {
     "withGlobalTauri": true,
     "security": {
-      "capabilities": ["main-capability"]
+      "capabilities": [
+        "main-capability"
+      ]
     },
     "windows": [
       {
@@ -26,7 +28,11 @@
         "center": true,
         "visible": true,
         "windowEffects": {
-          "effects": ["acrylic", "blur", "mica"],
+          "effects": [
+            "acrylic",
+            "blur",
+            "mica"
+          ],
           "radius": 12
         }
       }
@@ -44,7 +50,7 @@
     ],
     "resources": [
       "../../../examples/system-agent",
-      "../../../core/rollball-gateway/src/http/offline_providers.json"
+      "../../../assets/offline_providers.json"
     ]
   }
 }

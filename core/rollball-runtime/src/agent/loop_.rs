@@ -669,7 +669,7 @@ impl AgentLoop {
                 .core
                 .system_prompt_override
                 .as_deref()
-                .unwrap_or("You are an AI assistant that summarizes conversations.");
+                .unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT);
             let provider = self.core.provider.clone();
             let memory_store = self.core.memory_store().cloned();
 
@@ -875,6 +875,8 @@ impl AgentLoop {
                 .unwrap_or(0);
             let model_name = self.resolve_distill_model(content_size);
             let memory_store = self.core.memory_store().cloned();
+            let min_distill_chars = self.core.config.min_distill_chars;
+            let distill_max_tokens = self.core.config.distill_max_tokens;
 
             tokio::spawn(async move {
                 // Distill the old session
@@ -883,6 +885,8 @@ impl AgentLoop {
                     &session_id,
                     provider.as_ref(),
                     &model_name,
+                    min_distill_chars,
+                    distill_max_tokens,
                 )
                 .await
                 {
@@ -955,6 +959,7 @@ impl AgentLoop {
                     .map(|m| m.content.len() as u64)
                     .sum::<u64>();
                 let model_name = self.resolve_distill_model(content_size);
+                let distill_max_tokens = self.core.config.distill_max_tokens;
 
                 tracing::info!(
                     session_id = %session_id,
@@ -971,6 +976,7 @@ impl AgentLoop {
                         &tail_messages,
                         provider.as_ref(),
                         &model_name,
+                        distill_max_tokens,
                     )
                     .await
                     {

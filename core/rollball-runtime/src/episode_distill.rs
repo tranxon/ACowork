@@ -52,23 +52,7 @@ pub struct DistilledEpisode {
 // Prompt templates
 // ---------------------------------------------------------------------------
 
-/// Prompt for context compaction and episode distillation.
-///
-/// Per [ADR-011], the LLM outputs a plain natural-language summary — not JSON.
-/// The summary serves both as in-memory context replacement and as a Grafeo
-/// episodic memory entry.
-pub(crate) const COMPACT_PROMPT: &str = r#"You are a conversation summarization assistant. Your task is to produce a comprehensive natural-language summary of the conversation below.
-
-Instructions:
-- Write a concise but complete summary covering all key topics discussed, decisions made, problems solved, and code written.
-- Include technical details that would be needed to resume work later.
-- Preserve the chronological flow of the conversation.
-- Output ONLY the summary text, no JSON, no markdown formatting, no meta-commentary.
-
-Conversation:
-{messages_text}
-
-Summary:"#;
+// Prompt moved to crate::prompt::COMPACT_PROMPT.
 
 // ---------------------------------------------------------------------------
 // EpisodeDistiller
@@ -91,6 +75,7 @@ impl EpisodeDistiller {
         messages: &[ChatMessage],
         provider: &dyn Provider,
         model_name: &str,
+        distill_max_tokens: u32,
     ) -> Result<String> {
         let messages_text = format_messages(messages);
         if messages_text.is_empty() {
@@ -98,8 +83,8 @@ impl EpisodeDistiller {
                 "Cannot compact empty context".to_string(),
             ));
         }
-        let prompt = COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-        compact_with_llm(&prompt, provider, model_name).await
+        let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
+        compact_with_llm(&prompt, provider, model_name, distill_max_tokens).await
     }
 
     /// Compact a specific slice of in-memory messages (e.g. tail after last compaction).
@@ -110,18 +95,23 @@ impl EpisodeDistiller {
         messages: &[ChatMessage],
         provider: &dyn Provider,
         model_name: &str,
+        distill_max_tokens: u32,
     ) -> Result<String> {
-        Self::compact_full_context(messages, provider, model_name).await
+        Self::compact_full_context(messages, provider, model_name, distill_max_tokens).await
     }
 
     /// Distill an entire conversation session upon close.
     ///
     /// Reads the JSONL file and produces a session-level natural-language summary.
+    /// If the session content is shorter than `min_distill_chars`, the raw text is
+    /// used directly as summary — no LLM call is made.
     pub async fn distill_on_session_end(
         session_path: &Path,
         session_id: &str,
         provider: &dyn Provider,
         model_name: &str,
+        min_distill_chars: usize,
+        distill_max_tokens: u32,
     ) -> Result<DistilledEpisode> {
         let messages_text = read_jsonl_content(session_path)?;
         if messages_text.is_empty() {
@@ -129,8 +119,19 @@ impl EpisodeDistiller {
                 "Cannot distill empty session".to_string(),
             ));
         }
-        let prompt = COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-        let summary = compact_with_llm(&prompt, provider, model_name).await?;
+
+        let summary = if messages_text.len() < min_distill_chars {
+            tracing::debug!(
+                len = messages_text.len(),
+                threshold = min_distill_chars,
+                "Session content is short — using raw text as summary, skipping LLM"
+            );
+            messages_text
+        } else {
+            let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
+            compact_with_llm(&prompt, provider, model_name, distill_max_tokens).await?
+        };
+
         Ok(DistilledEpisode {
             session_id: session_id.to_string(),
             summary,
@@ -276,12 +277,13 @@ async fn compact_with_llm(
     prompt: &str,
     provider: &dyn Provider,
     model_name: &str,
+    max_tokens: u32,
 ) -> Result<String> {
     let request = ChatRequest {
         model: model_name.to_string(),
         messages: vec![ChatMessage::user(prompt)],
         temperature: Some(0.3),
-        max_tokens: Some(2048),
+        max_tokens: Some(max_tokens),
         tools: None,
     };
 

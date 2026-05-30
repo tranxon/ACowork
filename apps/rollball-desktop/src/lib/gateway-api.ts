@@ -99,3 +99,24 @@ export async function activateUser(
   }
   return resp.json();
 }
+
+/** Reset Gateway state (reload models cache from disk or background fetch) */
+export async function resetGateway(
+  gatewayUrl = getGatewayUrl(),
+): Promise<{ status: string; source: string }> {
+  const resp = await fetch(`${gatewayUrl}/api/gateway/reset`, {
+    method: "POST",
+  });
+  if (!resp.ok) throw new Error(`Failed to reset Gateway: ${resp.status}`);
+  return resp.json();
+}
+
+/** Reset onboarding and trigger Gateway models cache reload */
+export async function resetOnboarding(
+  gatewayUrl = getGatewayUrl(),
+): Promise<{ status: string; source: string }> {
+  const result = await resetGateway(gatewayUrl);
+  // Clear frontend onboarding state
+  localStorage.removeItem("rollball_onboarding");
+  return result;
+}

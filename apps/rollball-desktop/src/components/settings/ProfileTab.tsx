@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
-import { ConfirmDialog } from "../common/ConfirmDialog";
 import { RadioGroup } from "../common/RadioGroup";
 import { fetchActiveUser, updateUser } from "../../lib/gateway-api";
 import type { BackendUserProfile } from "../../lib/types";
@@ -26,10 +25,9 @@ const TIMEZONES = [
 // ── Component ───────────────────────────────────────────────────────────
 
 export function ProfileTab() {
-  const { profile, setProfile, resetProfile } = useUserProfileStore();
+  const { profile, setProfile } = useUserProfileStore();
   const [nameValue, setNameValue] = useState(profile.displayName);
   const [iconOpen, setIconOpen] = useState(false);
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // ── Backend user profile state ─────────────────────────────────────
   const [backendUser, setBackendUser] = useState<BackendUserProfile | null>(null);
@@ -130,11 +128,10 @@ export function ProfileTab() {
                         setProfile({ avatarIcon: iconId });
                         setIconOpen(false);
                       }}
-                      className={`flex items-center justify-center rounded-md p-1 transition-colors ${
-                        profile.avatarIcon === iconId
-                          ? "bg-zinc-200 dark:bg-zinc-600"
-                          : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
-                      }`}
+                      className={`flex items-center justify-center rounded-md p-1 transition-colors ${profile.avatarIcon === iconId
+                        ? "bg-zinc-200 dark:bg-zinc-600"
+                        : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                        }`}
                     >
                       <img
                         src={BUILTIN_ICONS[iconId] ?? ""}
@@ -310,29 +307,6 @@ export function ProfileTab() {
             onChange={(type) => setProfile({ avatarType: type })}
           />
         </div>
-      </div>
-
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
-        <button
-          onClick={() => setShowResetConfirm(true)}
-          className="rounded-lg btn-solid px-3 py-1.5 text-xs"
-        >
-          Reset to defaults
-        </button>
-
-        <ConfirmDialog
-          open={showResetConfirm}
-          title="Reset Profile"
-          message="确定要重置个人资料到默认值吗？"
-          confirmLabel="Reset"
-          destructive
-          onConfirm={() => {
-            resetProfile();
-            setNameValue("我");
-            setShowResetConfirm(false);
-          }}
-          onCancel={() => setShowResetConfirm(false)}
-        />
       </div>
     </div>
   );

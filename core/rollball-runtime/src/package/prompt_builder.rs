@@ -90,7 +90,7 @@ pub fn build_system_prompt_with_mode(
 
     if sections.is_empty() {
         // Default system prompt if no files found
-        return Ok("You are a helpful AI assistant.".to_string());
+        return Ok(crate::prompt::PROMPT_BUILDER_FALLBACK.to_string());
     }
 
     Ok(sections.join("\n\n---\n\n"))

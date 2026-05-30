@@ -20,4 +20,5 @@ pub mod embedding;
 pub mod security;
 pub mod conversation;
 pub mod episode_distill;
+pub mod prompt;
 pub mod debug;
