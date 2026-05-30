@@ -42,8 +42,8 @@
 | hybrid_search 多Label并行检索 | §6.1 | `manager.rs` `retrieve()` (L169-225) | 完成 |
 | graph_expand 关联扩散（含 hint_type 驱动早期终止阈值） | §6.2-6.3 | `manager.rs` `retrieve()` (L226-251) + `spreading.rs` | 完成 |
 | Abstention 拒答机制（min_score 过滤 + System Prompt 注入） | §6.5 | `rollball-grafeo/src/abstention.rs` | 完成 |
-| 三层冲突检测（语义相似度 + 时间冲突 + 上下文否定） | §6.4 | `rollball-grafeo/src/conflict.rs` | 完成 |
-| 即时提取冲突处理（Evolution/Correction → Dormant 旧节点 + Edge） | §4.1 / §6.4 | `rollball-grafeo/src/consolidation/instant.rs` `process_memory_store()` | 完成 |
+| 两层冲突检测（语义相似度 + 时间冲突，统一 Ambiguous） | §6.4 | `rollball-grafeo/src/conflict.rs` | 完成（v3.8 简化） |
+| 即时提取冲突处理（统一 Ambiguous → Phase 3 LLM 仲裁） | §4.1 / §6.4 | `rollball-grafeo/src/consolidation/instant.rs` `process_memory_store()` | 完成（v3.8 简化） |
 | 防重复提取（embedding similarity > 0.95 跳过） | §4.1 | `instant.rs` `is_duplicate_knowledge()` (L247-265) | 完成 |
 | PendingKnowledgeNode 概念（confidence < 0.85 → Pending） | §4.1 | `instant.rs` `process_memory_store()` | 完成 |
 | Episode / KnowledgeNode / ProceduralNode / AutobiographicalNode 数据类型 | §2-3 | `rollball-memory/src/types.rs` | 完成 |
@@ -179,7 +179,7 @@
 
 ### 风险等级：高
 
-1. **memory_store 工具接口不对齐**（最关键）：`tools/builtin/memory_store.rs` 使用 `{key, content, category}` 旧 API，未对接 `consolidation/instant.rs` 的 `MemoryStoreInput`，导致精心实现的即时提取+三层冲突检测管道处于"有代码但无法触发"的状态。**建议优先修复**。
+1. **memory_store 工具接口不对齐**（最关键）：`tools/builtin/memory_store.rs` 使用 `{key, content, category}` 旧 API，未对接 `consolidation/instant.rs` 的 `MemoryStoreInput`，导致精心实现的即时提取+两层冲突检测管道处于"有代码但无法触发"的状态。**建议优先修复**。
 
 2. ~~**memory_hint 整条链路缺失**~~ → **✅ 已解决（2026-05-30）**：设计简化，per-round memory_hint 已移除。实体+三元组提取移至 Compaction 时由 Compact Model 完成。详见 §1 更新和 `COMPACT_PROMPT` 变更。
 
