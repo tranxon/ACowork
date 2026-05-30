@@ -302,24 +302,20 @@ rollball-memory 保持为瘦 wrapper，仅导出 MemoryStore trait 定义。
 
 | 任务 | 文件 | 验收标准 | 状态 |
 |------|------|---------|------|
-| S2.10.1 `conflict.rs` 基础结构 | `semantic/conflict.rs` | `detect_conflict` 函数 + 单元测试（三层信号输入 → ConflictSignal 输出）| ✅ 已完成 |
-| S2.10.2 三层信号集成到巩固管道 | `consolidation/instant.rs` | PendingKnowledgeNode 写入时自动调用三层信号检测，标记候选冲突 | ⬚ |
-| S2.10.3 启发式快速路径 | `semantic/conflict.rs` | Evolution（时间差>7天+变化词）和 Correction（时间差<24h+否定词）自动判定，无需 LLM | ⬚ |
+| S2.10.1 `conflict.rs` 基础结构 | `conflict.rs` | `detect_conflict` 函数 + 单元测试（两层信号输入 → ConflictSignal 统一 Ambiguous）| ✅ 已完成 |
+| S2.10.2 两层信号集成到巩固管道 | `consolidation/instant.rs` | PendingKnowledgeNode 写入时自动调用两层信号检测，标记候选冲突 | ✅ 已完成 |
+| S2.10.3 ~~启发式快速路径~~ | ~~`conflict.rs`~~ | ~~Evolution/Correction 自动判定~~ → **v3.8 废弃**，统一 Ambiguous 由 Phase 3 LLM 仲裁 | ✅ 已废弃 |
 | S2.10.4 ambiguous 用户确认流程 | `consolidation/offline.rs` | ambiguous 累计 3+ 时通过 System Prompt 注入引导 Agent 自然询问用户确认 | ⬚ |
-| S2.10.5 LLM 离线仲裁 | `consolidation/offline.rs` | Phase 3：LLM 批量处理 ambiguous 候选，精确分类 evolution/correction/ambiguous | ⬚ |
+| S2.10.5 LLM 离线仲裁 | `consolidation/conflict_llm.rs` | Phase 3：LLM 批量处理 Ambiguous 候选，精确分类 evolution/correction/ambiguous | ⬚ |
 
-**三层冲突信号模型（v1.5 升级）**：
+**两层冲突信号模型（v3.8 简化）**：
 
 | 层级 | 信号 | 检测机制 | 动态阈值 |
 |------|------|---------|---------|
 | **Layer 1** | 语义相似度 | embedding cosine similarity | Fact 0.85 / Preference 0.80 / Relation 0.90 |
-| **Layer 2** | 时间冲突 | 同一 subject 24h 内矛盾陈述 | `db.history()` CDC API 获取创建时间 |
-| **Layer 3** | 上下文冲突 | source_episode 含否定词 | 正则匹配（"不是"/"其实"/"actually"/"correction"等）|
+| **Layer 2** | 时间冲突 | 创建时间差 < 24h | 24h 内置信度 0.7，24h 外 0.5 |
 
-**启发式快速路径**：
-- Evolution：时间差 > 7天 + 含变化词（"搬家了"、"换工作"）→ 新值 Active，旧值 Dormant，confidence=0.8
-- Correction：时间差 < 24h + 含否定词（"不是 X，是 Y"）→ 新值 Active，旧值 Dormant + 降低旧来源可信度，confidence=0.9
-- Ambiguous：不满足以上任一 → 标记 conflict_group_id，两个都 Active，交由离线 LLM 仲裁
+> **v3.8 变更**：移除了 Layer 3（上下文否定关键词）和启发式快速路径（Evolution/Correction 自动判定）。所有冲突统一标记 Ambiguous，交由 Phase 3 LLM 离线仲裁。理由：硬编码关键词覆盖面和可靠性不足，Correction 和 Evolution 代码路径一致，关键词匹配未带来额外价值。
 
 详见 `docs/05-memory.md` §6.4、`docs/module-design/04-grafeo.md` §冲突检测（Multi-Signal Conflict Detection）
 

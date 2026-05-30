@@ -30,7 +30,7 @@ pub mod types;
 pub use abstention::{AbstentionConfig, AbstentionResult, check_abstention, get_min_score_for_agent};
 pub use backup::{BackupConfig, BackupMetadata, BackupType};
 pub use consolidation::{ConflictCandidate, MemoryStoreInput, OfflineConsolidationConfig, OfflineConsolidationResult, ConsolidationScheduler, SchedulerConfig, ConsolidationRun, TriggerReason, BehaviorPattern, GeneralizationConfig, GeneralizationResult, PatternCategory};
-pub use conflict::{detect_conflict, FACT_THRESHOLD, NEGATION_KEYWORDS, PREFERENCE_THRESHOLD, RELATION_THRESHOLD, TEMPORAL_WINDOW_HOURS};
+pub use conflict::{detect_conflict, FACT_THRESHOLD, PREFERENCE_THRESHOLD, RELATION_THRESHOLD, TEMPORAL_WINDOW_HOURS};
 pub use engineering::{CapacityConfig, CapacityStatus, ConcurrencyConfig, EmbeddingLevel, HealthCheckResult};
 pub use eval::{EvalConfig, EvalDimension, EvalResult, run_eval};
 pub use rollball_memory::{ConflictSignal, ConflictType};

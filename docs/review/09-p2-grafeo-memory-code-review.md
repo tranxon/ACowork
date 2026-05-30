@@ -202,11 +202,11 @@ let similarity = (2.0 - f64::from(dist)) / 2.0;
 
 **建议**：删除此字段，或在 GrafeoStore 层面提供 `start_decay_background_task` 方法。
 
-### P2-3：Negation keywords 硬编码中英双语
+### P2-3：~~Negation keywords 硬编码中英双语~~ ✅ 已在 v3.8 解决
 
 `conflict.rs` 的 `NEGATION_KEYWORDS` 和 `EVOLUTION_KEYWORDS` 硬编码了中英文关键词。不支持日韩法等其他语言。
 
-**建议**：将关键词列表改为可配置的（从 manifest.toml 加载），或至少提供 `extend_keywords` API。
+**v3.8 解决方案**：已完全移除关键词匹配层（Layer 3）和启发式快速路径。所有冲突统一标记 Ambiguous，交由 Phase 3 LLM 离线仲裁，从根源上解决了多语言覆盖问题。
 
 ### P2-4：PageRank fallback 的 O(V^2) 遍历效率
 

@@ -376,7 +376,7 @@ session.commit()?;
 | 混合检索 | 自研 RRF 融合 | `db.hybrid_search(label, "content", "embedding", query, Some(&vec), k, filters)` — 内置 RRF 融合，可选 topology boost |
 | MMR 去重 | 无 | `db.mmr_search(label, "embedding", &vec, k, fetch_k, lambda, ef, filters)` — Maximal Marginal Relevance，保证结果多样性 |
 | 图遍历 | SQL 模拟 | GQL: `MATCH (m)-[r*1..3]-(other) WHERE id(m) = $id RETURN other` — 原生 LPG 遍历，有查询优化器支持 |
-| 冲突检测 | 无（Phase 2 新增） | `db.vector_search()` + `db.history()` — 三层信号融合（语义相似度 + 时间冲突 + 上下文否定），即时阶段快速判定 |
+| 冲突检测 | 无（Phase 2 新增） | `db.vector_search()` — 两层信号融合（语义相似度 + 时间窗口），统一 Ambiguous，Phase 3 LLM 仲裁 |
 
 ### 代码示例
 
@@ -577,15 +577,16 @@ pub fn detect_memory_communities(&self) -> Result<Vec<Community>> {
 
 ## 冲突检测（Multi-Signal Conflict Detection）
 
-冲突检测采用**三层信号融合**设计，在即时提取阶段（memory_store Tool Call 时）快速识别候选冲突，为离线巩固的精确分类提供输入。该模块对应 `conflict.rs`，独立于 `semantic/conflict.rs`（纯语义候选检测）和 `consolidation/conflict.rs`（离线分类），负责多信号融合的即时判定。
+冲突检测采用**两层信号融合**设计，在即时提取阶段（memory_store Tool Call 时）快速识别候选冲突，为离线巩固的精确分类提供输入。该模块对应 `conflict.rs`，独立于 `semantic/conflict.rs`（纯语义候选检测）和 `consolidation/conflict.rs`（离线分类），负责多信号融合的即时判定。
 
-### 三层冲突信号
+> **v3.8 简化**：移除了基于硬编码关键词的"上下文否定"层（Layer 3）和启发式快速路径（Evolution/Correction 自动判定）。原因：(1) 关键词硬编码无法覆盖所有语言和表达模式；(2) Correction 和 Evolution 在代码路径上完全一致（均将旧节点标记 Dormant），关键词匹配未带来额外价值；(3) 假阳性/假阴性风险高，由 Phase 3 LLM 统一仲裁更可靠。
+
+### 两层冲突信号
 
 | 信号层 | 数据源 | 判定逻辑 | 动态阈值 |
 |--------|--------|---------|---------|
 | **语义相似度** | `db.vector_search()` 返回的候选节点 embedding | 新节点与已有 Active 节点的余弦相似度 | Fact 0.85 / Preference 0.80 / Relation 0.90 |
-| **时间冲突** | `db.history()` CDC 历史 API | 同一 subject 在 24h 内的矛盾陈述 | 时间差 < 24h 且 predicate 相同但 object 不同 |
-| **上下文冲突** | `source_episode` 原始内容 | 来源 episode 含否定关键词 | "不是" / "其实" / "actually" / "错了" / "纠正" 等 |
+| **时间冲突** | 节点创建时间差 | 同一 subject 在 24h 内的矛盾陈述 | 时间差 < 24h |
 
 **语义阈值差异化设计**：
 - **Fact（事实）**：阈值 0.85 — 事实要求高精度匹配，避免误判
@@ -593,22 +594,16 @@ pub fn detect_memory_communities(&self) -> Result<Vec<Community>> {
 - **Relation（关系）**：阈值 0.90 — 关系涉及多实体，误匹配成本高
 
 **时间冲突检测**：
-利用 Grafeo CDC `db.history()` 获取同一 subject 的近期变更记录。当检测到同一 subject 在 24 小时内有多个 object 值时，触发时间冲突信号。例如："用户住北京"（上午） vs "用户住上海"（下午）。
+当新节点与已有 Active 节点语义相似度超过阈值且创建时间差在 24h 窗口内时，触发时间冲突信号。时间冲突的启发式置信度为 0.7（24h 内）或 0.5（24h 外）。
 
-**上下文否定检测**：
-扫描 `source_episode` 内容中的否定关键词（中文："不是"、"其实"、"错了"、"纠正"；英文："actually"、"wrong"、"correct"、"instead"）。命中否定词表明用户可能在修正之前的陈述，提升冲突置信度。
+### 统一 Ambiguous 策略
 
-### 启发式规则加速
+即时阶段**不对任何冲突做自动判定**。所有检测到的冲突统一标记为 `ConflictType::Ambiguous`，冲突双方均保持 Active 状态，共享 `conflict_group_id`，交由 Phase 3 LLM 离线仲裁做精确分类（Evolution / Correction / Ambiguous）。
 
-三层信号融合后，通过启发式规则实现**快速路径**（无需 LLM）和**慢速路径**（LLM 离线仲裁）的分流：
-
-| 规则 | 条件 | 自动判定 | Confidence | 处理路径 |
-|------|------|---------|------------|---------|
-| **Evolution（演进）** | 时间差 > 7天 + 含变化词（"搬家了"、"换工作"、"现在"） | 新值 Active，旧值 Dormant | 0.8 | 快速路径，无需 LLM |
-| **Correction（纠正）** | 时间差 < 24h + 含否定词（"不是 X，是 Y"） | 新值 Active，旧值 Dormant，降低旧来源可信度 | 0.9 | 快速路径，无需 LLM |
-| **Ambiguous（不确定）** | 不满足以上任一规则 | 标记 conflict_group_id，两个都 Active | — | 慢速路径，LLM 离线仲裁 |
-
-**设计理由**：Evolution 和 Correction 有明确的语义模式，规则足以判定；Ambiguous 需要 LLM 理解完整上下文，留给离线巩固阶段处理。这与 05-memory.md §6.4 的两阶段冲突处理设计一致。
+**设计理由**：
+- 硬编码关键词匹配（否定词、变化词）已被证明有限且不可靠
+- 即时阶段的职责是**快速识别**（存在候选冲突？），而非**精确分类**（什么类型的冲突？）
+- Phase 3 LLM 有完整的节点内容和上下文，判定质量远超硬编码规则
 
 ### ConflictSignal 结构
 
@@ -622,20 +617,18 @@ pub struct ConflictSignal {
     /// Whether temporal conflict is detected (same subject, <24h, different object)
     pub temporal_conflict: bool,
 
-    /// Whether source_episode contains negation keywords
-    pub context_negation: bool,
-
-    /// Suggested conflict type based on heuristic rules
+    /// Suggested conflict type — always Ambiguous in Phase 1,
+    /// to be reclassified by Phase 3 LLM arbitration
     pub suggested_type: ConflictType,
 
-    /// Heuristic confidence (0.0-1.0). Higher = more certain, no LLM needed.
-    /// Evolution: 0.8, Correction: 0.9, Ambiguous: 0.5 (requires LLM arbitration)
+    /// Heuristic confidence based on temporal proximity:
+    /// 0.7 if within 24h window, 0.5 otherwise
     pub heuristic_confidence: f32,
 }
 
 /// Conflict classification types
-/// Fast-path types (Evolution, Correction) are resolved immediately.
-/// Ambiguous types are deferred to offline consolidation LLM arbitration.
+/// Phase 1 (immediate): all conflicts are Ambiguous.
+/// Phase 3 (LLM): reclassifies to Evolution / Correction / Ambiguous.
 pub enum ConflictType {
     /// Natural knowledge evolution over time (e.g., user moved)
     Evolution,
@@ -649,76 +642,37 @@ pub enum ConflictType {
 ### 冲突检测 API
 
 ```rust
-/// Detect conflict between a new memory node and existing Active nodes
+/// Detect conflict between a new memory node and existing Active nodes.
+///
+/// Phase 1 (immediate): always returns Ambiguous — no auto-resolution.
+/// Phase 3 (LLM arbitration): reclassifies via consolidation/conflict_llm.rs.
 ///
 /// # Arguments
 /// - `semantic_score`: Cosine similarity from vector_search (0.0-1.0)
-/// - `threshold`: Dynamic threshold based on KnowledgeType (Fact 0.85, Preference 0.80, Relation 0.90)
+/// - `threshold`: Dynamic threshold based on KnowledgeType
 /// - `time_diff_hours`: Hours between new node and existing node creation
-/// - `source_content`: Raw source_episode content for negation keyword scanning
 ///
 /// # Returns
-/// - `Some(ConflictSignal)` if conflict is detected (semantic_score > threshold + temporal/context signals)
-/// - `None` if no conflict detected
-///
-/// # Fast-path behavior
-/// - Evolution: auto-resolved, old node marked Dormant
-/// - Correction: auto-resolved, old node marked Dormant + source credibility reduced
-/// - Ambiguous: deferred to offline consolidation (conflict_group_id marked)
+/// - `Some(ConflictSignal)` if semantic_score >= threshold
+/// - `None` if below threshold (no conflict)
 pub fn detect_conflict(
     semantic_score: f32,
     threshold: f32,
-    time_diff_hours: f32,
-    source_content: &str,
+    time_diff_hours: f64,
 ) -> Option<ConflictSignal> {
-    // 1. Semantic gate: must exceed type-specific threshold
     if semantic_score < threshold {
         return None;
     }
 
-    // 2. Temporal signal: check if same subject within 24h with different object
-    let temporal_conflict = time_diff_hours < 24.0;
-
-    // 3. Context signal: scan for negation keywords
-    let context_negation = has_negation_keywords(source_content);
-
-    // 4. Heuristic classification
-    let (suggested_type, heuristic_confidence) = if time_diff_hours > 168.0 && has_change_keywords(source_content) {
-        // > 7 days + change keywords → Evolution
-        (ConflictType::Evolution, 0.8)
-    } else if time_diff_hours < 24.0 && context_negation {
-        // < 24h + negation → Correction
-        (ConflictType::Correction, 0.9)
-    } else {
-        // Otherwise → Ambiguous, needs LLM arbitration
-        (ConflictType::Ambiguous, 0.0)
-    };
+    let temporal_conflict = time_diff_hours < TEMPORAL_WINDOW_HOURS as f64;
+    let heuristic_confidence = if temporal_conflict { 0.7 } else { 0.5 };
 
     Some(ConflictSignal {
         semantic_score,
         temporal_conflict,
-        context_negation,
-        suggested_type,
+        suggested_type: ConflictType::Ambiguous,
         heuristic_confidence,
     })
-}
-
-/// Check if content contains negation keywords (Chinese + English)
-fn has_negation_keywords(content: &str) -> bool {
-    const NEGATION_KEYWORDS: &[&str] = &[
-        "不是", "其实", "错了", "纠正", "不对", "更正",
-        "actually", "wrong", "correct", "instead", "not", "never",
-    ];
-    NEGATION_KEYWORDS.iter().any(|&kw| content.to_lowercase().contains(kw))
-}
-
-/// Check if content contains change/evolution keywords
-fn has_change_keywords(content: &str) -> bool {
-    const CHANGE_KEYWORDS: &[&str] = &[
-        "搬家", "换工作", "换城市", "现在", "已经", "改了",
-        "moved", "changed", "now", "recently", "new",
-    ];
-    CHANGE_KEYWORDS.iter().any(|&kw| content.to_lowercase().contains(kw))
 }
 ```
 
@@ -728,10 +682,10 @@ fn has_change_keywords(content: &str) -> bool {
 
 | 阶段 | 模块 | 职责 | 输出 |
 |------|------|------|------|
-| **即时** | `conflict.rs` | 三层信号融合 + 启发式快速判定 | `ConflictSignal` + 快速路径自动处理 |
-| **离线** | `consolidation/conflict.rs` | LLM 仲裁 Ambiguous 类型 + 精确分类 | `conflict_group_id` + 用户确认策略 |
+| **即时** | `conflict.rs` | 两层信号融合，统一标记 Ambiguous | `ConflictSignal` + `conflict_group_id` |
+| **离线** | `consolidation/conflict_llm.rs` | LLM 仲裁，精确分类 Evolution/Correction/Ambiguous | Edge 创建 + 旧节点 Dormant 处理 |
 
-即时阶段处理 Evolution 和 Correction（无需 LLM），Ambiguous 类型标记 `conflict_group_id` 后交由离线巩固的 LLM 做最终判定。这与 05-memory.md §6.4 的两阶段设计完全一致。
+即时阶段仅做**冲突候选发现**（语义 + 时间），统一标记 Ambiguous 后交由离线巩固 LLM 做最终判定。这与 05-memory.md §6.4 的两阶段设计一致。
 
 ---
 

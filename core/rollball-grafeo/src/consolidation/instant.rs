@@ -6,12 +6,12 @@
 
 use chrono::Utc;
 use grafeo_common::types::NodeId;
-use rollball_memory::{ConflictSignal, ConflictType};
+use rollball_memory::ConflictSignal;
 
 use crate::conflict::{self, FACT_THRESHOLD, PREFERENCE_THRESHOLD, RELATION_THRESHOLD};
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{edge_types, labels, KnowledgeNode, KnowledgeSubType, NodeStatus};
+use crate::types::{labels, KnowledgeNode, KnowledgeSubType, NodeStatus};
 
 // ---------------------------------------------------------------------------
 // Cosine similarity (local copy — semantic/knowledge.rs keeps its own private)
@@ -117,11 +117,11 @@ impl GrafeoStore {
     ///
     /// Pipeline:
     /// 1. If embedding is available, check for duplicates (sim > 0.95 → skip).
-    /// 2. If embedding is available, check for conflicts (three-layer signal).
+    /// 2. If embedding is available, check for conflicts (two-layer heuristic).
     /// 3. Create node with status = Active if confidence >= 0.85, else Pending.
     /// 4. If conflicts detected:
-    ///    - Evolution / Correction → new node Active, old node Dormant, record edge.
-    ///    - Ambiguous → both Active, mark conflict_group_id.
+    ///    - All heuristic conflicts are Ambiguous → both Active, mark conflict_group_id.
+    ///    - Phase 3 LLM arbitration reclassifies (Evolution / Correction) later.
     ///
     /// Returns the created/updated node ID, or `None` if a duplicate was skipped.
     pub fn process_memory_store(&self, input: &MemoryStoreInput) -> Result<Option<ProcessResult>> {
@@ -167,66 +167,37 @@ impl GrafeoStore {
             metadata: std::collections::HashMap::new(),
         };
 
-        // For Evolution/Correction conflicts, the new node becomes Active.
-        if !conflicts.is_empty() {
-            let dominated_by_correction_or_evolution = conflicts.iter().all(|c| {
-                c.conflict_signal.suggested_type == ConflictType::Correction
-                    || c.conflict_signal.suggested_type == ConflictType::Evolution
-            });
-            if dominated_by_correction_or_evolution {
-                new_node.status = NodeStatus::Active;
-            }
-            // For Ambiguous conflicts, new node keeps its determined status (Active or Pending).
-        }
+        // All heuristic conflicts are Ambiguous — new node keeps its
+        // determined status (Active if high confidence, Pending otherwise).
+        // Phase 3 LLM arbitration reclassifies and may promote later.
 
         let new_id = self.store_knowledge(&new_node)?;
         new_node.id = Some(new_id);
 
         // Step 5: Handle conflict resolution on existing nodes.
+        // All heuristic conflicts are Ambiguous — both nodes stay Active
+        // with a shared conflict_group_id.  Phase 3 LLM arbitration
+        // reclassifies and may demote old nodes to Dormant later.
         let mut conflict_resolutions = Vec::new();
         for conflict in &conflicts {
             let resolution = crate::conflict::resolve_conflict(&conflict.conflict_signal, conflict.existing_node_id);
-            match conflict.conflict_signal.suggested_type {
-                ConflictType::Evolution => {
-                    // Demote the old node to Dormant and record evolution edge.
-                    if let Some(mut old_node) = self.get_knowledge(conflict.existing_node_id)? {
-                        old_node.status = NodeStatus::Dormant;
-                        old_node.updated_at = Utc::now();
-                        self.update_knowledge(&old_node)?;
-                        // Record edge: new node evolved from old node.
-                        self.store_edge(new_id, conflict.existing_node_id, edge_types::EVOLUTION_FROM, [])?;
-                    }
-                }
-                ConflictType::Correction => {
-                    // Demote the old node to Dormant and record corrects edge.
-                    if let Some(mut old_node) = self.get_knowledge(conflict.existing_node_id)? {
-                        old_node.status = NodeStatus::Dormant;
-                        old_node.updated_at = Utc::now();
-                        self.update_knowledge(&old_node)?;
-                        // Record edge: new node corrects old node.
-                        self.store_edge(new_id, conflict.existing_node_id, edge_types::CORRECTS, [])?;
-                    }
-                }
-                ConflictType::Ambiguous => {
-                    // Both nodes stay Active, but we record the conflict group.
-                    // Store a conflict_group_id in both nodes' metadata.
-                    let group_id = format!("cg_{}", new_id.as_u64());
-                    if let Some(mut old_node) = self.get_knowledge(conflict.existing_node_id)? {
-                        old_node
-                            .metadata
-                            .insert("conflict_group_id".to_string(), serde_json::Value::String(group_id.clone()));
-                        old_node.updated_at = Utc::now();
-                        self.update_knowledge(&old_node)?;
-                    }
-                    // Also tag the new node.
-                    let mut updated_new = new_node.clone();
-                    updated_new
-                        .metadata
-                        .insert("conflict_group_id".to_string(), serde_json::Value::String(group_id));
-                    updated_new.updated_at = Utc::now();
-                    self.update_knowledge(&updated_new)?;
-                }
+
+            // Tag both the existing and new node with the same conflict_group_id.
+            let group_id = format!("cg_{}", new_id.as_u64());
+            if let Some(mut old_node) = self.get_knowledge(conflict.existing_node_id)? {
+                old_node
+                    .metadata
+                    .insert("conflict_group_id".to_string(), serde_json::Value::String(group_id.clone()));
+                old_node.updated_at = Utc::now();
+                self.update_knowledge(&old_node)?;
             }
+            let mut updated_new = new_node.clone();
+            updated_new
+                .metadata
+                .insert("conflict_group_id".to_string(), serde_json::Value::String(group_id));
+            updated_new.updated_at = Utc::now();
+            self.update_knowledge(&updated_new)?;
+
             conflict_resolutions.push(ConflictResolutionDetail {
                 existing_node_id: conflict.existing_node_id,
                 action: resolution.action,
@@ -314,12 +285,11 @@ impl GrafeoStore {
                     })
                     .unwrap_or(0.0);
 
-                // Run three-layer conflict detection.
+                // Run heuristic conflict detection.
                 if let Some(signal) = conflict::detect_conflict(
                     semantic_score,
                     threshold,
                     time_diff_hours,
-                    &input.content,
                 ) {
                     candidates.push(ConflictCandidate {
                         existing_node_id: id,
@@ -552,7 +522,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Test 7: Conflict — Correction → old Dormant, new Active
+    // Test 7: Conflict — now always Ambiguous (old stays Active, conflict_group_id)
     // =====================================================================
 
     #[test]
@@ -560,9 +530,6 @@ mod tests {
         let store = test_store();
 
         // Create an existing knowledge node directly.
-        // Use const_emb(1.0) for existing, flipped_emb(15) for new → cos ≈ 0.922.
-        // Correction requires: temporal_conflict (diff < 24h) AND context_negation.
-        // Use Utc::now() as created_at so time_diff is ~0h → temporal_conflict = true.
         let existing = KnowledgeNode {
             id: None,
             subject: "user".to_string(),
@@ -573,14 +540,13 @@ mod tests {
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
             status: NodeStatus::Active,
-            created_at: Utc::now(),  // recent → temporal_conflict = true
+            created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: std::collections::HashMap::new(),
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
-        // New input with correction (negation keywords + recent → Correction).
-        // Embedding has cos ≈ 0.922 with existing → triggers conflict but not dedup.
+        // New input — used to trigger Correction; now all Ambiguous.
         let input = MemoryStoreInput {
             content: "User actually lives in Shanghai, not Beijing".to_string(),
             sub_type: KnowledgeSubType::Fact,
@@ -589,21 +555,25 @@ mod tests {
             object: Some("Shanghai".to_string()),
             confidence: Some(0.95),
             source_episode_id: None,
-            embedding: Some(flipped_emb(15)), // cos ≈ 0.922 with const_emb(1.0)
+            embedding: Some(flipped_emb(15)),
         };
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
         let new_id = result.unwrap().node_id;
 
-        // Old node should be Dormant.
+        // Old node stays Active (Ambiguous — no auto-demotion).
         let old_node = store.get_knowledge(existing_id).unwrap().unwrap();
-        assert_eq!(old_node.status, NodeStatus::Dormant);
+        assert_eq!(old_node.status, NodeStatus::Active);
 
-        // New node should be Active.
+        // New node is Active because confidence ≥ 0.85.
         let new_node = store.get_knowledge(new_id).unwrap().unwrap();
         assert_eq!(new_node.status, NodeStatus::Active);
         assert_eq!(new_node.object, "Shanghai");
+
+        // Both tagged with conflict_group_id.
+        assert!(old_node.metadata.contains_key("conflict_group_id"));
+        assert!(new_node.metadata.contains_key("conflict_group_id"));
     }
 
     // =====================================================================
@@ -811,14 +781,14 @@ mod tests {
     }
 
     // =====================================================================
-    // Test 14: Conflict — Evolution → old Dormant, new Active
+    // Test 14: Conflict — old node stays Active (Ambiguous, no auto-demotion)
     // =====================================================================
 
     #[test]
     fn test_process_memory_store_conflict_evolution() {
         let store = test_store();
 
-        // Create an existing node far in the past (7+ days old).
+        // Create an existing node far in the past (10 days old).
         let old_time = Utc::now() - chrono::TimeDelta::days(10);
         let existing = KnowledgeNode {
             id: None,
@@ -836,8 +806,6 @@ mod tests {
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
-        // New input with evolution keyword ("moved").
-        // Embedding with cos ≈ 0.922 (flip 15) → above fact threshold 0.85, below dedup 0.95.
         let input = MemoryStoreInput {
             content: "User moved to Shanghai".to_string(),
             sub_type: KnowledgeSubType::Fact,
@@ -853,21 +821,23 @@ mod tests {
         assert!(result.is_some());
         let new_id = result.unwrap().node_id;
 
-        // Old node should be Dormant.
+        // Old node stays Active (Ambiguous — Phase 3 LLM will decide).
         let old_node = store.get_knowledge(existing_id).unwrap().unwrap();
-        assert_eq!(old_node.status, NodeStatus::Dormant);
+        assert_eq!(old_node.status, NodeStatus::Active);
+        assert!(old_node.metadata.contains_key("conflict_group_id"));
 
-        // New node should be Active.
+        // New node is Active (confidence ≥ 0.85).
         let new_node = store.get_knowledge(new_id).unwrap().unwrap();
         assert_eq!(new_node.status, NodeStatus::Active);
+        assert!(new_node.metadata.contains_key("conflict_group_id"));
     }
 
     // =====================================================================
-    // Test 15: Conflict — Correction creates CORRECTS edge
+    // Test 15: Conflict — no edges created (deferred to Phase 3 LLM)
     // =====================================================================
 
     #[test]
-    fn test_process_memory_store_correction_creates_edge() {
+    fn test_process_memory_store_no_auto_edges() {
         let store = test_store();
 
         let existing = KnowledgeNode {
@@ -901,59 +871,15 @@ mod tests {
         assert!(result.is_some());
         let new_id = result.unwrap().node_id;
 
-        // Verify CORRECTS edge from new to old.
+        // No auto CORRECTS or EVOLUTION_FROM edges — Phase 3 LLM creates them.
         let edges = store.get_edges(new_id, grafeo_core::graph::Direction::Outgoing);
         let has_corrects = edges.iter().any(|e| {
-            e.edge_type == edge_types::CORRECTS && e.dst == existing_id
+            e.edge_type == "CORRECTS" && e.dst == existing_id
         });
-        assert!(has_corrects, "CORRECTS edge should exist from new to old node");
-    }
-
-    // =====================================================================
-    // Test 16: Conflict — Evolution creates EVOLUTION_FROM edge
-    // =====================================================================
-
-    #[test]
-    fn test_process_memory_store_evolution_creates_edge() {
-        let store = test_store();
-
-        let old_time = Utc::now() - chrono::TimeDelta::days(10);
-        let existing = KnowledgeNode {
-            id: None,
-            subject: "user".to_string(),
-            predicate: "lives_in".to_string(),
-            object: "Beijing".to_string(),
-            sub_type: KnowledgeSubType::Fact,
-            confidence: 0.9,
-            source_episode_id: None,
-            embedding: Some(const_emb(1.0)),
-            status: NodeStatus::Active,
-            created_at: old_time,
-            updated_at: old_time,
-            metadata: std::collections::HashMap::new(),
-        };
-        let existing_id = store.store_knowledge(&existing).unwrap();
-
-        let input = MemoryStoreInput {
-            content: "User moved to Shanghai".to_string(),
-            sub_type: KnowledgeSubType::Fact,
-            subject: Some("user".to_string()),
-            predicate: Some("lives_in".to_string()),
-            object: Some("Shanghai".to_string()),
-            confidence: Some(0.95),
-            source_episode_id: None,
-            embedding: Some(flipped_emb(15)),
-        };
-
-        let result = store.process_memory_store(&input).unwrap();
-        assert!(result.is_some());
-        let new_id = result.unwrap().node_id;
-
-        // Verify EVOLUTION_FROM edge from new to old.
-        let edges = store.get_edges(new_id, grafeo_core::graph::Direction::Outgoing);
         let has_evolution = edges.iter().any(|e| {
-            e.edge_type == edge_types::EVOLUTION_FROM && e.dst == existing_id
+            e.edge_type == "EVOLUTION_FROM" && e.dst == existing_id
         });
-        assert!(has_evolution, "EVOLUTION_FROM edge should exist from new to old node");
+        assert!(!has_corrects, "CORRECTS edge should NOT be auto-created");
+        assert!(!has_evolution, "EVOLUTION_FROM edge should NOT be auto-created");
     }
 }
