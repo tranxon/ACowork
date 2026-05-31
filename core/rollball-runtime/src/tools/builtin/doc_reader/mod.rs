@@ -176,14 +176,44 @@ impl Tool for DocReaderTool {
             include_tables: params["include_tables"].as_bool().unwrap_or(false),
         };
 
-        // Dispatch to format-specific extraction
-        let raw = match format {
-            "pdf" => pdf::extract_text(&full_path, &opts),
-            "docx" => docx::extract_text(&full_path, &opts),
-            "pptx" => pptx::extract_text(&full_path, &opts),
-            "xlsx" => xlsx::extract_text(&full_path, &opts),
-            _ => unreachable!(),
-        };
+        // Dispatch to format-specific extraction on a blocking thread.
+        //
+        // PDF/DOCX/PPTX/XLSX extraction is inherently CPU-bound and may
+        // block for seconds on large or complex documents (e.g. PDFs with
+        // embedded fonts / tables).  Running this on a tokio worker thread
+        // would starve other async tasks and, worse, a panic inside the
+        // extraction crate (e.g. pdf_extract font rendering) would kill
+        // the owning tokio task (SessionTask).
+        //
+        // spawn_blocking isolates the heavy work on a dedicated thread pool
+        // and catch_unwind converts any internal panic into a clean error.
+        let full_path_clone = full_path.clone();
+        let opts_clone = opts.clone();
+        let raw = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match format {
+                "pdf" => pdf::extract_text(&full_path_clone, &opts_clone),
+                "docx" => docx::extract_text(&full_path_clone, &opts_clone),
+                "pptx" => pptx::extract_text(&full_path_clone, &opts_clone),
+                "xlsx" => xlsx::extract_text(&full_path_clone, &opts_clone),
+                _ => unreachable!(),
+            }))
+            .map_err(|panic_payload| {
+                let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "Unknown panic during document extraction".to_string()
+                };
+                format!("Document extraction panicked: {msg}")
+            })
+            .and_then(|r| r)
+        })
+        .await
+        .map_err(|join_err| {
+            format!("Document extraction task cancelled or panicked: {join_err}")
+        })
+        .and_then(|r| r);
 
         match raw {
             Ok(text) => {

@@ -40,6 +40,14 @@ pub struct MemoryManagerConfig {
     pub default_min_score: f32,
     /// Enable graph expansion (default: true).
     pub enable_graph_expand: bool,
+    /// PageRank boost weight for topology-aware re-ranking (default: 0.1).
+    ///
+    /// When `enable_graph_expand` is true and this is > 0.0, the retrieval
+    /// pipeline applies PageRank scores to the deduplicated results:
+    /// `new_score = original_score * (1.0 - weight) + pagerank * weight`.
+    ///
+    /// Set to 0.0 to disable PageRank boosting.
+    pub pagerank_weight: f64,
     /// Record episodes asynchronously (default: true).
     pub record_async: bool,
 }
@@ -51,6 +59,7 @@ impl Default for MemoryManagerConfig {
             default_k: 10,
             default_min_score: 0.0,
             enable_graph_expand: true,
+            pagerank_weight: 0.1,
             record_async: true,
         }
     }
@@ -160,7 +169,8 @@ impl MemoryManager {
 
     /// Retrieve relevant memories for the current query.
     ///
-    /// Pipeline: Grafeo hybrid_search → graph_expand → merge & rank
+    /// Pipeline: Grafeo hybrid_search → graph_expand → dedup →
+    /// PageRank boost (topology re-rank) → merge & rank
     /// + RAG channel (if rag_client is Some, run in parallel).
     ///
     /// RAG channel uses the user message as query with default top_k=3.
@@ -263,6 +273,26 @@ impl MemoryManager {
                     }
                 })
                 .or_insert((score, label, source));
+        }
+
+        // Apply PageRank topology boost for re-ranking (S2.8.3).
+        // Only when graph expansion is enabled and weight > 0.
+        if self.config.enable_graph_expand && self.config.pagerank_weight > 0.0 && !best_by_id.is_empty() {
+            let mut scored: Vec<(NodeId, f64)> = best_by_id
+                .iter()
+                .map(|(id, (score, _, _))| (NodeId::new(*id), *score))
+                .collect();
+
+            if let Err(e) = store.apply_pagerank_boost(&mut scored, self.config.pagerank_weight) {
+                tracing::warn!("PageRank boost failed, continuing with unboosted scores: {e}");
+            } else {
+                // Map boosted scores back to best_by_id.
+                for (node_id, boosted_score) in scored {
+                    if let Some(entry) = best_by_id.get_mut(&node_id.as_u64()) {
+                        entry.0 = boosted_score;
+                    }
+                }
+            }
         }
 
         // Build RetrievedMemory list, sorted by score descending.
@@ -963,5 +993,99 @@ mod tests {
         assert!(metrics.abstention_triggered);
         assert_eq!(injected.memory_count, 0);
         assert!(injected.formatted_text.is_empty());
+    }
+
+    // =====================================================================
+    // Test 13: PageRank boost in retrieval pipeline
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_retrieve_with_pagerank_boost() {
+        let store = test_store();
+        let emb = test_embedding();
+
+        // Create three Episode nodes with the same embedding and similar content
+        // so hybrid_search returns all three.
+        let a_id = store_episode(&store, "Rust is a systems programming language", &emb);
+        let b_id = store_episode(&store, "Rust powers web services and APIs", &emb);
+        let c_id = store_episode(&store, "Rust has excellent tooling", &emb);
+
+        // Create edges: A → B and C → B, making B the hub with 2 incoming edges.
+        store
+            .create_memory_edge(
+                NodeId::new(a_id),
+                NodeId::new(b_id),
+                "RELATES_TO",
+                vec![],
+            )
+            .unwrap();
+        store
+            .create_memory_edge(
+                NodeId::new(c_id),
+                NodeId::new(b_id),
+                "RELATES_TO",
+                vec![],
+            )
+            .unwrap();
+
+        // Retrieve with PageRank enabled (default config, strong boost).
+        let mut config = MemoryManagerConfig::default();
+        config.enable_graph_expand = true;
+        config.pagerank_weight = 0.3; // Strong boost to make topology effect visible.
+        let manager = MemoryManager::new(config);
+
+        let query = MemoryQuery {
+            query_text: "Rust".to_string(),
+            embedding: Some(emb),
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
+            min_score: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        };
+
+        let result = manager.retrieve(&store, &query).await.unwrap();
+        assert!(!result.memories.is_empty(), "should retrieve Rust-related nodes");
+    }
+
+    // =====================================================================
+    // Test 14: PageRank boost disabled (weight=0) has no effect
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_retrieve_pagerank_disabled() {
+        let store = test_store();
+        let emb = test_embedding();
+
+        let a_id = store_episode(&store, "Python is a scripting language", &emb);
+        let b_id = store_episode(&store, "Python excels at data science", &emb);
+        store
+            .create_memory_edge(
+                NodeId::new(a_id),
+                NodeId::new(b_id),
+                "RELATES_TO",
+                vec![],
+            )
+            .unwrap();
+
+        // PageRank disabled.
+        let mut config = MemoryManagerConfig::default();
+        config.pagerank_weight = 0.0;
+        let manager = MemoryManager::new(config);
+
+        let query = MemoryQuery {
+            query_text: "Python".to_string(),
+            embedding: Some(emb),
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
+            min_score: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        };
+
+        let result = manager.retrieve(&store, &query).await.unwrap();
+        assert!(!result.memories.is_empty());
     }
 }

@@ -44,6 +44,7 @@
 | Abstention 拒答机制（min_score 过滤 + System Prompt 注入） | §6.5 | `rollball-grafeo/src/abstention.rs` | 完成 |
 | **memory_store 工具接口对齐设计** | §4.1 | `tools/builtin/memory_store.rs` | **完成（2026-05-30 修复）**：接口从旧版 `{key, content, category}` 改为设计要求的 `{content, category, confidence, keywords}`；对接 `GrafeoStore.process_memory_store()` 即时提取管道（去重→冲突检测→节点创建）；GrafeoStore 未初始化时优雅降级为 UUID fallback |
 | 两层冲突检测（语义相似度 + 时间冲突，统一 Ambiguous） | §6.4 | `rollball-grafeo/src/conflict.rs` | 完成（v3.8 简化） |
+| **PageRank 集成到检索排序** | §6.3 | `manager.rs` `retrieve()` | **完成（2026-05-30 接线）**：`apply_pagerank_boost()` 已接入检索管线，在去重后、最终排序前应用拓扑权威性加成。`MemoryManagerConfig` 新增 `pagerank_weight` 字段（默认 0.1，0.0 表示禁用） |
 | 即时提取冲突处理（统一 Ambiguous → Phase 3 LLM 仲裁） | §4.1 / §6.4 | `rollball-grafeo/src/consolidation/instant.rs` `process_memory_store()` | 完成（v3.8 简化） |
 | 防重复提取（embedding similarity > 0.95 跳过） | §4.1 | `instant.rs` `is_duplicate_knowledge()` (L247-265) | 完成 |
 | PendingKnowledgeNode 概念（confidence < 0.85 → Pending） | §4.1 | `instant.rs` `process_memory_store()` | 完成 |
@@ -76,7 +77,6 @@
 | **自传体记忆 System Prompt 注入** | §3.3 | 设计要求在 System Prompt 最前面注入自传体摘要（Identity/Capability/Limitation 必注入，History Top-5 摘要+Top-3 明细，Relationship Top-3，总预算 200 token） |
 | **经历层遗忘清理** | §2 | 已巩固+超7天 / 未巩固+超14天+importance<0.3 / 未巩固+超14天+importance>=0.3 保留并离线巩固——清理逻辑未集成到自动调度 |
 | **Episode 检索时的 embedding 退化降级** | §2 | 设计要求 embedding 为空时退化为 text_search only，代码中有 fallback 但未按设计中的200ms超时生成 + 后台补生成策略实现 |
-| **PageRank 集成到检索排序** | §6.3 | `topology_boost` 概念在 spreading.rs 有实现，但 `compute_pagerank()` 的实际调用和结果注入到 hybrid_search 的路径不明确 |
 | **CDC/History 用于冲突时间检测** | §6.4 | `conflict.rs` 中时间冲突检测使用节点属性 `created_at` 而非 `db.history()` CDC API |
 | **MMR 多样性搜索** | §6.3 / 04-grafeo.md | `db.mmr_search()` API 可用，但 MemoryManager 检索路径中未使用，统一用 hybrid_search |
 | **Louvain 社区检测** | §6.3 / 04-grafeo.md | `CALL grafeo.louvain()` 代码示例存在，但未在 graph_expand 中用于优先扩展社区内节点 |
@@ -187,9 +187,9 @@
 
 3. ~~**Episode 内容分类未执行**~~ → **✅ 已废弃（2026-05-30）**：ContentType 枚举和 ArtifactRef 结构已从整个代码库中移除。管道 A（Tool Call 模板提取）和管道 B（代码块正则分离）不再需要——Episode 内容直接存储，摘要由 Compaction 阶段 Compact Model 生成。
 
-4. **主循环 Record 阶段缺失**：loop_.rs 中有检索和注入，但每轮对话结束后的 record（写入 Grafeo Episodic）调用路径不明确，可能依赖其他模块间接写入。
+4. ~~**主循环 Record 阶段缺失**~~ → **✅ 已废弃（ADR-011）**：经历层的唯一写入来源为 compaction/distillation 摘要。`loop_.rs` 中 `write_distilled_to_grafeo()` 在 compaction/session-end 时通过 `record_distilled()` 写入 Grafeo，符合 ADR-011 设计。
 
-5. **自传体记忆链缺失**：Manifest 派生 → Grafeo 存储 → System Prompt 注入整条链路未实现，Agent 无自我认知背景。
+5. **自传体记忆链缺失**：Manifest 派生 → Grafeo 存储 → System Prompt 注入整条链路未实现，Agent 无自我认知背景。这是当前 Phase 1 最大的剩余缺口。
 
 ### 建议优先修复顺序
 
@@ -204,15 +204,17 @@
 
 | Phase | 总设计项 | 已实现 | 部分实现 | 未实现 | 已废弃（设计简化） |
 |-------|---------|--------|---------|--------|-------------------|
-| Phase 1 | ~35 | 29 | 1 | 1 | 4 (memory_hint ×2, ContentType, Per-round Episode) |
+| Phase 1 | ~35 | 30 | 1 | 0 | 4 (memory_hint ×2, ContentType, Per-round Episode) |
 | Phase 2 | ~18 | 5 | 6 | 7 | 0 |
 | Phase 3 | ~15 | 3 | 4 | 8 | 0 |
-| **合计** | **~68** | **37** | **11** | **16** | **4** |
+| **合计** | **~68** | **38** | **11** | **15** | **4** |
 
-**整体完成度：约 54%（已实现）→ 约 75%（含部分实现可工作的功能）**
+**整体完成度：约 56%（已实现）→ 约 76%（含部分实现可工作的功能）**
 
 Phase 1 核心存储/检索/遗忘管线基本完整，即时提取管道已于 2026-05-30 接通（memory_store 接口对齐设计）。Phase 2/3 的大量代码骨架存在（47KB generalization、25KB triple_extraction、39KB instant 等），暗示曾投入大量开发但未完成端到端集成。
 
 **2026-05-30 更新（1）**：移除 per-round memory_hint 设计，改为 Compaction 时 Compact Model 提取实体+三元组。新增 `DistilledEpisode.entities`/`.triples` 字段，`record_distilled` 已存储到 Grafeo 节点属性。检索权重统一默认值，不再动态调整。
 
 **2026-05-30 更新（2）**：memory_store 工具接口从旧版 `{key, content, category}` 对齐到设计要求的 `{content, category, confidence, keywords}`，接入 `GrafeoStore.process_memory_store()` 即时提取管道（去重→两层冲突检测→节点创建）。工厂函数 `all_builtin_tools()` 和 `MemoryStoreTool::new()` 新增 `Option<Arc<GrafeoStore>>` 参数，GrafeoStore 未初始化时优雅降级为 UUID fallback。统计数据已同步更新。
+
+**2026-05-30 更新（3）**：PageRank 拓扑权威性加成接入检索管线。`manager.rs` 的 `retrieve()` 在去重后、最终排序前调用 `apply_pagerank_boost()`，`MemoryManagerConfig` 新增 `pagerank_weight` 字段（默认 0.1）。Phase 1 已实现项 29→30，未实现项 1→0。统计数据已同步更新。

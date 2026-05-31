@@ -84,6 +84,7 @@ zip = { version = "8.1", default-features = true, features = ["deflate-flate2"] 
 pdf-extract = "0.10"
 calamine = "0.26"
 quick-xml = "0.37"
+lopdf = "0.38"
 
 # Concurrency primitives
 parking_lot = "0.12"

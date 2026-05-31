@@ -450,6 +450,16 @@ impl SessionTask {
                     let mut enriched_content = content.clone();
                     if let Some(ref docs) = documents {
                         if !docs.is_empty() {
+                            let filenames: Vec<&str> = docs
+                                .iter()
+                                .filter_map(|d| d.get("filename").and_then(|v| v.as_str()))
+                                .collect();
+                            tracing::info!(
+                                session_id = %session_id,
+                                doc_count = docs.len(),
+                                filenames = ?filenames,
+                                "SessionTask: pre-extracting uploaded documents via doc_reader"
+                            );
                             let mut doc_blocks: Vec<String> = Vec::new();
                             for doc in docs {
                                 let abs_path = doc.get("abs_path").and_then(|v| v.as_str()).unwrap_or("");
@@ -458,6 +468,13 @@ impl SessionTask {
                                     continue;
                                 }
                                 let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                tracing::info!(
+                                    session_id = %session_id,
+                                    filename = %filename,
+                                    format = %format,
+                                    abs_path = %abs_path,
+                                    "SessionTask: extracting document"
+                                );
                                 let params = serde_json::json!({"path": abs_path, "include_tables": true});
                                 match agent_loop.execute_tool_by_name("doc_reader", params).await {
                                     Ok(text) if !text.trim().is_empty() => {
@@ -496,6 +513,12 @@ impl SessionTask {
                                     doc_blocks.join("\n\n")
                                 );
                             }
+                            tracing::info!(
+                                session_id = %session_id,
+                                doc_blocks = doc_blocks.len(),
+                                enriched_len = enriched_content.len(),
+                                "SessionTask: document pre-extraction complete"
+                            );
                         }
                     }
 
