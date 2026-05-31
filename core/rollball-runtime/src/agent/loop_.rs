@@ -449,16 +449,27 @@ impl AgentLoop {
         };
 
         let manager = self.core.init_memory_manager();
-        let query = rollball_memory::MemoryQuery {
-            query_text: user_message.to_string(),
-            embedding: None, // Text-only search initially; hybrid when embedding is available
-            filters: Default::default(),
-            limit: 10,
-            expand_hops: 0,
-            min_score: None,
-            abstention_enabled: false,
-            hint_type: rollball_memory::HintType::Semantic,
-        };
+
+        // Build exclude_session_id filter to avoid re-injecting Episode
+        // summaries that are already in the current session's context window.
+        let current_session_id = self
+            .session
+            .conversation
+            .as_ref()
+            .map(|c| c.session_id().to_string());
+
+        // Update MemorySessionHandle so memory_recall tool can see the
+        // current session_id for its own exclude_session_id filtering.
+        if let Some(ref handle) = self.core.memory_session {
+            if let Some(ref sid) = current_session_id {
+                handle.set_session_id(sid.clone());
+            }
+        }
+
+        let query = rollball_memory::MemoryQuery::auto_inject(
+            user_message.to_string(),
+            current_session_id,
+        );
 
         // P2-4 fix: Use retrieve + inject separately (instead of process_turn)
         // so we can capture the node IDs of retrieved memories for traceability.
@@ -473,7 +484,7 @@ impl AgentLoop {
                     .collect();
 
                 let metrics = retrieval.metrics.clone();
-                let injected = manager.inject(&retrieval, crate::memory::MemoryManagerConfig::default().max_inject_tokens);
+                let injected = manager.inject(&retrieval);
                 if !injected.formatted_text.is_empty() {
                     tracing::info!(
                         memory_count = injected.memory_count,

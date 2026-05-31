@@ -303,7 +303,7 @@ async fn stress_test_tool_spec_serialization_roundtrip() {
     let work_dir = tmp.path().to_string_lossy().to_string();
 
     let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.stress", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None);
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.stress", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None, None);
     let rounds = 1000;
 
     for tool in &tools {

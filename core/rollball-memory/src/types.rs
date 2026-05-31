@@ -106,6 +106,52 @@ impl MemoryQuery {
             embedding: None,
         }
     }
+
+    /// Build a query for per-turn auto-injection.
+    ///
+    /// Lightweight background context: searches Autobiographical + Episodic
+    /// labels, excludes current-session nodes, no graph expansion, low limit.
+    pub fn auto_inject(
+        query_text: String,
+        exclude_session_id: Option<String>,
+    ) -> Self {
+        Self {
+            query_text,
+            embedding: None,
+            filters: MemoryFilters {
+                exclude_session_id,
+                ..Default::default()
+            },
+            limit: 5,
+            expand_hops: 0,
+            min_score: Some(0.3),
+            abstention_enabled: false,
+            hint_type: HintType::Identity,
+        }
+    }
+
+    /// Build a query for LLM-triggered deep recall (memory_recall tool).
+    ///
+    /// Comprehensive retrieval: searches all four labels, enables graph
+    /// expansion, no score filtering — lets the LLM decide relevance.
+    pub fn deep_recall(
+        query_text: String,
+        exclude_session_id: Option<String>,
+    ) -> Self {
+        Self {
+            query_text,
+            embedding: None,
+            filters: MemoryFilters {
+                exclude_session_id,
+                ..Default::default()
+            },
+            limit: 10,
+            expand_hops: 2,
+            min_score: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        }
+    }
 }
 
 /// Filters for memory queries.
@@ -117,8 +163,13 @@ pub struct MemoryFilters {
     pub privacy_levels: Vec<PrivacyLevel>,
     /// Filter by time range.
     pub time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
-    /// Filter by session ID.
+    /// Filter by session ID (include only this session).
     pub session_id: Option<String>,
+    /// Exclude nodes belonging to this session.
+    ///
+    /// Used by per-turn auto-injection to avoid re-injecting summaries
+    /// that are already present in the current session's context window.
+    pub exclude_session_id: Option<String>,
 }
 
 // ============================================================================

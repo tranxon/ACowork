@@ -539,6 +539,11 @@ async fn async_main(
         .map(|c| !c.search_key_vault.is_empty())
         .unwrap_or(false);
 
+    // Create shared memory session handle — tools and AgentCore share
+    // the same handle. GrafeoStore is lazily initialized later via
+    // init_memory_store(); session_id is updated per-turn in loop_.rs.
+    let memory_session = Arc::new(crate::memory::MemorySessionHandle::new());
+
     let mut registry = ToolRegistry::new();
     for tool in builtin::all_builtin_tools(
         &workspace_resolver,
@@ -546,6 +551,7 @@ async fn async_main(
         config.tool_http_timeout_ms,
         has_search_providers,
         None, // GrafeoStore not yet initialized — tool uses fallback path
+        Some(memory_session.clone()), // Shared session handle for memory_recall
     ) {
         registry.register(tool);
     }
@@ -806,6 +812,10 @@ async fn async_main(
                     "Populated provider_compact_models from resource cache"
                 );
             }
+
+            // Inject shared MemorySessionHandle so tools can access
+            // the Grafeo store once initialized and session_id at runtime.
+            c.memory_session = Some(memory_session);
 
             // Initialize Grafeo memory store at agent workspace
             c.init_memory_store(work_dir_path);

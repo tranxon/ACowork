@@ -571,7 +571,7 @@ async fn test_llm_tool_call_with_proper_tool_call_id() {
     std::fs::write(tmp.path().join("hello.txt"), "Hello from RollBall!").unwrap();
 
     let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
-    let builtin_tools = builtin::all_builtin_tools(&resolver, "com.test.history-recovery", DEFAULT_TOOL_HTTP_TIMEOUT_MS);
+    let builtin_tools = builtin::all_builtin_tools(&resolver, "com.test.history-recovery", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None, None);
     let tool_jsons: Vec<serde_json::Value> = builtin_tools
         .iter()
         .map(|t| serde_json::to_value(t.spec()).unwrap())

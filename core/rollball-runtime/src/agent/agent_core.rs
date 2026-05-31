@@ -12,10 +12,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::Utc;
 use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::providers::traits::Provider;
 use rollball_core::tools::traits::Tool;
 use rollball_grafeo::grafeo::GrafeoStore;
+use rollball_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
@@ -125,6 +127,9 @@ pub struct AgentCore {
     /// the SessionHandle holds the Receiver for non-blocking reads.
     /// None for CLI-only sessions (no SessionHandle).
     pub(crate) status_tx: Option<tokio::sync::watch::Sender<crate::agent::session_state::SessionStatus>>,
+    /// Memory session handle — shared between agent loop and memory tools.
+    /// Created at tool registry time, store initialized lazily.
+    pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
 }
 
 impl AgentCore {
@@ -155,6 +160,7 @@ impl AgentCore {
             session_id: None,
             on_chunk,
             memory_store: None,
+            memory_session: None,
             debug_ctrl: None,
             debug_rewind_notify: None,
             debug_resume_notify: None,
@@ -363,7 +369,14 @@ impl AgentCore {
                     existing_nodes = existing,
                     "Grafeo memory store opened"
                 );
-                self.memory_store = Some(Arc::new(store));
+                let store_arc = Arc::new(store);
+                // Bootstrap Autobiographical nodes from manifest on cold start.
+                self.bootstrap_autobiographical_from_manifest(&store_arc);
+                // Propagate to memory session handle so tools can use it.
+                if let Some(ref session) = self.memory_session {
+                    session.set_store(store_arc.clone());
+                }
+                self.memory_store = Some(store_arc);
             }
             Err(e) => {
                 tracing::warn!(
@@ -378,6 +391,113 @@ impl AgentCore {
     /// Access the Grafeo memory store, if initialized.
     pub fn memory_store(&self) -> Option<&Arc<GrafeoStore>> {
         self.memory_store.as_ref()
+    }
+
+    /// Bootstrap Autobiographical nodes from the agent manifest.
+    ///
+    /// On first run (cold start), derives Identity/Capability nodes from
+    /// [`AgentManifest`] fields and writes them to Grafeo. The bootstrap is
+    /// **idempotent**: if any Autobiographical/Identity nodes already exist,
+    /// the entire bootstrap is skipped.
+    ///
+    /// This ensures the agent has searchable self-knowledge from the moment
+    /// Grafeo is initialized, without waiting for LLM-triggered
+    /// `memory_store` calls.
+    ///
+    /// ## Mapping
+    ///
+    /// | Manifest field           | → Node                              |
+    /// |--------------------------|-------------------------------------|
+    /// | `agent_id`               | `Identity: agent_id: ...`           |
+    /// | `name`                   | `Identity: name: ...`               |
+    /// | `display_name`           | `Identity: display_name: ...`       |
+    /// | `role`                   | `Identity: role: ...`               |
+    /// | `description`            | `Identity: description: ...`        |
+    /// | `capabilities.*.description` | `Capability: {key}: {desc}`     |
+    fn bootstrap_autobiographical_from_manifest(&self, store: &GrafeoStore) {
+        // Idempotency: skip if any Identity nodes already exist.
+        match store.find_autobiographical_by_category(AutobioCategory::Identity) {
+            Ok(existing) if !existing.is_empty() => {
+                tracing::debug!(
+                    count = existing.len(),
+                    "Autobiographical nodes already exist, skipping manifest bootstrap"
+                );
+                return;
+            }
+            Err(e) => {
+                // Non-fatal: graph may not have index yet on first access.
+                tracing::warn!(error = %e, "Failed to probe existing Autobiographical nodes, attempting bootstrap anyway");
+            }
+            _ => {}
+        }
+
+        let manifest = &self.manifest;
+        let now = Utc::now();
+        let mut bootstrapped = 0u32;
+
+        // ── Identity nodes ──
+        let identity_entries: Vec<(&str, String)> = {
+            let mut v = vec![
+                ("agent_id", manifest.agent_id.clone()),
+                ("name", manifest.name.clone()),
+                ("description", manifest.description.clone()),
+            ];
+            if let Some(ref dn) = manifest.display_name {
+                v.push(("display_name", dn.clone()));
+            }
+            if let Some(ref role) = manifest.role {
+                v.push(("role", role.clone()));
+            }
+            v
+        };
+
+        for (key, value) in &identity_entries {
+            let node = AutobiographicalNode {
+                id: None,
+                category: AutobioCategory::Identity,
+                key: key.to_string(),
+                value: value.clone(),
+                confidence: 1.0,
+                source_episode_id: None,
+                embedding: None,
+                status: NodeStatus::Active,
+                created_at: now,
+                updated_at: now,
+                metadata: HashMap::new(),
+            };
+            match store.store_autobiographical(&node) {
+                Ok(_) => bootstrapped += 1,
+                Err(e) => tracing::warn!(key = %key, error = %e, "Failed to bootstrap Autobiographical/Identity node"),
+            }
+        }
+
+        // ── Capability nodes ──
+        for (cap_key, cap_def) in &manifest.capabilities {
+            let node = AutobiographicalNode {
+                id: None,
+                category: AutobioCategory::Capability,
+                key: cap_key.clone(),
+                value: cap_def.description.clone(),
+                confidence: 1.0,
+                source_episode_id: None,
+                embedding: None,
+                status: NodeStatus::Active,
+                created_at: now,
+                updated_at: now,
+                metadata: HashMap::new(),
+            };
+            match store.store_autobiographical(&node) {
+                Ok(_) => bootstrapped += 1,
+                Err(e) => tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node"),
+            }
+        }
+
+        tracing::info!(
+            identity_count = identity_entries.len(),
+            capability_count = manifest.capabilities.len(),
+            bootstrapped,
+            "Bootstrapped Autobiographical nodes from manifest"
+        );
     }
 
     /// Initialize and return a MemoryManager for this agent.
@@ -412,6 +532,7 @@ impl AgentCore {
             session_id: Some(session_id),
             on_chunk,
             memory_store: self.memory_store.clone(),
+            memory_session: self.memory_session.clone(),
             debug_ctrl: self.debug_ctrl.clone(),
             debug_rewind_notify: self.debug_rewind_notify.clone(),
             debug_resume_notify: self.debug_resume_notify.clone(),
