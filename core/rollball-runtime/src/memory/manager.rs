@@ -184,7 +184,7 @@ impl MemoryManager {
 
         // Determine which labels to search based on hint type.
         let search_labels: Vec<&str> = match hint_type {
-            HintType::Identity => vec![labels::AUTOBIOGRAPHICAL],
+            HintType::Identity => vec![labels::AUTOBIOGRAPHICAL, labels::EPISODIC],
             _ => vec![
                 labels::EPISODIC,
                 labels::KNOWLEDGE,
@@ -273,6 +273,29 @@ impl MemoryManager {
                     }
                 })
                 .or_insert((score, label, source));
+        }
+
+        // Post-filter: exclude nodes belonging to the current session.
+        // Prevents re-injecting compaction summaries that are already in
+        // the conversation context window.
+        if let Some(ref exclude_sid) = query.filters.exclude_session_id {
+            let before = best_by_id.len();
+            best_by_id.retain(|node_id, _| {
+                let nid = NodeId::new(*node_id);
+                match store.db().get_node(nid) {
+                    Some(node) => node
+                        .get_property("session_id")
+                        .map(|v| v.to_string().trim_matches('"') != *exclude_sid)
+                        .unwrap_or(true),
+                    None => true,
+                }
+            });
+            tracing::debug!(
+                before,
+                after = best_by_id.len(),
+                exclude_session_id = %exclude_sid,
+                "Excluded current-session nodes from retrieval"
+            );
         }
 
         // Apply PageRank topology boost for re-ranking (S2.8.3).
@@ -374,8 +397,11 @@ impl MemoryManager {
 
     /// Format retrieved memories for system prompt injection.
     ///
-    /// Respects token budget, prioritizes by score.
-    pub fn inject(&self, retrieval: &RetrievalResult, max_tokens: usize) -> InjectedMemory {
+    /// All memories from the retrieval result are included without
+    /// content truncation. Grafeo stores already-distilled summaries
+    /// (individual items are small), so count limiting is handled at
+    /// the retrieve() level via `MemoryQuery.limit`.
+    pub fn inject(&self, retrieval: &RetrievalResult) -> InjectedMemory {
         if retrieval.memories.is_empty() {
             return InjectedMemory {
                 formatted_text: String::new(),
@@ -387,38 +413,21 @@ impl MemoryManager {
 
         let mut lines: Vec<String> = Vec::new();
         let mut token_count: usize = 0;
-        let mut truncated = false;
 
         for memory in &retrieval.memories {
             let line = format!("[{}] {}", memory.label, memory.content);
             let line_tokens = estimate_tokens(&line);
-
-            if token_count + line_tokens > max_tokens && !lines.is_empty() {
-                truncated = true;
-                break;
-            }
-
             lines.push(line);
             token_count += line_tokens;
-
-            // If a single memory exceeds the budget on an empty list, include it anyway
-            // but mark truncated.
-            if token_count > max_tokens && lines.len() == 1 {
-                truncated = true;
-            }
         }
 
-        let formatted_text = if lines.is_empty() {
-            String::new()
-        } else {
-            lines.join("\n")
-        };
+        let formatted_text = lines.join("\n");
 
         InjectedMemory {
             formatted_text,
             token_count,
             memory_count: lines.len(),
-            truncated,
+            truncated: false,
         }
     }
 
@@ -524,7 +533,7 @@ impl MemoryManager {
     ) -> Result<(InjectedMemory, RetrievalMetrics)> {
         let retrieval = self.retrieve(store, query).await?;
         let metrics = retrieval.metrics.clone();
-        let injected = self.inject(&retrieval, self.config.max_inject_tokens);
+        let injected = self.inject(&retrieval);
         Ok((injected, metrics))
     }
 }
@@ -539,6 +548,23 @@ fn extract_node_content(store: &GrafeoStore, node_id: u64) -> String {
     let Some(node) = store.get_node(nid) else {
         return String::new();
     };
+
+    // Autobiographical nodes: include category for disambiguation.
+    // Without this, the LLM cannot distinguish "agent's own capability"
+    // from "learned user preference" — both show as [Autobiographical].
+    // inject() prepends the label, so final output is:
+    //   [Autobiographical] Capability: language: Rust
+    //   [Autobiographical] Preference: answer_style: 大鱼 prefers concise answers
+    if let Some(category) = node.get_property("category").and_then(|v| v.as_str()) {
+        let key = node.get_property("key").and_then(|v| v.as_str()).unwrap_or("");
+        let value = node.get_property("value").and_then(|v| v.as_str()).unwrap_or("");
+        if !key.is_empty() && !value.is_empty() {
+            return format!("{category}: {key}: {value}");
+        }
+        if !value.is_empty() {
+            return format!("{category}: {value}");
+        }
+    }
 
     // Try common content fields in priority order.
     if let Some(content) = node.get_property("content").and_then(|v| v.as_str()) {
@@ -834,7 +860,7 @@ mod tests {
         };
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let injected = manager.inject(&retrieval, 1000);
+        let injected = manager.inject(&retrieval);
 
         assert!(!injected.formatted_text.is_empty());
         assert!(injected.formatted_text.contains("[Knowledge]"));
@@ -844,11 +870,11 @@ mod tests {
     }
 
     // =====================================================================
-    // Test 8: Inject with truncation
+    // Test 8: Inject includes all memories without content truncation
     // =====================================================================
 
     #[test]
-    fn test_inject_truncation() {
+    fn test_inject_all_memories_no_truncation() {
         let retrieval = RetrievalResult {
             memories: vec![
                 RetrievedMemory {
@@ -883,11 +909,14 @@ mod tests {
         };
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let injected = manager.inject(&retrieval, 5); // Very tight budget.
+        let injected = manager.inject(&retrieval);
 
-        assert!(injected.memory_count < retrieval.memories.len());
-        assert!(injected.truncated);
-        assert!(injected.token_count <= 5 + estimate_tokens(&retrieval.memories[0].content));
+        // All 3 memories should be included, no truncation.
+        assert_eq!(injected.memory_count, 3);
+        assert!(!injected.truncated);
+        assert!(injected.formatted_text.contains("User likes Rust"));
+        assert!(injected.formatted_text.contains("Another very long memory"));
+        assert!(injected.formatted_text.contains("Third memory"));
     }
 
     // =====================================================================
@@ -902,7 +931,7 @@ mod tests {
         };
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let injected = manager.inject(&retrieval, 1000);
+        let injected = manager.inject(&retrieval);
 
         assert!(injected.formatted_text.is_empty());
         assert_eq!(injected.memory_count, 0);

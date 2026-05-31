@@ -61,12 +61,14 @@ use search_backends::WebSearchEngine;
 ///   When false, the `web_search` tool is skipped to avoid wasting LLM calls on
 ///   a tool that always returns "Provider not configured".
 /// * `grafeo_store` - Optional GrafeoStore for memory_store backend wiring.
+/// * `memory_session` - Optional MemorySessionHandle for memory_recall session-aware retrieval.
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
     tool_http_timeout_ms: u64,
     has_search_providers: bool,
     grafeo_store: Option<Arc<GrafeoStore>>,
+    memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
 ) -> Vec<Arc<dyn Tool>> {
     let _work_dir = resolver.read().unwrap().agent_home().to_string();
     let current_dir = resolver.read().unwrap().agent_home().to_string();
@@ -87,7 +89,7 @@ pub fn all_builtin_tools(
         .collect();
 
     let mut tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(memory_recall::MemoryRecallTool::new(agent_id)),
+        Arc::new(memory_recall::MemoryRecallTool::new(agent_id, memory_session)),
         Arc::new(memory_store::MemoryStoreTool::new(agent_id, grafeo_store)),
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::with_timeout(Duration::from_millis(tool_http_timeout_ms))),

@@ -59,6 +59,10 @@
 | RetrievalMetrics 检索指标收集 | §11.1 | `rollball-memory/src/types.rs` (L161-178) | 完成 |
 | RAG 双通道检索（Grafeo + RAG 并行） | §10.6 | `manager.rs` `retrieve()` (L283-302) | 完成 |
 | 存储统计（stats/health_check） | §10.3 | `grafeo.rs` `stats()` / `health_check()` (L509-541) | 完成 |
+| **MemoryQuery 检索意图分化（auto_inject / deep_recall）** | §6.6 | `rollball-memory/src/types.rs` 工厂方法 | **完成（2026-05-30）**：`HintType::Identity`（auto_inject：limit=5, expand_hops=0, min_score=0.3）vs `HintType::Semantic`（deep_recall：limit=10, expand_hops=2, min_score=None），通过工厂方法而非新增字段实现，零测试破坏 |
+| **MemorySessionHandle 共享状态** | §10.4 | `rollball-runtime/src/memory/session_handle.rs` | **完成（2026-05-30）**：`Arc<RwLock<SharedState>>` 在 AgentCore 主循环和 memory 工具间共享 `current_session_id` 和 `store`，支持 exclude_session_id 过滤和延迟绑定 |
+| **自动注入 session_id 跟踪** | §10.4 | `agent/loop_.rs` `retrieve_and_inject_memories()` | **完成（2026-05-30）**：每次检索前通过 `MemorySessionHandle.set_session_id()` 更新，防止当前 session 摘要重新注入 |
+| **Identity 标签扩展（Autobiographical + Episodic）** | §3.3 / §6.6 | `memory/manager.rs` `retrieve()` | **完成（2026-05-30）**：`HintType::Identity` 从仅 `AUTOBIOGRAPHICAL` 扩展为 `[AUTOBIOGRAPHICAL, EPISODIC]`，自动注入同时召回自我认知和经历摘要 |
 
 ### 2.2 部分实现
 
@@ -74,7 +78,7 @@
 | 设计项 | 设计文档位置 | 说明 |
 |--------|------------|------|
 | **AutobiographicalNode 从 manifest 自动派生** | §3.3 | 设计要求启动时从 `manifest.toml` 的 `agent.name`、`agent.description`、`skills/` 列表自动生成 Identity/Capability 节点，目前未实现 |
-| **自传体记忆 System Prompt 注入** | §3.3 | 设计要求在 System Prompt 最前面注入自传体摘要（Identity/Capability/Limitation 必注入，History Top-5 摘要+Top-3 明细，Relationship Top-3，总预算 200 token） |
+| **自传体记忆 System Prompt 注入** | §3.3 | 设计要求在 System Prompt 最前面注入自传体摘要（Identity/Capability/Limitation 必注入，History Top-5 摘要+Top-3 明细，Relationship Top-3，总预算 200 token）。**2026-05-30 部分进展**：`HintType::Identity` 标签扩展为 `[AUTOBIOGRAPHICAL, EPISODIC]`，`auto_inject()` 已能召回 Grafeo 中的自传体节点并注入上下文。但 manifest 自动派生 Autobio-graphicalNode 和 200 token 预算控制的 System Prompt 格式化尚未实现。 |
 | **经历层遗忘清理** | §2 | 已巩固+超7天 / 未巩固+超14天+importance<0.3 / 未巩固+超14天+importance>=0.3 保留并离线巩固——清理逻辑未集成到自动调度 |
 | **Episode 检索时的 embedding 退化降级** | §2 | 设计要求 embedding 为空时退化为 text_search only，代码中有 fallback 但未按设计中的200ms超时生成 + 后台补生成策略实现 |
 | **CDC/History 用于冲突时间检测** | §6.4 | `conflict.rs` 中时间冲突检测使用节点属性 `created_at` 而非 `db.history()` CDC API |
@@ -189,7 +193,7 @@
 
 4. ~~**主循环 Record 阶段缺失**~~ → **✅ 已废弃（ADR-011）**：经历层的唯一写入来源为 compaction/distillation 摘要。`loop_.rs` 中 `write_distilled_to_grafeo()` 在 compaction/session-end 时通过 `record_distilled()` 写入 Grafeo，符合 ADR-011 设计。
 
-5. **自传体记忆链缺失**：Manifest 派生 → Grafeo 存储 → System Prompt 注入整条链路未实现，Agent 无自我认知背景。这是当前 Phase 1 最大的剩余缺口。
+5. **自传体记忆链缺失**：Manifest 派生 → Grafeo 存储 → System Prompt 注入整条链路未完全实现。**2026-05-30 部分进展**：`HintType::Identity` 标签扩展为 `[AUTOBIOGRAPHICAL, EPISODIC]`，`auto_inject()` 工厂方法已能召回 Grafeo 中的自传体节点并注入上下文——检索管线已就绪。剩余工作：manifest 自动派生 AutobiographicalNode + 200 token 预算 System Prompt 格式化。这是当前 Phase 1 最大的剩余缺口。
 
 ### 建议优先修复顺序
 
@@ -204,12 +208,12 @@
 
 | Phase | 总设计项 | 已实现 | 部分实现 | 未实现 | 已废弃（设计简化） |
 |-------|---------|--------|---------|--------|-------------------|
-| Phase 1 | ~35 | 30 | 1 | 0 | 4 (memory_hint ×2, ContentType, Per-round Episode) |
+| Phase 1 | ~39 | 34 | 1 | 0 | 4 (memory_hint ×2, ContentType, Per-round Episode) |
 | Phase 2 | ~18 | 5 | 6 | 7 | 0 |
 | Phase 3 | ~15 | 3 | 4 | 8 | 0 |
-| **合计** | **~68** | **38** | **11** | **15** | **4** |
+| **合计** | **~72** | **42** | **11** | **15** | **4** |
 
-**整体完成度：约 56%（已实现）→ 约 76%（含部分实现可工作的功能）**
+**整体完成度：约 58%（已实现）→ 约 74%（含部分实现可工作的功能）**
 
 Phase 1 核心存储/检索/遗忘管线基本完整，即时提取管道已于 2026-05-30 接通（memory_store 接口对齐设计）。Phase 2/3 的大量代码骨架存在（47KB generalization、25KB triple_extraction、39KB instant 等），暗示曾投入大量开发但未完成端到端集成。
 
@@ -218,3 +222,22 @@ Phase 1 核心存储/检索/遗忘管线基本完整，即时提取管道已于 
 **2026-05-30 更新（2）**：memory_store 工具接口从旧版 `{key, content, category}` 对齐到设计要求的 `{content, category, confidence, keywords}`，接入 `GrafeoStore.process_memory_store()` 即时提取管道（去重→两层冲突检测→节点创建）。工厂函数 `all_builtin_tools()` 和 `MemoryStoreTool::new()` 新增 `Option<Arc<GrafeoStore>>` 参数，GrafeoStore 未初始化时优雅降级为 UUID fallback。统计数据已同步更新。
 
 **2026-05-30 更新（3）**：PageRank 拓扑权威性加成接入检索管线。`manager.rs` 的 `retrieve()` 在去重后、最终排序前调用 `apply_pagerank_boost()`，`MemoryManagerConfig` 新增 `pagerank_weight` 字段（默认 0.1）。Phase 1 已实现项 29→30，未实现项 1→0。统计数据已同步更新。
+
+**2026-05-30 更新（4）— 检索意图分化 + MemorySessionHandle 共享状态**：
+
+1. **`MemoryQuery` 工厂方法**（`rollball-memory/src/types.rs`）：新增 `auto_inject()` 和 `deep_recall()` 两个工厂方法，用 `HintType` 区分两种检索意图：
+   - `auto_inject()`：背景注入场景（`loop_.rs` 每轮自动注入）。`HintType::Identity`、limit=5、expand_hops=0、min_score=0.3。
+   - `deep_recall()`：LLM 工具调用场景（`memory_recall` 工具）。`HintType::Semantic`、limit=10、expand_hops=2、min_score=None。
+   - 设计选择：不在 `MemoryQuery` 结构体上添加 `RetrievalIntent` 字段（避免破坏 10+ 处 struct literal 用法的测试代码），而是通过工厂方法 + 已有 `HintType` 传递意图。
+
+2. **`MemorySessionHandle` 共享状态**（`rollball-runtime/src/memory/session_handle.rs`）：`Arc<RwLock<SharedState>>` 在 AgentCore 主循环和 memory 工具之间共享两个关键状态：
+   - `current_session_id: Option<String>`：主循环每次处理用户消息前更新，工具侧读取用于 `exclude_session_id` 过滤（防止把当前 session 的 compaction 摘要重新注入）。
+   - `store: Option<Arc<GrafeoStore>>`：延迟绑定，支持 `all_builtin_tools()` 在 `GrafeoStore` 初始化前被调用（早于内存系统启动）。
+
+3. **`loop_.rs` 自动注入接入 `MemorySessionHandle`**：在 `retrieve_and_inject_memories()` 调用前通过 `handle.set_session_id()` 更新 session_id，检索使用 `MemoryQuery::auto_inject()`。
+
+4. **`memory_recall.rs` 深度召回**：工具执行时构造 `MemoryQuery::deep_recall()`，LLM 可通过 `limit` 参数覆盖默认值。`exclude_session_id` 从共享状态读取。
+
+5. **`manager.rs` Identity 标签扩展**：`HintType::Identity` 的标签选择从 `[AUTOBIOGRAPHICAL]` 扩展为 `[AUTOBIOGRAPHICAL, EPISODIC]`，使自动注入能同时召回自我认知和最近经历摘要。
+
+6. **`cli.rs` 编译修复**：`all_builtin_tools()` 签名含 6 个参数但仅传 5 个导致编译断裂——创建 `MemorySessionHandle` 并作为第 6 参数传入，同时写入 `AgentCore.memory_session` 字段供主循环使用。

@@ -128,7 +128,7 @@ async fn test_tool_definition_parameters_serialization() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None);
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None, None);
 
     for tool in &tools {
         let spec = tool.spec();
@@ -175,7 +175,7 @@ async fn test_all_builtin_tools_have_unique_names() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None);
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None, None);
 
     let names: Vec<String> = tools.iter().map(|t| t.name()).collect();
     let mut unique = names.clone();
@@ -196,7 +196,7 @@ async fn test_all_builtin_tools_count() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None);
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None, None);
     // 13 fixed built-in tools (memory_recall, memory_store, http_request, web_fetch,
     // web_search, file_read, file_write, file_edit, doc_reader, glob_search,
     // content_search, intent_send, ask_user_question) + platform shell tools
@@ -893,7 +893,7 @@ async fn test_shell_command_missing_param() {
 #[tokio::test]
 async fn test_memory_store_and_recall() {
     let store_tool = builtin::memory_store::MemoryStoreTool::new("com.test.e2e", None);
-    let recall_tool = builtin::memory_recall::MemoryRecallTool::new("com.test.e2e");
+    let recall_tool = builtin::memory_recall::MemoryRecallTool::new("com.test.e2e", None);
 
     // Store a memory with new natural-language interface
     let store_result = store_tool
@@ -948,7 +948,7 @@ async fn test_memory_store_missing_category() {
 
 #[tokio::test]
 async fn test_memory_recall_no_filters() {
-    let tool = builtin::memory_recall::MemoryRecallTool::new("com.test.e2e");
+    let tool = builtin::memory_recall::MemoryRecallTool::new("com.test.e2e", None);
     let result = tool
         .execute(serde_json::json!({}))
         .await
@@ -1249,7 +1249,7 @@ fn test_convert_tools_preserves_all_builtin_tools() {
     let work_dir = tmp.path().to_string_lossy().to_string();
     let resolver: SharedResolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(&work_dir)));
 
-    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None);
+    let tools = builtin::all_builtin_tools(&resolver, "com.test.e2e", DEFAULT_TOOL_HTTP_TIMEOUT_MS, false, None, None);
 
     // Serialize each tool's spec
     let tool_jsons: Vec<Value> = tools
