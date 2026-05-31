@@ -261,7 +261,7 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
 
       {/* Context snapshot tree */}
       <div className="flex-1 overflow-y-auto">
-        <div className="px-2 py-1 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+        <div className="px-2.5 pt-2 pb-1 text-[11px] font-medium text-zinc-400 dark:text-zinc-500">
           Context Snapshots ({snapshots.length})
         </div>
         {snapshots.length === 0 && (
@@ -327,7 +327,7 @@ export function ControlButton({
           ? "cursor-not-allowed text-zinc-300 dark:text-zinc-600"
           : active
             ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-            : "text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+            : "text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
       )}
     >
       {children}
@@ -350,7 +350,7 @@ export function StateLabel({
       <span
         className={cn(
           "text-right font-mono",
-          highlight ? "text-amber-600 dark:text-amber-400" : "text-zinc-700 dark:text-zinc-300"
+          highlight ? "text-[var(--color-accent)] dark:text-[var(--color-accent)]" : "text-zinc-700 dark:text-zinc-300"
         )}
       >
         {value}
@@ -400,17 +400,17 @@ export function SnapshotNode({
         tabIndex={0}
         onClick={() => setCollapsed(!collapsed)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setCollapsed(!collapsed); }}
-        className="flex w-full items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+        className="flex w-full items-center gap-2 rounded-lg bg-zinc-50 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:hover:bg-zinc-800/50 cursor-pointer"
       >
         {collapsed ? (
-          <ChevronRight className="h-3 w-3 shrink-0 text-zinc-400" />
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
         ) : (
-          <ChevronDown className="h-3 w-3 shrink-0 text-zinc-400" />
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
         )}
-        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+        <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
           Iteration #{snapshot.iteration}
         </span>
-        <span className="ml-auto text-[10px] text-zinc-400">
+        <span className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500">
           ~{snapshot.total_token_estimate} tok
         </span>
         <button
@@ -419,7 +419,7 @@ export function SnapshotNode({
             onRewind(snapshot.iteration);
           }}
           title={`Rewind to iteration ${snapshot.iteration}`}
-          className="ml-1 rounded p-0.5 text-zinc-400 transition-colors hover:bg-amber-100 hover:text-amber-600 dark:hover:bg-amber-900/30 dark:hover:text-amber-400"
+          className="ml-auto rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
         >
           <Rewind className="h-3 w-3" />
         </button>
@@ -427,7 +427,7 @@ export function SnapshotNode({
 
       {/* Sections */}
       {!collapsed && (
-        <div className="pb-1">
+        <div className="ml-2 mt-1 rounded-lg border-l-2 border-zinc-300 bg-zinc-50 pl-2 pr-1.5 py-1.5 space-y-0.5 dark:border-zinc-600 dark:bg-zinc-800/30">
           {SECTION_ORDER.map((sectionKey) => {
             const section = snapshot.sections[sectionKey];
             if (!section) return null;
@@ -439,20 +439,20 @@ export function SnapshotNode({
             return (
               <div key={sectionKey}>
                 {/* Section header */}
-                <div className="flex w-full items-center gap-1.5 py-1 pl-8 pr-3 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                <div className="flex w-full items-center gap-1.5 rounded-md bg-zinc-100 pl-2 pr-2 py-1.5 text-left transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700">
                   <button
                     onClick={() => onToggleSection(sectionKey)}
                     className="flex flex-1 items-center gap-1.5"
                   >
                     {isExpanded ? (
-                      <ChevronDown className="h-2.5 w-2.5 shrink-0 text-zinc-400" />
+                      <ChevronDown className="h-2.5 w-2.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
                     ) : (
-                      <ChevronRight className="h-2.5 w-2.5 shrink-0 text-zinc-400" />
+                      <ChevronRight className="h-2.5 w-2.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
                     )}
-                    <span className="text-[11px] text-zinc-600 dark:text-zinc-400">
+                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
                       {SECTION_LABELS[sectionKey] ?? sectionKey}
                     </span>
-                    <span className="ml-auto text-[10px] text-zinc-400">
+                    <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">
                       {formatBytes(section.size_bytes)} / ~{section.token_estimate} tok
                     </span>
                   </button>
@@ -480,7 +480,7 @@ export function SnapshotNode({
 
                 {/* Section content (lazy-loaded or inline-editing) */}
                 {isExpanded && (
-                  <div className="mx-3 mb-1 rounded border border-zinc-200 bg-zinc-100/50 px-2 py-1.5 dark:border-zinc-700 dark:bg-zinc-800/50">
+                  <div className="mx-2 mb-1.5 rounded border-[0.5px] border-zinc-300 bg-zinc-100 p-2 text-zinc-600 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
                     {/* Inline editing mode */}
                     {editingSection &&
                       editingSection.iteration === snapshot.iteration &&
@@ -489,16 +489,16 @@ export function SnapshotNode({
                         <textarea
                           value={editingSection.current}
                           onChange={(e) => onEditChange(e.target.value)}
-                          className="max-h-48 min-h-[80px] w-full resize-y rounded border border-amber-300 bg-white px-2 py-1 font-mono text-[10px] leading-relaxed text-zinc-700 outline-none focus:ring-1 focus:ring-amber-400 dark:border-amber-600 dark:bg-zinc-800 dark:text-zinc-300"
+                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-white px-2 py-1 font-mono text-[10px] leading-relaxed text-zinc-700 outline-none dark:border-[var(--color-accent)]/50 dark:bg-zinc-800 dark:text-zinc-300"
                           autoFocus
                         />
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => onSaveEdit(sectionKey, editingSection.current)}
-                            className="flex items-center gap-0.5 rounded bg-amber-500 px-2 py-0.5 text-[10px] text-white transition-colors hover:bg-amber-600"
+                            className="flex items-center gap-0.5 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] text-white transition-opacity hover:opacity-90"
                           >
                             <Check className="h-2.5 w-2.5" />
-                            Apply Patch
+                            Apply
                           </button>
                           <button
                             onClick={onCancelEdit}
