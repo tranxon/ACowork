@@ -11,7 +11,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-ff6600" alt="Language" /></a>
   <a href="./docs/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
-  <a href="./docs/module-design/00-overview.md"><img src="https://img.shields.io/badge/status-design%20phase-yellow" alt="Status" /></a>
+  <a href="./apps/rollball-desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
 </p>
 
 <p align="center">
@@ -46,15 +46,31 @@ Every Agent is an independent **"digital being"**: its own runtime process, priv
 
 ## 🚀 Quick Start
 
-### Installation
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (nightly)
+- [Node.js](https://nodejs.org/) >= 18
+- A running [Gateway + Runtime](https://github.com/tranxon/rollball-ai#-running-the-backend) locally
+
+### Quick Start
 
 ```bash
-# Cargo (Rust toolchain)
-cargo install rollball-gateway rollball-runtime
+git clone https://github.com/tranxon/rollball-ai.git
+cd rollball-ai
 
-# Or build from source
-git clone https://github.com/rollball/agent-study.git
+# 1. Start the backend services (Gateway + Runtime)
 cd core && cargo build --release
+# Run Gateway & Runtime binaries from target/release/
+
+# 2. Start the desktop app (browser-only UI mode)
+cd ../apps/rollball-desktop
+npm install
+npm run dev      # → http://localhost:5173
+
+# 3. Or build the full Tauri desktop app
+cd ../apps/rollball-desktop
+npm install
+npm run tauri dev
 ```
 
 ### Write Your First Agent
@@ -258,15 +274,15 @@ Developers **don't need to write code** (unless they want to build WASM tools). 
 
 ## 📈 Project Status & Roadmap
 
-> **Current Status**: Design Phase. Core Rust crate architecture is defined, detailed design docs are complete, implementation has not yet started.
+> **Current Status**: Alpha. Core Gateway, Runtime, Grafeo memory engine, and Desktop UI are under active development. See [docs/](docs/) for architecture design docs.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| Phase 1 | Foundation + LLM interaction (MVP): package parsing, signature verification, Runtime main loop, loop detection, Tool dedup, Rate tiers, Gateway basics | 📝 Designing |
-| Phase 2 | Memory layering + System Agent: Grafeo biomimetic layers, instant extraction, associative diffusion, AutobiographicalNode | 📝 Designing |
+| Phase 1 | Foundation + LLM interaction (MVP): package parsing, signature verification, Runtime main loop, loop detection, Tool dedup, Rate tiers, Gateway basics | 🚧 In progress |
+| Phase 2 | Memory layering + System Agent: Grafeo biomimetic layers, instant extraction, associative diffusion, AutobiographicalNode | 🚧 In progress |
 | Phase 3 | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate | 📝 Designing |
 | Phase 4 | Communication & coordination: Intent, Budget Tracker, Rate Limiter, Cron | 📝 Designing |
-| Phase 5 | Desktop App + dev framework: Tauri app, Debug Protocol, Skill hot-reload, recording/replay | 🔮 Planning |
+| Phase 5 | Desktop App + dev framework: Debug Protocol, Skill hot-reload, recording/replay | 🚧 In progress |
 | Phase 6 | Cloud & ecosystem: Memory Sync, remote registry, Agent store | 🔮 Planning |
 | Phase 7 | Cross-platform: Windows / macOS / Android / iOS | 🔮 Planning |
 
@@ -276,13 +292,13 @@ RollBall adopts a **7-crate Rust workspace** architecture:
 
 | Crate | Responsibility | Status |
 |-------|---------------|--------|
-| [`rollball-core`](./core/rollball-core/) | Shared types, errors, config | 📝 Designing |
-| [`rollball-runtime`](./core/rollball-runtime/) | Agent Runtime: main loop, tool dispatch, Providers | 📝 Designing |
-| [`rollball-gateway`](./core/rollball-gateway/) | Gateway: package management, lifecycle, Intent routing | 📝 Designing |
-| [`rollball-grafeo`](./core/rollball-grafeo/) | Graph database engine: HNSW index, BM25 search, ACID transactions | 📝 Designing |
-| [`rollball-memory`](./core/rollball-memory/) | Memory management: MemoryStore trait, Compaction scheduling | 📝 Designing |
-| [`rollball-vault`](./core/rollball-vault/) | Encrypted key-value store | 📝 Designing |
-| [`rollball-sign`](./core/rollball-sign/) | Package signing & verification | 📝 Designing |
+| [`rollball-core`](./core/rollball-core/) | Shared types, errors, config | 🚧 In progress |
+| [`rollball-runtime`](./core/rollball-runtime/) | Agent Runtime: main loop, tool dispatch, Providers | 🚧 In progress |
+| [`rollball-gateway`](./core/rollball-gateway/) | Gateway: package management, lifecycle, Intent routing | 🚧 In progress |
+| [`rollball-grafeo`](./core/rollball-grafeo/) | Graph database engine: HNSW index, BM25 search, ACID transactions | 🚧 In progress |
+| [`rollball-memory`](./core/rollball-memory/) | Memory management: MemoryStore trait, Compaction scheduling | 🚧 In progress |
+| [`rollball-vault`](./core/rollball-vault/) | Encrypted key-value store | 🚧 In progress |
+| [`rollball-sign`](./core/rollball-sign/) | Package signing & verification | 🚧 In progress |
 
 ---
 
