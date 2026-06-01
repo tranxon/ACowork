@@ -48,9 +48,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "../../../examples/system-agent",
-      "../../../assets/offline_providers.json"
-    ]
+    "resources": {
+      "../../../examples/system-agent": "system-agent",
+      "../../../assets/offline_providers.json": "offline_providers.json",
+      "../../../target/release/rollball-gateway*": "./",
+      "../../../target/release/rollball-runtime*": "./"
+    }
   }
 }

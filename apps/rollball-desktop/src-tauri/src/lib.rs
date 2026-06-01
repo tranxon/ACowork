@@ -55,6 +55,9 @@ pub fn run() {
             commands::publish::build_publish,
             commands::publish::export_package,
             commands::create::create_agent,
+            commands::gateway::start_local_gateway,
+            commands::gateway::stop_local_gateway,
+            commands::gateway::get_local_gateway_status,
         ])
         .setup(|app| {
             tray::setup(app)?;

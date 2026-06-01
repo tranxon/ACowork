@@ -1,3 +1,9 @@
+/** Gateway deployment mode */
+export type GatewayMode = "local" | "remote";
+
+/** Local Gateway process state */
+export type LocalGatewayState = "idle" | "starting" | "running" | "stopped" | "error";
+
 /** Gateway health check response */
 export interface HealthResponse {
   status: string;

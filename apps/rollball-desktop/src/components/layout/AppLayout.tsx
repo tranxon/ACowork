@@ -11,7 +11,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { useChatStore } from "../../stores/chatStore";
-import { getGatewayUrl } from "../../lib/config";
+import { getGatewayUrl, getGatewayMode } from "../../lib/config";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -40,6 +40,7 @@ export function AppLayout() {
   });
   const gatewayStatus = useGatewayStore((s) => s.status);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
+  const startLocalGateway = useGatewayStore((s) => s.startLocalGateway);
   // Determine if selected agent is in debug mode
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
@@ -54,16 +55,25 @@ export function AppLayout() {
   const startWidthRight = useRef(DEFAULT_RIGHT_WIDTH);
   const currentWidthRefRight = useRef(DEFAULT_RIGHT_WIDTH);
 
-  // Check Gateway health on mount and periodically
+  // Check Gateway health on mount and periodically.
+  // In local mode, attempt auto-start; in remote mode, just check.
   useEffect(() => {
-    checkHealth();
+    const mode = getGatewayMode();
+    if (mode === "local") {
+      startLocalGateway().catch(() => {
+        // Gateway binary may not exist yet (dev scenario); fall back to health check
+        checkHealth();
+      });
+    } else {
+      checkHealth();
+    }
     const interval = setInterval(() => {
       if (useGatewayStore.getState().status !== "connected") {
         checkHealth();
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [checkHealth]);
+  }, [checkHealth, startLocalGateway]);
 
   // Detect wake from sleep via visibility change and reconnect
   useEffect(() => {

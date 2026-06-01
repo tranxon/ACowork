@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Theme } from "../lib/types";
+import type { Theme, GatewayMode } from "../lib/types";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
 
 const STORAGE_KEY_THEME = "rollball-theme";
@@ -9,6 +9,7 @@ const STORAGE_KEY_CONTENT_WIDTH = "rollball-content-width";
 const STORAGE_KEY_OPACITY = "rollball-opacity";
 const STORAGE_KEY_ACCENT_COLOR = "rollball-accent-color";
 const STORAGE_KEY_GATEWAY_URL = "rollball-gateway-url";
+const STORAGE_KEY_GATEWAY_MODE = "rollball-gateway-mode";
 const STORAGE_KEY_LOG_FILE_SIZE = "rollball-log-file-size";
 
 const DEFAULT_ACCENT_COLOR = "#3b82f6";
@@ -109,6 +110,15 @@ function getPersistedGatewayUrl(): string {
   return DEFAULT_GATEWAY_URL;
 }
 
+/** Read persisted gateway mode from localStorage, fallback to "local" */
+function getPersistedGatewayMode(): GatewayMode {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_MODE);
+    if (stored === "local" || stored === "remote") return stored;
+  } catch {}
+  return "local";
+}
+
 /** Read persisted log file size from localStorage, fallback to 10 (MB) */
 function getPersistedLogFileSizeMb(): number {
   try {
@@ -140,6 +150,7 @@ interface SettingsStore {
   opacity: number;
   accentColor: string;
   gatewayUrl: string;
+  gatewayMode: GatewayMode;
   logLevel: string;
   logFileSizeMb: number;
   setTheme: (theme: Theme) => void;
@@ -148,6 +159,7 @@ interface SettingsStore {
   setOpacity: (opacity: number) => void;
   setAccentColor: (color: string) => void;
   setGatewayUrl: (url: string) => void;
+  setGatewayMode: (mode: GatewayMode) => void;
   setLogLevel: (level: string) => void;
   setLogFileSizeMb: (size: number) => void;
 }
@@ -173,6 +185,7 @@ export const useSettingsStore = create<SettingsStore>((set) => {
     opacity: initialOpacity,
     accentColor: initialAccentColor,
     gatewayUrl: getPersistedGatewayUrl(),
+    gatewayMode: getPersistedGatewayMode(),
     logLevel: initialLogLevel,
     logFileSizeMb: getPersistedLogFileSizeMb(),
 
@@ -209,6 +222,10 @@ export const useSettingsStore = create<SettingsStore>((set) => {
     setGatewayUrl: (gatewayUrl) => {
       try { localStorage.setItem(STORAGE_KEY_GATEWAY_URL, gatewayUrl); } catch {}
       set({ gatewayUrl });
+    },
+    setGatewayMode: (gatewayMode) => {
+      try { localStorage.setItem(STORAGE_KEY_GATEWAY_MODE, gatewayMode); } catch {}
+      set({ gatewayMode });
     },
     setLogLevel: (logLevel) => {
       try { localStorage.setItem(STORAGE_KEY_LOG_LEVEL, logLevel); } catch {}

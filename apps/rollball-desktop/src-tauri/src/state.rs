@@ -1,7 +1,8 @@
 //! Application state shared across Tauri commands
 
+use std::process::Child;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::gateway_client::GatewayClient;
 
@@ -9,6 +10,8 @@ use crate::gateway_client::GatewayClient;
 pub struct AppState {
     /// Gateway HTTP client
     pub gateway: Arc<RwLock<GatewayClient>>,
+    /// Handle to the locally spawned Gateway process (None when remote mode)
+    pub gateway_process: Arc<Mutex<Option<Child>>>,
 }
 
 impl AppState {
@@ -16,6 +19,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             gateway: Arc::new(RwLock::new(GatewayClient::new())),
+            gateway_process: Arc::new(Mutex::new(None)),
         }
     }
 }

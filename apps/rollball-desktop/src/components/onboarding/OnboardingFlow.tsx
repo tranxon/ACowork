@@ -2,11 +2,13 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders, createUser } from "../../lib/gateway-api";
 import { DEFAULT_GATEWAY_URL } from "../../lib/config";
-import type { ModelInfo } from "../../lib/types";
+import type { GatewayMode, ModelInfo } from "../../lib/types";
+import { RadioGroup } from "../common/RadioGroup";
 
 const TOTAL_STEPS = 5;
 
@@ -130,78 +132,184 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
   );
 }
 
-/** Step 2: Gateway Connection */
+/** Step 2: Gateway Connection — mode selection + connect */
 function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void }) {
-  const { status, checkHealth } = useGatewayStore();
+  const { status, localState, checkHealth, startLocalGateway } = useGatewayStore();
+  const gatewayMode = useSettingsStore((s) => s.gatewayMode);
+  const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
+  const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
+  const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
+  const [urlDraft, setUrlDraft] = useState(gatewayUrl);
   const [checking, setChecking] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
-  useEffect(() => {
-    checkHealth();
-  }, [checkHealth]);
+  // Sync urlDraft when gatewayUrl changes externally
+  useEffect(() => { setUrlDraft(gatewayUrl); }, [gatewayUrl]);
 
   // Preload provider list as soon as Gateway is connected.
-  // This triggers an early /api/models request, which starts the background
-  // models.dev refresh (5+ second network call) while the user is still on
-  // Step 2-4, so by the time they reach Step 3 (ApiKeyStep), the cache
-  // may already be populated with fresh network data.
   useEffect(() => {
     if (status === "connected") {
-      // Fire-and-forget — don't block the UI
-      fetchProviders().catch(() => {
-        // Ignore errors — offline fallback will be used in Step 3
-      });
+      fetchProviders().catch(() => {});
     }
   }, [status]);
 
-  const handleRetry = async () => {
+  // Auto-check health when remote mode is selected
+  useEffect(() => {
+    if (gatewayMode === "remote") {
+      checkHealth();
+    }
+  }, [gatewayMode, checkHealth]);
+
+  const handleModeChange = (mode: GatewayMode) => {
+    setGatewayMode(mode);
+    setStartError(null);
+  };
+
+  const handleStartLocal = async () => {
+    setStarting(true);
+    setStartError(null);
+    try {
+      await startLocalGateway();
+      // After successful start, health is already checked
+    } catch {
+      setStartError("Failed to start local Gateway");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleTestRemote = async () => {
+    // Save URL first
+    setGatewayUrl(urlDraft.trim());
     setChecking(true);
     await checkHealth();
     setChecking(false);
   };
 
+  const canProceed = gatewayMode === "local"
+    ? status === "connected"
+    : status === "connected";
+
+  const localConnected = gatewayMode === "local" && status === "connected";
+  const localError = gatewayMode === "local" && (startError || localState === "error");
+
   return (
     <div>
       <h2 className="text-lg font-semibold">Connect to Gateway</h2>
-      <p className="mt-1 text-sm text-zinc-500">Rollball needs a running Gateway to manage Agents</p>
+      <p className="mt-1 text-sm text-zinc-500">Choose how you want to connect to the Gateway</p>
 
       <div className="mt-6 space-y-4">
-        <div>
-          <label className="mb-1 block text-xs text-zinc-500">Gateway Address</label>
-          <input
-            type="text"
-            value={DEFAULT_GATEWAY_URL}
-            readOnly
-            className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        {/* Mode selection */}
+        <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+          <label className="mb-2 block text-xs text-zinc-500">Gateway Mode</label>
+          <RadioGroup
+            name="gatewayMode"
+            value={gatewayMode}
+            options={[
+              { label: <span className="font-medium">Local (recommended)</span>, value: "local" as GatewayMode },
+              { label: "Remote", value: "remote" as GatewayMode },
+            ]}
+            onChange={handleModeChange}
           />
-        </div>
-
-        <div className="flex items-center gap-2 text-sm">
-          <span className="text-zinc-500">Status:</span>
-          {checking ? (
-            <span className="text-zinc-400">Checking...</span>
-          ) : status === "connected" ? (
-            <>
-              <span className="h-2 w-2 rounded-full bg-green-500" />
-              <span className="text-green-600 dark:text-green-400">Gateway Connected</span>
-            </>
-          ) : (
-            <>
-              <span className="h-2 w-2 rounded-full bg-red-500" />
-              <span className="text-red-600 dark:text-red-400">Cannot connect to Gateway</span>
-            </>
+          {gatewayMode === "local" && (
+            <p className="mt-1 text-xs text-zinc-400">
+              Gateway starts automatically with the Desktop App
+            </p>
+          )}
+          {gatewayMode === "remote" && (
+            <p className="mt-1 text-xs text-zinc-400">
+              Connect to a Gateway running on another machine
+            </p>
           )}
         </div>
 
-        {status !== "connected" && !checking && (
-          <p className="text-xs text-zinc-400">
-            Please start Gateway: <code className="rounded bg-zinc-100 px-1 py-0.5 dark:bg-zinc-800">rollball-gateway --daemon</code>
-          </p>
+        {/* Local mode: auto-start status */}
+        {gatewayMode === "local" && (
+          <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-zinc-500">Status:</span>
+              {starting ? (
+                <span className="text-zinc-400">Starting Gateway...</span>
+              ) : localConnected ? (
+                <>
+                  <span className="h-2 w-2 rounded-full bg-green-500" />
+                  <span className="text-green-600 dark:text-green-400">Gateway Connected</span>
+                </>
+              ) : (
+                <>
+                  <span className="h-2 w-2 rounded-full bg-amber-500" />
+                  <span className="text-amber-600 dark:text-amber-400">
+                    {localError ? "Failed to start" : "Not started"}
+                  </span>
+                </>
+              )}
+            </div>
+            {localError && (
+              <p className="mt-1 text-xs text-red-500">{startError ?? "Could not start local Gateway"}</p>
+            )}
+            {!localConnected && !starting && (
+              <button
+                onClick={handleStartLocal}
+                className="mt-3 rounded-md px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+                style={{ backgroundColor: "var(--color-accent)" }}
+              >
+                Start Local Gateway
+              </button>
+            )}
+          </div>
         )}
 
-        {status !== "connected" && (
-          <button onClick={handleRetry} className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">
-            Retry
-          </button>
+        {/* Remote mode: URL config + test */}
+        {gatewayMode === "remote" && (
+          <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+            <label className="mb-1 block text-xs text-zinc-500">Gateway URL</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={urlDraft}
+                onChange={(e) => setUrlDraft(e.target.value)}
+                placeholder={DEFAULT_GATEWAY_URL}
+                className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+              />
+              {urlDraft !== gatewayUrl && (
+                <button
+                  onClick={() => { setGatewayUrl(urlDraft.trim()); checkHealth(); }}
+                  className="rounded-md px-3 py-2 text-xs font-medium text-white hover:opacity-90"
+                  style={{ backgroundColor: "var(--color-accent)" }}
+                >
+                  Apply
+                </button>
+              )}
+            </div>
+
+            <div className="mt-3 flex items-center gap-2 text-sm">
+              <span className="text-zinc-500">Status:</span>
+              {checking ? (
+                <span className="text-zinc-400">Checking...</span>
+              ) : status === "connected" ? (
+                <>
+                  <span className="h-2 w-2 rounded-full bg-green-500" />
+                  <span className="text-green-600 dark:text-green-400">Connected</span>
+                </>
+              ) : (
+                <>
+                  <span className="h-2 w-2 rounded-full bg-red-500" />
+                  <span className="text-red-600 dark:text-red-400">Cannot connect</span>
+                </>
+              )}
+            </div>
+
+            {status !== "connected" && (
+              <button
+                onClick={handleTestRemote}
+                disabled={checking || !urlDraft.trim()}
+                className="mt-3 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+              >
+                {checking ? "Testing..." : "Test Connection"}
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -211,10 +319,10 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
         </button>
         <button
           onClick={onNext}
-          disabled={status !== "connected"}
+          disabled={!canProceed || starting}
           className="rounded-md btn-solid px-4 py-2 text-xs font-medium disabled:opacity-50"
         >
-          Next
+          {starting ? "Starting..." : "Next"}
         </button>
       </div>
     </div>

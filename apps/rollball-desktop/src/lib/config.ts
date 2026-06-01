@@ -4,6 +4,7 @@
  */
 
 import { useSettingsStore } from "../stores/settingsStore";
+import type { GatewayMode } from "./types";
 
 export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:19876";
 
@@ -37,4 +38,25 @@ export function isGatewayLocal(): boolean {
     const hostname = url.replace(/^https?:\/\//i, '').split('/')[0].split(':')[0];
     return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
   }
+}
+
+/**
+ * Get the current Gateway deployment mode.
+ * Reads from settingsStore, defaults to "local".
+ */
+export function getGatewayMode(): GatewayMode {
+  try {
+    const mode = useSettingsStore.getState().gatewayMode;
+    if (mode === "local" || mode === "remote") return mode;
+  } catch {
+    // settingsStore not yet available
+  }
+  return "local";
+}
+
+/**
+ * Check if the current Gateway mode is remote.
+ */
+export function isGatewayModeRemote(): boolean {
+  return getGatewayMode() === "remote";
 }

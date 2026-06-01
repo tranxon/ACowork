@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import type { AgentListResponse, GatewayConfig } from "../../lib/types";
+import type { AgentListResponse, GatewayConfig, GatewayMode } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { RadioGroup } from "../common/RadioGroup";
@@ -57,16 +57,24 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
 
 /** Gateway connection settings */
 function GatewayTab() {
-  const { status, health, checkHealth } = useGatewayStore();
+  const { status, health, localState, checkHealth, startLocalGateway, stopLocalGateway } = useGatewayStore();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
   const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
+  const gatewayMode = useSettingsStore((s) => s.gatewayMode);
+  const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
   const [testing, setTesting] = useState(false);
   const [agents, setAgents] = useState<AgentListResponse[]>([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [urlDraft, setUrlDraft] = useState(gatewayUrl);
+  const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   // Sync draft when gatewayUrl changes externally
   useEffect(() => { setUrlDraft(gatewayUrl); }, [gatewayUrl]);
+
+  const handleModeChange = useCallback((mode: GatewayMode) => {
+    setGatewayMode(mode);
+  }, [setGatewayMode]);
 
   const handleUrlSave = useCallback(() => {
     const trimmed = urlDraft.trim();
@@ -89,13 +97,46 @@ function GatewayTab() {
     setTesting(false);
   }, [checkHealth]);
 
+  const handleStartLocal = useCallback(async () => {
+    setStarting(true);
+    try {
+      await startLocalGateway();
+    } catch {
+      // Error handled by store
+    } finally {
+      setStarting(false);
+    }
+  }, [startLocalGateway]);
+
+  const handleStopLocal = useCallback(async () => {
+    setStopping(true);
+    try {
+      await stopLocalGateway();
+    } catch {
+      // Error handled by store
+    } finally {
+      setStopping(false);
+    }
+  }, [stopLocalGateway]);
+
+  const handleRestartLocal = useCallback(async () => {
+    setStarting(true);
+    try {
+      await stopLocalGateway();
+      await startLocalGateway();
+    } catch {
+      // Error handled by store
+    } finally {
+      setStarting(false);
+    }
+  }, [startLocalGateway, stopLocalGateway]);
+
   const fetchAgents = useCallback(async () => {
     setAgentsLoading(true);
     try {
       const resp = await fetch(`${getGatewayUrl()}/api/agents`);
       if (resp.ok) {
         const data: AgentListResponse[] = await resp.json();
-        // Show only running/connected agents
         setAgents(data.filter(a => a.running || a.connected));
       }
     } catch {
@@ -111,74 +152,151 @@ function GatewayTab() {
     }
   }, [status, fetchAgents]);
 
+  const localIsRunning = gatewayMode === "local" && localState === "running";
+  const localIsStarting = gatewayMode === "local" && (localState === "starting" || starting);
+
   return (
     <div className="max-w-lg space-y-4">
+      {/* Mode selection */}
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
-        <h2 className="mb-3 text-xs font-medium">Gateway Connection</h2>
+        <h2 className="mb-3 text-xs font-medium">Gateway Mode</h2>
+        <RadioGroup
+          name="gatewayMode"
+          value={gatewayMode}
+          options={[
+            { label: "Local", value: "local" as GatewayMode },
+            { label: "Remote", value: "remote" as GatewayMode },
+          ]}
+          onChange={handleModeChange}
+        />
+      </div>
 
-        <div className="space-y-3">
-          <div>
-            <label className="mb-1 block text-xs text-zinc-500">Gateway URL</label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={urlDraft}
-                onChange={(e) => setUrlDraft(e.target.value)}
-                onBlur={handleUrlSave}
-                onKeyDown={handleUrlKeyDown}
-                placeholder={DEFAULT_GATEWAY_URL}
-                className={`flex-1 ${inputBase}`}
-              />
-              {urlDraft !== gatewayUrl && (
-                <button
-                  onClick={handleUrlSave}
-                  className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-white hover:opacity-90" style={{ backgroundColor: "var(--color-accent)" }}
-                >
-                  Apply
-                </button>
-              )}
-            </div>
-            <p className="mt-1 text-xs text-zinc-400">
-              Set the Gateway HTTP API address. Default: {DEFAULT_GATEWAY_URL}
-            </p>
-          </div>
+      {/* Local mode: status + controls */}
+      {gatewayMode === "local" && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+          <h2 className="mb-3 text-xs font-medium">Local Gateway</h2>
 
           <div className="flex items-center gap-2 text-xs">
             <span className="text-zinc-500">Status</span>
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
-                status === "connected" ? "bg-[var(--color-accent)]" : status === "error" ? "bg-red-500" : "bg-zinc-400",
+                localIsRunning ? "bg-[var(--color-accent)]" : localIsStarting ? "bg-amber-500" : "bg-zinc-400",
               )}
             />
             <span className={cn(
-              status === "connected" ? "text-[var(--color-accent)]" :
-                status === "error" ? "text-red-600 dark:text-red-400" :
+              localIsRunning ? "text-[var(--color-accent)]" :
+                localIsStarting ? "text-amber-600 dark:text-amber-400" :
                   "text-zinc-500"
             )}>
-              {status === "connected" ? "Connected" : status === "error" ? "Error" : "Disconnected"}
+              {localIsRunning ? "Running" : localIsStarting ? "Starting..." : "Stopped"}
             </span>
           </div>
 
-          {health && (
-            <>
+          {health && localIsRunning && (
+            <div className="mt-2 flex items-center gap-2 text-xs">
+              <span className="text-zinc-500">Version</span>
+              <span>{health.version}</span>
+            </div>
+          )}
+
+          <div className="mt-3 flex gap-2">
+            {!localIsRunning && !localIsStarting && (
+              <button
+                onClick={handleStartLocal}
+                disabled={starting}
+                className="rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+              >
+                {starting ? "Starting..." : "Start Gateway"}
+              </button>
+            )}
+            {localIsRunning && (
+              <>
+                <button
+                  onClick={handleRestartLocal}
+                  disabled={starting}
+                  className="rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+                >
+                  {starting ? "Restarting..." : "Restart"}
+                </button>
+                <button
+                  onClick={handleStopLocal}
+                  disabled={stopping}
+                  className="rounded-md border border-zinc-300 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-50"
+                >
+                  {stopping ? "Stopping..." : "Stop"}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Remote mode: URL + test */}
+      {gatewayMode === "remote" && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+          <h2 className="mb-3 text-xs font-medium">Gateway Connection</h2>
+
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-xs text-zinc-500">Gateway URL</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={urlDraft}
+                  onChange={(e) => setUrlDraft(e.target.value)}
+                  onBlur={handleUrlSave}
+                  onKeyDown={handleUrlKeyDown}
+                  placeholder={DEFAULT_GATEWAY_URL}
+                  className={`flex-1 ${inputBase}`}
+                />
+                {urlDraft !== gatewayUrl && (
+                  <button
+                    onClick={handleUrlSave}
+                    className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-white hover:opacity-90" style={{ backgroundColor: "var(--color-accent)" }}
+                  >
+                    Apply
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-zinc-500">Status</span>
+              <span
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  status === "connected" ? "bg-[var(--color-accent)]" : status === "error" ? "bg-red-500" : "bg-zinc-400",
+                )}
+              />
+              <span className={cn(
+                status === "connected" ? "text-[var(--color-accent)]" :
+                  status === "error" ? "text-red-600 dark:text-red-400" :
+                    "text-zinc-500"
+              )}>
+                {status === "connected" ? "Connected" : status === "error" ? "Error" : "Disconnected"}
+              </span>
+            </div>
+
+            {health && (
               <div className="flex items-center gap-2 text-xs">
                 <span className="text-zinc-500">Version</span>
                 <span>{health.version}</span>
               </div>
-            </>
-          )}
+            )}
 
-          <button
-            onClick={handleTest}
-            disabled={testing}
-            className="rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
-          >
-            {testing ? "Testing..." : "Test Connection"}
-          </button>
+            <button
+              onClick={handleTest}
+              disabled={testing || !urlDraft.trim()}
+              className="rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+            >
+              {testing ? "Testing..." : "Test Connection"}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
+      {/* Connected Agents (shared between modes) */}
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">Connected Agents</h2>
 
