@@ -20,11 +20,6 @@ pub struct RuntimeConfig {
     pub package_path: String,
     /// Working directory for the agent
     pub work_dir: String,
-    /// Gateway endpoint (e.g., unix:///tmp/agent-gateway.sock)
-    /// Deprecated: use `gateway_socket` instead.
-    #[deprecated(note = "Use gateway_socket instead. Will be removed in a future version.")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway_endpoint: Option<String>,
     /// Gateway Unix socket path for IPC connection
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_socket: Option<String>,
@@ -152,13 +147,11 @@ fn default_distill_max_tokens() -> u32 {
 }
 
 impl Default for RuntimeConfig {
-    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             agent_id: String::new(),
             package_path: String::new(),
             work_dir: String::new(),
-            gateway_endpoint: None,
             gateway_socket: None,
             manifest_path: None,
             config_dir: None,
@@ -185,15 +178,11 @@ impl Default for RuntimeConfig {
 impl RuntimeConfig {
     /// Build RuntimeConfig from CLI arguments
     pub fn from_cli(cli: &Cli) -> Self {
-        #[allow(deprecated)]
-        let gateway_endpoint = cli.gateway_endpoint.clone();
-        #[allow(deprecated)]
         Self {
             agent_id: cli.agent_id.clone(),
             package_path: cli.package_path.clone(),
             work_dir: cli.work_dir.clone(),
-            gateway_endpoint,
-            gateway_socket: cli.gateway_socket.clone(),
+            gateway_socket: cli.gateway_socket.clone().or_else(|| cli.gateway_endpoint.clone()),
             manifest_path: cli.manifest_path.clone(),
             config_dir: cli.config_dir.clone(),
             dev_mode: cli.dev_mode,
@@ -204,16 +193,9 @@ impl RuntimeConfig {
         }
     }
 
-    /// Get gateway address with priority: gateway_socket > gateway_endpoint.
-    /// Returns None if neither is set (standalone mode).
-    #[allow(deprecated)]
+    /// Get gateway address from `gateway_socket`.
+    /// Returns None if not set (standalone mode).
     pub fn get_gateway_address(&self) -> Option<&str> {
-        if let Some(ref socket) = self.gateway_socket {
-            return Some(socket.as_str());
-        }
-        if let Some(ref endpoint) = self.gateway_endpoint {
-            return Some(endpoint.as_str());
-        }
-        None
+        self.gateway_socket.as_deref()
     }
 }

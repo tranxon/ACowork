@@ -20,5 +20,5 @@ Learning materials and research reports used during design phase.
 ## CONVENTIONS (THIS DIR)
 
 - Reference only — not source of truth for RollBall design
-- ZeroClaw is separate project, referenced for learning only
+- ref-repo is separate project, referenced for learning only
 - Design decisions documented in `docs/`, not here

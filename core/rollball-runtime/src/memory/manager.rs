@@ -216,6 +216,11 @@ impl MemoryManager {
 
             match search_result {
                 Ok(results) => {
+                    tracing::info!(
+                        label,
+                        result_count = results.len(),
+                        "Memory search completed (before dedup + exclude)"
+                    );
                     for (node_id, score) in results {
                         let source = if query.embedding.is_some() {
                             "hybrid".to_string()
@@ -397,10 +402,12 @@ impl MemoryManager {
 
     /// Format retrieved memories for system prompt injection.
     ///
-    /// All memories from the retrieval result are included without
-    /// content truncation. Grafeo stores already-distilled summaries
-    /// (individual items are small), so count limiting is handled at
-    /// the retrieve() level via `MemoryQuery.limit`.
+    /// - Autobiographical memories are always fully included (agent identity
+    ///   is compact and always relevant).
+    /// - Episodic memories are included in score-descending order until the
+    ///   `max_inject_tokens` budget is reached. Each episodic memory is kept
+    ///   intact (no mid-content truncation); memories that would exceed the
+    ///   budget are skipped entirely.
     pub fn inject(&self, retrieval: &RetrievalResult) -> InjectedMemory {
         if retrieval.memories.is_empty() {
             return InjectedMemory {
@@ -411,14 +418,49 @@ impl MemoryManager {
             };
         }
 
+        let budget = self.config.max_inject_tokens;
         let mut lines: Vec<String> = Vec::new();
         let mut token_count: usize = 0;
+        let mut truncated = false;
 
+        // Pass 1: inject ALL autobiographical memories unconditionally.
         for memory in &retrieval.memories {
+            if memory.label != labels::AUTOBIOGRAPHICAL {
+                continue;
+            }
             let line = format!("[{}] {}", memory.label, memory.content);
             let line_tokens = estimate_tokens(&line);
             lines.push(line);
             token_count += line_tokens;
+        }
+
+        // Pass 2: inject episodic memories within token budget.
+        for memory in &retrieval.memories {
+            if memory.label == labels::AUTOBIOGRAPHICAL {
+                continue; // already handled in pass 1
+            }
+            let line = format!("[{}] {}", memory.label, memory.content);
+            let line_tokens = estimate_tokens(&line);
+
+            // Keep memory intact: skip entirely if it would exceed budget
+            if token_count + line_tokens > budget {
+                truncated = true;
+                break;
+            }
+
+            lines.push(line);
+            token_count += line_tokens;
+        }
+
+        // Edge case: if nothing was injected (not even autobiographical),
+        // include the first result anyway to avoid empty injection.
+        if lines.is_empty() && !retrieval.memories.is_empty() {
+            let first = &retrieval.memories[0];
+            let line = format!("[{}] {}", first.label, first.content);
+            let line_tokens = estimate_tokens(&line);
+            lines.push(line);
+            token_count = line_tokens;
+            truncated = true;
         }
 
         let formatted_text = lines.join("\n");
@@ -427,7 +469,7 @@ impl MemoryManager {
             formatted_text,
             token_count,
             memory_count: lines.len(),
-            truncated: false,
+            truncated,
         }
     }
 

@@ -8,6 +8,7 @@ use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::providers::traits::{ChatMessage, ChatRequest, ContentPart, MessageRole};
 
 use crate::agent::history::HistoryManager;
+use crate::token::counter::TokenCounter;
 
 /// Context builder for LLM requests
 pub struct ContextBuilder {
@@ -34,6 +35,8 @@ pub struct ContextBuilder {
     /// Todo list context for injection into the system prompt.
     /// Set by AgentLoop before each build() from SessionState.todos.
     todo_context: Option<String>,
+    /// Reusable token counter for system prompt estimation.
+    counter: TokenCounter,
 }
 
 impl ContextBuilder {
@@ -49,6 +52,7 @@ impl ContextBuilder {
             retrieved_memory: None,
             skill_instructions: None,
             todo_context: None,
+            counter: TokenCounter::new(),
         }
     }
 
@@ -359,6 +363,11 @@ impl ContextBuilder {
         // 3.5 Tool definitions are passed separately in ChatRequest
 
         messages.push(ChatMessage::system(system_content));
+
+        // Estimate system prompt tokens for observability
+        let system_msg = messages.last().unwrap();
+        let system_tokens = self.counter.count_message(system_msg, "", None);
+        tracing::debug!(system_tokens, "System prompt token estimation");
 
         // 7. Conversation history
         // Filter out System messages from history — only the first system message

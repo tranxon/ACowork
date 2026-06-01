@@ -1467,6 +1467,9 @@ impl AgentLoop {
             if let Some(usage) = &response.usage {
                 self.session.budget_guard.update_usage(usage.total_tokens, 0.0);
 
+                // Calibrate history token count from API ground truth
+                self.session.history.calibrate_from_usage(usage.prompt_tokens);
+
                 // Compute and emit context usage report — use exact model lookup
                 // to avoid capability confusion in multi-model scenarios.
                 let model_caps = self.get_model_capabilities(&current_model);

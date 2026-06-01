@@ -74,6 +74,9 @@ tokio-tungstenite.workspace = true
 # Interactive CLI (feature-gated)
 dialoguer = { workspace = true, optional = true }
 
+# Token counting
+tiktoken-rs.workspace = true
+
 # WASM runtime (feature-gated)
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }

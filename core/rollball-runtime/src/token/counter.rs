@@ -15,6 +15,15 @@ use std::collections::HashMap;
 use rollball_core::protocol::ProtocolType;
 use rollball_core::providers::traits::{ChatMessage, MessageRole};
 
+/// Lazy-initialized tiktoken BPE for cl100k_base (GPT-4/GPT-4o/GPT-3.5).
+fn get_cl100k_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
+    use std::sync::OnceLock;
+    static BPE: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
+    BPE.get_or_init(|| {
+        tiktoken_rs::cl100k_base().ok()
+    }).as_ref()
+}
+
 // ── Tier classification ─────────────────────────────────────────────────
 
 /// Precision tier for token counting
@@ -126,6 +135,7 @@ impl TokenCounter {
         // Tier 2: Models with known sampling ratios
         if lower.contains("claude") || lower.contains("llama") || lower.contains("qwen")
             || lower.contains("mistral") || lower.contains("deepseek")
+            || lower.contains("gemini") || lower.contains("minimax")
         {
             return TokenCountTier::Tier2Approximate;
         }
@@ -227,19 +237,6 @@ impl TokenCounter {
         total
     }
 
-    /// Incremental count: count only new messages since last count
-    pub fn count_incremental(
-        &self,
-        new_messages: &[ChatMessage],
-        model: &str,
-    ) -> u64 {
-        let mut total = 0u64;
-        for msg in new_messages {
-            total += self.count_message(msg, model, None);
-        }
-        total
-    }
-
     /// Update observed ratio from actual API usage
     pub fn update_observed_ratio(&mut self, model: &str, actual_tokens: u64, char_count: usize) {
         if actual_tokens > 0 && char_count > 0 {
@@ -251,16 +248,22 @@ impl TokenCounter {
     // ── Tier implementations ────────────────────────────────────────────
 
     /// Tier 1: Exact token counting
-    /// For OpenAI models, uses tiktoken-rs when available,
-    /// otherwise falls back to well-calibrated approximation.
-    fn count_tier1(&self, text: &str, model: &str) -> u64 {
-        // Use observed ratio if available (most accurate)
-        if let Some(&ratio) = self.observed_ratios.get(model) {
+    /// Uses tiktoken-rs cl100k_base for OpenAI models (GPT-4/GPT-4o/GPT-3.5).
+    /// Falls back to well-calibrated approximation when tiktoken is unavailable.
+    fn count_tier1(&self, text: &str, _model: &str) -> u64 {
+        // Try tiktoken-rs cl100k_base (shared by all OpenAI GPT models)
+        if let Some(bpe) = get_cl100k_bpe() {
+            let tokens = bpe.encode_ordinary(text);
+            return tokens.len() as u64;
+        }
+
+        // Fallback: use observed ratio if available (most accurate)
+        if let Some(&ratio) = self.observed_ratios.get(_model) {
             return (text.len() as f64 / ratio).ceil() as u64;
         }
 
         // Use known sampling ratio
-        if let Some(&ratio) = self.sampling_ratios.get(model) {
+        if let Some(&ratio) = self.sampling_ratios.get(_model) {
             return (text.len() as f64 / ratio).ceil() as u64;
         }
 
@@ -323,117 +326,10 @@ impl Default for TokenCounter {
     }
 }
 
-// ── Budget Allocation ───────────────────────────────────────────────────
-
-/// Elastic budget allocation for context window
-///
-/// Divides the available context window into:
-/// - Fixed zone: system prompt + output reserve
-/// - Distributable space: split between history and retrieval
-///
-/// Deprecated per [ADR-010]: programmatic budget partitioning has been
-/// replaced by LLM-based summarization as the sole compression mechanism.
-/// This struct is retained for reference but no longer connected to the
-/// compression pipeline.
-#[deprecated(
-    since = "0.1.0",
-    note = "Programmatic budget partitioning replaced by LLM summarization (ADR-010)"
-)]
-#[derive(Debug, Clone)]
-pub struct BudgetAllocation {
-    /// Total context window size in tokens
-    pub context_window: u64,
-    /// Reserved tokens for output (from manifest.max_output_tokens)
-    pub output_reserve: u64,
-    /// System prompt token count (measured)
-    pub system_prompt_tokens: u64,
-    /// History share ratio (default: 0.75)
-    pub history_ratio: f64,
-    /// Retrieval share ratio (default: 0.25)
-    pub retrieval_ratio: f64,
-    /// Hard minimum for retrieval tokens
-    pub retrieval_min_tokens: u64,
-    /// Hard minimum turns to keep in history
-    pub history_min_turns: usize,
-}
-
-#[allow(deprecated)]
-impl BudgetAllocation {
-    /// Create a new budget allocation with default ratios
-    pub fn new(context_window: u64) -> Self {
-        Self {
-            context_window,
-            output_reserve: 1024,
-            system_prompt_tokens: 0,
-            history_ratio: 0.75,
-            retrieval_ratio: 0.25,
-            retrieval_min_tokens: 2048,
-            history_min_turns: 3,
-        }
-    }
-
-    /// Set output reserve
-    pub fn with_output_reserve(mut self, tokens: u64) -> Self {
-        self.output_reserve = tokens;
-        self
-    }
-
-    /// Set system prompt tokens
-    pub fn with_system_prompt(mut self, tokens: u64) -> Self {
-        self.system_prompt_tokens = tokens;
-        self
-    }
-
-    /// Calculate the fixed zone (tokens that cannot be redistributed)
-    pub fn fixed_zone(&self) -> u64 {
-        self.system_prompt_tokens + self.output_reserve
-    }
-
-    /// Calculate the distributable space
-    pub fn distributable_space(&self) -> u64 {
-        self.context_window.saturating_sub(self.fixed_zone())
-    }
-
-    /// Get history token budget
-    pub fn history_budget(&self) -> u64 {
-        let space = self.distributable_space();
-        let history = (space as f64 * self.history_ratio) as u64;
-        // Ensure we don't violate retrieval minimum
-        let retrieval = self.retrieval_budget();
-        if space.saturating_sub(retrieval) < history {
-            space.saturating_sub(retrieval)
-        } else {
-            history
-        }
-    }
-
-    /// Get retrieval token budget
-    pub fn retrieval_budget(&self) -> u64 {
-        let space = self.distributable_space();
-        let retrieval = (space as f64 * self.retrieval_ratio) as u64;
-        // Ensure hard minimum
-        retrieval.max(self.retrieval_min_tokens).min(space)
-    }
-
-    /// Check if budget allocation is valid
-    pub fn is_valid(&self) -> bool {
-        self.fixed_zone() < self.context_window
-            && self.history_ratio + self.retrieval_ratio <= 1.0
-    }
-}
-
-#[allow(deprecated)]
-impl Default for BudgetAllocation {
-    fn default() -> Self {
-        Self::new(128000) // Default GPT-4 context window
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    #![allow(deprecated)]
     use super::*;
     use rollball_core::providers::traits::{FunctionCall, ToolCall};
 
@@ -526,16 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn test_count_incremental() {
-        let counter = TokenCounter::new();
-        let new_messages = vec![
-            ChatMessage::user("What is the weather?"),
-        ];
-        let count = counter.count_incremental(&new_messages, "gpt-4");
-        assert!(count > 0);
-    }
-
-    #[test]
     fn test_update_observed_ratio() {
         let mut counter = TokenCounter::new();
         counter.update_observed_ratio("my-custom-model", 100, 380);
@@ -564,75 +450,4 @@ mod tests {
         assert!(count >= 1);
     }
 
-    // ── BudgetAllocation tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_budget_allocation_default() {
-        let alloc = BudgetAllocation::default();
-        assert_eq!(alloc.context_window, 128000);
-        assert_eq!(alloc.output_reserve, 1024);
-        assert_eq!(alloc.history_ratio, 0.75);
-        assert_eq!(alloc.retrieval_ratio, 0.25);
-        assert!(alloc.is_valid());
-    }
-
-    #[test]
-    fn test_budget_allocation_fixed_zone() {
-        let alloc = BudgetAllocation::new(128000)
-            .with_output_reserve(2048)
-            .with_system_prompt(500);
-        assert_eq!(alloc.fixed_zone(), 2548); // 2048 + 500
-    }
-
-    #[test]
-    fn test_budget_allocation_distributable() {
-        let alloc = BudgetAllocation::new(128000)
-            .with_output_reserve(2048)
-            .with_system_prompt(500);
-        assert_eq!(alloc.distributable_space(), 128000 - 2548);
-    }
-
-    #[test]
-    fn test_budget_allocation_history_budget() {
-        let alloc = BudgetAllocation::new(128000)
-            .with_output_reserve(2048)
-            .with_system_prompt(500);
-        let space = alloc.distributable_space();
-        let history = alloc.history_budget();
-        // Should be approximately 75% of distributable space
-        let expected = (space as f64 * 0.75) as u64;
-        assert!((history as i64 - expected as i64).unsigned_abs() < 100);
-    }
-
-    #[test]
-    fn test_budget_allocation_retrieval_budget() {
-        let alloc = BudgetAllocation::new(128000)
-            .with_output_reserve(2048)
-            .with_system_prompt(500);
-        let retrieval = alloc.retrieval_budget();
-        // Should be at least the hard minimum
-        assert!(retrieval >= 2048);
-    }
-
-    #[test]
-    fn test_budget_allocation_small_window() {
-        let alloc = BudgetAllocation::new(4096)
-            .with_output_reserve(1024)
-            .with_system_prompt(500);
-        // With only 2572 distributable, retrieval min (2048) should be respected
-        let retrieval = alloc.retrieval_budget();
-        assert!(retrieval >= 2048 || alloc.distributable_space() < 2048);
-    }
-
-    #[test]
-    fn test_budget_allocation_validity() {
-        let valid = BudgetAllocation::new(128000);
-        assert!(valid.is_valid());
-
-        // Invalid: fixed zone exceeds context window
-        let invalid = BudgetAllocation::new(1000)
-            .with_output_reserve(800)
-            .with_system_prompt(500);
-        assert!(!invalid.is_valid());
-    }
 }
