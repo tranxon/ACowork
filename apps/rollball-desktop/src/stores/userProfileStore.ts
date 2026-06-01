@@ -49,7 +49,7 @@ function saveProfile(profile: UserProfile) {
 
 function validateAvatarType(v?: unknown): AvatarType {
   if (v === "boring" || v === "icon" || v === "letter") return v;
-  return "boring";
+  return "icon";
 }
 
 function validateVariant(v?: unknown): BoringAvatarVariant {

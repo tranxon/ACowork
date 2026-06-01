@@ -1094,7 +1094,10 @@ export function ChatPanel() {
         {/* Queued messages box — separate box above the input area,
           flush against input, slightly narrower for layered depth */}
         {queuedMessages.length > 0 && (
-          <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className={cn(
+            "mx-5 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
+            todos.length > 0 ? "" : "rounded-t-lg"
+          )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
               <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
                 消息队列 ({queuedMessages.length})
