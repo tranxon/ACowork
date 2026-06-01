@@ -11,6 +11,7 @@ use crate::types::{
     KnowledgeNode as GrafeoKnowledgeNode, KnowledgeSubType as GrafeoKnowledgeSubType,
     ProceduralNode as GrafeoProceduralNode,
     AutobioCategory as GrafeoAutobioCategory, NodeStatus as GrafeoNodeStatus,
+    GrafeoConfig,
 };
 use rollball_memory::types::{ResultSource, SearchResult};
 use rollball_memory::{
@@ -40,7 +41,7 @@ pub struct GrafeoStore {
     /// Underlying GrafeoDB engine instance.
     pub(crate) db: GrafeoDB,
     /// HNSW index configuration used for this store.
-    hnsw_config: HnswConfig,
+    pub(crate) hnsw_config: HnswConfig,
 }
 
 // Static assertion: GrafeoStore must be Sync for safe concurrent access.
@@ -55,10 +56,22 @@ const _: () = {
 const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
 
 impl GrafeoStore {
+    /// Open or create a persistent Grafeo database with the given configuration.
+    ///
+    /// Automatically initializes the schema (labels, vector indexes, text indexes).
+    /// The HNSW vector index dimension is taken from [`GrafeoConfig::embedding_dim`].
+    pub fn open(config: &GrafeoConfig) -> Result<Self> {
+        let hnsw_config = crate::index_config::HnswConfig::new(config.embedding_dim);
+        Self::open_with_config(&config.db_path, hnsw_config)
+    }
+
     /// Open or create a persistent Grafeo database at the given path.
     ///
     /// Automatically initializes the schema (labels, vector indexes, text indexes).
-    pub fn open(path: &Path) -> Result<Self> {
+    /// Uses the default HNSW configuration, including the default embedding dimension
+    /// ([`crate::types::DEFAULT_EMBEDDING_DIM`] = 384). For non-default dimensions,
+    /// use [`open`](Self::open) with a [`GrafeoConfig`].
+    pub fn open_with_default_config(path: &Path) -> Result<Self> {
         Self::open_with_config(path, HnswConfig::default())
     }
 

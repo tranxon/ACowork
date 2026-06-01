@@ -127,7 +127,7 @@ impl GrafeoStore {
 /// Embedding provider degradation chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddingLevel {
-    /// ONNX local model (preferred).
+    /// Local provider (e.g., Ollama, preferred).
     Local,
 
     /// Remote API fallback.

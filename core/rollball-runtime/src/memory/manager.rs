@@ -19,6 +19,7 @@ use rollball_grafeo::{
 };
 use rollball_memory::{HintType, MemoryQuery, RetrievalMetrics};
 
+use crate::embedding::EmbeddingProvider;
 use crate::error::{Result, RuntimeError};
 use crate::episode_distill::DistilledEpisode;
 use crate::tools::rag::client::RagClient;
@@ -169,14 +170,48 @@ impl MemoryManager {
 
     /// Retrieve relevant memories for the current query.
     ///
-    /// Pipeline: Grafeo hybrid_search → graph_expand → dedup →
+    /// If `query.embedding` is `None` and `embedding_provider` is `Some`,
+    /// generates the embedding automatically with a 200ms timeout before
+    /// proceeding to hybrid search. On timeout or failure, falls back to
+    /// text-only search (graceful degradation).
+    ///
+    /// Pipeline: (auto-embed) → Grafeo hybrid_search → graph_expand → dedup →
     /// PageRank boost (topology re-rank) → merge & rank
     /// + RAG channel (if rag_client is Some, run in parallel).
     ///
     /// RAG channel uses the user message as query with default top_k=3.
     /// Results from both channels are merged and sorted by score.
     /// Source annotations distinguish [Grafeo] vs [RAG:<tool_name>].
-    pub async fn retrieve(&self, store: &GrafeoStore, query: &MemoryQuery) -> Result<RetrievalResult> {
+    pub async fn retrieve(
+        &self,
+        store: &GrafeoStore,
+        query: &mut MemoryQuery,
+        embedding_provider: Option<&dyn EmbeddingProvider>,
+    ) -> Result<RetrievalResult> {
+        // ── Auto-generate embedding if needed ──
+        // Timeout is handled by FallbackEmbeddingProvider internally
+        // (200ms per attempt, then fallback to next provider).
+        if query.embedding.is_none() {
+            if let Some(provider) = embedding_provider {
+                match provider.embed(&query.query_text).await {
+                    Ok(vec) => {
+                        tracing::debug!(
+                            dim = vec.len(),
+                            provider = provider.name(),
+                            "Auto-generated query embedding"
+                        );
+                        query.embedding = Some(vec);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Embedding generation failed, falling back to text search"
+                        );
+                    }
+                }
+            }
+        }
+
         let k = if query.limit > 0 { query.limit } else { self.config.default_k };
         let min_score = query.min_score.unwrap_or(self.config.default_min_score);
         let hint_type = query.hint_type;
@@ -524,7 +559,40 @@ impl MemoryManager {
     /// The summary text IS the distillation result.
     /// Entities and triples extracted during compaction are stored as
     /// node properties for later consolidation.
-    pub fn record_distilled(&self, store: &GrafeoStore, episode: &DistilledEpisode) -> Result<()> {
+    ///
+    /// If `embedding_provider` is `Some`, generates an embedding from
+    /// the summary text (200ms timeout) for future vector retrieval.
+    pub async fn record_distilled(
+        &self,
+        store: &GrafeoStore,
+        episode: &DistilledEpisode,
+        embedding_provider: Option<&dyn EmbeddingProvider>,
+    ) -> Result<()> {
+        // ── Auto-generate episode embedding ──
+        // Timeout is handled by FallbackEmbeddingProvider internally
+        // (200ms per attempt, then fallback to next provider).
+        let episode_embedding: Option<Vec<f32>> = if let Some(provider) = embedding_provider {
+            match provider.embed(&episode.summary).await {
+                Ok(vec) => {
+                    tracing::debug!(
+                        dim = vec.len(),
+                        provider = provider.name(),
+                        "Auto-generated episode embedding"
+                    );
+                    Some(vec)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Episode embedding generation failed, storing without vector"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let entities_str = episode.entities.join(", ");
         let triples_json = serde_json::to_string(&episode.triples)
             .unwrap_or_else(|_| "[]".to_string());
@@ -549,9 +617,20 @@ impl MemoryManager {
             ("triples", Value::from(triples_json.as_str())),
         ];
 
-        store
+        let node_id = store
             .store_node(labels::EPISODIC, props)
             .map_err(|e| RuntimeError::Tool(format!("Failed to record distilled episode: {e}")))?;
+
+        // Store embedding vector on the node for future vector retrieval.
+        if let Some(ref emb) = episode_embedding {
+            store
+                .db()
+                .set_node_property(
+                    node_id,
+                    "embedding",
+                    grafeo_common::types::Value::Vector(std::sync::Arc::from(emb.as_slice())),
+                );
+        }
 
         tracing::debug!(
             session_id = %episode.session_id,
@@ -571,9 +650,10 @@ impl MemoryManager {
     pub async fn process_turn(
         &self,
         store: &GrafeoStore,
-        query: &MemoryQuery,
+        query: &mut MemoryQuery,
+        embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<(InjectedMemory, RetrievalMetrics)> {
-        let retrieval = self.retrieve(store, query).await?;
+        let retrieval = self.retrieve(store, query, embedding_provider).await?;
         let metrics = retrieval.metrics.clone();
         let injected = self.inject(&retrieval);
         Ok((injected, metrics))
@@ -667,7 +747,7 @@ fn estimate_tokens(text: &str) -> usize {
 mod tests {
     use super::*;
     use grafeo_common::types::Value;
-    use rollball_grafeo::types::{labels, EMBEDDING_DIM};
+    use rollball_grafeo::types::{labels, DEFAULT_EMBEDDING_DIM};
 
     /// Helper: create an in-memory GrafeoStore for testing.
     fn test_store() -> GrafeoStore {
@@ -676,7 +756,7 @@ mod tests {
 
     /// Helper: generate a test embedding vector.
     fn test_embedding() -> Vec<f32> {
-        vec![0.1f32; EMBEDDING_DIM]
+        vec![0.1f32; DEFAULT_EMBEDDING_DIM]
     }
 
     /// Helper: store an Episodic node with content and embedding.
@@ -775,7 +855,7 @@ mod tests {
         store_knowledge(&store, "user", "lives_in", "Beijing", &emb);
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "rust programming".to_string(),
             embedding: Some(emb),
             filters: Default::default(),
@@ -786,7 +866,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).await.unwrap();
+        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
         assert!(!result.memories.is_empty(), "expected at least one result");
         assert!(!result.metrics.abstention_triggered);
     }
@@ -801,7 +881,7 @@ mod tests {
         let emb = test_embedding();
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "something completely unrelated".to_string(),
             embedding: Some(emb),
             filters: Default::default(),
@@ -812,7 +892,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).await.unwrap();
+        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
         assert!(result.memories.is_empty());
         assert!(result.metrics.abstention_triggered);
         assert_eq!(result.metrics.result_count, 0);
@@ -829,7 +909,7 @@ mod tests {
         store_episode(&store, "test content", &emb);
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "unrelated query".to_string(),
             embedding: Some(emb),
             filters: Default::default(),
@@ -840,7 +920,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).await.unwrap();
+        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
         assert!(result.metrics.abstention_triggered);
     }
 
@@ -855,7 +935,7 @@ mod tests {
         store_episode(&store, "rust programming tutorial", &emb);
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "rust programming".to_string(),
             embedding: None,
             filters: Default::default(),
@@ -866,7 +946,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).await.unwrap();
+        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
         // Text search should still find results.
         assert!(!result.memories.is_empty());
     }
@@ -1019,7 +1099,7 @@ mod tests {
         store_episode(&store, "user prefers concise replies", &emb);
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "concise".to_string(),
             embedding: Some(emb),
             filters: Default::default(),
@@ -1030,7 +1110,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let (injected, metrics) = manager.process_turn(&store, &query).await.unwrap();
+        let (injected, metrics) = manager.process_turn(&store, &mut query, None).await.unwrap();
 
         assert!(!injected.formatted_text.is_empty());
         assert!(metrics.result_count > 0);
@@ -1048,7 +1128,7 @@ mod tests {
         store_episode(&store, "some content", &emb);
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "completely unrelated".to_string(),
             embedding: Some(emb),
             filters: Default::default(),
@@ -1059,7 +1139,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let (injected, metrics) = manager.process_turn(&store, &query).await.unwrap();
+        let (injected, metrics) = manager.process_turn(&store, &mut query, None).await.unwrap();
 
         assert!(metrics.abstention_triggered);
         assert_eq!(injected.memory_count, 0);
@@ -1105,7 +1185,7 @@ mod tests {
         config.pagerank_weight = 0.3; // Strong boost to make topology effect visible.
         let manager = MemoryManager::new(config);
 
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "Rust".to_string(),
             embedding: Some(emb),
             filters: Default::default(),
@@ -1116,7 +1196,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).await.unwrap();
+        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
         assert!(!result.memories.is_empty(), "should retrieve Rust-related nodes");
     }
 
@@ -1145,7 +1225,7 @@ mod tests {
         config.pagerank_weight = 0.0;
         let manager = MemoryManager::new(config);
 
-        let query = MemoryQuery {
+        let mut query = MemoryQuery {
             query_text: "Python".to_string(),
             embedding: Some(emb),
             filters: Default::default(),
@@ -1156,7 +1236,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &query).await.unwrap();
+        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
         assert!(!result.memories.is_empty());
     }
 }

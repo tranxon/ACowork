@@ -269,14 +269,14 @@ impl ConsolidationScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KnowledgeNode, KnowledgeSubType, EMBEDDING_DIM};
+    use crate::types::{KnowledgeNode, KnowledgeSubType, DEFAULT_EMBEDDING_DIM};
 
     fn test_store() -> Arc<Mutex<GrafeoStore>> {
         Arc::new(Mutex::new(GrafeoStore::new_in_memory().unwrap()))
     }
 
     fn test_embedding() -> Vec<f32> {
-        vec![0.1f32; EMBEDDING_DIM]
+        vec![0.1f32; DEFAULT_EMBEDDING_DIM]
     }
 
     fn old_time() -> DateTime<Utc> {

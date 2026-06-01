@@ -17,6 +17,7 @@ use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::providers::traits::Provider;
 use rollball_core::tools::traits::Tool;
 use rollball_grafeo::grafeo::GrafeoStore;
+use rollball_grafeo::types::GrafeoConfig;
 use rollball_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
@@ -26,6 +27,7 @@ use crate::agent::loop_::ApprovalHandle;
 use crate::config::RuntimeConfig;
 use crate::debug::controller::DebugController;
 use crate::debug::server::DebugEventSender;
+use crate::embedding::EmbeddingProvider;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
 use rollball_core::ShellApprovalThreshold;
@@ -130,6 +132,10 @@ pub struct AgentCore {
     /// Memory session handle — shared between agent loop and memory tools.
     /// Created at tool registry time, store initialized lazily.
     pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
+    /// Embedding provider for vector-based memory retrieval.
+    /// Built from LLM provider registry; shared across all sessions.
+    /// Used by [`init_memory_store`] to determine Grafeo vector dimension.
+    pub(crate) embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl AgentCore {
@@ -170,6 +176,7 @@ impl AgentCore {
             approval_handle: None,
             shell_approval_threshold,
             status_tx: None,
+            embedding_provider: None,
         }
     }
 
@@ -356,7 +363,16 @@ impl AgentCore {
         }
 
         let db_path = memory_dir.join("private.grafeo");
-        match GrafeoStore::open(&db_path) {
+        let embedding_dim = self
+            .embedding_provider
+            .as_ref()
+            .map(|p| p.dimension())
+            .unwrap_or(rollball_grafeo::types::DEFAULT_EMBEDDING_DIM);
+        let config = GrafeoConfig {
+            db_path: db_path.clone(),
+            embedding_dim,
+        };
+        match GrafeoStore::open(&config) {
             Ok(store) => {
                 // Count existing nodes to confirm data loaded from disk.
                 let graph = store.db().graph_store();
@@ -542,6 +558,7 @@ impl AgentCore {
             approval_handle: self.approval_handle.clone(),
             shell_approval_threshold: self.shell_approval_threshold.clone(),
             status_tx: None, // set separately by SessionTask
+            embedding_provider: self.embedding_provider.clone(),
         }
     }
 

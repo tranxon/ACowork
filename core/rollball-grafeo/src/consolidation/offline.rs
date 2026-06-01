@@ -201,14 +201,14 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KnowledgeSubType, EMBEDDING_DIM};
+    use crate::types::{KnowledgeSubType, DEFAULT_EMBEDDING_DIM};
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
     }
 
     fn test_embedding() -> Vec<f32> {
-        vec![0.1f32; EMBEDDING_DIM]
+        vec![0.1f32; DEFAULT_EMBEDDING_DIM]
     }
 
     // =====================================================================

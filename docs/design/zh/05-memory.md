@@ -192,9 +192,17 @@ Grafeo Episodic Store
 - **时间过滤**：按时间范围缩小检索空间
 - **跨层关联扩散**（§6）：检索到的 episode 通过沉淀层 KnowledgeNode 的 `source_episode` 字段反向查询关联节点，沿 GQL 原生图遍历扩展到沉淀层知识和其他经历层 episode。例如：用户问"上次去上海住的酒店"，episodic 检索到出差记录 → 反向查到沉淀层"用户常住锦江之星" → 通过 `MATCH (m)-[r*1..3]-(other)` 图遍历扩展到同一酒店的另一次出差 episode。
 
-**Embedding 生成时机：**
+**Embedding 生成策略：**
 
-Embedding 由 Runtime 层的 LLM Provider 生成（而非 GrafeoStore 内部），以 `Vec<f32>` 形式传入 Episode/MemoryQuery。episode 写入时同步生成 embedding（all-MiniLM-L6-v2 在 CPU 上约 10-50ms）。如果生成超时（200ms），embedding 置空，后台任务补生成。检索时如果 episode 的 embedding 为空，退化为仅 `db.text_search()` 全文检索。GrafeoStore 仅负责存储和索引，不持有 EmbeddingProvider。
+Embedding 由 Runtime 层通过 `EmbeddingProvider` trait 生成（而非 GrafeoStore 内部），以 `Vec<f32>` 形式传入 `Episode` / `MemoryQuery`。
+
+**Provider 降级链**：Ollama local（primary，`nomic-embed-text`，768d）→ Remote API（fallback，OpenAI-compatible `/embeddings`，512-1536d）。`FallbackEmbeddingProvider` 自动管理 primary→fallback 切换（2 次连续失败 + 200ms 超时）。
+
+**生成时机**：
+- 检索时：`MemoryManager.retrieve()` 方法头部自动生成 embedding（200ms 超时），超时/失败则 `query.embedding = None`，退回 `text_search` 纯文本检索
+- 写入时：episode 蒸馏写入时同步生成 embedding，同样 200ms 超时降级
+
+GrafeoStore 仅负责存储和索引，不持有 `EmbeddingProvider`。
 
 **经历层的遗忘：**
 
@@ -1860,7 +1868,7 @@ Phase 2 交付前必须通过以下验证：
 - 使用 LongMemEval-S 标准子集（约 115K tokens 上下文长度）运行完整 5 维评测
 - 综合分数 >= 65%，各维度不低于 50%
 - Abs 维度 >= 60%（拒答是最关键的差异化能力）
-- 测试环境：单 Agent，Grafeo 存储后端，embedding 模型 all-MiniLM-L6-v2
+- 测试环境：单 Agent，Grafeo 存储后端，embedding 模型 Ollama/Remote API（取决于 provider 配置）
 
 **功能验证清单**：
 

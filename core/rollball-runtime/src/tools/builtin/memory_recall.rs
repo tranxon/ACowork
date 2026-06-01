@@ -19,7 +19,9 @@ use rollball_memory::MemoryQuery;
 /// Automatically excludes nodes from the current session to avoid
 /// re-injecting data already present in the conversation context.
 pub struct MemoryRecallTool {
-    /// Agent ID (namespace for memory isolation)
+    /// Agent ID (namespace for memory isolation).
+    /// Kept for future per-agent query filtering; Grafeo currently isolates at store level.
+    #[allow(dead_code)]
     agent_id: String,
     /// Memory session handle providing store + current session context.
     /// None when no Grafeo store is available (degraded mode).
@@ -177,7 +179,15 @@ impl Tool for MemoryRecallTool {
             crate::memory::MemoryManagerConfig::default(),
         );
 
-        match manager.retrieve(&*store, &memory_query).await {
+        // Pass embedding provider from session handle so retrieve() can
+        // auto-generate query embeddings (Ollama → Remote fallback).
+        let emb_provider = self
+            .handle
+            .as_ref()
+            .and_then(|h| h.embedding());
+        let emb_deref = emb_provider.as_deref();
+
+        match manager.retrieve(&*store, &mut memory_query, emb_deref).await {
             Ok(retrieval) => {
                 if retrieval.memories.is_empty() {
                     return Ok(ToolResult {
@@ -223,7 +233,7 @@ mod tests {
     /// Helper: create a MemoryRecallTool backed by an in-memory GrafeoStore.
     fn test_tool() -> MemoryRecallTool {
         let store = Arc::new(GrafeoStore::new_in_memory().unwrap());
-        let handle = Arc::new(crate::memory::MemorySessionHandle::new());
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
         handle.set_store(store);
         MemoryRecallTool {
             agent_id: "com.test.agent".to_string(),

@@ -5,10 +5,11 @@
 //! lazily (after tool creation). This handle provides a shared, lock-protected
 //! context for session-scoped operations without changing the Tool trait.
 
-use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use rollball_grafeo::GrafeoStore;
+
+use crate::embedding::EmbeddingProvider;
 
 /// Lightweight session context shared between the agent loop (writer)
 /// and memory tools (readers).
@@ -19,11 +20,13 @@ use rollball_grafeo::GrafeoStore;
 /// - `current_session_id`: written by `SessionTask` before each turn,
 ///   read by tools during `execute()`.  Uses `RwLock` because writes are
 ///   infrequent (once per turn switch) and reads far more common.
+/// - `embedding_provider`: set once at construction, immutable thereafter.
+///   Tools and agent loop pass it to [`MemoryManager::retrieve`] for
+///   auto-embedding.
 ///
 /// This separation avoids the need to inject session context through the
 /// [`Tool`](rollball_core::tools::traits::Tool) trait, keeping tool
 /// signatures simple while still providing session-aware behaviour.
-#[derive(Default)]
 pub struct MemorySessionHandle {
     /// Grafeo memory store (lazily initialized, shared across all sessions).
     store: RwLock<Option<Arc<GrafeoStore>>>,
@@ -33,12 +36,19 @@ pub struct MemorySessionHandle {
     /// Memory tools use this to exclude current-session nodes from recall,
     /// since they are already present in the conversation context window.
     current_session_id: RwLock<Option<String>>,
+    /// Embedding provider (set once at construction, immutable thereafter).
+    /// Used by memory tools and agent loop for vector-based retrieval.
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl MemorySessionHandle {
     /// Create a new handle with no store (lazy initialization).
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(embedding_provider: Option<Arc<dyn EmbeddingProvider>>) -> Self {
+        Self {
+            store: RwLock::new(None),
+            current_session_id: RwLock::new(None),
+            embedding_provider,
+        }
     }
 
     /// Set the Grafeo store once it becomes available.
@@ -83,5 +93,10 @@ impl MemorySessionHandle {
             .read()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// Read a clone of the embedding provider, if set.
+    pub fn embedding(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding_provider.clone()
     }
 }

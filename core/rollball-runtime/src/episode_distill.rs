@@ -24,6 +24,7 @@ use rollball_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Pr
 use rollball_core::protocol::ModelCapabilitiesInfo;
 use serde::{Deserialize, Serialize};
 
+use crate::embedding::EmbeddingProvider;
 use crate::error::{Result, RuntimeError};
 
 // ---------------------------------------------------------------------------
@@ -248,10 +249,15 @@ impl EpisodeDistiller {
     /// This is the unified write path for both compaction summaries and
     /// session-close tail distillations. Parses entity and triple metadata
     /// from the compact model output and creates a DistilledEpisode.
-    pub fn write_summary_to_grafeo(
+    ///
+    /// If `embedding_provider` is `Some`, generates an embedding vector
+    /// from the summary text (200ms timeout) and stores it on the node
+    /// for future vector-based retrieval.
+    pub async fn write_summary_to_grafeo(
         summary_text: &str,
         session_id: &str,
         memory_store: &Option<Arc<rollball_grafeo::GrafeoStore>>,
+        embedding_provider: Option<&dyn EmbeddingProvider>,
     ) {
         let Some(store) = memory_store else {
             return;
@@ -268,7 +274,7 @@ impl EpisodeDistiller {
             entities: parsed.entities,
             triples: parsed.triples,
         };
-        if let Err(e) = manager.record_distilled(store, &episode) {
+        if let Err(e) = manager.record_distilled(store, &episode, embedding_provider).await {
             tracing::warn!(
                 error = %e,
                 session_id = %session_id,

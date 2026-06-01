@@ -36,7 +36,11 @@ impl RemoteEmbeddingProvider {
         )
     }
 
-    /// Create with custom configuration
+    /// Create with custom configuration.
+    ///
+    /// # Panics
+    /// Panics if the HTTP client cannot be built. Prefer
+    /// [`try_with_config`](Self::try_with_config) in production code.
     pub fn with_config(
         base_url: &str,
         api_key: Option<&str>,
@@ -56,6 +60,28 @@ impl RemoteEmbeddingProvider {
             dimension,
             http_client,
         }
+    }
+
+    /// Create with custom configuration (fallible — for production use).
+    pub fn try_with_config(
+        base_url: &str,
+        api_key: Option<&str>,
+        model: &str,
+        dimension: usize,
+    ) -> Result<Self, EmbeddingError> {
+        let http_client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| EmbeddingError::Remote(format!("Failed to build HTTP client: {e}")))?;
+
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.map(ToString::to_string),
+            model: model.to_string(),
+            dimension,
+            http_client,
+        })
     }
 
     /// Create a provider for DeepSeek or other compatible APIs

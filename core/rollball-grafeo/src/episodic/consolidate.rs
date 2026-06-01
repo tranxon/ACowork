@@ -80,7 +80,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{EMBEDDING_DIM, Episode};
+    use crate::types::{DEFAULT_EMBEDDING_DIM, Episode};
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
 
@@ -99,7 +99,7 @@ mod tests {
             turn_index: 0,
             role: "user".to_string(),
             content: content.to_string(),
-            embedding: Some(vec![0.1f32; EMBEDDING_DIM]),
+            embedding: Some(vec![0.1f32; DEFAULT_EMBEDDING_DIM]),
             timestamp: ts,
             consolidated: false,
             metadata: HashMap::new(),

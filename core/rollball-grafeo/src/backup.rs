@@ -326,7 +326,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_store(db_dir: &Path) -> GrafeoStore {
-        GrafeoStore::open(db_dir).unwrap()
+        GrafeoStore::open_with_default_config(db_dir).unwrap()
     }
 
     #[test]

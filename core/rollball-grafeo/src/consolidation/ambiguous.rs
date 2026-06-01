@@ -168,20 +168,20 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KnowledgeNode, KnowledgeSubType, EMBEDDING_DIM};
+    use crate::types::{KnowledgeNode, KnowledgeSubType, DEFAULT_EMBEDDING_DIM};
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
     }
 
     fn const_emb(v: f32) -> Vec<f32> {
-        vec![v; EMBEDDING_DIM]
+        vec![v; DEFAULT_EMBEDDING_DIM]
     }
 
     fn flipped_emb(flip_count: usize) -> Vec<f32> {
-        let mut v = vec![1.0f32; EMBEDDING_DIM];
+        let mut v = vec![1.0f32; DEFAULT_EMBEDDING_DIM];
         for i in 0..flip_count {
-            v[EMBEDDING_DIM - 1 - i] = -1.0;
+            v[DEFAULT_EMBEDDING_DIM - 1 - i] = -1.0;
         }
         v
     }

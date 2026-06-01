@@ -10,7 +10,7 @@
 - 新增 consolidation/conflict.rs（冲突分类）
 - 新增 forgetting/purge_log.rs（Purge 恢复机制）
 - 新增 backup.rs / recovery.rs（备份与恢复）
-- 新增 embedding/fallback.rs（降级链路）
+- 新增 embedding/fallback.rs（降级链路）— 已废弃，降级逻辑上移至 Runtime 层 `FallbackEmbeddingProvider`
 - 新增 vector/hnsw.rs（HNSW 参数定义：M=16, ef_construction=100, ef_search=64）
 
 **v3.6 变更（当前）**：
@@ -270,7 +270,7 @@ impl MemoryStore for GrafeoStore {
 
 **注意**：`MemoryStore` trait、`MemoryQuery`、`SearchResult`、`DecayConfig`、`StoreHealth`、`StoreStats`、`MemoryMiddleware` 等类型定义在独立的 `rollball-memory` crate 中（与 Runtime 共享），Grafeo crate 只实现 trait，不定义 trait。详见 05-memory.md §10。
 
-**Embedding 职责上移**：GrafeoStore 不再持有 `EmbeddingProvider`。Embedding 向量由 `rollball-runtime` 的 LLM Provider 生成，以 `Vec<f32>` 形式传入 `Episode` / `MemoryQuery`，GrafeoStore 仅负责存储和索引。
+**Embedding 职责上移**：GrafeoStore 不持有 `EmbeddingProvider`。Embedding 向量由 `rollball-runtime` 层通过 `EmbeddingProvider` trait 生成（Ollama `/api/embed` → Remote `/embeddings` 降级链），以 `Vec<f32>` 形式传入 `Episode` / `MemoryQuery`。`MemoryManager.retrieve()` 方法头部自动生成 embedding（200ms 超时），失败降级到 `text_search`。GrafeoStore 仅负责向量存储和 HNSW 索引，维度由 `GrafeoConfig.embedding_dim` 动态注入。
 
 ---
 

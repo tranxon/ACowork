@@ -310,7 +310,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::EMBEDDING_DIM;
+    use crate::types::DEFAULT_EMBEDDING_DIM;
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
@@ -323,7 +323,7 @@ mod tests {
     /// Create a constant-value embedding (all elements same).
     /// NOTE: All constant vectors have cosine similarity = 1.0 regardless of value.
     fn const_emb(v: f32) -> Vec<f32> {
-        vec![v; EMBEDDING_DIM]
+        vec![v; DEFAULT_EMBEDDING_DIM]
     }
 
     /// Create an embedding that has a controlled cosine similarity to `const_emb(1.0)`.
@@ -337,9 +337,9 @@ mod tests {
     /// flip 28 → cos ≈ 0.854  (just above fact conflict 0.85)
     /// flip 40 → cos ≈ 0.792  (below conflict 0.85)
     fn flipped_emb(flip_count: usize) -> Vec<f32> {
-        let mut v = vec![1.0f32; EMBEDDING_DIM];
+        let mut v = vec![1.0f32; DEFAULT_EMBEDDING_DIM];
         for i in 0..flip_count {
-            v[EMBEDDING_DIM - 1 - i] = -1.0;
+            v[DEFAULT_EMBEDDING_DIM - 1 - i] = -1.0;
         }
         v
     }

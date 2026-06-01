@@ -13,8 +13,6 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Local embedding generation via ONNX Runtime + all-MiniLM-L6-v2
-local-embeddings = []
 # WASM tool sandbox (Wasmtime-based)
 wasm-tools = ["wasmtime", "wasmtime-wasi"]
 # Interactive CLI approval (dialoguer-based confirmation prompts)

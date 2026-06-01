@@ -721,7 +721,7 @@ fn extract_json_array(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::EMBEDDING_DIM;
+    use crate::types::DEFAULT_EMBEDDING_DIM;
 
     // =====================================================================
     // Test: Simple pattern detection
@@ -923,7 +923,7 @@ mod tests {
     }
 
     fn test_embedding_fn(_text: &str) -> Vec<f32> {
-        vec![0.1f32; EMBEDDING_DIM]
+        vec![0.1f32; DEFAULT_EMBEDDING_DIM]
     }
 
     #[tokio::test]

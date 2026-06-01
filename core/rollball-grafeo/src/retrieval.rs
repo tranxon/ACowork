@@ -202,7 +202,7 @@ impl GrafeoStore {
         ef_search: usize,
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        validate_embedding_dim(embedding)?;
+        validate_embedding_dim(embedding, self.hnsw_config.dim)?;
         let raw = self.db.vector_search(label, "embedding", embedding, k, Some(ef_search), None)?;
         // Convert distance to similarity score using shared function.
         let results: Vec<(NodeId, f64)> = raw
@@ -245,7 +245,7 @@ impl GrafeoStore {
         _vector_weight: f32,  // Reserved for future weighted RRF implementation
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        validate_embedding_dim(embedding)?;
+        validate_embedding_dim(embedding, self.hnsw_config.dim)?;
         let results = self.db.hybrid_search(
             label,
             "content",
@@ -538,16 +538,17 @@ mod tests {
 
     #[test]
     fn test_validate_embedding_dim_ok_and_err() {
+        use crate::types::DEFAULT_EMBEDDING_DIM;
         // Valid
-        let ok_emb = vec![0.0f32; EMBEDDING_DIM];
-        assert!(validate_embedding_dim(&ok_emb).is_ok());
+        let ok_emb = vec![0.0f32; DEFAULT_EMBEDDING_DIM];
+        assert!(validate_embedding_dim(&ok_emb, DEFAULT_EMBEDDING_DIM).is_ok());
 
         // Wrong dimension
         let bad_emb = vec![0.0f32; 128];
-        let err = validate_embedding_dim(&bad_emb).unwrap_err();
+        let err = validate_embedding_dim(&bad_emb, DEFAULT_EMBEDDING_DIM).unwrap_err();
         match err {
             crate::error::GrafeoError::InvalidDimension { expected, got } => {
-                assert_eq!(expected, EMBEDDING_DIM);
+                assert_eq!(expected, DEFAULT_EMBEDDING_DIM);
                 assert_eq!(got, 128);
             }
             other => panic!("expected InvalidDimension, got: {other}"),
@@ -555,10 +556,10 @@ mod tests {
 
         // Empty
         let empty: Vec<f32> = Vec::new();
-        let err = validate_embedding_dim(&empty).unwrap_err();
+        let err = validate_embedding_dim(&empty, DEFAULT_EMBEDDING_DIM).unwrap_err();
         match err {
             crate::error::GrafeoError::InvalidDimension { expected, got } => {
-                assert_eq!(expected, EMBEDDING_DIM);
+                assert_eq!(expected, DEFAULT_EMBEDDING_DIM);
                 assert_eq!(got, 0);
             }
             other => panic!("expected InvalidDimension, got: {other}"),
@@ -578,7 +579,7 @@ mod tests {
 
         // Phase 1: create store, add data, verify search works
         {
-            let store = GrafeoStore::open(&db_path).unwrap();
+            let store = GrafeoStore::open_with_default_config(&db_path).unwrap();
             store_episode(&store, "persistent memory content", &emb);
 
             // Verify vector search works before close
@@ -592,7 +593,7 @@ mod tests {
 
         // Phase 2: reopen and verify index is still usable
         {
-            let store = GrafeoStore::open(&db_path).unwrap();
+            let store = GrafeoStore::open_with_default_config(&db_path).unwrap();
 
             // Rebuild vector index since HNSW is not persisted automatically
             store.db().rebuild_vector_index(labels::EPISODIC, "embedding").unwrap();

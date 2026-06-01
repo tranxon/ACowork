@@ -140,8 +140,8 @@ crates/rollball-runtime/
     ├── memory/
     │   ├── mod.rs                 # Memory 门面
     │   ├── grafeo_client.rs       # Grafeo 读写封装
-    │   ├── embeddings.rs          # ONNX Runtime embedding 生成
-    │   └── rag.rs                 # RAG 检索管线
+    │   ├── embedding/              # Embedding 提供者（Ollama + Remote 降级链）
+    │   ├── session_handle.rs       # MemorySessionHandle 共享状态
     ├── skills/
     │   ├── mod.rs
     │   ├── loader.rs              # SKILL.md 解析（YAML frontmatter + Markdown body）
@@ -326,11 +326,10 @@ impl DevModeController {
 ## 依赖
 
 - `rollball-core` — 共享类型
-- `rollball-grafeo` — 私有 Memory
+- `rollball-grafeo` — 私有 Memory（维度由 `GrafeoConfig.embedding_dim` 动态注入）
 - `rollball-vault` — 不直接依赖，Key 通过 IPC 从 Gateway 获取
 - `tokio`, `reqwest`, `clap`, `serde_json`
 - `wasmtime` (feature-gated: `wasm-tools`)
-- `ort` (ONNX Runtime, feature-gated: `local-embeddings`)
 
 ## Feature Flags
 
@@ -338,7 +337,6 @@ impl DevModeController {
 [features]
 default = []
 wasm-tools = ["dep:wasmtime"]          # WASM 工具沙箱
-local-embeddings = ["dep:ort"]         # 本地 embedding 生成
 dev-mode = []                           # DevMode 调试支持
 integration-notion = []                 # Notion API 工具
 integration-jira = []                   # Jira API 工具

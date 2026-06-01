@@ -3,7 +3,7 @@ use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::session::{SessionManager, SessionManagerConfig, SessionMessage};
 use crate::config::RuntimeConfig;
-use crate::error::Result;
+use crate::error::{Result, RuntimeError};
 use clap::Parser;
 use rollball_core::protocol::{McpListItem, ProtocolType, ProviderListItem};
 use std::sync::Arc;
@@ -304,6 +304,9 @@ async fn async_main(
 ) -> Result<()> {
     use crate::agent::context::ContextBuilder;
     use crate::agent::loop_::AgentLoop;
+    use crate::embedding::{FallbackEmbeddingProvider, EmbeddingConfig, EmbeddingProvider};
+    use crate::embedding::ollama::OllamaEmbeddingProvider;
+    use crate::embedding::remote::RemoteEmbeddingProvider;
     use crate::package::loader::load_package;
     use crate::package::prompt_builder::build_system_prompt_with_mode;
     use crate::tools::builtin;
@@ -526,6 +529,107 @@ async fn async_main(
         }
     };
 
+    // ── Build FallbackEmbeddingProvider ──
+    // Primary: Ollama local (always attempted, fast /api/embed).
+    // Fallback: remote provider — auto-select embedding model from the
+    //           provider list (family == "text-embedding"), or fall back
+    //           to "text-embedding-3-small" with the first provider.
+    let ollama_primary = Box::new(
+        OllamaEmbeddingProvider::try_new()
+            .map_err(|e| RuntimeError::Config(format!("Failed to create Ollama embedding provider: {e}")))?,
+    );
+    let ollama_dim = ollama_primary.dimension();
+
+    // ── Select remote embedding model ──
+    // Scan the provider list for a model with family == "text-embedding"
+    // (from models.dev offline data). Falls back to hardcoded default.
+    let remote_fallback = {
+        let (base_url, api_key, model, dim) = {
+            let providers = hello_config
+                .as_ref()
+                .and_then(|cfg| cfg.provider_list.as_deref())
+                .unwrap_or(&[]);
+            let key_vault = hello_config
+                .as_ref()
+                .map(|cfg| cfg.provider_key_vault.as_slice())
+                .unwrap_or(&[]);
+
+            let mut selected: Option<(String, Option<String>, String, usize)> = None;
+            'outer: for p in providers {
+                for m in &p.models {
+                    if m.capabilities.family.as_deref() == Some("text-embedding") {
+                        let api_key = key_vault
+                            .iter()
+                            .find(|k| k.provider_id == p.id)
+                            .map(|k| k.api_key.clone());
+                        // Embedding models: max_output_tokens = vector dimension.
+                        let dim = if m.capabilities.max_output_tokens > 0 {
+                            m.capabilities.max_output_tokens as usize
+                        } else {
+                            ollama_dim
+                        };
+                        selected =
+                            Some((p.base_url.clone(), api_key, m.id.clone(), dim));
+                        break 'outer;
+                    }
+                }
+            }
+
+            match selected {
+                Some((url, key, name, dim)) => {
+                    tracing::info!(
+                        model = %name,
+                        dim,
+                        "Selected embedding model from provider list"
+                    );
+                    (url, key, name, dim)
+                }
+                None => {
+                    let url = providers
+                        .first()
+                        .map(|p| p.base_url.clone())
+                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+                    let key = key_vault.first().map(|k| k.api_key.clone());
+                    tracing::info!(
+                        "No embedding model found in provider list, \
+                         defaulting to text-embedding-3-small"
+                    );
+                    (
+                        url,
+                        key,
+                        "text-embedding-3-small".to_string(),
+                        ollama_dim,
+                    )
+                }
+            }
+        };
+
+        Box::new(
+            RemoteEmbeddingProvider::try_with_config(
+                &base_url,
+                api_key.as_deref(),
+                &model,
+                dim,
+            )
+            .map_err(|e| {
+                RuntimeError::Config(format!(
+                    "Failed to create remote embedding provider: {e}"
+                ))
+            })?,
+        )
+    };
+    let fallback_emb = Arc::new(FallbackEmbeddingProvider::new(
+        Some(ollama_primary),
+        remote_fallback,
+        EmbeddingConfig::default(),
+    ));
+    let emb_provider: Arc<dyn EmbeddingProvider> = fallback_emb;
+    tracing::info!(
+        dim = emb_provider.dimension(),
+        name = emb_provider.name(),
+        "Embedding provider initialized"
+    );
+
     // Step 4: Build tool registry + activate by manifest
     let workspace_resolver: crate::tools::workspace_resolver::SharedResolver =
         Arc::new(std::sync::RwLock::new(
@@ -542,7 +646,9 @@ async fn async_main(
     // Create shared memory session handle — tools and AgentCore share
     // the same handle. GrafeoStore is lazily initialized later via
     // init_memory_store(); session_id is updated per-turn in loop_.rs.
-    let memory_session = Arc::new(crate::memory::MemorySessionHandle::new());
+    let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
+        Some(emb_provider.clone()),
+    ));
 
     let mut registry = ToolRegistry::new();
     for tool in builtin::all_builtin_tools(
@@ -816,6 +922,10 @@ async fn async_main(
             // Inject shared MemorySessionHandle so tools can access
             // the Grafeo store once initialized and session_id at runtime.
             c.memory_session = Some(memory_session);
+
+            // Inject embedding provider (built from LLM provider registry)
+            // so init_memory_store can use the correct vector dimension.
+            c.embedding_provider = Some(emb_provider.clone());
 
             // Initialize Grafeo memory store at agent workspace
             c.init_memory_store(work_dir_path);
@@ -1375,6 +1485,10 @@ async fn async_main(
             chunk_tx,
             conversation_session,
         );
+
+        // Inject embedding provider and memory session before store init.
+        agent_loop.core.embedding_provider = Some(emb_provider.clone());
+        agent_loop.core.memory_session = Some(memory_session);
 
         // Initialize Grafeo memory store at agent workspace
         agent_loop.init_memory_store(work_dir_path);

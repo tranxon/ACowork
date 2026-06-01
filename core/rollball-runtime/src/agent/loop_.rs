@@ -466,14 +466,18 @@ impl AgentLoop {
             }
         }
 
-        let query = rollball_memory::MemoryQuery::auto_inject(
+        let mut query = rollball_memory::MemoryQuery::auto_inject(
             user_message.to_string(),
             current_session_id,
         );
 
+        // Pass embedding provider from AgentCore so retrieve() can auto-generate
+        // query embeddings on-demand (Ollama local → Remote fallback chain).
+        let emb_provider = self.core.embedding_provider.as_deref();
+
         // P2-4 fix: Use retrieve + inject separately (instead of process_turn)
         // so we can capture the node IDs of retrieved memories for traceability.
-        match manager.retrieve(store, &query).await {
+        match manager.retrieve(store, &mut query, emb_provider).await {
             Ok(retrieval) => {
                 // Capture node IDs before inject (inject discards the RetrievalResult)
                 let memory_ids: Vec<String> = retrieval
@@ -604,16 +608,17 @@ impl AgentLoop {
     ///
     /// P2-1 fix: extracted common pattern from 3 duplicate code blocks
     /// (trimmed distillation, switch-session distillation, session-close distillation).
-    fn write_distilled_to_grafeo(
+    async fn write_distilled_to_grafeo(
         memory_store: &Option<std::sync::Arc<rollball_grafeo::GrafeoStore>>,
         episode: &crate::episode_distill::DistilledEpisode,
         context: &str, // for logging: "trimmed", "switch-session", "session"
+        embedding_provider: Option<&dyn crate::embedding::EmbeddingProvider>,
     ) {
         if let Some(store) = memory_store {
             let manager = crate::memory::MemoryManager::new(
                 crate::memory::MemoryManagerConfig::default(),
             );
-            if let Err(e) = manager.record_distilled(store, episode) {
+            if let Err(e) = manager.record_distilled(store, episode, embedding_provider).await {
                 tracing::warn!(
                     error = %e,
                     distill_context = context,
@@ -706,7 +711,8 @@ impl AgentLoop {
                         &summary,
                         &session_id,
                         &memory_store,
-                    );
+                        self.core.embedding_provider.as_deref(),
+                    ).await;
 
                     // Mark session as compacted (zero new messages since compaction)
                     self.session.is_compacted = true;
@@ -890,6 +896,7 @@ impl AgentLoop {
             let memory_store = self.core.memory_store().cloned();
             let min_distill_chars = self.core.config.min_distill_chars;
             let distill_max_tokens = self.core.config.distill_max_tokens;
+            let emb_provider = self.core.embedding_provider.clone();
 
             tokio::spawn(async move {
                 // Distill the old session
@@ -905,7 +912,12 @@ impl AgentLoop {
                 {
                     Ok(episode) => {
                         // Write distilled episode to Grafeo memory store (P2-1: using shared helper)
-                        Self::write_distilled_to_grafeo(&memory_store, &episode, "switch-session");
+                        Self::write_distilled_to_grafeo(
+                            &memory_store,
+                            &episode,
+                            "switch-session",
+                            emb_provider.as_deref(),
+                        ).await;
                         tracing::info!(
                             summary = %episode.summary,
                             summary_len = episode.summary.len(),
@@ -967,6 +979,7 @@ impl AgentLoop {
             } else {
                 let provider = self.core.provider.clone();
                 let memory_store = self.core.memory_store().cloned();
+                let emb_provider = self.core.embedding_provider.clone();
                 let content_size = tail_messages
                     .iter()
                     .map(|m| m.content.len() as u64)
@@ -998,7 +1011,8 @@ impl AgentLoop {
                                 &summary,
                                 &session_id,
                                 &memory_store,
-                            );
+                                emb_provider.as_deref(),
+                            ).await;
                             tracing::info!(
                                 session_id = %session_id,
                                 summary_len = summary.len(),

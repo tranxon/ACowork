@@ -5,7 +5,7 @@
 //! against the expected index dimension.
 
 use crate::error::{GrafeoError, Result};
-use crate::types::EMBEDDING_DIM;
+use crate::types::DEFAULT_EMBEDDING_DIM;
 
 // ---------------------------------------------------------------------------
 // HNSW configuration
@@ -60,8 +60,9 @@ pub struct HnswConfig {
 
     /// Expected vector dimensionality.
     ///
-    /// Must match the embedding model output (384 for all-MiniLM-L6-v2).
-    /// Default: 384.
+    /// Must match the embedding model output.  Default: 384.
+    /// Actual dimension depends on the active embedding provider
+    /// and is configured via [`GrafeoConfig::embedding_dim`].
     pub dim: usize,
 }
 
@@ -71,7 +72,7 @@ impl Default for HnswConfig {
             m: HNSW_DEFAULT_M,
             ef_construction: HNSW_DEFAULT_EF_CONSTRUCTION,
             ef_search: HNSW_DEFAULT_EF_SEARCH,
-            dim: EMBEDDING_DIM,
+            dim: DEFAULT_EMBEDDING_DIM,
         }
     }
 }
@@ -110,12 +111,13 @@ impl HnswConfig {
 
 /// Validate that an embedding vector has the expected dimension.
 ///
-/// The expected dimension is [`EMBEDDING_DIM`] (384 for all-MiniLM-L6-v2).
+/// The expected dimension is provided by the caller (typically from the
+/// active embedding provider), defaulting to [`DEFAULT_EMBEDDING_DIM`].
 /// Returns [`GrafeoError::InvalidDimension`] if the length does not match.
-pub fn validate_embedding_dim(embedding: &[f32]) -> Result<()> {
-    if embedding.len() != EMBEDDING_DIM {
+pub fn validate_embedding_dim(embedding: &[f32], expected_dim: usize) -> Result<()> {
+    if embedding.len() != expected_dim {
         return Err(GrafeoError::InvalidDimension {
-            expected: EMBEDDING_DIM,
+            expected: expected_dim,
             got: embedding.len(),
         });
     }
@@ -132,7 +134,7 @@ mod tests {
         assert_eq!(config.m, 16);
         assert_eq!(config.ef_construction, 100);
         assert_eq!(config.ef_search, 64);
-        assert_eq!(config.dim, EMBEDDING_DIM);
+        assert_eq!(config.dim, DEFAULT_EMBEDDING_DIM);
     }
 
     #[test]
@@ -149,17 +151,19 @@ mod tests {
 
     #[test]
     fn test_validate_embedding_dim_ok() {
-        let embedding = vec![0.0f32; EMBEDDING_DIM];
-        assert!(validate_embedding_dim(&embedding).is_ok());
+        let dim = 384;
+        let embedding = vec![0.0f32; dim];
+        assert!(validate_embedding_dim(&embedding, dim).is_ok());
     }
 
     #[test]
     fn test_validate_embedding_dim_wrong() {
+        let dim = 384;
         let embedding = vec![0.0f32; 128];
-        let err = validate_embedding_dim(&embedding).unwrap_err();
+        let err = validate_embedding_dim(&embedding, dim).unwrap_err();
         match err {
             GrafeoError::InvalidDimension { expected, got } => {
-                assert_eq!(expected, EMBEDDING_DIM);
+                assert_eq!(expected, dim);
                 assert_eq!(got, 128);
             }
             other => panic!("expected InvalidDimension, got: {other}"),
@@ -168,11 +172,12 @@ mod tests {
 
     #[test]
     fn test_validate_embedding_dim_empty() {
+        let dim = 384;
         let embedding: Vec<f32> = Vec::new();
-        let err = validate_embedding_dim(&embedding).unwrap_err();
+        let err = validate_embedding_dim(&embedding, dim).unwrap_err();
         match err {
             GrafeoError::InvalidDimension { expected, got } => {
-                assert_eq!(expected, EMBEDDING_DIM);
+                assert_eq!(expected, dim);
                 assert_eq!(got, 0);
             }
             other => panic!("expected InvalidDimension, got: {other}"),

@@ -49,7 +49,7 @@ pub use spreading::{
 };
 pub use export::FilteredNode;
 pub use types::{
-    labels, edge_types, EMBEDDING_DIM,
+    labels, edge_types, DEFAULT_EMBEDDING_DIM, GrafeoConfig,
     AutobioCategory, AutobiographicalNode,
     Episode, KnowledgeNode, KnowledgeSubType,
     NodeStatus, ProceduralNode,

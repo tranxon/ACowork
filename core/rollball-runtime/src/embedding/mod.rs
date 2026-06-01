@@ -1,16 +1,14 @@
 //! Embedding generation module
 //!
-//! Provides embedding generation with two backends:
-//! - Local (feature-gated: `local-embeddings`): Uses ONNX Runtime + all-MiniLM-L6-v2
-//! - Remote: Uses OpenAI text-embedding-3-small as fallback
+//! Provides embedding generation with:
+//! - Remote: OpenAI-compatible API (text-embedding-3-small, etc.)
+//! - Extensible via [`EmbeddingProvider`] trait for custom/local backends
 //!
-//! Automatic switching: local → remote when local fails or is unavailable.
+//! Fallback chain: primary (e.g., Ollama local) → remote API → text_search only.
 //! Remote fallback triggers after 200ms timeout or 2 consecutive failures.
 
+pub mod ollama;
 pub mod remote;
-
-#[cfg(feature = "local-embeddings")]
-pub mod local;
 
 use async_trait::async_trait;
 
@@ -214,7 +212,14 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
     }
 
     fn dimension(&self) -> usize {
-        if let Some(ref primary) = self.primary {
+        // When primary is active and not degraded, use its dimension
+        // (Grafeo index was initialised with this value).
+        // When primary has been skipped due to consecutive failures,
+        // return the fallback dimension — though vector search may degrade
+        // to text-only if the stored index dimension differs.
+        if let Some(ref primary) = self.primary
+            && !self.should_skip_primary()
+        {
             primary.dimension()
         } else {
             self.fallback.dimension()

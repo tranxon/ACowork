@@ -172,7 +172,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::EMBEDDING_DIM;
+    use crate::types::DEFAULT_EMBEDDING_DIM;
     use chrono::TimeDelta;
     use std::collections::HashMap;
 
@@ -191,7 +191,7 @@ mod tests {
             turn_index: 0,
             role: "user".to_string(),
             content: content.to_string(),
-            embedding: Some(vec![0.1f32; EMBEDDING_DIM]),
+            embedding: Some(vec![0.1f32; DEFAULT_EMBEDDING_DIM]),
             timestamp: ts,
             consolidated: false,
             metadata: HashMap::new(),
@@ -259,13 +259,13 @@ mod tests {
         let base = test_dt();
 
         let mut ep1 = make_episode("s1", "vector one", base);
-        ep1.embedding = Some(vec![1.0f32; EMBEDDING_DIM]);
+        ep1.embedding = Some(vec![1.0f32; DEFAULT_EMBEDDING_DIM]);
         let mut ep2 = make_episode("s1", "vector two", base);
-        ep2.embedding = Some(vec![0.0f32; EMBEDDING_DIM]);
+        ep2.embedding = Some(vec![0.0f32; DEFAULT_EMBEDDING_DIM]);
         store.store_episode(&ep1).unwrap();
         store.store_episode(&ep2).unwrap();
 
-        let query = vec![0.9f32; EMBEDDING_DIM];
+        let query = vec![0.9f32; DEFAULT_EMBEDDING_DIM];
         let results = store.search_episodes_by_embedding(&query, 10).unwrap();
         assert!(!results.is_empty());
         // The episode with embedding closer to the query should rank higher.

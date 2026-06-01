@@ -18,8 +18,28 @@ use crate::error::{GrafeoError, Result};
 // Embedding dimension
 // ---------------------------------------------------------------------------
 
-/// Embedding vector dimension (all-MiniLM-L6-v2).
-pub const EMBEDDING_DIM: usize = 384;
+/// Default embedding vector dimension (384d).
+/// When an embedding provider is available, the actual dimension is configured
+/// via [`GrafeoConfig::embedding_dim`] at [`GrafeoStore::open`] time.
+pub const DEFAULT_EMBEDDING_DIM: usize = 384;
+
+/// Configuration for opening a Grafeo persistence store.
+pub struct GrafeoConfig {
+    /// Filesystem path to the `.grafeo` database directory.
+    pub db_path: std::path::PathBuf,
+    /// Embedding vector dimension, obtained from the active [`EmbeddingProvider`].
+    /// Falls back to [`DEFAULT_EMBEDDING_DIM`] when no provider is available.
+    pub embedding_dim: usize,
+}
+
+impl Default for GrafeoConfig {
+    fn default() -> Self {
+        Self {
+            db_path: std::path::PathBuf::from(".grafeo"),
+            embedding_dim: DEFAULT_EMBEDDING_DIM,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Node labels
@@ -647,7 +667,7 @@ mod tests {
     }
 
     fn test_embedding() -> Vec<f32> {
-        vec![0.1f32; EMBEDDING_DIM]
+        vec![0.1f32; DEFAULT_EMBEDDING_DIM]
     }
 
     // =====================================================================
@@ -684,7 +704,7 @@ mod tests {
         assert_eq!(restored.importance, original.importance);
         assert_eq!(restored.metadata, original.metadata);
         assert!(restored.embedding.is_some());
-        assert_eq!(restored.embedding.unwrap().len(), EMBEDDING_DIM);
+        assert_eq!(restored.embedding.unwrap().len(), DEFAULT_EMBEDDING_DIM);
     }
 
     #[test]
