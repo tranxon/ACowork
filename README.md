@@ -1,63 +1,125 @@
 <h1 align="center">RollBall.AI — Agent as APP</h1>
 
 <p align="center">
+  🏗️ <strong>Declarative Agent Platform · Decentralized · High-Security · Scalable</strong><br>
   ⚡️ <strong>Easy to develop an agent for everyone.</strong><br>
   ⚡️ <strong>Easy to deliver an agent to everyone.</strong><br>
   ⚡️ <strong>Easy to deploy an agent everywhere.</strong>
 </p>
 
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-ff6600" alt="Language" /></a>
+  <a href="./docs/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
+  <a href="./docs/module-design/00-overview.md"><img src="https://img.shields.io/badge/status-design%20phase-yellow" alt="Status" /></a>
+</p>
+
+<p align="center">
+  <a href="README.zh.md">简体中文</a>
+</p>
+
 ---
 
-RollBall.AI 是一个去中心化、高安全、可扩展的 AI Agent 运行时平台。核心思想借鉴 Android 模型——每个 Agent 是一个独立的声明式应用包（`.agent`），由统一的 Agent Runtime 加载执行，运行在客户端并由轻量级 Gateway 管理生命周期。
+RollBall.AI is a **decentralized, high-security, scalable AI Agent runtime platform** modeled after Android. Every Agent is an independent declarative application package (`.agent`) loaded by a universal Agent Runtime binary and managed by a lightweight Gateway.
 
-Rollball **同时服务于两类用户**：开发者用声明式包（manifest + prompt + SKILL.md，无需写代码）构建 Agent，终端用户从仓库安装使用。签名工具链 + DevMode + 发布向导构成完整的开发者工具链，让"会写 prompt 就能做 Agent"成为可能。
+RollBall **serves two types of users**: developers build agents declaratively (manifest + prompt + SKILL.md, no coding required), and end-users install agents from a repository. The signing toolchain + DevMode + publishing wizard form a complete developer toolkit — making **"can write prompt = can build Agent"** a reality.
 
-每个 Agent 都是独立的"数字人"：拥有自己的运行时进程、私有记忆、工作区和配置，对用户保有完全独立的个性化认知。Agent 可在用户间自由分享——Personal/Sensitive 数据自动剥离，只带走 Agent 能力，不带走用户记忆。
+Every Agent is an independent **"digital being"**: its own runtime process, private memory, workspace, and configuration — fully independent personalized cognition. Agents can be freely shared between users — Personal/Sensitive data is automatically stripped during packaging, taking only the agent's capabilities away, leaving user's private memories behind.
 
-## 开发者友好
+---
 
-- **零门槛开发** — manifest.toml + prompt + SKILL.md 即可构建 Agent，不需要 Rust/Python 编程。SKILL.md 兼容 agentskills.io 开放标准，直接复用社区技能。
-- **完整调试工具链** — Desktop App DevMode 提供对话调试、单步执行、断点、录制回放；Skill 热加载（修改 SKILL.md 无需重启）；Provider 动态切换（真实 LLM ↔ 本地模型）。
-- **签名发布闭环** — rollball-keygen / rollball-sign / rollball-verify 工具链 → 发布向导 → 远程仓库分发。
-- **渐进增强** — 从声明式 Skill 起步（Phase 1），后续进阶到 WASM 自定义工具（Phase 2+）。
+## 🔥 Why RollBall?
 
-## 终端用户特性
+| Dimension | LangChain / CrewAI | OpenCode / OpenClaw | RollBall.AI |
+|-----------|--------------------|---------------------|-------------|
+| **Architecture** | Library/Framework: your code calls its API | Coding Agent (TUI/CLI): single-agent, task-focused | **Agent Platform**: declarative `.agent` package, universal Runtime binary |
+| **Agent Model** | Code-defined agents (Python/TS) | Built-in agents (build/plan), skill-based | **Declarative agents**: config + prompt + SKILL.md, zero coding |
+| **Agent Isolation** | In-process (threads/coroutines) | Process-level, single runtime | **Process-level**: each Agent independent process + private Grafeo |
+| **LLM Connection** | Your code manages LLM calls | Direct connection per agent | **Direct Connect**: each Agent talks directly to LLM API, not proxied |
+| **Memory System** | Simple RAG or vector store | Chat-scoped / plugin-reliant | **Biomimetic Layered**: 3-tier, 5-class (Grafeo graph database) |
+| **Privacy Sharing** | No privacy boundary | Package-level sharing | **Zone Isolation**: Personal/Sensitive data auto-stripped on share |
+| **Distribution** | pip package / Docker image | npm / brew / script install | **`.agent` packages**: signed, registry distribution, APK-like |
+| **Multi-Agent** | Code-level orchestration | Limited (built-in agents) | **Intent mechanism**: Capability Registry + message routing |
+| **Security** | Framework-level checks | Tool-level approval gates | **3-layer**: Package signing + Process sandbox + WASM sandbox |
 
-- **开箱即用** — 从仓库安装 Agent，配置 API Key，直接使用。
-- **隐私安全分享** — Agent 可自由分享，Personal/Sensitive 节点自动剥离，只带走"Agent 能力"而非"用户记忆"。
-- **多 Agent 协作** — 通过 Intent 机制，日历 Agent 和天气 Agent 可以协同工作。
-- **跨设备一致** — Grafeo 全 Zone 跨设备同步，身份/偏好等私密数据由平台托管（明文存储，与主流互联网平台一致）。Zone 只控制打包分享时的边界，不影响跨设备同步范围。
+---
 
-## 核心架构
+## 🚀 Quick Start
 
-| Android | RollBall | 作用 |
+### Installation
+
+```bash
+# Cargo (Rust toolchain)
+cargo install rollball-gateway rollball-runtime
+
+# Or build from source
+git clone https://github.com/rollball/agent-study.git
+cd core && cargo build --release
+```
+
+### Write Your First Agent
+
+All you need is a `manifest.toml` + a prompt file:
+
+```toml
+# com.example.qa-agent/manifest.toml
+[package]
+id = "com.example.qa-agent"
+name = "Quality Assurance"
+display_name = "QA-Tom"
+role = "QA"
+version = "1.0.0"
+
+[llm]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[permissions]
+tools = ["web_search", "read_file", "write_file"]
+```
+
+```markdown
+# prompts/system.md
+You are a QA Agent, helping users with quality management and code review.
+```
+
+### Package, Sign, and Run
+
+```bash
+# Package into .agent bundle
+rollball-sign package ./qa-agent/ -o qa-agent.agent
+
+# Install to local Gateway and run
+rollball-gateway install qa-agent.agent
+rollball-gateway start com.example.qa-agent
+
+# Chat mode
+rollball-gateway chat --agent com.example.qa-agent "Help me review this code"
+```
+
+> **Status**: The project is in **design phase**. Core Rust crate architecture is defined, detailed design docs are complete, but implementation has not started. The above is the target API design.
+
+---
+
+## 🏛️ Core Architecture
+
+### Android Analogy
+
+| Android | RollBall | Role |
 |---------|----------|------|
-| ART | Agent Runtime | 通用执行引擎（平台唯一二进制） |
-| APK | `.agent` 包 | 声明式打包（config + prompts + skills，无可执行代码） |
-| APK Signature | Signing Block | 包签名，验证完整性和来源 |
-| AMS | Gateway | 生命周期管理（安装、启停、预算、速率） |
-| Binder IPC | Gateway Service API | 进程间通信 |
-| ContentProvider | 系统 Agent | 系统级数据服务（身份、偏好） |
-| PMS | Package Manager | 安装/卸载/升级 |
+| ART | Agent Runtime | Universal execution engine (single binary) |
+| APK | `.agent` package | Declarative bundle (config + prompts + skills, no executable code) |
+| APK Signature | Signing Block | Package signing, verifies integrity and origin |
+| AMS | Gateway | Lifecycle management (install, start/stop, budget, rate) |
+| Binder IPC | Gateway Service API | Inter-process communication |
+| ContentProvider | System Agent | System-level data service (identity, preferences) |
+| PMS | Package Manager | Install/uninstall/upgrade |
 
-## 核心特性
-
-- **标准化打包** — Agent 以 `.agent` 压缩包分发，内含 manifest.toml、Prompts、Skills、工具声明，不含可执行文件。所有包必须签名，Gateway 安装时强制验证。
-- **统一执行引擎** — Agent Runtime 是平台提供的唯一二进制，负责加载 `.agent` 包并执行 LLM 交互、工具调度、记忆读写。Agent 直连 LLM API，不经 Gateway 代理。
-- **进程级隔离** — 每个 Agent 由 Gateway 启动为独立进程，拥有独立工作区、私有 Grafeo 数据库、文件系统隔离、可选资源限制。
-- **Agent 自治** — Agent 进程内直连 LLM、自主执行工具、自主管理权限校验。Gateway 只管必须集中化的事（Key 分发、Intent 路由、预算协调）。
-- **仿生 Memory** — 每个 Agent 内嵌私有 Grafeo，三层五类仿生分层（瞬态/经历/沉淀 + 工作记忆/情景/语义/程序/自传体），系统 Agent 提供身份与偏好等系统级数据服务，全部 Zone 跨设备完整同步，Zone 语义仅作用于打包分享边界。
-- **用户间隐私安全分享** — Agent 可自由分享给其他用户，Personal/Sensitive 节点在打包时自动剥离，只带走"Agent 能力"（Skill、行事风格、知识）而非"用户记忆"（偏好、历史、私密信息）。
-- **Intent 通信** — 跨 Agent 通信通过 Gateway 的 Intent Router，支持 Capability Registry、同步/异步模式、变更订阅（observe）。
-- **权限声明与授权** — Agent 在 manifest 中声明所需权限，Gateway 在启动时配置沙箱，Agent 运行时自主校验。
-- **跨平台支持** — `.agent` 包格式和 Gateway Service API 合同跨平台统一，各平台运行时机制按特性适配。
-- **全链路开发框架** — Desktop App（Tauri）提供对话调试、Skill 热加载、Provider 动态切换、录制回放、Agent 克隆与发布向导。
-
-## 总体架构
+### System Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                        Gateway（常驻）                        │
+│                      Gateway (Daemon)                        │
 │                                                              │
 │  ┌────────────┐ ┌────────────┐ ┌───────────┐ ┌───────────┐ │
 │  │ Package    │ │ Lifecycle  │ │ Intent    │ │ Rate      │ │
@@ -77,119 +139,228 @@ Rollball **同时服务于两类用户**：开发者用声明式包（manifest +
        ▼                   ▼                   ▼
 ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
 │ Agent Runtime   │ │ Agent Runtime   │ │ Agent Runtime   │
-│ (统一二进制)     │ │ (统一二进制)     │ │ (统一二进制)     │
+│ (Single Binary) │ │ (Single Binary) │ │ (Single Binary) │
 │                 │ │                 │ │                 │
 │ ┌─────────────┐│ │ ┌─────────────┐│ │ ┌─────────────┐│
-│ │ 系统 Agent  ││ │ │ 天气 Agent  ││ │ │ 日历 Agent  ││
-│ │(com.rollball ││ │ │ (config +   ││ │ │ (config +   ││
-│ │  .system)   ││ │ │  prompt +   ││ │ │  prompt +   ││
+│ │ System Agent││ │ │ Weather     ││ │ │ Calendar    ││
+│ │(com.rollball││ │ │ Agent       ││ │ │ Agent       ││
+│ │  .system)  ││ │ │ (config +   ││ │ │ (config +   ││
+│ │             ││ │ │  prompt +   ││ │ │  prompt +   ││
 │ │             ││ │ │  skills)    ││ │ │  skills)    ││
 │ └─────────────┘│ │ └─────────────┘│ │ └─────────────┘│
 │                 │ │                 │ │                 │
-│ ✅ 私有 Grafeo │ │ ✅ 私有 Grafeo │ │ ✅ 私有 Grafeo │
-│ ✅ LLM 直连    │ │ ✅ LLM 直连    │ │ ✅ LLM 直连    │
-│ ✅ Tools 执行  │ │ ✅ Tools 执行  │ │ ✅ Tools 执行  │
-│ ⭐ 系统特权   │ │                 │ │                 │
+│ ✅ Private     │ │ ✅ Private     │ │ ✅ Private     │
+│    Grafeo      │ │    Grafeo      │ │    Grafeo      │
+│ ✅ Direct LLM  │ │ ✅ Direct LLM  │ │ ✅ Direct LLM  │
+│ ✅ Tools Exec  │ │ ✅ Tools Exec  │ │ ✅ Tools Exec  │
+│ ⭐ System      │ │                 │ │                 │
+│    Privilege   │ │                 │ │                 │
 └─────────────────┘ └─────────────────┘ └─────────────────┘
 ```
 
-## `.agent` 包结构
+---
+
+## ✨ Core Features
+
+### 🧩 Standardized Packaging
+Agents are distributed as `.agent` archives containing manifest.toml, Prompts, Skills, and tool declarations — **no executable code**. Every package must be signed, and Gateway enforces verification at install time.
 
 ```
 <agent_id>.agent
-├── manifest.toml          # 元数据 + LLM 配置 + 权限 + 工具声明
-├── prompts/               # System prompt 模板
-├── config/                # 默认配置文件
-├── data/                  # 初始数据
-├── skills/                # Skill 定义（YAML frontmatter + Markdown）
-├── tools/                 # 自定义工具（WASM，可选）
-└── resources/             # 图标、本地化等
+├── manifest.toml          # Metadata + LLM config + permissions + tool declarations
+├── prompts/               # System prompt templates
+├── config/                # Default configuration
+├── data/                  # Initial data
+├── skills/                # Skill definitions (YAML frontmatter + Markdown)
+├── tools/                 # Custom tools (WASM, optional)
+└── resources/             # Icons, i18n, etc.
 ```
 
-包必须签名（APK Signature Scheme v2 思路），Phase 1 支持两类签名身份：Developer（自签名）和 Platform（系统 Agent 专用）。
+Packages must be signed (inspired by APK Signature Scheme v2). Phase 1 supports two signing identities: Developer (self-signed) and Platform (system Agent only).
 
-## Agent 开发流程
+### ⚙️ Universal Execution Engine
+The Agent Runtime is the platform's **single binary**, responsible for loading `.agent` packages and executing LLM interactions, tool dispatch, and memory read/write. Agents **connect directly to LLM APIs** — not proxied through Gateway — reducing latency and ensuring decentralization.
+
+### 🔒 Process-Level Isolation
+Each Agent is spawned by Gateway as an **independent process**, each with:
+- Its own workspace
+- A private Grafeo graph database
+- Filesystem isolation
+- Optional resource limits (CPU/memory/network)
+
+### 🧠 Biomimetic Memory System
+Every Agent embeds a private Grafeo, implementing **3-tier, 5-class** biomimetic layered memory:
+
+| Tier | Content | Lifecycle | Description |
+|------|---------|-----------|-------------|
+| 🟢 Transient | Working memory | Single session | Conversation history, LLM context window |
+| 🟡 Experiential | Episodic memory | Persistent | Episode nodes, associative diffusion retrieval, content classification |
+| 🔴 Sediment | Semantic/Procedural/Autobiographical | Long-term | Knowledge graph, cross-skill common behavior, 6-dim self-cognition |
+
+- **Grafeo native HNSW vector index + BM25 full-text search + hybrid search**
+- **Associative diffusion retrieval**: diffuses from user query along the graph — not a simple Top-K semantic match
+- **Compaction as Distillation**: context compression and memory distillation unified in a single LLM call
+- Every Agent has a completely independent private Grafeo — no shared database
+
+### 🔄 Privacy-Safe Sharing
+Agents can be freely shared with other users. **Personal/Sensitive nodes are automatically stripped during packaging**, taking only the agent's capabilities (skills, behavior style, knowledge), not the user's memories (preferences, history, private information). Zone semantics apply to the packaging/sharing boundary and do not affect cross-device sync.
+
+### 💬 Intent Communication
+Cross-Agent communication is handled via Gateway's Intent Router, supporting:
+- **Capability Registry**: Agents declare what they "can do"
+- **Sync/Async modes**: request-response and event-driven
+- **Change subscription (observe)**: Agents can subscribe to state changes of other Agents
+
+### 🛡️ Three-Layer Security
+1. **Package signing**: all `.agent` packages must be signed, verified at install
+2. **Process sandbox**: OS-level process isolation + filesystem isolation
+3. **WASM sandbox**: custom tools run in Wasmtime sandbox, cannot escape
+
+### 🛠️ Full-Stack Dev Framework
+Desktop App (Tauri v2) provides:
+- Conversational debugging (real LLM or local model)
+- Skill hot-reload (modify SKILL.md without restart)
+- Dynamic Provider switching
+- Breakpoints / recording & replay
+- Agent cloning & publishing wizard
+
+---
+
+## 📦 Agent Development Workflow
 
 ```
-① 编写
-  manifest.toml          # 元数据、权限、LLM 配置
-  prompts/               # System prompt 模板
-  skills/SKILL.md        # 技能定义（兼容 agentskills.io）
-  可选：tools/*.wasm     # WASM 自定义工具
+① Authoring
+  manifest.toml          # Metadata, permissions, LLM config
+  prompts/               # System prompt templates
+  skills/SKILL.md        # Skill definitions (agentskills.io compatible)
+  Optional: tools/*.wasm # WASM custom tools
 
-② 签名
-  rollball-keygen        # 生成 Developer Key
-  rollball-sign          # 签名 .agent 包
+② Signing
+  rollball-keygen        # Generate Developer Key
+  rollball-sign          # Sign the .agent package
 
-③ 调试
+③ Debugging
   Desktop App DevMode
-    ├─ 安装到本地（Gateway 验证签名）
-    ├─ 对话调试（真实 LLM 或本地模型）
-    ├─ 断点 / 录制回放
-    ├─ SKILL.md 热加载（修改即时生效）
-    └─ 单步执行 Skill 步骤
+    ├─ Install locally (Gateway verifies signature)
+    ├─ Conversational debug (real LLM or local model)
+    ├─ Breakpoints / recording & replay
+    ├─ SKILL.md hot-reload (edit takes effect immediately)
+    └─ Step-through Skill execution
 
-④ 发布
-  发布向导 → 远程仓库（Phase 2+ 仓库分发）
-  或直接分享 .agent 文件（接收方验证签名后安装）
+④ Publishing
+  Publishing wizard → remote registry (Phase 2+)
+  Or share the .agent file directly (recipient verifies signature on install)
 ```
 
-开发者不需要写代码（除非进阶到 WASM 工具）。整个流程从编写到调试到发布，平台提供工具支撑。
+Developers **don't need to write code** (unless they want to build WASM tools). The entire pipeline from authoring to debugging to publishing is supported by the platform.
 
-## Memory 仿生分层
+---
 
-| 层级 | 内容 | 生命周期 | 说明 |
-|------|------|---------|------|
-| 瞬态层 | 工作记忆 | 单次会话 | 对话历史、LLM 上下文窗口 |
-| 经历层 | 情景记忆 | 持久化 | Episode 节点、关联扩散检索、内容分类压缩 |
-| 沉淀层 | 语义记忆 + 程序记忆 + 自传体记忆 | 长期 | 知识图谱、跨 Skill 通用行为、六维度自我认知 |
+## 📈 Project Status & Roadmap
 
-每个 Agent 拥有完全独立的私有 Grafeo，不存在公共数据库。跨 Agent 数据共享通过 Intent 查询和系统 Agent 服务实现。Grafeo Zone 是打包边界的标记（控制分享时 Personal/Sensitive 数据是否剥离），跨设备同步不受 Zone 影响——全部 Zone 均完整同步。
+> **Current Status**: Design Phase. Core Rust crate architecture is defined, detailed design docs are complete, implementation has not yet started.
 
-## 设计文档
+| Phase | Scope | Status |
+|-------|-------|--------|
+| Phase 1 | Foundation + LLM interaction (MVP): package parsing, signature verification, Runtime main loop, loop detection, Tool dedup, Rate tiers, Gateway basics | 📝 Designing |
+| Phase 2 | Memory layering + System Agent: Grafeo biomimetic layers, instant extraction, associative diffusion, AutobiographicalNode | 📝 Designing |
+| Phase 3 | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate | 📝 Designing |
+| Phase 4 | Communication & coordination: Intent, Budget Tracker, Rate Limiter, Cron | 📝 Designing |
+| Phase 5 | Desktop App + dev framework: Tauri app, Debug Protocol, Skill hot-reload, recording/replay | 🔮 Planning |
+| Phase 6 | Cloud & ecosystem: Memory Sync, remote registry, Agent store | 🔮 Planning |
+| Phase 7 | Cross-platform: Windows / macOS / Android / iOS | 🔮 Planning |
 
-| 文档 | 内容 |
-|------|------|
-| [01-overview.md](./docs/01-overview.md) | 平台总纲：背景目标、核心类比、架构总览、与现有方案对比 |
-| [02-agent-package.md](./docs/02-agent-package.md) | `.agent` 包格式、签名机制、manifest.toml 架构 |
-| [03-agent-runtime.md](./docs/03-agent-runtime.md) | Agent Runtime 主循环、上下文构建、循环检测、Approval Gate |
-| [04-gateway.md](./docs/04-gateway.md) | Gateway 组件：PackageManager、Lifecycle、IntentRouter、Vault、Budget、Rate、沙箱 |
-| [05-memory.md](./docs/05-memory.md) | Memory 仿生分层：三层五类、Grafeo 知识图谱、遗忘机制、关联扩散检索 |
-| [06-communication.md](./docs/06-communication.md) | Gateway Service API + Intent 通信协议 + Capability Registry |
-| [07-system-agent.md](./docs/07-system-agent.md) | 系统 Agent：ContentProvider、冷启动身份注入、LLM 二次判断 |
-| [08-security.md](./docs/08-security.md) | 安全设计：进程隔离、文件隔离、签名验证、网络隔离、WASM 沙箱 |
-| [09-roadmap-and-scenarios.md](./docs/09-roadmap-and-scenarios.md) | 七阶段实现路线图与使用场景示例 |
-| [10-debug-protocol.md](./docs/10-debug-protocol.md) | Debug Protocol：DevMode、执行控制、断点系统、消息快照与回滚 |
-| [11-module-design.md](./docs/11-module-design.md) | 模块设计索引（rollball-core / runtime / gateway / grafeo / vault / sign） |
-| [12-tool-system.md](./docs/12-tool-system.md) | 工具系统：Built-in Tools、WASM 沙箱（Wasmtime）、Gateway Tools、平台兼容性 |
-| [13-skill-system.md](./docs/13-skill-system.md) | 技能系统：SKILL.md 格式、Grafeo 经验层、自学习闭环、模型兼容性 |
-| [14-desktop-app.md](./docs/14-desktop-app.md) | Desktop App：Tauri v2 四栏布局、系统托盘、Gateway HTTP API、开发者模式 |
+### Core Crate Architecture
 
-## 实现路线图
+RollBall adopts a **7-crate Rust workspace** architecture:
 
-| 阶段 | 内容 |
-|------|------|
-| Phase 1 | 基础框架 + LLM 交互（MVP）：包解析、签名验证、Runtime 主循环、循环检测、Tool 去重、Rate 分层、Gateway 基础 |
-| Phase 2 | Memory 分层 + 系统 Agent：Grafeo 仿生分层、即时提取、关联扩散、AutobiographicalNode、系统 Agent |
-| Phase 3 | 权限与沙箱：文件系统隔离、WASM 沙箱（Wasmtime）、Approval Gate |
-| Phase 4 | 通信与协调：Intent、Budget Tracker、Rate Limiter、Cron |
-| Phase 5 | Desktop App + 开发框架：Tauri 应用、Debug Protocol、Skill 热加载、录制回放、发布向导 |
-| Phase 6 | 云端与生态：Memory Sync、远程仓库、Agent 商店 |
-| Phase 7 | 跨平台适配：Windows / macOS / Android / iOS |
+| Crate | Responsibility | Status |
+|-------|---------------|--------|
+| [`rollball-core`](./core/rollball-core/) | Shared types, errors, config | 📝 Designing |
+| [`rollball-runtime`](./core/rollball-runtime/) | Agent Runtime: main loop, tool dispatch, Providers | 📝 Designing |
+| [`rollball-gateway`](./core/rollball-gateway/) | Gateway: package management, lifecycle, Intent routing | 📝 Designing |
+| [`rollball-grafeo`](./core/rollball-grafeo/) | Graph database engine: HNSW index, BM25 search, ACID transactions | 📝 Designing |
+| [`rollball-memory`](./core/rollball-memory/) | Memory management: MemoryStore trait, Compaction scheduling | 📝 Designing |
+| [`rollball-vault`](./core/rollball-vault/) | Encrypted key-value store | 📝 Designing |
+| [`rollball-sign`](./core/rollball-sign/) | Package signing & verification | 📝 Designing |
 
-## 仓库结构
+---
 
-```
-agent-study/
-├── docs/                    # 架构设计文档（v3.x）
-├── docs/module-design/      # 模块设计子文档
-├── ref-doc/                 # 参考文档（ZeroClaw 学习材料等）
-├── AGENTS.md                # 项目指引
-└── README.md                # 本文件
-```
+## 📚 Design Documentation
 
-> 本仓库为设计研究阶段，实现尚未启动。`zeroclaw/` 目录为参考实现，非 RollBall.AI 设计的 Source of Truth。
+> Full architecture design docs live in [`docs/design/`](./docs/design/), module-level design in [`docs/module-design/`](./docs/module-design/).
 
-## License
+| Doc | Content |
+|-----|---------|
+| [01-overview.md](./docs/design/01-overview.md) | Platform overview: vision, core analogy, architecture, comparison |
+| [02-agent-package.md](./docs/design/02-agent-package.md) | `.agent` package format, signing, manifest.toml |
+| [03-agent-runtime.md](./docs/design/03-agent-runtime.md) | Runtime main loop, context building, loop detection, Approval Gate |
+| [04-gateway.md](./docs/design/04-gateway.md) | Gateway: PackageManager, Lifecycle, IntentRouter, Vault, Budget, sandbox |
+| [05-memory.md](./docs/design/05-memory.md) | Biomimetic memory: 3-tier 5-class, Grafeo, forgetting, associative retrieval |
+| [06-communication.md](./docs/design/06-communication.md) | Gateway Service API + Intent protocol + Capability Registry |
+| [07-system-agent.md](./docs/design/07-system-agent.md) | System Agent: ContentProvider, cold-start identity injection |
+| [08-security.md](./docs/design/08-security.md) | Security: process isolation, filesystem isolation, signing, WASM sandbox |
+| [10-debug-protocol.md](./docs/design/10-debug-protocol.md) | Debug Protocol: DevMode, execution control, breakpoints, snapshots |
+| [12-tool-system.md](./docs/design/12-tool-system.md) | Tool system: Built-in, WASM sandbox, Gateway Tools |
+| [13-skill-system.md](./docs/design/13-skill-system.md) | Skill system: SKILL.md format, Grafeo experience layer, self-learning |
+| [14-desktop-app.md](./docs/design/14-desktop-app.md) | Desktop App: Tauri v2, system tray, DevMode |
+| [15-conversation-persistence.md](./docs/design/15-conversation-persistence.md) | Conversation persistence: Session Actor, JSONL, Token budget |
 
-Apache-2.0
+### Architecture Decision Records (ADR)
+
+| Doc | Decision |
+|-----|----------|
+| [ADR-009](./docs/adr/ADR-009-gateway-workspace-isolation.md) | Gateway workspace isolation |
+| [ADR-010](./docs/adr/ADR-010-context-compression-simplification.md) | Context compression simplification |
+| [ADR-011](./docs/adr/ADR-011-compaction-as-distillation.md) | Compaction as Distillation |
+
+### Module-Level Design
+
+| Doc | Content |
+|-----|---------|
+| [00-overview.md](./docs/module-design/00-overview.md) | Module overview: 7-crate workspace structure |
+| [01-core.md](./docs/module-design/01-core.md) | rollball-core design |
+| [02-runtime.md](./docs/module-design/02-runtime.md) | rollball-runtime design |
+| [03-gateway.md](./docs/module-design/03-gateway.md) | rollball-gateway design |
+| [04-grafeo.md](./docs/module-design/04-grafeo.md) | rollball-grafeo design |
+| [05-vault-sign.md](./docs/module-design/05-vault-sign.md) | rollball-vault / sign design |
+
+---
+
+## 🧪 References & Acknowledgments
+
+RollBall.AI's design is deeply inspired by the following open-source projects:
+
+| Project | Domain | Inspiration |
+|---------|--------|-------------|
+| [ZeroClaw 🦀](https://github.com/zeroclaw-labs/zeroclaw) | Agent Runtime | Trait-driven architecture, security decorator pattern, streaming parser |
+| [Grafeo](https://github.com/GrafeoDB/grafeo) | Graph Database | HNSW vector index, BM25 full-text search, hybrid search |
+| [Mem0](https://github.com/mem0ai/mem0) | Memory Layer | Multi-level memory, user/session/Agent state management |
+| [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) | Memory Framework | Neurobiology-inspired long-term memory, associative diffusion |
+| [LightMem](https://github.com/zjunlp/LightMem) | Memory Framework | Lightweight memory compression, structured memory management |
+| [OpenCode](https://github.com/anomalyco/opencode) | Coding Agent | Multi-agent collaboration, provider-agnostic design |
+
+> ZeroClaw is a reference implementation (`ref-repo/zeroclaw/`), not the Source of Truth for RollBall.AI design. Code reuse follows MIT / Apache-2.0 license requirements.
+
+---
+
+## 🤝 Contributing
+
+The project is currently in **design phase**. Contributions to discussion and design review are welcome:
+
+- Browse existing design review reports in `docs/review/`
+- Submit design feedback via issues
+- Read [AGENTS.md](./AGENTS.md) for project conventions
+
+---
+
+## 📄 License
+
+Apache-2.0 — see [LICENSE](./LICENSE) for details.
+
+---
+
+<p align="center">
+  <b>RollBall.AI — Agent as APP</b><br>
+  <i>Develop, distribute, and run agents like apps.</i>
+</p>
