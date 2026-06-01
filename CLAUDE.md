@@ -16,14 +16,16 @@ The platform serves two user roles:
 
 ## Repository Structure
 
-- `docs/` — Architecture design documents (17 files, Chinese, v3.x)
-- `docs/module-design/` — Detailed module/crate specifications (7 files)
-- `docs/plan/` — planning documents (1 file)
-- `docs/review/` — Review reports: design review (`01-design-review.md` 等) and code review (`01-code-review.md` 等)
-- `ref-doc/` — Reference materials (ZeroClaw analysis, memory research)
-- `zeroclaw/` — Reference implementation (independent project, do NOT edit from this root)
+- `docs/design/zh/` — Architecture design documents (16 files, Chinese, v3.x)
+- `docs/module-design/zh/` — Detailed module/crate specifications (8 files)
+- `docs/plan/zh/` — Implementation planning documents (7 files)
+- `docs/adr/zh/` — Architecture Decision Records (3 files, Chinese)
+- `docs/review/zh/` — Review reports: design and code reviews (35 files)
+- `docs/reference/zh/` — Reference materials (ZeroClaw analysis, memory research)
+- `docs/zh/` — Root-level Chinese docs (PRD, UI/UX, RAG protocol, session diagnostic)
+- `docs/en/` — Root-level English docs (MCP server research)
+- `docs/AGENTS.md` — Language-organized doc index
 - `.opencode/style-guide.md` — Code review style guide (security, memory safety, error handling)
-- `AGENTS.md` — Cross-tool AI assistant instructions
 
 ## Architecture (Design Phase)
 
@@ -54,21 +56,21 @@ Key design decisions:
 
 | Topic | File |
 |-------|------|
-| **PRD (authoritative requirements)** | `docs/00-prd.md` |
-| Platform overview & Android analogy | `docs/01-overview.md` |
-| .agent package format & signing | `docs/02-agent-package.md` |
-| Runtime main loop & tool dispatch | `docs/03-agent-runtime.md` |
-| Gateway components | `docs/04-gateway.md` |
-| Grafeo memory architecture | `docs/05-memory.md` |
-| Security & isolation | `docs/08-security.md` |
-| Tool system (builtin/WASM/Gateway) | `docs/12-tool-system.md` |
-| Skill system | `docs/13-skill-system.md` |
-| Workspace & crate structure | `docs/module-design/00-overview.md` |
-| Implementation roadmap (7 phases) | `docs/09-roadmap-and-scenarios.md` |
+| **PRD (authoritative requirements)** | `docs/zh/prd.md` |
+| Platform overview & Android analogy | `docs/design/zh/01-overview.md` |
+| .agent package format & signing | `docs/design/zh/02-agent-package.md` |
+| Runtime main loop & tool dispatch | `docs/design/zh/03-agent-runtime.md` |
+| Gateway components | `docs/design/zh/04-gateway.md` |
+| Grafeo memory architecture | `docs/design/zh/05-memory.md` |
+| Security & isolation | `docs/design/zh/08-security.md` |
+| Tool system (builtin/WASM/Gateway) | `docs/design/zh/12-tool-system.md` |
+| Skill system | `docs/design/zh/13-skill-system.md` |
+| Workspace & crate structure | `docs/module-design/zh/00-overview.md` |
+| Implementation roadmap (7 phases) | `docs/plan/zh/plan-overview.md` |
 
 ## Requirements & Priorities
 
-The PRD (`docs/00-prd.md`) is the authoritative source for "what to build and why". Design docs (01–14) describe "how".
+The PRD (`docs/zh/prd.md`) is the authoritative source for "what to build and why". Design docs under `docs/design/zh/` describe "how".
 
 Requirements use coded prefixes: PKG (packaging), FMT (format), RUN (runtime), MEM (memory), TOL (tools), SKL (skills), GTW (gateway), SYS (system agent), COM (communication), SEC (security), DSK (desktop), PLT (cross-platform), RAG (enterprise RAG).
 
