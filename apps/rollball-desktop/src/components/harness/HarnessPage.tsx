@@ -581,7 +581,7 @@ function ProvidersTab() {
                         </button>
                         <span className="text-xs" style={{ color: "var(--color-accent)" }}>Active</span>
                         {isLocal ? (
-                          <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-700 dark:bg-green-900 dark:text-green-300" title="Local provider — no API key needed">
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400" title="Local provider — no API key needed">
                             🏠 Local
                           </span>
                         ) : (
@@ -589,13 +589,13 @@ function ProvidersTab() {
                         )}
                         <button
                           onClick={() => handleEdit(keyEntry.provider)}
-                          className="text-xs hover:opacity-70" style={{ color: "var(--color-accent)" }}
+                          className="rounded-md btn-solid px-2 py-0.5 text-xs"
                         >
                           Edit
                         </button>
                         <button
                           onClick={() => handleRemove(keyEntry.provider)}
-                          className="text-xs text-red-500 hover:text-red-700"
+                          className="rounded-md btn-solid px-2 py-0.5 text-xs"
                         >
                           Remove
                         </button>
@@ -603,14 +603,14 @@ function ProvidersTab() {
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                       {keyEntry.models?.length ? (
-                        <span className="text-xs" style={{ color: "var(--color-accent)" }}>{keyEntry.models.join(", ")}</span>
+                        <span className="text-xs text-zinc-600 dark:text-zinc-400">{keyEntry.models.join(", ")}</span>
                       ) : keyEntry.default_model ? (
-                        <span className="text-xs" style={{ color: "var(--color-accent)" }}>{keyEntry.default_model}</span>
+                        <span className="text-xs text-zinc-600 dark:text-zinc-400">{keyEntry.default_model}</span>
                       ) : (
                         <span className="text-xs text-zinc-400">—</span>
                       )}
                       {keyEntry.compact_model && (
-                        <span className="rounded bg-purple-100 px-1.5 py-0.5 text-xs text-purple-700 dark:bg-purple-900 dark:text-purple-300" title="Compact model for summarization">
+                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400" title="Compact model for summarization">
                           compact: {keyEntry.compact_model}
                         </span>
                       )}
@@ -667,7 +667,7 @@ function ProvidersTab() {
               {/* ── Local Providers (always visible) ── */}
               {localProviders.length > 0 && (
                 <div>
-                  <h4 className="mb-1.5 text-xs font-medium text-green-600 dark:text-green-400">🏠 Local Providers</h4>
+                  <h4 className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🏠 Local Providers</h4>
                   <div className="space-y-1">
                     {localProviders.map((item) => {
                       const providerId = item.id;
@@ -675,11 +675,11 @@ function ProvidersTab() {
                       const keyEntry = keys.find((k) => k.provider === providerId);
                       if (keyEntry) return null;
                       return (
-                        <div key={providerId} className="rounded-lg border border-green-200 px-3 py-1.5 dark:border-green-800">
+                        <div key={providerId} className="rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
                           <div className="flex items-center justify-between">
                             <div className="min-w-0 flex-1">
                               <span className="text-xs font-medium">{providerName}</span>
-                              <span className="ml-2 rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900 dark:text-green-300">Local</span>
+                              <span className="ml-2 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">Local</span>
                             </div>
                             <button
                               onClick={() => {
@@ -692,7 +692,7 @@ function ProvidersTab() {
                                 setNewSupportsToolCalling(true);
                                 setShowAddDialog(true);
                               }}
-                              className="rounded-md bg-green-100 px-3 py-1 text-xs font-medium text-green-700 hover:bg-green-200 dark:bg-green-900 dark:text-green-300 dark:hover:bg-green-800"
+                              className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
                             >
                               Connect
                             </button>
