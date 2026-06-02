@@ -183,10 +183,6 @@ pub struct SessionManager {
     /// Cached LLM config from LLMConfigDelivery (provider params, caps, limit)
     /// that must be re-applied to every newly created session.
     cached_llm: Option<CachedLLMConfig>,
-    /// The currently active session ID — used as the default routing target
-    /// when an incoming message does not specify an explicit session_id.
-    /// Owned here (not in cli.rs) so SessionManager is the single source of truth.
-    current_session_id: String,
     /// MCP tool wrappers, built when MCP servers are connected.
     /// Merged into each new session's tools at creation time.
     mcp_tools: Option<Vec<Arc<dyn Tool>>>,
@@ -216,11 +212,8 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// Create a new SessionManager with the given shared core, config, and initial session ID.
-    ///
-    /// The `initial_session_id` is set as the current active session for routing
-    /// messages that don't specify an explicit session_id.
-    pub fn new(core: Arc<AgentCore>, config: SessionManagerConfig, initial_session_id: String) -> Self {
+    /// Create a new SessionManager with the given shared core and config.
+    pub fn new(core: Arc<AgentCore>, config: SessionManagerConfig) -> Self {
         Self {
             core,
             sessions: HashMap::new(),
@@ -228,7 +221,6 @@ impl SessionManager {
             runtime_overrides: RuntimeConfigOverrides::default(),
             workspace_context: None,
             cached_llm: None,
-            current_session_id: initial_session_id,
             mcp_tools: None,
             mcp_manager: McpManager::new(),
             session_workspaces: HashMap::new(),
@@ -946,42 +938,23 @@ impl SessionManager {
         }
     }
 
-    /// Get the current session ID (used as the default routing target).
-    pub fn current_session_id(&self) -> &str {
-        &self.current_session_id
-    }
-
-    /// Set the current session ID (called when the user activates a session).
-    pub fn set_current_session_id(&mut self, session_id: String) {
-        tracing::info!(
-            old_session_id = %self.current_session_id,
-            new_session_id = %session_id,
-            "SessionManager: current session updated"
-        );
-        self.current_session_id = session_id;
-    }
-
-    /// Resolve the target session ID for an incoming message.
+    /// Extract the target session ID from request params.
     ///
-    /// If `explicit_id` is Some and non-empty, use it; otherwise fall back
-    /// to the current session ID. This replaces the scattered logic in
-    /// cli.rs that was doing the same thing inline.
-    ///
-    /// Returns `None` when both explicit_id and current_session_id are
-    /// absent/empty (e.g. before any session has been created).
-    pub fn resolve_target_session(&self, explicit_id: Option<&str>) -> Option<String> {
-        explicit_id
+    /// Every message MUST carry an explicit `session_id` — the backend is
+    /// stateless with respect to "which session is current".  Returns an
+    /// error when `session_id` is missing or empty so the caller can
+    /// reject the message cleanly.
+    pub fn require_session_id(params: &serde_json::Value) -> Result<String> {
+        params
+            .get("session_id")
+            .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .or_else(|| {
-                if self.current_session_id.is_empty() {
-                    tracing::warn!(
-                        "resolve_target_session: no explicit session_id and current_session_id is empty — no session created yet?"
-                    );
-                    None
-                } else {
-                    Some(self.current_session_id.clone())
-                }
+            .ok_or_else(|| {
+                RuntimeError::Config(
+                    "Missing or empty session_id parameter — every message must carry a session_id"
+                        .to_string(),
+                )
             })
     }
 
@@ -990,19 +963,14 @@ impl SessionManager {
     /// A session is evicted when ALL of the following conditions are met:
     /// 1. Its status is `Idle` (not Streaming/WaitingApproval/Paused)
     /// 2. It has been idle for longer than `idle_timeout`
-    /// 3. It is NOT the current active session
     ///
     /// Eviction destroys the in-memory SessionTask but leaves the JSONL
     /// file on disk. The session can be re-activated later via lazy resume
     /// in the `activate_session` handler.
     pub async fn evict_idle_sessions(&mut self, idle_timeout: std::time::Duration) {
-        let current = self.current_session_id.clone();
         let mut to_evict = Vec::new();
 
         for (session_id, handle) in &self.sessions {
-            if *session_id == current {
-                continue;
-            }
             if handle.status() != SessionStatus::Idle {
                 continue;
             }
@@ -1183,16 +1151,23 @@ impl SessionManager {
             self.debug_controllers.clone(),
         );
         let debug_event_tx = debug_server.start().await;
-        // Create a default debug controller for the current session.
-        // This controller is added to the shared map so the debug server
-        // can route requests for this session.  When new sessions are
-        // created with debug mode active, they register their own
-        // controllers into the same shared map.
+
+        // Create debug controllers for ALL existing sessions and register
+        // them in the shared debug_controllers map. New sessions created
+        // while debug mode is active register their own controllers at
+        // creation time via pending_debug_handles.
+        {
+            let session_ids: Vec<String> = self.sessions.keys().cloned().collect();
+            let mut controllers = self.debug_controllers.write().await;
+            for sid in session_ids {
+                let debug_ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
+                controllers.insert(sid, debug_ctrl);
+            }
+        }
+
+        // Build handles from the first session's controller (all sessions
+        // share the same event_tx and notify handles via DebugHandles).
         let debug_ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
-        self.debug_controllers
-            .write()
-            .await
-            .insert(self.current_session_id.clone(), debug_ctrl.clone());
         let rewind_notify = {
             let guard = debug_ctrl.lock().await;
             guard.rewind_notify_handle()
@@ -1355,7 +1330,7 @@ mod tests {
         let mut mgr_config = SessionManagerConfig::default();
         mgr_config.full_tool_specs = vec![make_tool_spec("tool_a"), make_tool_spec("tool_b")];
 
-        let mut mgr = SessionManager::new(core, mgr_config, String::new());
+        let mut mgr = SessionManager::new(core, mgr_config);
 
         // Apply active_tools
         let failed = mgr.apply_active_tools(Some(vec!["tool_a".to_string()]));
@@ -1385,7 +1360,7 @@ mod tests {
         let core = Arc::new(AgentCore::new(config, manifest, provider, vec![], None));
 
         let mgr_config = SessionManagerConfig::default();
-        let mut mgr = SessionManager::new(core, mgr_config, String::new());
+        let mut mgr = SessionManager::new(core, mgr_config);
 
         // apply_active_tools(None) should return empty and not crash
         let failed = mgr.apply_active_tools(None);
@@ -1414,7 +1389,7 @@ mod tests {
 
         let mut mgr_config = SessionManagerConfig::default();
         mgr_config.full_tool_specs = vec![make_tool_spec("tool_x")];
-        let mut mgr = SessionManager::new(core, mgr_config, String::new());
+        let mut mgr = SessionManager::new(core, mgr_config);
 
         // Create a session first
         let sid = mgr.create_session_with_id("s1".to_string()).await.unwrap();
@@ -1425,9 +1400,9 @@ mod tests {
         assert!(failed.is_empty());
     }
 
-    // ── resolve_target_session ─────────────────────────────────────────
+    // ── require_session_id ─────────────────────────────────────────────
 
-    fn make_manager_with_current_id(current_id: &str) -> SessionManager {
+    fn make_manager() -> SessionManager {
         let manifest = rollball_core::AgentManifest::from_toml(
             r#"
             agent_id = "com.test.resolve"
@@ -1444,36 +1419,27 @@ mod tests {
         let config = RuntimeConfig::default();
         let provider = Arc::new(MockProvider::single_text("OK"));
         let core = Arc::new(AgentCore::new(config, manifest, provider, vec![], None));
-        SessionManager::new(core, SessionManagerConfig::default(), current_id.to_string())
+        SessionManager::new(core, SessionManagerConfig::default())
     }
 
     #[test]
-    fn test_resolve_target_session_explicit_id_wins() {
-        let mgr = make_manager_with_current_id("current-sid");
-        assert_eq!(mgr.resolve_target_session(Some("explicit-sid")), Some("explicit-sid".to_string()));
+    fn test_require_session_id_valid() {
+        let params = serde_json::json!({ "session_id": "test-sid" });
+        assert_eq!(
+            SessionManager::require_session_id(&params).unwrap(),
+            "test-sid"
+        );
     }
 
     #[test]
-    fn test_resolve_target_session_empty_explicit_falls_back() {
-        let mgr = make_manager_with_current_id("current-sid");
-        assert_eq!(mgr.resolve_target_session(Some("")), Some("current-sid".to_string()));
+    fn test_require_session_id_missing() {
+        let params = serde_json::json!({});
+        assert!(SessionManager::require_session_id(&params).is_err());
     }
 
     #[test]
-    fn test_resolve_target_session_none_falls_back() {
-        let mgr = make_manager_with_current_id("current-sid");
-        assert_eq!(mgr.resolve_target_session(None), Some("current-sid".to_string()));
-    }
-
-    #[test]
-    fn test_resolve_target_session_both_empty_returns_none() {
-        let mgr = make_manager_with_current_id("");
-        assert_eq!(mgr.resolve_target_session(None), None);
-    }
-
-    #[test]
-    fn test_resolve_target_session_empty_explicit_and_empty_current_returns_none() {
-        let mgr = make_manager_with_current_id("");
-        assert_eq!(mgr.resolve_target_session(Some("")), None);
+    fn test_require_session_id_empty() {
+        let params = serde_json::json!({ "session_id": "" });
+        assert!(SessionManager::require_session_id(&params).is_err());
     }
 }
