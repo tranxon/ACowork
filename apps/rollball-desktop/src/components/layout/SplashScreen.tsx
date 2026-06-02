@@ -219,10 +219,10 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 {/* Title */}
                 <div className="flex flex-col items-center gap-1.5">
                     <h1 className="text-[32px] font-bold tracking-tight text-zinc-800 dark:text-zinc-100">
-                        RollBall
+                        RollBall.AI
                     </h1>
                     <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">
-                        AI Agent Platform
+                        Collaborate with your AI colleagues
                     </p>
                 </div>
 
