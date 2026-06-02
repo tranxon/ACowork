@@ -437,11 +437,6 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                     proto::CreateSessionRequest {},
                 ))
             }
-            protocol::GatewayRequest::GetCurrentSessionId => {
-                Some(proto::client_message::Payload::GetCurrentSessionId(
-                    proto::GetCurrentSessionIdRequest {},
-                ))
-            }
             protocol::GatewayRequest::DeleteSession { session_id } => {
                 Some(proto::client_message::Payload::DeleteSession(
                     proto::DeleteSessionRequest { session_id: session_id.clone() },
@@ -728,11 +723,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             protocol::GatewayResponse::SessionCreated { session_id } => {
                 Some(proto::server_message::Payload::SessionCreated(
                     proto::SessionCreated { session_id: session_id.clone() },
-                ))
-            }
-            protocol::GatewayResponse::CurrentSessionId { session_id } => {
-                Some(proto::server_message::Payload::CurrentSessionId(
-                    proto::CurrentSessionId { session_id: session_id.clone().unwrap_or_default() },
                 ))
             }
             protocol::GatewayResponse::SessionDeleted { success, error } => {

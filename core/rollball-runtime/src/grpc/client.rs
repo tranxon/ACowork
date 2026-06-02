@@ -934,29 +934,6 @@ impl GatewayGrpcClient {
             )),
         }
     }
-
-    /// Get the current session ID.
-    pub async fn get_current_session_id(&self) -> Result<Option<String>, RollballError> {
-        let request = GatewayRequest::GetCurrentSessionId;
-
-        let resp = self.send_gateway_request(request).await?;
-        match resp.payload {
-            Some(ServerPayload::CurrentSessionId(csid)) => {
-                Ok(if csid.session_id.is_empty() {
-                    None
-                } else {
-                    Some(csid.session_id)
-                })
-            }
-            Some(other) => Err(RollballError::Ipc(format!(
-                "Unexpected response: {:?}",
-                other
-            ))),
-            None => Err(RollballError::Ipc(
-                "Empty response payload".to_string(),
-            )),
-        }
-    }
 }
 
 // ── Proto → Domain conversion ─────────────────────────────────────────────
@@ -1202,13 +1179,6 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
         },
         Some(ServerPayload::SessionCreated(r)) => GatewayResponse::SessionCreated {
             session_id: r.session_id,
-        },
-        Some(ServerPayload::CurrentSessionId(r)) => GatewayResponse::CurrentSessionId {
-            session_id: if r.session_id.is_empty() {
-                None
-            } else {
-                Some(r.session_id)
-            },
         },
         Some(ServerPayload::SessionDeleted(r)) => GatewayResponse::SessionDeleted {
             success: r.success,

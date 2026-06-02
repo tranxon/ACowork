@@ -328,13 +328,24 @@ pub async fn get_conversations(
     Ok(Json(ConversationsListResponse { conversations }))
 }
 
-/// `GET /api/agents/:id/conversations/latest` — get the most recent conversation
+/// Query parameters for the latest conversation endpoint.
 ///
-/// S1.14: Forwards the query to Runtime via IPC. Falls back to the
-/// legacy Grafeo-based implementation if IPC is unavailable.
+/// The frontend MUST pass `session_id` explicitly — there is no "current session"
+/// concept on the backend. Every request carries its own session routing.
+#[derive(Deserialize)]
+pub struct LatestConversationQuery {
+    /// Required session ID — the frontend tracks which session is selected.
+    pub session_id: String,
+}
+
+/// `GET /api/agents/:id/conversations/latest?session_id=...` — get the latest conversation
+///
+/// Requires `session_id` query param. Returns an error if it is missing or empty,
+/// because the backend no longer tracks a "current session".
 pub async fn get_latest_conversation(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
+    Query(query): Query<LatestConversationQuery>,
 ) -> Result<Json<LatestConversationResponse>, (StatusCode, Json<ApiError>)> {
     // Verify agent exists
     {
@@ -347,89 +358,38 @@ pub async fn get_latest_conversation(
         }
     }
 
-    // S1.14: Try IPC forwarding first (if agent is running)
-    if let Some(ref session_mgr) = state.session_mgr {
-        // First, get current session ID
-        let curr_request_id = format!("sess-curr-{}", uuid::Uuid::new_v4());
-        let curr_intent = rollball_core::protocol::GatewayResponse::IntentReceived {
-            from: "http-api".to_string(),
-            action: "get_current_session_id".to_string(),
-            params: serde_json::json!({
-                "request_id": curr_request_id,
-            }),
-            command: None,
-        };
-
-        let curr_pushed = {
-            let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
-                session.push_message(curr_intent).await
-            } else {
-                false
-            }
-        }; // mgr dropped here
-
-        if curr_pushed
-            && let Ok(data) = wait_for_session_response(&state, &curr_request_id).await
-        {
-            let current_session_id = data.get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            if !current_session_id.is_empty() {
-                // Now get the messages for this session
-                let msg_request_id = format!("sess-msgs-{}", uuid::Uuid::new_v4());
-                let msg_intent = rollball_core::protocol::GatewayResponse::IntentReceived {
-                    from: "http-api".to_string(),
-                    action: "get_session_messages".to_string(),
-                    params: serde_json::json!({
-                        "request_id": msg_request_id,
-                        "session_id": current_session_id,
-                        "limit": 100,
-                        "direction": "backward",
-                    }),
-                    command: None,
-                };
-
-                let msg_pushed = {
-                    let mgr = session_mgr.lock().await;
-                    if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
-                        session.push_message(msg_intent).await
-                    } else {
-                        false
-                    }
-                }; // mgr dropped here
-
-                if msg_pushed
-                    && let Ok(msg_data) = wait_for_session_response(&state, &msg_request_id).await
-                {
-                    let messages: Vec<ConversationMessage> = msg_data.get("messages")
-                        .and_then(|v| serde_json::from_value::<Vec<rollball_core::protocol::ConversationEntryDto>>(v.clone()).ok())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, m)| ConversationMessage {
-                            role: m.role,
-                            content: m.content,
-                            timestamp: parse_iso8601_to_unix(&m.ts),
-                            turn_index: i as u32,
-                        })
-                        .collect();
-
-                    return Ok(Json(LatestConversationResponse {
-                        session_id: current_session_id,
-                        messages,
-                    }));
-                }
-            }
-        }
+    if query.session_id.is_empty() {
+        return Err(ApiError::bad_request("session_id query parameter is required and must not be empty"));
     }
 
-    // No running agent with IPC session — return empty response
+    // Fetch messages for the target session via IPC
+    let params = serde_json::json!({
+        "session_id": &query.session_id,
+        "limit": 100,
+        "direction": "backward",
+    });
+
+    let messages = match forward_session_query(&state, &agent_id, "get_session_messages", params).await {
+        Ok(data) => {
+            data.get("messages")
+                .and_then(|v| serde_json::from_value::<Vec<rollball_core::protocol::ConversationEntryDto>>(v.clone()).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .map(|(i, m)| ConversationMessage {
+                    role: m.role,
+                    content: m.content,
+                    timestamp: parse_iso8601_to_unix(&m.ts),
+                    turn_index: i as u32,
+                })
+                .collect()
+        }
+        Err(_) => vec![],
+    };
+
     Ok(Json(LatestConversationResponse {
-        session_id: String::new(),
-        messages: vec![],
+        session_id: query.session_id,
+        messages,
     }))
 }
 

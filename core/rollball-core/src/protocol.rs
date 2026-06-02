@@ -477,11 +477,6 @@ pub enum GatewayRequest {
     /// conversation session has been created. Gateway responds
     /// with SessionCreated.
     CreateSession,
-    /// Get current session ID request (S1.14)
-    ///
-    /// Runtime sends this to Gateway to query the currently
-    /// active session ID. Gateway responds with CurrentSessionId.
-    GetCurrentSessionId,
     /// Delete session request
     ///
     /// Gateway sends this to Runtime to delete a conversation
@@ -801,13 +796,6 @@ pub enum GatewayResponse {
     SessionCreated {
         /// The newly created session identifier
         session_id: String,
-    },
-    /// Current session ID result (S1.14)
-    ///
-    /// Sent by Gateway in response to GatewayRequest::GetCurrentSessionId.
-    CurrentSessionId {
-        /// The currently active session ID, or None if no session
-        session_id: Option<String>,
     },
     /// Session deleted result
     ///

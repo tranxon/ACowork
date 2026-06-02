@@ -194,10 +194,6 @@ pub async fn dispatch_grpc_request(
             }
         }
 
-        Some(proto::client_message::Payload::GetCurrentSessionId(_req)) => {
-            GatewayResponse::CurrentSessionId { session_id: None }
-        }
-
         Some(proto::client_message::Payload::UpdateWorkspaceConfig(update)) => {
             // Runtime pushes its workspace config snapshot for Gateway's in-memory cache.
             let agent_id = {
