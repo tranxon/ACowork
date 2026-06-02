@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useChatStore } from "./chatStore";
+import { useAgentStore } from "./agentStore";
 
 // ── Debug Protocol types ──────────────────────────────────────────────
 
@@ -248,7 +249,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         }
         set({ connected: true, connecting: false });
         setTimeout(() => {
-          get().getState().catch(() => {});
+          get().getState().catch(() => { });
           console.log("[debugStore] WebSocket connected, sending initial step");
           get().sendRequest("debugger.step").catch((e) => console.warn("[debugStore] initial step failed:", e));
         }, 0);
@@ -337,9 +338,17 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         reject(new Error("Not connected to debug WebSocket"));
         return;
       }
+      // Auto-inject current session_id so the backend knows which
+      // DebugController to query.  Callers can override by passing
+      // session_id explicitly — their value wins because ...params
+      // comes after the default.
+      const finalParams: Record<string, unknown> = {
+        session_id: state.currentSessionId,
+        ...params,
+      };
       const id = state.nextRequestId;
       set({ nextRequestId: id + 1 });
-      const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
+      const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params: finalParams };
       state.pendingRequests.set(id, { resolve, reject });
       try {
         state.socket.send(JSON.stringify(request));
@@ -476,8 +485,29 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   },
 
   restart: async () => {
-    await get().sendRequest("debugger.restart");
-    resetCurrent();
+    const agentId = get().debugAgentId;
+    if (!agentId) {
+      console.warn("[debugStore] restart: no debugAgentId, skipping");
+      return;
+    }
+    // Route through Gateway gRPC EnableDebugMode (the debugger.restart RPC
+    // was removed when restart-to-debug was refactored to be processless).
+    try {
+      await useAgentStore.getState().restartAgentInDebug(agentId);
+    } catch (e) {
+      console.error("[debugStore] restart: restartAgentInDebug failed:", e);
+      throw e;
+    }
+    // Reset UI state; the backend will push fresh events after reconnect.
+    patchCurrent({
+      iteration: 0,
+      phase: "Idle",
+      debugState: "Stepping",
+      paused: false,
+      snapshots: [],
+      sectionCache: new Map(),
+      hasPendingPatches: false,
+    });
   },
 
   // ── State query ─────────────────────────────────────────────────────
@@ -616,22 +646,9 @@ function applyCurrent(fn: (current: PerSessionDebugState, sid: string) => PerSes
   });
 }
 
-/** Reset the current session's state to fresh AND sync to live view. */
-function resetCurrent() {
-  useDebugStore.setState((s) => {
-    const sid = s.currentSessionId;
-    if (!sid) return { ...initialTopLevel };
-    const fresh = freshPerSessionState();
-    return {
-      sessionStates: { ...s.sessionStates, [sid]: fresh },
-      ...topLevelFromSession(fresh),
-    };
-  });
-}
-
 // Augment the interface for the internal _handleEvent
 declare module "zustand" {
-  interface StoreMutators<S, A> {}
+  interface StoreMutators<S, A> { }
 }
 
 interface DebugStore {

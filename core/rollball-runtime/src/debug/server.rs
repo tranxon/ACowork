@@ -138,6 +138,10 @@ pub struct DebugProtocolServer {
     event_rx: mpsc::UnboundedReceiver<TaggedEvent>,
     /// Port to bind the WebSocket server to
     port: u16,
+    /// Track which session was last targeted by a control command
+    /// (step/resume/pause) so that getState without an explicit
+    /// session_id can fall back to the actively-debugged session.
+    last_active_session_id: Option<String>,
 }
 
 impl DebugProtocolServer {
@@ -155,6 +159,7 @@ impl DebugProtocolServer {
             event_tx,
             event_rx,
             port,
+            last_active_session_id: None,
         }
     }
 
@@ -409,12 +414,16 @@ impl DebugProtocolServer {
         params: &serde_json::Value,
         id: serde_json::Value,
     ) -> Result<JsonRpcResponse, MethodError> {
-        // Resolve session from request params — the frontend always sends
-        // a session_id; if missing, fall back to the first available session.
-        let session_id = params
+        // Resolve session from request params. Priority:
+        // 1. Explicit `session_id` in params (sent by frontend)
+        // 2. Last session targeted by a control command (step/resume/pause)
+        // 3. First session in the map (best-effort fallback)
+        let explicit_session_id = params
             .get("session_id")
-            .and_then(|v| v.as_str())
+            .and_then(|v| v.as_str());
+        let session_id = explicit_session_id
             .map(|s| s.to_string())
+            .or_else(|| self.last_active_session_id.clone())
             .or_else(|| {
                 self.sessions
                     .try_read()
@@ -427,6 +436,12 @@ impl DebugProtocolServer {
                     "No debug session available — create a session first".to_string(),
                 )
             })?;
+        tracing::info!(
+            method = %method,
+            explicit_session_id = ?explicit_session_id,
+            resolved_session_id = %session_id,
+            "[DBG-TRACE] route_method: session resolution"
+        );
         let ctrl_arc = self
             .sessions
             .read()
@@ -454,6 +469,7 @@ impl DebugProtocolServer {
         match method {
             // ── Execution Control ──
             "debugger.resume" => {
+                self.last_active_session_id = Some(session_id.clone());
                 ctrl.state = DebugState::Running;
                 let iteration = ctrl.iteration;
                 // event_tx.send() is non-blocking (unbounded channel) —
@@ -480,6 +496,7 @@ impl DebugProtocolServer {
             }
 
             "debugger.pause" => {
+                self.last_active_session_id = Some(session_id.clone());
                 ctrl.state = DebugState::Paused;
                 let iteration = ctrl.iteration;
                 send_event(
@@ -498,6 +515,7 @@ impl DebugProtocolServer {
             }
 
             "debugger.step" => {
+                self.last_active_session_id = Some(session_id.clone());
                 ctrl.state = DebugState::Stepping;
                 let iteration = ctrl.iteration;
                 send_event(
@@ -508,6 +526,11 @@ impl DebugProtocolServer {
                         iteration,
                     },
                 );
+                // Wake the SessionTask so it can re-enter the agent loop.
+                // await_debug_resume() inside execute_single_iteration also
+                // waits on this notify — this covers both the running and
+                // idle-session cases.
+                ctrl.resume_notify.notify_one();
                 tracing::info!("Debug: step — agent loop will execute one step");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -516,6 +539,7 @@ impl DebugProtocolServer {
             }
 
             "debugger.stop" => {
+                self.last_active_session_id = Some(session_id.clone());
                 ctrl.state = DebugState::Stopped;
                 let iteration = ctrl.iteration;
                 send_event(
@@ -535,6 +559,7 @@ impl DebugProtocolServer {
 
             // ── State Query ──
             "debugger.getState" => {
+                let ctrl_ptr = Arc::as_ptr(&ctrl_arc) as *const ();
                 let current_state = ctrl.state;
                 let state = protocol::GetStateResult {
                     iteration: ctrl.iteration,
@@ -559,6 +584,13 @@ impl DebugProtocolServer {
                 };
                 let result = serde_json::to_value(state)
                     .map_err(|e| MethodError::internal(e.to_string()))?;
+                tracing::info!(
+                    session_id = %session_id,
+                    ctrl_ptr = ?ctrl_ptr,
+                    iteration = ctrl.iteration,
+                    dbg_state = %serde_json::to_string(&current_state).unwrap_or_default().trim_matches('"'),
+                    "[DBG-TRACE] Debug: getState response"
+                );
                 Ok(JsonRpcResponse::success(
                     id.clone(),
                     result,

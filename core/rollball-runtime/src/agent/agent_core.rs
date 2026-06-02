@@ -607,6 +607,14 @@ impl AgentCore {
         rewind_notify: Arc<Notify>,
         resume_notify: Arc<Notify>,
     ) {
+        let ctrl_ptr = Arc::as_ptr(&ctrl) as *const ();
+        tracing::info!(
+            ctrl_ptr = ?ctrl_ptr,
+            has_event_tx = true,
+            has_rewind = true,
+            has_resume = true,
+            "[DBG-TRACE] AgentCore::set_debug_mode called"
+        );
         self.debug_rewind_notify = Some(rewind_notify);
         self.debug_resume_notify = Some(resume_notify);
         self.debug_ctrl = Some(ctrl);
@@ -648,7 +656,11 @@ impl AgentCore {
 
     /// Access the debug controller, if in DevMode.
     pub fn debug_ctrl(&self) -> Option<&Arc<tokio::sync::Mutex<DebugController>>> {
-        self.debug_ctrl.as_ref()
+        let result = self.debug_ctrl.as_ref();
+        if result.is_none() {
+            tracing::warn!("[DBG-TRACE] AgentCore::debug_ctrl() returning None — debug not injected");
+        }
+        result
     }
 
     /// Access the debug rewind notify handle, if in DevMode.

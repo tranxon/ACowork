@@ -295,6 +295,33 @@ impl SessionManager {
         let pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
+        // If debug mode is active, create a per-session DebugController and
+        // register it in self.debug_controllers so the DebugProtocolServer can
+        // read this session's state via getState. The global runtime_debug_handles
+        // carries a shared controller — we must NOT reuse it because each session
+        // needs its own independent iteration/phase/breakpoints.
+        // The notify handles (rewind/resume) also come from the per-session
+        // controller so the debug server's notify_one() calls align with SessionTask.
+        let per_session_debug = if let Some(ref handles) = self.runtime_debug_handles {
+            let ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
+            let (per_rewind, per_resume) = {
+                let guard = ctrl.lock().await;
+                (guard.rewind_notify_handle(), guard.resume_notify_handle())
+            };
+            self.debug_controllers
+                .write()
+                .await
+                .insert(session_id.clone(), ctrl.clone());
+            Some(DebugHandles {
+                debug_ctrl: ctrl,
+                debug_event_tx: handles.debug_event_tx.for_session(session_id.clone()),
+                rewind_notify: per_rewind,
+                resume_notify: per_resume,
+            })
+        } else {
+            None
+        };
+
         let (mut task, agent_inbound_tx) = SessionTask::new(
             self.core.clone(),
             session_state,
@@ -306,7 +333,7 @@ impl SessionManager {
             self.config.identity_context.clone(),
             self.config.protocol_type.clone(),
             self.mcp_tools.clone(),
-            self.runtime_debug_handles.clone(),
+            per_session_debug,
             pending_debug_handles.clone(),
         );
 
@@ -1165,25 +1192,41 @@ impl SessionManager {
             }
         }
 
-        // Build handles from the first session's controller (all sessions
-        // share the same event_tx and notify handles via DebugHandles).
-        let debug_ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
-        let rewind_notify = {
-            let guard = debug_ctrl.lock().await;
-            guard.rewind_notify_handle()
+        // Build the shared DebugHandles template from the first per-session
+        // controller. The event_tx is shared across all sessions; notify handles
+        // come from a per-session controller so the debug server's notify_one()
+        // calls (which target per-session controllers) align with SessionTask
+        // waiters. The debug_ctrl in this template is only a fallback —
+        // push_debug_mode_to_existing_sessions and create_session both construct
+        // per-session DebugHandles using each session's own controller.
+        let template_handles = {
+            let controllers = self.debug_controllers.read().await;
+            if let Some(first_ctrl) = controllers.values().next() {
+                let guard = first_ctrl.lock().await;
+                DebugHandles {
+                    debug_ctrl: first_ctrl.clone(),
+                    debug_event_tx: debug_event_tx.clone(),
+                    rewind_notify: guard.rewind_notify_handle(),
+                    resume_notify: guard.resume_notify_handle(),
+                }
+            } else {
+                // No sessions exist yet — create a minimal controller just for
+                // its notify handles. Its iteration/phase state will never be read.
+                let ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
+                let ctrl_for_lock = ctrl.clone();
+                let (rw, rs) = {
+                    let guard = ctrl_for_lock.lock().await;
+                    (guard.rewind_notify_handle(), guard.resume_notify_handle())
+                };
+                DebugHandles {
+                    debug_ctrl: ctrl,
+                    debug_event_tx: debug_event_tx.clone(),
+                    rewind_notify: rw,
+                    resume_notify: rs,
+                }
+            }
         };
-        let resume_notify = {
-            let guard = debug_ctrl.lock().await;
-            guard.resume_notify_handle()
-        };
-
-        let handles = DebugHandles {
-            debug_ctrl,
-            debug_event_tx,
-            rewind_notify,
-            resume_notify,
-        };
-        self.runtime_debug_handles = Some(handles.clone());
+        self.runtime_debug_handles = Some(template_handles);
 
         tracing::info!(
             port = port,
@@ -1199,12 +1242,64 @@ impl SessionManager {
 
     /// Push EnableDebugMode to every existing session so they inject the
     /// debug handles into their AgentCore without a restart.
+    ///
+    /// Each session receives its own per-session `DebugController` (stored
+    /// in `self.debug_controllers`) so that the AgentLoop's state updates
+    /// are visible to the `DebugProtocolServer` via `getState`. The notify
+    /// handles (rewind/resume) also come from the per-session controller so
+    /// that the debug server's `notify_one()` calls reach the correct waiter.
     async fn push_debug_mode_to_existing_sessions(&self) {
         let Some(ref handles) = self.runtime_debug_handles else {
             return;
         };
+        let controllers = self.debug_controllers.read().await;
         for (sid, session_handle) in &self.sessions {
-            let msg = SessionMessage::EnableDebugMode(handles.clone());
+            // Use the per-session controller registered in debug_controllers,
+            // NOT the global handles.debug_ctrl. The DebugProtocolServer reads
+            // from debug_controllers for getState, so the AgentLoop must write
+            // to the same instance.
+            let per_session_ctrl = controllers
+                .get(sid)
+                .cloned()
+                .unwrap_or_else(|| handles.debug_ctrl.clone());
+            let ctrl_ptr = Arc::as_ptr(&per_session_ctrl) as *const ();
+            tracing::info!(
+                session_id = %sid,
+                ctrl_ptr = ?ctrl_ptr,
+                found_in_map = controllers.contains_key(sid),
+                "[DBG-TRACE] push_debug_mode: per-session controller resolved"
+            );
+            // Extract notify handles from the per-session controller.
+            // The debug server calls ctrl.resume_notify.notify_one() on this
+            // same controller instance, so SessionTask must wait on the same
+            // Notify arcs.
+            let (per_rewind, per_resume) = {
+                let guard = per_session_ctrl.lock().await;
+                (guard.rewind_notify_handle(), guard.resume_notify_handle())
+            };
+            let per_session_handles = DebugHandles {
+                debug_ctrl: per_session_ctrl,
+                debug_event_tx: handles.debug_event_tx.for_session(sid.clone()),
+                rewind_notify: per_rewind,
+                resume_notify: per_resume,
+            };
+
+            // Bypass path: write debug handles into pending_debug_handles so
+            // that check_and_apply_pending_debug() inside execute_single_iteration
+            // can pick them up EVEN when the SessionTask's message loop is blocked
+            // inside agent_loop.run(). Without this, EnableDebugMode just sits in
+            // the inbound channel queue and the AgentLoop never sees debug_ctrl.
+            {
+                let mut pending = session_handle.pending_debug_handles.lock().await;
+                *pending = Some(per_session_handles.clone());
+                tracing::info!(
+                    session_id = %sid,
+                    ctrl_ptr = ?ctrl_ptr,
+                    "[DBG-TRACE] push_debug_mode: handles written to pending_debug_handles (bypass)"
+                );
+            }
+
+            let msg = SessionMessage::EnableDebugMode(per_session_handles);
             if session_handle.inbound_tx.send(msg).await.is_err() {
                 tracing::warn!(
                     session_id = %sid,

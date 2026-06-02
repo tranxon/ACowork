@@ -360,29 +360,35 @@ impl SessionTask {
                         continue;
                     }
                     _ = resume.notified() => {
-                        // Resume pressed while agent loop is not running.
-                        // Check if the debug state is Running and we have
+                        // Resume or Step pressed while agent loop is not running.
+                        // Check if the debug state is Running or Stepping and we have
                         // a saved user message to replay.
-                        let should_replay = if let Some(ref ctrl) = debug_ctrl {
+                        let can_continue = if let Some(ref ctrl) = debug_ctrl {
                             let guard = ctrl.lock().await;
-                            guard.state == crate::debug::controller::DebugState::Running
+                            matches!(
+                                guard.state,
+                                crate::debug::controller::DebugState::Running
+                                    | crate::debug::controller::DebugState::Stepping
+                            )
                         } else {
                             false
                         };
-                        if should_replay
+                        if can_continue
                             && let Some((ref content, ref msg_id)) = last_user_message
                         {
                                 tracing::info!(
                                     session_id = %session_id,
-                                    "Debug: resume notify — replaying agent loop"
+                                    "Debug: resume/step notify — restarting agent loop"
                                 );
-                                // Apply rewind/patches before replay
+                                // Apply rewind/patches before run
                                 apply_debug_rewind_and_patches(
                                     &debug_ctrl,
                                     &session_id,
                                     &mut agent_loop,
                                     &mut context_builder,
                                 ).await;
+                                // Use replay() to avoid appending a duplicate user message
+                                // to history (the original is already there).
                                 match agent_loop.replay(content, &mut context_builder, None).await {
                                     Ok(response) => {
                                         tracing::info!(
@@ -806,9 +812,11 @@ impl SessionTask {
                     let _ = agent_inbound_tx.send(crate::agent::inbound::InboundMessage::Interrupt { reason }).await;
                 }
                 Some(SessionMessage::EnableDebugMode(handles)) => {
+                    let ctrl_ptr = Arc::as_ptr(&handles.debug_ctrl) as *const ();
                     tracing::info!(
                         session_id = %session_id,
-                        "SessionTask: injecting debug mode into existing session"
+                        ctrl_ptr = ?ctrl_ptr,
+                        "[DBG-TRACE] SessionTask: injecting debug mode into existing session"
                     );
                     // Inject debug controller, event sender, and notify handles
                     // into the AgentCore so the next agent_loop.run() emits debug

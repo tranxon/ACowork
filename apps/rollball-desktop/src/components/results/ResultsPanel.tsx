@@ -316,7 +316,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
                   >
                     <Square className="h-3.5 w-3.5" />
                   </ControlButton>
-                  <ControlButton onClick={restart} title="Restart">
+                  <ControlButton onClick={restart} title="Restart" disabled={!debugAgentId}>
                     <RefreshCw className="h-3.5 w-3.5" />
                   </ControlButton>
                   {hasPendingPatches && (
