@@ -1276,6 +1276,15 @@ impl AgentLoop {
         _retrieved_memory_ids: &[String],
         current_model: &str,
     ) -> Result<IterationResult> {
+            // ── Check for bypass-injected debug handles ──
+            // When Gateway pushes EnableDebugMode to an actively-running
+            // session, the SessionTask's message loop is blocked on
+            // agent_loop.run() and cannot process SessionMessage::EnableDebugMode.
+            // SessionManager writes the handles into the shared
+            // pending_debug_handles Arc; we pick them up here at the start
+            // of each iteration.
+            self.core.check_and_apply_pending_debug();
+
             // ── Debug mode hooks ──
             // Increment session-level iteration counter (cumulative across
             // all chat messages).  The local loop counter resets per message

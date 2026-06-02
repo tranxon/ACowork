@@ -3,7 +3,7 @@
 //! Provides a typed interface for sending messages to a session and
 //! checking whether the session task is still alive.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 
 use crate::agent::inbound::InboundMessage;
 use crate::agent::session_state::SessionStatus;
+use crate::debug::DebugHandles;
 use super::session_task::SessionMessage;
 
 /// External handle for interacting with a running SessionTask.
@@ -43,6 +44,12 @@ pub struct SessionHandle {
     /// Used by `SessionManager::evict_idle_sessions` to decide when a
     /// session can be safely released from memory.
     pub(crate) last_active_at: Mutex<Instant>,
+    /// Shared pending debug handles for bypass injection while the agent
+    /// loop is running. SessionManager writes the handles here when
+    /// enabling debug mode on an active session, so the AgentLoop can
+    /// pick them up at the start of each iteration without going through
+    /// the SessionTask message channel (which is blocked on .run()).
+    pub(crate) pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>>,
 }
 
 impl SessionHandle {

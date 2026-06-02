@@ -4,6 +4,7 @@ import { isSessionActive } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { useDebugStore } from "./debugStore";
 
 interface SessionState {
   sessions: SessionInfo[];
@@ -137,6 +138,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // ① IMMEDIATELY set currentSessionId — closes the WS event vulnerability window.
     //    WS events will now be filtered/routed to the new session.
     set({ currentSessionId: sessionId });
+    // Also sync to debugStore so the debug panel can filter per-session events.
+    useDebugStore.getState().setCurrentSessionId(sessionId);
 
     // ② Notify chatStore to activate this session (manages session-level state isolation)
     if (agentId) {
@@ -226,6 +229,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: [newSession, ...state.sessions],
         currentSessionId: data.session_id,
       }));
+      // Also sync to debugStore for per-session event filtering.
+      useDebugStore.getState().setCurrentSessionId(data.session_id);
 
       // Populate workspace for the new session from last_active in workspace list.
       if (lastActiveWs) {

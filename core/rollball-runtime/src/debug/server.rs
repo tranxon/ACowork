@@ -18,6 +18,7 @@
 //!    - Write: forward events from AgentLoop as notifications.
 //! 4. On disconnect, the server returns to listening state.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -71,50 +72,86 @@ pub enum DebugEvent {
     },
 }
 
+/// Internal wrapper that tags an event with its originating session ID.
+struct TaggedEvent {
+    session_id: String,
+    event: DebugEvent,
+}
+
 /// Handle for sending events to the WebSocket client.
 ///
+/// Each session gets its own `DebugEventSender` with the session's ID
+/// embedded, so events are automatically tagged at send time.
 /// Clone is cheap — multiple senders can push events concurrently.
 #[derive(Debug, Clone)]
 pub struct DebugEventSender {
-    tx: mpsc::UnboundedSender<DebugEvent>,
+    tx: mpsc::UnboundedSender<TaggedEvent>,
+    session_id: String,
 }
 
 impl DebugEventSender {
+    /// Return the session ID that this sender tags events with.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     /// Send a debug event to the connected WebSocket client.
     /// Returns `true` if the event was queued, `false` if the channel is closed.
     pub fn send(&self, event: DebugEvent) -> bool {
-        self.tx.send(event).is_ok()
+        self.tx
+            .send(TaggedEvent {
+                session_id: self.session_id.clone(),
+                event,
+            })
+            .is_ok()
     }
 
     /// Check if the event channel is still open.
     pub fn is_open(&self) -> bool {
         !self.tx.is_closed()
     }
+
+    /// Create a sender for a specific session, sharing the same underlying channel.
+    pub fn for_session(&self, session_id: String) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            session_id,
+        }
+    }
 }
 
 // ── Server ────────────────────────────────────────────────────────────
 
 /// Debug Protocol WebSocket server state.
+///
+/// Per-session debug isolation: each session has its own `DebugController`
+/// (iteration counter, breakpoints, state, snapshots). The frontend sends
+/// `session_id` in every request; the server routes to the correct
+/// controller without needing a server-side "current session".
 pub struct DebugProtocolServer {
-    /// Shared debug controller (AgentLoop + WebSocket server)
-    controller: Arc<Mutex<DebugController>>,
-    /// Event sender (clone this for AgentLoop access)
-    event_tx: mpsc::UnboundedSender<DebugEvent>,
+    /// Per-session debug controllers, shared with SessionManager for
+    /// dynamic add/remove as sessions are created/destroyed.
+    sessions: Arc<tokio::sync::RwLock<HashMap<String, Arc<Mutex<DebugController>>>>>,
+    /// Event sender (clone this and call `for_session()` for per-session senders)
+    event_tx: mpsc::UnboundedSender<TaggedEvent>,
     /// Event receiver (used by server task to forward to WebSocket)
-    event_rx: mpsc::UnboundedReceiver<DebugEvent>,
+    event_rx: mpsc::UnboundedReceiver<TaggedEvent>,
     /// Port to bind the WebSocket server to
     port: u16,
 }
 
 impl DebugProtocolServer {
-    /// Create a new DebugProtocolServer.
+    /// Create a new DebugProtocolServer with shared per-session state.
     ///
     /// `port` is the TCP port to bind the WebSocket server to.
-    /// Each agent instance should use a unique port to avoid conflicts.
-    pub fn new(port: u16) -> Self {
+    /// `sessions` is shared with SessionManager for dynamic add/remove.
+    pub fn new(
+        port: u16,
+        sessions: Arc<tokio::sync::RwLock<HashMap<String, Arc<Mutex<DebugController>>>>>,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         Self {
-            controller: Arc::new(Mutex::new(DebugController::new())),
+            sessions,
             event_tx,
             event_rx,
             port,
@@ -126,25 +163,19 @@ impl DebugProtocolServer {
     /// Binds to `ws://127.0.0.1:19878` and spawns a tokio task
     /// to accept and handle WebSocket connections.
     ///
-    /// Returns the `DebugEventSender` (for AgentLoop integration) and
-    /// a shared reference to the `DebugController`.
-    pub async fn start(
-        self,
-    ) -> (
-        DebugEventSender,
-        Arc<Mutex<DebugController>>,
-    ) {
-        let controller = self.controller.clone();
-        let event_tx = self.event_tx.clone();
+    /// Returns a `DebugEventSender` template — clone it and call
+    /// `for_session(session_id)` to create per-session senders.
+    pub async fn start(self) -> DebugEventSender {
+        let template = DebugEventSender {
+            tx: self.event_tx.clone(),
+            session_id: String::new(),
+        };
 
         tokio::spawn(async move {
             self.run().await;
         });
 
-        (
-            DebugEventSender { tx: event_tx },
-            controller,
-        )
+        template
     }
 
     /// Main server loop: listen, accept, handle, repeat.
@@ -278,15 +309,17 @@ impl DebugProtocolServer {
                     }
                 }
 
-                // Forward events from AgentLoop to WebSocket client
-                event = self.event_rx.recv() => {
-                    match event {
-                        Some(debug_event) => {
+                // Forward events from AgentLoop to WebSocket client.
+                // ALL session events are forwarded; the frontend routes
+                // them by session_id via its per-session debugStore.
+                tagged = self.event_rx.recv() => {
+                    match tagged {
+                        Some(TaggedEvent { session_id, event: debug_event }) => {
                             let method = event_method_name(&debug_event);
-                            let notification = event_to_notification(debug_event);
+                            let notification = event_to_notification(debug_event, &session_id);
                             match serde_json::to_string(&notification) {
                                 Ok(json) => {
-                                    tracing::info!(method = %method, "DebugProtocolServer: forwarding event to client");
+                                    tracing::info!(method = %method, session_id = %session_id, "DebugProtocolServer: forwarding event to client");
                                     if let Err(e) = ws_sender
                                         .send(Message::Text(json.into()))
                                         .await
@@ -315,13 +348,15 @@ impl DebugProtocolServer {
             }
         }
 
-        // Reset controller state on disconnect — but preserve Stopped.
+        // On disconnect, reset all non-Stopped session controllers to Running.
         // If the user explicitly stopped debugging, we must not auto-resume
         // the agent loop when the WebSocket closes.
-        let mut ctrl = self.controller.lock().await;
-        if ctrl.state != super::controller::DebugState::Stopped {
-            ctrl.state = super::controller::DebugState::Running;
-            ctrl.phase = DebugPhase::Idle;
+        for ctrl_arc in self.sessions.read().await.values() {
+            let mut ctrl = ctrl_arc.lock().await;
+            if ctrl.state != super::controller::DebugState::Stopped {
+                ctrl.state = super::controller::DebugState::Running;
+                ctrl.phase = DebugPhase::Idle;
+            }
         }
     }
 
@@ -374,7 +409,47 @@ impl DebugProtocolServer {
         params: &serde_json::Value,
         id: serde_json::Value,
     ) -> Result<JsonRpcResponse, MethodError> {
-        let mut ctrl = self.controller.lock().await;
+        // Resolve session from request params — the frontend always sends
+        // a session_id; if missing, fall back to the first available session.
+        let session_id = params
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                self.sessions
+                    .try_read()
+                    .ok()
+                    .and_then(|guard| guard.keys().next().cloned())
+            })
+            .ok_or_else(|| {
+                MethodError::new(
+                    -32000,
+                    "No debug session available — create a session first".to_string(),
+                )
+            })?;
+        let ctrl_arc = self
+            .sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| {
+                MethodError::new(
+                    -32000,
+                    format!("No debug session found for session_id: {session_id}"),
+                )
+            })?;
+        let mut ctrl = ctrl_arc.lock().await;
+
+        // Helper to send a tagged event for the current session.
+        let send_event = |event_tx: &mpsc::UnboundedSender<TaggedEvent>,
+                          sid: &str,
+                          event: DebugEvent| {
+            let _ = event_tx.send(TaggedEvent {
+                session_id: sid.to_string(),
+                event,
+            });
+        };
 
         match method {
             // ── Execution Control ──
@@ -384,10 +459,14 @@ impl DebugProtocolServer {
                 // event_tx.send() is non-blocking (unbounded channel) —
                 // safe to call while holding the controller lock at RPC
                 // route level (agent loop acquires the lock separately).
-                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
-                    new_state: DebugState::Running,
-                    iteration,
-                });
+                send_event(
+                    &self.event_tx,
+                    &session_id,
+                    DebugEvent::ExecutionStateChanged {
+                        new_state: DebugState::Running,
+                        iteration,
+                    },
+                );
                 // Wake up the SessionTask so it can re-run the agent loop
                 // if it has already exited (e.g. after rewind was issued
                 // post-completion).  This is a no-op if the agent loop is
@@ -403,10 +482,14 @@ impl DebugProtocolServer {
             "debugger.pause" => {
                 ctrl.state = DebugState::Paused;
                 let iteration = ctrl.iteration;
-                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
-                    new_state: DebugState::Paused,
-                    iteration,
-                });
+                send_event(
+                    &self.event_tx,
+                    &session_id,
+                    DebugEvent::ExecutionStateChanged {
+                        new_state: DebugState::Paused,
+                        iteration,
+                    },
+                );
                 tracing::info!("Debug: pause — agent loop will pause at next check");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -417,10 +500,14 @@ impl DebugProtocolServer {
             "debugger.step" => {
                 ctrl.state = DebugState::Stepping;
                 let iteration = ctrl.iteration;
-                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
-                    new_state: DebugState::Stepping,
-                    iteration,
-                });
+                send_event(
+                    &self.event_tx,
+                    &session_id,
+                    DebugEvent::ExecutionStateChanged {
+                        new_state: DebugState::Stepping,
+                        iteration,
+                    },
+                );
                 tracing::info!("Debug: step — agent loop will execute one step");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -431,10 +518,14 @@ impl DebugProtocolServer {
             "debugger.stop" => {
                 ctrl.state = DebugState::Stopped;
                 let iteration = ctrl.iteration;
-                let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
-                    new_state: DebugState::Stopped,
-                    iteration,
-                });
+                send_event(
+                    &self.event_tx,
+                    &session_id,
+                    DebugEvent::ExecutionStateChanged {
+                        new_state: DebugState::Stopped,
+                        iteration,
+                    },
+                );
                 tracing::info!("Debug: stop — agent loop terminated");
                 Ok(JsonRpcResponse::success(
                     id.clone(),
@@ -658,10 +749,14 @@ impl DebugProtocolServer {
                 // an ExecutionStateChanged event so the frontend's debug
                 // panel updates to show "Paused" instead of "Stopped".
                 if was_stopped {
-                    let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
-                        new_state: DebugState::Paused,
-                        iteration: target,
-                    });
+                    send_event(
+                        &self.event_tx,
+                        &session_id,
+                        DebugEvent::ExecutionStateChanged {
+                            new_state: DebugState::Paused,
+                            iteration: target,
+                        },
+                    );
                 }
 
                 let result = serde_json::to_value(protocol::RewindResult {
@@ -774,12 +869,6 @@ impl DebugProtocolServer {
     }
 }
 
-impl Default for DebugProtocolServer {
-    fn default() -> Self {
-        Self::new(19878)
-    }
-}
-
 /// Get the event method name for logging.
 fn event_method_name(event: &DebugEvent) -> &'static str {
     match event {
@@ -793,8 +882,9 @@ fn event_method_name(event: &DebugEvent) -> &'static str {
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-/// Convert a DebugEvent to a JSON-RPC notification.
-fn event_to_notification(event: DebugEvent) -> JsonRpcNotification {
+/// Convert a DebugEvent to a JSON-RPC notification, tagging it with the
+/// originating session ID so the frontend can filter events per session.
+fn event_to_notification(event: DebugEvent, session_id: &str) -> JsonRpcNotification {
     match event {
         DebugEvent::StateChanged {
             old_phase,
@@ -802,6 +892,7 @@ fn event_to_notification(event: DebugEvent) -> JsonRpcNotification {
             iteration,
         } => {
             let params = serde_json::json!({
+                "session_id": session_id,
                 "old_phase": format!("{:?}", old_phase),
                 "new_phase": format!("{:?}", new_phase),
                 "iteration": iteration,
@@ -816,6 +907,7 @@ fn event_to_notification(event: DebugEvent) -> JsonRpcNotification {
             usage,
         } => {
             let params = serde_json::json!({
+                "session_id": session_id,
                 "iteration": iteration,
                 "phase": format!("{:?}", phase),
                 "input": input,
@@ -830,6 +922,7 @@ fn event_to_notification(event: DebugEvent) -> JsonRpcNotification {
             phase,
         } => {
             let params = serde_json::json!({
+                "session_id": session_id,
                 "breakpoint_id": breakpoint_id,
                 "iteration": iteration,
                 "phase": format!("{:?}", phase),
@@ -842,6 +935,7 @@ fn event_to_notification(event: DebugEvent) -> JsonRpcNotification {
             total_token_estimate,
         } => {
             let params = serde_json::json!({
+                "session_id": session_id,
                 "iteration": iteration,
                 "sections": sections,
                 "total_token_estimate": total_token_estimate,
@@ -853,6 +947,7 @@ fn event_to_notification(event: DebugEvent) -> JsonRpcNotification {
             iteration,
         } => {
             let params = serde_json::json!({
+                "session_id": session_id,
                 "new_state": new_state,
                 "iteration": iteration,
             });

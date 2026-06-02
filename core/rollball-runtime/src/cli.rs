@@ -7,7 +7,7 @@ use crate::error::{Result, RuntimeError};
 use clap::Parser;
 use rollball_core::protocol::{McpListItem, ProtocolType, ProviderListItem};
 use std::sync::Arc;
-use tokio::sync::Notify;
+
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, reload, util::SubscriberInitExt};
 
 /// Type alias for the reload handle used to dynamically change log level.
@@ -314,41 +314,6 @@ async fn async_main(
 
     // Step 0 (DevMode): Start debug protocol server as early as possible.
     //
-    // The debug WS must be available before the frontend debug panel
-    // tries to connect — which happens immediately after Gateway's
-    // start_agent HTTP response.  By starting the TCP listener here
-    // (before package loading, gRPC, skills, etc.) we eliminate
-    // ~400ms of latency where the debug panel shows "Connecting…".
-    // The debug_ctrl handles are stored and injected into AgentCore
-    // later (after it is created).
-    let mut early_debug_ctrl: Option<
-        Arc<tokio::sync::Mutex<crate::debug::controller::DebugController>>,
-    > = None;
-    let mut early_debug_event_tx: Option<crate::debug::server::DebugEventSender> = None;
-    let mut early_rewind_notify: Option<Arc<Notify>> = None;
-    let mut early_resume_notify: Option<Arc<Notify>> = None;
-    if config.dev_mode {
-        tracing::info!(
-            port = config.debug_port,
-            "DevMode enabled, starting debug protocol server on ws://127.0.0.1:{}",
-            config.debug_port
-        );
-        let debug_server = crate::debug::server::DebugProtocolServer::new(config.debug_port);
-        let (debug_event_tx, debug_ctrl) = debug_server.start().await;
-        let rewind_notify = {
-            let guard = debug_ctrl.lock().await;
-            guard.rewind_notify_handle()
-        };
-        let resume_notify = {
-            let guard = debug_ctrl.lock().await;
-            guard.resume_notify_handle()
-        };
-        early_debug_ctrl = Some(debug_ctrl);
-        early_debug_event_tx = Some(debug_event_tx);
-        early_rewind_notify = Some(rewind_notify);
-        early_resume_notify = Some(resume_notify);
-    }
-
     // Step 1: Load .agent package (before Gateway connection so we know agent_id)
     tracing::info!(path = %config.package_path, "Loading .agent package");
     let loaded = load_package(std::path::Path::new(&config.package_path))?;
@@ -931,22 +896,6 @@ async fn async_main(
             c.init_memory_store(work_dir_path);
         }
 
-        // Inject debug controller into AgentCore (server was started in Step 0)
-        if let Some(c) = Arc::get_mut(&mut core) {
-            if let (
-                Some(debug_ctrl),
-                Some(debug_event_tx),
-                Some(rewind_notify),
-                Some(resume_notify),
-            ) = (
-                early_debug_ctrl.take(),
-                early_debug_event_tx.take(),
-                early_rewind_notify.take(),
-                early_resume_notify.take(),
-            ) {
-                c.set_debug_mode(debug_ctrl, debug_event_tx, rewind_notify, resume_notify);
-            }
-        }
 
         let session_manager_config = SessionManagerConfig {
             inbound_channel_capacity: 64,

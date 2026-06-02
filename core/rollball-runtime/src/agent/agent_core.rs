@@ -27,6 +27,7 @@ use crate::agent::loop_::ApprovalHandle;
 use crate::config::RuntimeConfig;
 use crate::debug::controller::DebugController;
 use crate::debug::server::DebugEventSender;
+use crate::debug::DebugHandles;
 use crate::embedding::EmbeddingProvider;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
@@ -88,6 +89,16 @@ pub struct AgentCore {
     /// Provides execution control (pause/step/resume), breakpoints, and snapshots.
     /// None in production mode.
     pub(crate) debug_ctrl: Option<Arc<tokio::sync::Mutex<DebugController>>>,
+    /// Pending debug handles injected by SessionManager while the agent loop is running.
+    ///
+    /// When Gateway pushes EnableDebugMode to an actively-running session, the
+    /// SessionTask's message loop is blocked on `agent_loop.run().await` and
+    /// cannot process `SessionMessage::EnableDebugMode`. This shared Arc allows
+    /// SessionManager to inject the handles directly, bypassing the channel.
+    /// The agent loop checks this field at the start of each iteration via
+    /// [`check_and_apply_pending_debug`] and applies the handles if present.
+    /// None in production mode or before debug mode is enabled.
+    pub(crate) pending_debug_handles: Option<Arc<tokio::sync::Mutex<Option<DebugHandles>>>>,
     /// Debug rewind notification handle (shared across all sessions, only in DevMode).
     ///
     /// When the debug WebSocket sets a rewind target, the RPC handler calls
@@ -172,6 +183,7 @@ impl AgentCore {
             memory_store: None,
             memory_session: None,
             debug_ctrl: None,
+            pending_debug_handles: None,
             debug_rewind_notify: None,
             debug_resume_notify: None,
             debug_event_tx: None,
@@ -555,6 +567,7 @@ impl AgentCore {
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),
             debug_ctrl: self.debug_ctrl.clone(),
+            pending_debug_handles: None, // each session gets its own, injected via pending channel
             debug_rewind_notify: self.debug_rewind_notify.clone(),
             debug_resume_notify: self.debug_resume_notify.clone(),
             debug_event_tx: self.debug_event_tx.clone(),
@@ -598,6 +611,39 @@ impl AgentCore {
         self.debug_resume_notify = Some(resume_notify);
         self.debug_ctrl = Some(ctrl);
         self.debug_event_tx = Some(event_tx);
+    }
+
+    /// Check and apply any pending debug handles that were injected by
+    /// SessionManager while the agent loop was already running.
+    ///
+    /// This is the bypass path for the case where Gateway pushes
+    /// EnableDebugMode to an actively-running session: the SessionTask's
+    /// message loop is blocked on `agent_loop.run().await` and cannot
+    /// process `SessionMessage::EnableDebugMode`, so SessionManager
+    /// writes the handles into the shared `pending_debug_handles` Arc.
+    ///
+    /// Called at the start of each `execute_single_iteration` and before
+    /// `agent_loop.run()` in SessionTask's main loop (for idle sessions).
+    pub fn check_and_apply_pending_debug(&mut self) {
+        // Take the Arc out of self first to avoid a mutable borrow conflict
+        // with set_debug_mode.
+        let pending_arc = match self.pending_debug_handles.as_ref() {
+            Some(arc) => arc.clone(),
+            None => return,
+        };
+        let handles = match pending_arc.try_lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        };
+        if let Some(handles) = handles {
+            tracing::info!("AgentCore: applying pending debug handles (bypass)");
+            self.set_debug_mode(
+                handles.debug_ctrl,
+                handles.debug_event_tx,
+                handles.rewind_notify,
+                handles.resume_notify,
+            );
+        }
     }
 
     /// Access the debug controller, if in DevMode.

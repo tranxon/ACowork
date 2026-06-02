@@ -16,7 +16,7 @@ use crate::agent::context::ContextBuilder;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_::{AgentLoop, ChunkEvent, SessionChunkEvent};
 use crate::agent::session_state::SessionState;
-use crate::agent::session::session_manager::DebugHandles;
+use crate::debug::DebugHandles;
 use crate::debug::controller::DebugController;
 
 /// Messages that can be sent to a SessionTask.
@@ -238,6 +238,7 @@ impl SessionTask {
         protocol_type: rollball_core::protocol::ProtocolType,
         mcp_tools: Option<Vec<Arc<dyn Tool>>>,
         runtime_debug: Option<DebugHandles>,
+        pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         // Build the AgentLoop eagerly so its inbound sender can be exposed.
         // Heavy fields (provider, tools) are Arc-cloned (refcount only).
@@ -245,6 +246,11 @@ impl SessionTask {
         // Set MCP tools and rebuild the merged dispatch list
         core_for_session.mcp_tools = mcp_tools;
         core_for_session.rebuild_all_tools();
+
+        // Inject the shared pending-debug-handles channel so SessionManager
+        // can bypass the message queue when enabling debug mode on a running
+        // session (whose message loop is blocked on agent_loop.run().await).
+        core_for_session.pending_debug_handles = Some(pending_debug_handles);
 
         // Inject runtime debug handles into the session's core if provided.
         // This enables debug mode on sessions created AFTER Gateway pushes
@@ -602,6 +608,13 @@ impl SessionTask {
                             _ => {}
                         }
                     }
+
+                    // Check for bypass-injected debug handles before each agent
+                    // loop run. This covers the idle-session case where the
+                    // message loop is not blocked and EnableDebugMode arrives
+                    // between runs (handled by the existing EnableDebugMode arm),
+                    // but is a safety net if handles arrive during an idle window.
+                    agent_loop.core.check_and_apply_pending_debug();
 
                     match agent_loop.run(&enriched_content, &mut context_builder, content_parts).await {
                         Ok(response) => {

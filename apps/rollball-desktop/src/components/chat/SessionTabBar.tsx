@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useDebugStore } from "../../stores/debugStore";
 import { isSessionActive } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search } from "lucide-react";
@@ -52,6 +53,7 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
 
   const handleSelect = async (sessionId: string) => {
     await switchSession(sessionId, agentId);
+    useDebugStore.getState().setCurrentSessionId(sessionId);
     useSessionStore.getState().saveSessionForAgent(agentId, sessionId);
     // Ensure tab is opened
     useChatStore.getState().openTab(agentId, sessionId);
@@ -255,6 +257,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     if (hasMoved.current) return;
     if (sessionId === activeSessionId) return;
     await switchSession(sessionId, agentId);
+    useDebugStore.getState().setCurrentSessionId(sessionId);
     saveSessionForAgent(agentId, sessionId);
   };
 

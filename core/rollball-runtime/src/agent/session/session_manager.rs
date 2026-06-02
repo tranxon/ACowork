@@ -13,7 +13,6 @@ use rollball_core::protocol::{SearchKeyEntry, SearchProviderListItem};
 use rollball_core::tools::traits::Tool;
 use rollball_core::Budget;
 use tokio::sync::mpsc;
-use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::agent::agent_core::AgentCore;
@@ -24,7 +23,6 @@ use crate::agent::session::session_task::{SessionMessage, SessionTask};
 use crate::agent::session_state::{SessionState, SessionStatus};
 use crate::conversation::ConversationSession;
 use crate::debug::controller::DebugController;
-use crate::debug::server::DebugEventSender;
 use crate::error::{Result, RuntimeError};
 use crate::tools::mcp_manager::McpManager;
 use crate::tools::workspace_resolver::{WorkspaceResolver, format_workspace_context_for_session};
@@ -158,13 +156,9 @@ struct CachedLLMConfig {
 /// EnableDebugMode. Stored on SessionManager so that sessions
 /// created *after* debug mode is enabled inherit the debug
 /// controller, event sender, and notify handles.
-#[derive(Clone)]
-pub struct DebugHandles {
-    pub debug_ctrl: Arc<tokio::sync::Mutex<DebugController>>,
-    pub debug_event_tx: DebugEventSender,
-    pub rewind_notify: Arc<Notify>,
-    pub resume_notify: Arc<Notify>,
-}
+///
+/// Re-exported from `crate::debug::DebugHandles` for convenience.
+use crate::debug::DebugHandles;
 
 /// Lifecycle manager for multiple concurrent sessions.
 ///
@@ -214,6 +208,11 @@ pub struct SessionManager {
     /// and notify handles. Existing sessions restart via urgent_interrupt
     /// and pick up these handles on their next agent_loop.run().
     pub(crate) runtime_debug_handles: Option<DebugHandles>,
+    /// Per-session debug controllers, shared with DebugProtocolServer for
+    /// request routing. Each session adds its controller when created with
+    /// debug mode active.
+    pub(crate) debug_controllers:
+        Arc<tokio::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<DebugController>>>>>,
 }
 
 impl SessionManager {
@@ -236,6 +235,7 @@ impl SessionManager {
             pending_workspaces: HashMap::new(),
             default_workspace_id: "__agent_home__".to_string(),
             runtime_debug_handles: None,
+            debug_controllers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -298,6 +298,11 @@ impl SessionManager {
             session_state.set_provider(p.clone());
         }
 
+        // Shared channel for bypass-injecting debug handles into AgentCore
+        // while the agent loop is running (its message channel is blocked).
+        let pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+
         let (mut task, agent_inbound_tx) = SessionTask::new(
             self.core.clone(),
             session_state,
@@ -310,6 +315,7 @@ impl SessionManager {
             self.config.protocol_type.clone(),
             self.mcp_tools.clone(),
             self.runtime_debug_handles.clone(),
+            pending_debug_handles.clone(),
         );
 
         // ADR-014: Create watch channel for session status
@@ -328,6 +334,7 @@ impl SessionManager {
             join_handle,
             status_rx,
             last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
+            pending_debug_handles: pending_debug_handles.clone(),
         };
 
         self.sessions.insert(session_id.clone(), handle);
@@ -1171,8 +1178,21 @@ impl SessionManager {
         }
 
         let port = debug_port as u16;
-        let debug_server = crate::debug::server::DebugProtocolServer::new(port);
-        let (debug_event_tx, debug_ctrl) = debug_server.start().await;
+        let debug_server = crate::debug::server::DebugProtocolServer::new(
+            port,
+            self.debug_controllers.clone(),
+        );
+        let debug_event_tx = debug_server.start().await;
+        // Create a default debug controller for the current session.
+        // This controller is added to the shared map so the debug server
+        // can route requests for this session.  When new sessions are
+        // created with debug mode active, they register their own
+        // controllers into the same shared map.
+        let debug_ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
+        self.debug_controllers
+            .write()
+            .await
+            .insert(self.current_session_id.clone(), debug_ctrl.clone());
         let rewind_notify = {
             let guard = debug_ctrl.lock().await;
             guard.rewind_notify_handle()

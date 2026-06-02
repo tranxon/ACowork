@@ -8,6 +8,24 @@
 //! The debug protocol follows Chrome DevTools Protocol (CDP) conventions
 //! with JSON-RPC 2.0 over WebSocket. See `docs/design/10-debug-protocol.md`.
 
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+use crate::debug::controller::DebugController;
+use crate::debug::server::DebugEventSender;
+
 pub mod controller;
 pub mod protocol;
 pub mod server;
+
+/// Bundle of debug-related handles injected into an AgentCore by SessionManager.
+///
+/// Each session gets its own independent instance so that debug state
+/// (iteration counter, breakpoints, snapshots) is isolated per session.
+#[derive(Clone)]
+pub struct DebugHandles {
+    pub debug_ctrl: Arc<tokio::sync::Mutex<DebugController>>,
+    pub debug_event_tx: DebugEventSender,
+    pub rewind_notify: Arc<Notify>,
+    pub resume_notify: Arc<Notify>,
+}
