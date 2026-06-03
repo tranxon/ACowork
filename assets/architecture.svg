@@ -1,47 +1,45 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 620" width="100%" height="100%">
   <!-- Background -->
-  <rect width="800" height="620" fill="#f8fafc" rx="12" />
+  <rect width="800" height="620" fill="#ffffff" rx="12" />
 
   <!-- ==================== GATEWAY BOX ==================== -->
-  <rect x="20" y="10" width="760" height="190" rx="10" fill="#1e293b" />
-  <text x="400" y="38" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700">Gateway (Daemon)</text>
+  <rect x="20" y="10" width="760" height="190" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="400" y="38" text-anchor="middle" fill="#334155" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700">Gateway (Daemon)</text>
 
   <!-- Row 1 -->
-  <rect x="40" y="55" width="170" height="46" rx="6" fill="#334155" />
-  <text x="125" y="82" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Package Manager</text>
+  <rect x="40" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="125" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Package Manager</text>
 
-  <rect x="220" y="55" width="170" height="46" rx="6" fill="#334155" />
-  <text x="305" y="82" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Lifecycle Manager</text>
+  <rect x="220" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="305" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Lifecycle Manager</text>
 
-  <rect x="400" y="55" width="170" height="46" rx="6" fill="#334155" />
-  <text x="485" y="82" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Intent Router</text>
+  <rect x="400" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="485" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Intent Router</text>
 
-  <rect x="580" y="55" width="170" height="46" rx="6" fill="#334155" />
-  <text x="665" y="82" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Rate Limiter</text>
+  <rect x="580" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="665" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Rate Limiter</text>
 
   <!-- Row 2 -->
-  <rect x="90" y="115" width="170" height="46" rx="6" fill="#334155" />
-  <text x="175" y="142" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Budget Tracker</text>
+  <rect x="90" y="115" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="175" y="142" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Budget Tracker</text>
 
-  <rect x="315" y="115" width="170" height="46" rx="6" fill="#334155" />
-  <text x="400" y="142" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Key Vault</text>
+  <rect x="315" y="115" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="400" y="142" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Key Vault</text>
 
-  <rect x="540" y="115" width="170" height="46" rx="6" fill="#334155" />
-  <text x="625" y="142" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Config Manager</text>
+  <rect x="540" y="115" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="625" y="142" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Config Manager</text>
 
   <!-- ==================== GATEWAY SERVICE API ==================== -->
-  <!-- Horizontal bus from Gateway bottom -->
   <line x1="150" y1="200" x2="650" y2="200" stroke="#94a3b8" stroke-width="2" />
   <line x1="400" y1="200" x2="400" y2="210" stroke="#94a3b8" stroke-width="2" />
   <line x1="150" y1="200" x2="150" y2="210" stroke="#94a3b8" stroke-width="2" />
   <line x1="650" y1="200" x2="650" y2="210" stroke="#94a3b8" stroke-width="2" />
 
-  <!-- API label card -->
-  <rect x="230" y="210" width="340" height="48" rx="8" fill="white" stroke="#cbd5e1" stroke-width="1.5" />
-  <text x="400" y="232" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="13" font-weight="700">Gateway Service API</text>
+  <rect x="230" y="210" width="340" height="48" rx="8" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" />
+  <text x="400" y="232" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="13" font-weight="700">Gateway Service API</text>
   <text x="400" y="249" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">Unix Socket / Named Pipe / Local TCP</text>
 
-  <!-- Down arrows to Runtimes -->
+  <!-- Down arrows -->
   <line x1="150" y1="258" x2="150" y2="278" stroke="#94a3b8" stroke-width="2" />
   <line x1="150" y1="278" x2="400" y2="278" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,3" />
   <line x1="400" y1="258" x2="400" y2="290" stroke="#94a3b8" stroke-width="2" />
@@ -62,91 +60,90 @@
   <!-- ==================== AGENT RUNTIME BOXES ==================== -->
 
   <!-- Runtime 1: System Agent -->
-  <rect x="30" y="310" width="235" height="280" rx="10" fill="#1e293b" />
-  <text x="147" y="338" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
-  <text x="147" y="356" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
+  <rect x="30" y="310" width="235" height="280" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="147" y="338" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
+  <text x="147" y="356" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
 
-  <rect x="42" y="372" width="211" height="85" rx="6" fill="#334155" />
+  <rect x="42" y="372" width="211" height="85" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
   <rect x="42" y="372" width="211" height="26" rx="6" fill="#0ea5e9" />
   <rect x="42" y="392" width="211" height="6" fill="#0ea5e9" />
   <text x="147" y="390" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">System Agent</text>
-  <text x="147" y="415" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(com.rollball.system)</text>
+  <text x="147" y="415" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(com.rollball.system)</text>
   <text x="147" y="435" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">config + prompt + skills</text>
 
-  <!-- Capabilities -->
   <g transform="translate(45, 472)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
   </g>
   <g transform="translate(45, 498)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
   </g>
   <g transform="translate(45, 524)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
   </g>
   <g transform="translate(45, 550)">
     <text x="0" y="3" fill="#f59e0b" font-family="system-ui, sans-serif" font-size="13">⭐</text>
-    <text x="22" y="3" fill="#fde68a" font-family="system-ui, sans-serif" font-size="12" font-weight="500">System Privilege</text>
+    <text x="22" y="3" fill="#d97706" font-family="system-ui, sans-serif" font-size="12" font-weight="500">System Privilege</text>
   </g>
 
   <!-- Runtime 2: Weather Agent -->
-  <rect x="282" y="310" width="235" height="280" rx="10" fill="#1e293b" />
-  <text x="400" y="338" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
-  <text x="400" y="356" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
+  <rect x="282" y="310" width="235" height="280" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="400" y="338" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
+  <text x="400" y="356" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
 
-  <rect x="294" y="372" width="211" height="85" rx="6" fill="#334155" />
+  <rect x="294" y="372" width="211" height="85" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
   <rect x="294" y="372" width="211" height="26" rx="6" fill="#8b5cf6" />
   <rect x="294" y="392" width="211" height="6" fill="#8b5cf6" />
   <text x="400" y="390" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Weather Agent</text>
-  <text x="400" y="415" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(config + prompt +</text>
+  <text x="400" y="415" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(config + prompt +</text>
   <text x="400" y="435" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">skills)</text>
 
   <g transform="translate(297, 472)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
   </g>
   <g transform="translate(297, 498)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
   </g>
   <g transform="translate(297, 524)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
   </g>
 
   <!-- Runtime 3: Calendar Agent -->
-  <rect x="535" y="310" width="235" height="280" rx="10" fill="#1e293b" />
-  <text x="652" y="338" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
-  <text x="652" y="356" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
+  <rect x="535" y="310" width="235" height="280" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="652" y="338" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
+  <text x="652" y="356" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
 
-  <rect x="547" y="372" width="211" height="85" rx="6" fill="#334155" />
+  <rect x="547" y="372" width="211" height="85" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
   <rect x="547" y="372" width="211" height="26" rx="6" fill="#10b981" />
   <rect x="547" y="392" width="211" height="6" fill="#10b981" />
   <text x="652" y="390" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Calendar Agent</text>
-  <text x="652" y="415" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(config + prompt +</text>
+  <text x="652" y="415" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(config + prompt +</text>
   <text x="652" y="435" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">skills)</text>
 
   <g transform="translate(550, 472)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
   </g>
   <g transform="translate(550, 498)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
   </g>
   <g transform="translate(550, 524)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
   </g>
 </svg>
