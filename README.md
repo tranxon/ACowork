@@ -162,46 +162,9 @@ rollball-gateway chat --agent com.example.qa-agent "Help me review this code"
 
 ### System Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                      Gateway (Daemon)                        │
-│                                                              │
-│  ┌────────────┐ ┌────────────┐ ┌───────────┐ ┌───────────┐ │
-│  │ Package    │ │ Lifecycle  │ │ Intent    │ │ Rate      │ │
-│  │ Manager    │ │ Manager    │ │ Router    │ │ Limiter   │ │
-│  └────────────┘ └────────────┘ └───────────┘ └───────────┘ │
-│                                                              │
-│  ┌────────────┐ ┌────────────┐             ┌───────────┐   │
-│  │ Budget    │ │ Key       │             │ Config    │   │
-│  │ Tracker   │ │ Vault     │             │ Manager   │   │
-│  └────────────┘ └───────────┘             └───────────┘   │
-│                                                              │
-└──────────────────────────┬───────────────────────────────────┘
-                           │ Gateway Service API
-                           │ (Unix Socket / Named Pipe / Local TCP)
-       ┌───────────────────┼───────────────────┐
-       │                   │                   │
-       ▼                   ▼                   ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│ Agent Runtime   │ │ Agent Runtime   │ │ Agent Runtime   │
-│ (Single Binary) │ │ (Single Binary) │ │ (Single Binary) │
-│                 │ │                 │ │                 │
-│ ┌─────────────┐│ │ ┌─────────────┐│ │ ┌─────────────┐│
-│ │ System Agent││ │ │ Weather     ││ │ │ Calendar    ││
-│ │(com.rollball││ │ │ Agent       ││ │ │ Agent       ││
-│ │  .system)  ││ │ │ (config +   ││ │ │ (config +   ││
-│ │             ││ │ │  prompt +   ││ │ │  prompt +   ││
-│ │             ││ │ │  skills)    ││ │ │  skills)    ││
-│ └─────────────┘│ │ └─────────────┘│ │ └─────────────┘│
-│                 │ │                 │ │                 │
-│ ✅ Private     │ │ ✅ Private     │ │ ✅ Private     │
-│    Grafeo      │ │    Grafeo      │ │    Grafeo      │
-│ ✅ Direct LLM  │ │ ✅ Direct LLM  │ │ ✅ Direct LLM  │
-│ ✅ Tools Exec  │ │ ✅ Tools Exec  │ │ ✅ Tools Exec  │
-│ ⭐ System      │ │                 │ │                 │
-│    Privilege   │ │                 │ │                 │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
-```
+<p align="center">
+  <img src="./assets/architecture.svg" alt="RollBall.AI System Architecture" width="100%" />
+</p>
 
 ---
 
