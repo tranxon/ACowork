@@ -83,61 +83,63 @@ export function MemoryPanel() {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+      <div className="flex flex-col gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <input
           type="text"
           value={filters.keyword}
           onChange={(e) => setFilters({ keyword: e.target.value })}
           placeholder={t("memoryPanel.searchNodes")}
-          className="min-w-[160px] flex-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
+          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
         />
-        <select
-          value={filters.type}
-          onChange={(e) =>
-            setFilters({
-              type: e.target.value as
-                | "All"
-                | "Knowledge"
-                | "Episodic"
-                | "Procedural"
-                | "Autobiographical",
-            })
-          }
-          className="appearance-none rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-          style={{
-            backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-            backgroundPosition: 'right 0.5rem center',
-            backgroundRepeat: 'no-repeat',
-            backgroundSize: '1.5em 1.5em',
-          }}
-        >
-          <option value="All">{t("memoryPanel.allTypes")}</option>
-          <option value="Knowledge">Knowledge</option>
-          <option value="Episodic">Episodic</option>
-          <option value="Procedural">Procedural</option>
-          <option value="Autobiographical">Autobiographical</option>
-        </select>
-        <select
-          value={filters.timeRange}
-          onChange={(e) =>
-            setFilters({
-              timeRange: e.target.value as "1h" | "1d" | "7d" | "30d" | "all",
-            })
-          }
-          className="appearance-none rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-          style={{
-            backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-            backgroundPosition: 'right 0.5rem center',
-            backgroundRepeat: 'no-repeat',
-            backgroundSize: '1.5em 1.5em',
-          }}
-        >
-          <option value="all">{t("memoryPanel.allTime")}</option>
-          <option value="1h">{t("memoryPanel.lastHour")}</option>
-          <option value="1d">{t("memoryPanel.lastDay")}</option>
-          <option value="7d">{t("memoryPanel.last7Days")}</option>
-          <option value="30d">{t("memoryPanel.last30Days")}</option>
-        </select>
+        <div className="flex gap-2">
+          <select
+            value={filters.type}
+            onChange={(e) =>
+              setFilters({
+                type: e.target.value as
+                  | "All"
+                  | "Knowledge"
+                  | "Episodic"
+                  | "Procedural"
+                  | "Autobiographical",
+              })
+            }
+            className="min-w-0 flex-1 appearance-none rounded-lg border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            style={{
+              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+              backgroundPosition: 'right 0.5rem center',
+              backgroundRepeat: 'no-repeat',
+              backgroundSize: '1.5em 1.5em',
+            }}
+          >
+            <option value="All">{t("memoryPanel.allTypes")}</option>
+            <option value="Knowledge">Knowledge</option>
+            <option value="Episodic">Episodic</option>
+            <option value="Procedural">Procedural</option>
+            <option value="Autobiographical">Autobiographical</option>
+          </select>
+          <select
+            value={filters.timeRange}
+            onChange={(e) =>
+              setFilters({
+                timeRange: e.target.value as "1h" | "1d" | "7d" | "30d" | "all",
+              })
+            }
+            className="min-w-0 flex-1 appearance-none rounded-lg border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            style={{
+              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+              backgroundPosition: 'right 0.5rem center',
+              backgroundRepeat: 'no-repeat',
+              backgroundSize: '1.5em 1.5em',
+            }}
+          >
+            <option value="all">{t("memoryPanel.allTime")}</option>
+            <option value="1h">{t("memoryPanel.lastHour")}</option>
+            <option value="1d">{t("memoryPanel.lastDay")}</option>
+            <option value="7d">{t("memoryPanel.last7Days")}</option>
+            <option value="30d">{t("memoryPanel.last30Days")}</option>
+          </select>
+        </div>
       </div>
 
       {/* Stats cards */}
