@@ -25,9 +25,7 @@ use tokio::sync::Notify;
 use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use crate::agent::loop_::ApprovalHandle;
 use crate::config::RuntimeConfig;
-use crate::debug::controller::DebugController;
-use crate::debug::server::DebugEventSender;
-use crate::debug::DebugHandles;
+use crate::debug::DebugObserverSlot;
 use crate::embedding::EmbeddingProvider;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
@@ -85,39 +83,12 @@ pub struct AgentCore {
     /// Opened at agent startup from `{work_dir}/memory/private.grafeo`.
     /// None if initialization failed (memory features degraded gracefully).
     pub(crate) memory_store: Option<Arc<GrafeoStore>>,
-    /// Debug controller (shared across all sessions, only in DevMode).
-    /// Provides execution control (pause/step/resume), breakpoints, and snapshots.
-    /// None in production mode.
-    pub(crate) debug_ctrl: Option<Arc<tokio::sync::Mutex<DebugController>>>,
-    /// Pending debug handles injected by SessionManager while the agent loop is running.
+    /// Debug observer slot — Production (no-op) or Dev (real observer).
     ///
-    /// When Gateway pushes EnableDebugMode to an actively-running session, the
-    /// SessionTask's message loop is blocked on `agent_loop.run().await` and
-    /// cannot process `SessionMessage::EnableDebugMode`. This shared Arc allows
-    /// SessionManager to inject the handles directly, bypassing the channel.
-    /// The agent loop checks this field at the start of each iteration via
-    /// [`check_and_apply_pending_debug`] and applies the handles if present.
-    /// None in production mode or before debug mode is enabled.
-    pub(crate) pending_debug_handles: Option<Arc<tokio::sync::Mutex<Option<DebugHandles>>>>,
-    /// Debug rewind notification handle (shared across all sessions, only in DevMode).
-    ///
-    /// When the debug WebSocket sets a rewind target, the RPC handler calls
-    /// `rewind_notify.notify_one()`.  Both `await_debug_resume` (paused path)
-    /// and `SessionTask` (idle path) await this notify via `tokio::select!`
-    /// to consume rewinds without polling.
-    /// None in production mode.
-    pub(crate) debug_rewind_notify: Option<Arc<Notify>>,
-    /// Debug resume notification handle (shared across all sessions, only in DevMode).
-    ///
-    /// When the user presses resume but the agent loop has already exited
-    /// (e.g. after rewind was issued post-completion), the RPC handler calls
-    /// `resume_notify.notify_one()`.  The SessionTask uses this to wake up
-    /// from its idle wait and re-run the agent loop with the saved message.
-    /// None in production mode.
-    pub(crate) debug_resume_notify: Option<Arc<Notify>>,
-    /// Debug event sender (clone for each session to push events to WebSocket).
-    /// None in production mode.
-    pub(crate) debug_event_tx: Option<DebugEventSender>,
+    /// Consolidates the previous 6 `Option<T>` debug fields (debug_ctrl,
+    /// pending_debug_handles, debug_rewind_notify, debug_resume_notify,
+    /// debug_event_tx) into a single pluggable observer. See ADR-013.
+    pub(crate) debug_observer: DebugObserverSlot,
     /// Urgent stop notify — fired by Gateway gRPC (Stop / Restart-in-Debug)
     /// to cancel tool execution immediately without waiting for 500ms poll.
     /// Each session gets its own independent Notify; fire_urgent_stop() only
@@ -152,14 +123,21 @@ pub struct AgentCore {
 }
 
 impl AgentCore {
-    /// Create a new AgentCore with the given shared resources.
+    /// Create a new AgentCore with the given shared resources and a
+    /// pre-configured debug observer.
+    ///
+    /// This constructor supports integration testing and advanced embedding
+    /// scenarios where the caller needs to control the observer lifecycle.
+    /// For normal usage, prefer [`AgentCore::new()`] which defaults to
+    /// Production mode (zero-cost no-ops). See ADR-013.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_with_observer(
         config: RuntimeConfig,
         manifest: rollball_core::AgentManifest,
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
         on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
+        observer: crate::debug::DebugObserverSlot,
     ) -> Self {
         let shell_approval_threshold = ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
             .unwrap_or_default();
@@ -180,11 +158,7 @@ impl AgentCore {
             on_chunk,
             memory_store: None,
             memory_session: None,
-            debug_ctrl: None,
-            pending_debug_handles: None,
-            debug_rewind_notify: None,
-            debug_resume_notify: None,
-            debug_event_tx: None,
+            debug_observer: observer,
             urgent_stop: Some(Arc::new(Notify::new())),
             approval_gate: None,
             approval_handle: None,
@@ -192,6 +166,21 @@ impl AgentCore {
             status_tx: None,
             embedding_provider: None,
         }
+    }
+
+    /// Create a new AgentCore with the given shared resources.
+    ///
+    /// Defaults to Production mode (zero-cost debug no-ops).
+    /// Use [`AgentCore::new_with_observer()`] to inject a DevMode observer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config: RuntimeConfig,
+        manifest: rollball_core::AgentManifest,
+        provider: Arc<dyn Provider>,
+        tools: Vec<Arc<dyn Tool>>,
+        on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
+    ) -> Self {
+        Self::new_with_observer(config, manifest, provider, tools, on_chunk, DebugObserverSlot::production())
     }
 
     /// Rebuild the merged `all_tools` list from built-in `tools` + `mcp_tools`.
@@ -566,11 +555,9 @@ impl AgentCore {
             on_chunk,
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),
-            debug_ctrl: self.debug_ctrl.clone(),
-            pending_debug_handles: None, // each session gets its own, injected via pending channel
-            debug_rewind_notify: self.debug_rewind_notify.clone(),
-            debug_resume_notify: self.debug_resume_notify.clone(),
-            debug_event_tx: self.debug_event_tx.clone(),
+            // Debug observer is NOT cloned — each session gets a fresh
+            // Production slot; DevMode is injected via SessionManager.
+            debug_observer: DebugObserverSlot::production(),
             // Per-session Notify — each session gets its own independent
             // Notify so fire_urgent_stop() only wakes the target session.
             urgent_stop: Some(Arc::new(Notify::new())),
@@ -605,83 +592,39 @@ impl AgentCore {
         caps
     }
 
-    /// Set the debug controller, notify handles, and event sender (DevMode only).
-    pub fn set_debug_mode(
-        &mut self,
-        ctrl: Arc<tokio::sync::Mutex<DebugController>>,
-        event_tx: DebugEventSender,
-        rewind_notify: Arc<Notify>,
-        resume_notify: Arc<Notify>,
-    ) {
-        let ctrl_ptr = Arc::as_ptr(&ctrl) as *const ();
+    /// Set debug mode by replacing the observer slot with a DevMode observer.
+    ///
+    /// This is the primary injection point — called by SessionManager when
+    /// Gateway pushes EnableDebugMode. The DebugObserverImpl bundles all
+    /// debug state (controller, event sender, notify handles) into one
+    /// cohesive unit. See ADR-013.
+    pub fn set_debug_mode(&mut self, observer: crate::debug::DebugObserverImpl) {
         tracing::info!(
-            ctrl_ptr = ?ctrl_ptr,
-            has_event_tx = true,
-            has_rewind = true,
-            has_resume = true,
-            "[DBG-TRACE] AgentCore::set_debug_mode called"
+            is_dev = crate::debug::observer::DebugObserver::is_dev_mode(&observer),
+            "[DBG-TRACE] AgentCore::set_debug_mode called (observer pipeline)"
         );
-        self.debug_rewind_notify = Some(rewind_notify);
-        self.debug_resume_notify = Some(resume_notify);
-        self.debug_ctrl = Some(ctrl);
-        self.debug_event_tx = Some(event_tx);
+        self.debug_observer = DebugObserverSlot::dev(observer);
     }
 
-    /// Check and apply any pending debug handles that were injected by
-    /// SessionManager while the agent loop was already running.
-    ///
-    /// This is the bypass path for the case where Gateway pushes
-    /// EnableDebugMode to an actively-running session: the SessionTask's
-    /// message loop is blocked on `agent_loop.run().await` and cannot
-    /// process `SessionMessage::EnableDebugMode`, so SessionManager
-    /// writes the handles into the shared `pending_debug_handles` Arc.
-    ///
-    /// Called at the start of each `execute_single_iteration` and before
-    /// `agent_loop.run()` in SessionTask's main loop (for idle sessions).
-    pub fn check_and_apply_pending_debug(&mut self) {
-        // Take the Arc out of self first to avoid a mutable borrow conflict
-        // with set_debug_mode.
-        let pending_arc = match self.pending_debug_handles.as_ref() {
-            Some(arc) => arc.clone(),
-            None => return,
-        };
-        let handles = match pending_arc.try_lock() {
-            Ok(mut guard) => guard.take(),
-            Err(_) => None,
-        };
-        if let Some(handles) = handles {
-            tracing::info!("AgentCore: applying pending debug handles (bypass)");
-            self.set_debug_mode(
-                handles.debug_ctrl,
-                handles.debug_event_tx,
-                handles.rewind_notify,
-                handles.resume_notify,
-            );
-        }
+    /// Set the pending injection channel on the debug observer (DevMode only).
+    /// No-op for Production mode.
+    pub fn set_debug_pending_injection(&mut self, ch: std::sync::Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>) {
+        self.debug_observer.set_pending_injection(ch);
     }
 
-    /// Access the debug controller, if in DevMode.
-    pub fn debug_ctrl(&self) -> Option<&Arc<tokio::sync::Mutex<DebugController>>> {
-        let result = self.debug_ctrl.as_ref();
-        if result.is_none() {
-            tracing::warn!("[DBG-TRACE] AgentCore::debug_ctrl() returning None — debug not injected");
-        }
-        result
+    /// Access the debug observer slot.
+    pub fn debug_observer(&self) -> &DebugObserverSlot {
+        &self.debug_observer
     }
 
-    /// Access the debug rewind notify handle, if in DevMode.
-    pub fn debug_rewind_notify(&self) -> Option<&Arc<Notify>> {
-        self.debug_rewind_notify.as_ref()
+    /// Access the debug observer slot mutably.
+    pub fn debug_observer_mut(&mut self) -> &mut DebugObserverSlot {
+        &mut self.debug_observer
     }
 
-    /// Access the debug resume notify handle, if in DevMode.
-    pub fn debug_resume_notify(&self) -> Option<&Arc<Notify>> {
-        self.debug_resume_notify.as_ref()
-    }
-
-    /// Access the debug event sender, if in DevMode.
-    pub fn debug_event_tx(&self) -> Option<&DebugEventSender> {
-        self.debug_event_tx.as_ref()
+    /// Check if DevMode is active.
+    pub fn is_dev_mode(&self) -> bool {
+        self.debug_observer.is_dev_mode()
     }
 
     /// Access the approval gate, if configured.

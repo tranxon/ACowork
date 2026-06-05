@@ -234,7 +234,51 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
+    /// Create a new agent loop runner with a pre-configured debug observer.
+    ///
+    /// This constructor supports integration testing and advanced embedding
+    /// scenarios where the caller needs to control the observer lifecycle.
+    /// For normal usage, prefer [`AgentLoop::new()`] which defaults to
+    /// Production mode (zero-cost no-ops). See ADR-013.
+    ///
+    /// The caller can use the returned sender to inject messages into the loop
+    /// from external sources (Gateway, cross-agent intents, system notifications).
+    ///
+    /// If `on_chunk` is provided, streaming LLM deltas are forwarded to it
+    /// so the caller can relay chunks to the Gateway via StreamChunk messages
+    /// (like ZeroClaw's on_delta / DraftEvent pattern).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_observer(
+        config: RuntimeConfig,
+        manifest: rollball_core::AgentManifest,
+        provider: Arc<dyn Provider>,
+        tools: Vec<Arc<dyn Tool>>,
+        budget: rollball_core::Budget,
+        on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
+        conversation: Option<ConversationSession>,
+        observer: crate::debug::DebugObserverSlot,
+    ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
+        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
+        let max_tokens = config.history_max_tokens;
+        let approval_handle = ApprovalHandle::new(approval_tx);
+        let mut loop_ = Self {
+            core: AgentCore::new_with_observer(config, manifest, provider, tools, on_chunk, observer),
+            session: SessionState::new(max_tokens, budget, conversation),
+            inbound_rx,
+            approval_rx,
+            approval_handle: approval_handle.clone(),
+            approval_next_id: AtomicU64::new(0),
+        };
+        // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
+        loop_.core.approval_handle = Some(approval_handle);
+        (loop_, inbound_tx)
+    }
+
     /// Create a new agent loop runner, returning both the loop and an inbound sender.
+    ///
+    /// Defaults to Production mode (zero-cost debug no-ops).
+    /// Use [`AgentLoop::new_with_observer()`] to inject a DevMode observer.
     ///
     /// The caller can use the sender to inject messages into the loop from
     /// external sources (Gateway, cross-agent intents, system notifications).
@@ -252,21 +296,10 @@ impl AgentLoop {
         on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
         conversation: Option<ConversationSession>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
-        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
-        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
-        let max_tokens = config.history_max_tokens;
-        let approval_handle = ApprovalHandle::new(approval_tx);
-        let mut loop_ = Self {
-            core: AgentCore::new(config, manifest, provider, tools, on_chunk),
-            session: SessionState::new(max_tokens, budget, conversation),
-            inbound_rx,
-            approval_rx,
-            approval_handle: approval_handle.clone(),
-            approval_next_id: AtomicU64::new(0),
-        };
-        // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
-        loop_.core.approval_handle = Some(approval_handle);
-        (loop_, inbound_tx)
+        Self::new_with_observer(
+            config, manifest, provider, tools, budget, on_chunk, conversation,
+            crate::debug::DebugObserverSlot::production(),
+        )
     }
 
     /// Create an AgentLoop from pre-built components (for multi-session Actor model).
@@ -1228,89 +1261,103 @@ impl AgentLoop {
         _retrieved_memory_ids: &[String],
         current_model: &str,
     ) -> Result<IterationResult> {
-            // ── Check for bypass-injected debug handles ──
-            // When Gateway pushes EnableDebugMode to an actively-running
-            // session, the SessionTask's message loop is blocked on
-            // agent_loop.run() and cannot process SessionMessage::EnableDebugMode.
-            // SessionManager writes the handles into the shared
-            // pending_debug_handles Arc; we pick them up here at the start
-            // of each iteration.
-            self.core.check_and_apply_pending_debug();
+            // ── Debug observer hooks (ADR-013: Observer Pipeline) ──
+            // Check for bypass-injected debug handles, then notify the
+            // observer of iteration start (which increments the debug
+            // iteration counter and creates a conversation snapshot).
+            self.core.debug_observer.check_pending_injection();
+            let debug_iter = self.core.debug_observer.on_iteration_start(
+                self.session.history.len(),
+            );
 
-            // ── Debug mode hooks ──
-            // Increment session-level iteration counter (cumulative across
-            // all chat messages).  The local loop counter resets per message
-            // (see run() line 614), but the debug snapshot iteration must be
-            // globally unique within the session.
-            //
-            // Capture the incremented value into a local so that subsequent
-            // rewind operations (which reset ctrl.iteration mid-flight) do
-            // not cause capture_context_snapshot to read a wrong value.
-            let debug_iter = if let Some(ctrl) = self.core.debug_ctrl() {
-                let mut ctrl = ctrl.lock().await;
-                let prev_iter = ctrl.iteration;
-                ctrl.iteration += 1;
-                let current_iter = ctrl.iteration;
-                tracing::info!(
-                    prev_iter,
-                    new_iter = current_iter,
-                    "Debug: iteration counter incremented in execute_single_iteration"
-                );
-                // Create conversation snapshot for rewind support.
-                // Records the current message count and usage at this
-                // iteration so that rewinding can truncate history
-                // back to this point.
-                let msg_count = self.session.history.len();
-                let usage = crate::debug::protocol::DebugUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                };
-                let conv_snap = ctrl.create_conversation_snapshot(msg_count, usage);
-                tracing::info!(
-                    conv_iter = conv_snap.iteration,
-                    msg_count,
-                    snapshot_count = ctrl.conversation_snapshots.len(),
-                    "Debug: conversation snapshot created"
-                );
-                Some(current_iter)
-            } else {
-                None
-            };
+            // Await resume if paused (DevMode only).
+            {
+                let ctrl = self.core.debug_observer.debug_ctrl().cloned();
+                if let Some(ctrl) = ctrl {
+                    let rewind_notify = self.core.debug_observer.rewind_notify().cloned();
+                    loop {
+                        // Check for Chat Panel STOP
+                        if self.poll_stop() {
+                            tracing::info!("Debug: agent loop stopped via inbound channel");
+                            let mut ctrl_guard = ctrl.lock().await;
+                            let iteration = ctrl_guard.iteration;
+                            ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
+                            drop(ctrl_guard);
+                            if let Some(event_tx) = self.core.debug_observer.debug_event_tx() {
+                                let _ = event_tx.send(
+                                    crate::debug::server::DebugEvent::ExecutionStateChanged {
+                                        new_state: crate::debug::controller::DebugState::Stopped,
+                                        iteration,
+                                    },
+                                );
+                            }
+                            return Ok(IterationResult::Stopped(String::new()));
+                        }
 
-            // Await resume if paused (DevMode only)
-            if !self.await_debug_resume().await {
-                return Ok(IterationResult::Stopped(String::new()));
+                        // Consume any pending rewind
+                        {
+                            let mut ctrl_guard = ctrl.lock().await;
+                            if let Some(target_iter) = ctrl_guard.take_rewind_target() {
+                                let msg_count = ctrl_guard
+                                    .conversation_snapshots
+                                    .iter()
+                                    .find(|s| s.iteration == target_iter)
+                                    .map(|s| s.message_count);
+                                if let Some(count) = msg_count {
+                                    self.session.history.truncate_to(count);
+                                    tracing::info!(
+                                        target_iteration = target_iter,
+                                        messages_trimmed_to = count,
+                                        "Debug rewind: history truncated"
+                                    );
+                                }
+                                ctrl_guard.iteration = target_iter;
+                            }
+                        }
+
+                        let state = {
+                            let ctrl_guard = ctrl.lock().await;
+                            ctrl_guard.state.clone()
+                        };
+                        match state {
+                            crate::debug::controller::DebugState::Running => {
+                                self.transition_status(SessionStatus::Streaming { message_id: None });
+                                break;
+                            }
+                            crate::debug::controller::DebugState::Stepping => {
+                                self.transition_status(SessionStatus::Streaming { message_id: None });
+                                break;
+                            }
+                            crate::debug::controller::DebugState::Stopped => {
+                                tracing::info!("Debug: agent loop stopped");
+                                self.transition_status(SessionStatus::Idle);
+                                return Ok(IterationResult::Stopped(String::new()));
+                            }
+                            crate::debug::controller::DebugState::Paused => {
+                                self.transition_status(SessionStatus::Paused {
+                                    iteration: None,
+                                    max_iterations: None,
+                                });
+                                if let Some(ref notify) = rewind_notify {
+                                    tokio::select! {
+                                        _ = notify.notified() => {},
+                                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                                    }
+                                } else {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Apply pending patches to context_builder (DevMode only) ──
-            // When the agent is paused via debugger, SessionTask is blocked
-            // inside agent_loop.run() and cannot apply patches through its
-            // normal apply_debug_rewind_and_patches path.  Patches stored
-            // by patchContext in ctrl.pending_patches must be applied HERE,
-            // after resume, so that the LLM receives the patched context.
-            if let Some(ctrl) = self.core.debug_ctrl() {
-                let mut ctrl_guard = ctrl.lock().await;
-                if let Some(patches) = ctrl_guard.pending_patches.take() {
-                    context_builder.apply_patches(&patches);
-                    tracing::info!(
-                        iteration,
-                        "Debug: pending patches applied to context builder after resume"
-                    );
-                }
-                // Also consume the re_execute_pending flag so that
-                // apply_debug_rewind_and_patches at SessionTask level
-                // does not see a stale flag after agent_loop.run() finishes.
-                if ctrl_guard.take_re_execute_pending() {
-                    tracing::info!(
-                        iteration,
-                        "Debug: re_execute_pending consumed inside agent loop after resume"
-                    );
-                }
-            }
+            self.core.debug_observer.apply_pending_patches(context_builder);
+            self.core.debug_observer.take_re_execute_pending();
 
             // Enter BudgetCheck phase
-            self.update_debug_phase(
+            self.core.debug_observer.on_phase_enter(
                 crate::debug::protocol::DebugPhase::BudgetCheck,
             )
             .await;
@@ -1399,13 +1446,20 @@ impl AgentLoop {
             }
 
             // Debug: enter BuildContext phase
-            self.update_debug_phase(
+            self.core.debug_observer.on_phase_enter(
                 crate::debug::protocol::DebugPhase::BuildContext,
             )
             .await;
 
             // Debug: create context snapshot and push onContextBuilt event
-            self.capture_context_snapshot(context_builder, debug_iter, &current_model).await;
+            self.core.debug_observer.on_context_built(
+                crate::debug::observer::ContextSnapshotRequest {
+                    context_builder,
+                    iteration: debug_iter,
+                    model: &current_model,
+                    all_tools: &self.core.all_tools,
+                },
+            ).await;
 
             // Merge MCP tool definitions into the LLM request right before
             // injection. MCP tools are kept separate from active_tools and
@@ -1424,14 +1478,14 @@ impl AgentLoop {
             let response = self.call_llm_streaming(&chat_request, context_builder).await?;
 
             // Debug: enter LlmCall phase
-            self.update_debug_phase(crate::debug::protocol::DebugPhase::LlmCall)
+            self.core.debug_observer.on_phase_enter(crate::debug::protocol::DebugPhase::LlmCall)
                 .await;
 
             // ④ Parse response
             let has_tool_calls = response.tool_calls.is_some();
 
             // Debug: enter ParseResponse phase
-            self.update_debug_phase(
+            self.core.debug_observer.on_phase_enter(
                 crate::debug::protocol::DebugPhase::ParseResponse,
             )
             .await;
@@ -1564,16 +1618,16 @@ impl AgentLoop {
                 tracing::info!(iteration, "Agent returned text response");
 
                 // Debug: enter AppendHistory phase and push step event
-                self.update_debug_phase(
+                self.core.debug_observer.on_phase_enter(
                     crate::debug::protocol::DebugPhase::AppendHistory,
                 )
                 .await;
-                self.push_debug_step(
+                self.core.debug_observer.on_phase_step(
                     crate::debug::protocol::DebugPhase::Idle,
                     None,
                     Some(serde_json::json!({"content": content})),
                 );
-                self.debug_auto_pause_if_stepping().await;
+                self.core.debug_observer.on_phase_step_done().await;
 
                 return Ok(IterationResult::TextResponse(content));
             }
@@ -1680,18 +1734,18 @@ impl AgentLoop {
                 });
 
                 // Debug: push step event and auto-pause if stepping
-                self.push_debug_step(
+                self.core.debug_observer.on_phase_step(
                     crate::debug::protocol::DebugPhase::Idle,
                     None,
                     Some(serde_json::json!({"stopped": true, "content": content})),
                 );
-                self.debug_auto_pause_if_stepping().await;
+                self.core.debug_observer.on_phase_step_done().await;
 
                 return Ok(IterationResult::Stopped(content));
             }
 
             // Debug: enter ToolExecution phase
-            self.update_debug_phase(
+            self.core.debug_observer.on_phase_enter(
                 crate::debug::protocol::DebugPhase::ToolExecution,
             )
             .await;
@@ -1914,12 +1968,12 @@ impl AgentLoop {
                 });
 
                 // Debug: push step event and auto-pause if stepping
-                self.push_debug_step(
+                self.core.debug_observer.on_phase_step(
                     crate::debug::protocol::DebugPhase::Idle,
                     None,
                     Some(serde_json::json!({"stopped": true, "content": content})),
                 );
-                self.debug_auto_pause_if_stepping().await;
+                self.core.debug_observer.on_phase_step_done().await;
 
                 return Ok(IterationResult::Stopped(content));
             }
@@ -1928,16 +1982,16 @@ impl AgentLoop {
             tracing::debug!(iteration, "Loop iteration complete");
 
             // Debug: enter AppendHistory phase and push step event
-            self.update_debug_phase(
+            self.core.debug_observer.on_phase_enter(
                 crate::debug::protocol::DebugPhase::AppendHistory,
             )
             .await;
-            self.push_debug_step(
+            self.core.debug_observer.on_phase_step(
                 crate::debug::protocol::DebugPhase::Idle,
                 None,
                 None,
             );
-            self.debug_auto_pause_if_stepping().await;
+            self.core.debug_observer.on_phase_step_done().await;
 
             Ok(IterationResult::ToolCallsExecuted)
     }
@@ -2133,113 +2187,13 @@ impl AgentLoop {
 
     // ── Tool execution extracted to loop_tools.rs ──
 
-    // ── Debug mode control methods ──
-
-    /// Await debug resume: blocks if the debug controller is in Paused state.
-    ///
-    /// Uses `rewind_notify` via `tokio::select!` so that rewinds requested
-    /// via the Debug Panel are applied **immediately** (notification-driven)
-    /// rather than after up to 100ms of polling.  State changes (Running /
-    /// Stepping / Stopped) are still checked on each loop iteration.
-    ///
-    /// Also checks the inbound channel for Chat Panel STOP signals
-    /// (InboundMessage::Stop), which arrive via the Gateway gRPC push
-    /// path rather than the debug WebSocket.
-    /// Returns `true` if execution should continue, `false` if stopped.
-    async fn await_debug_resume(&mut self) -> bool {
-        let Some(ctrl) = self.core.debug_ctrl().cloned() else {
-            return true; // Production mode, no debug controller
-        };
-
-        // Clone the rewind notify handle so the Paused branch can use
-        // tokio::select! for instant rewind response.
-        let rewind_notify = self.core.debug_rewind_notify().cloned();
-
-        loop {
-            // Check for Chat Panel STOP (arrives via inbound channel).
-            // The Debug Panel STOP sets ctrl.state directly; the Chat Panel
-            // STOP sends InboundMessage::Stop through the Gateway gRPC
-            // push path.  Without this check, the stop sits unread in
-            // the channel while await_debug_resume only polls ctrl.state.
-            if self.poll_stop() {
-                tracing::info!("Debug: agent loop stopped via inbound channel");
-                // Synchronize debug controller state so the frontend sees Stopped
-                let mut ctrl_guard = ctrl.lock().await;
-                let iteration = ctrl_guard.iteration;
-                ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
-                drop(ctrl_guard);
-                // Push execution state change event for frontend sync
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(
-                        crate::debug::server::DebugEvent::ExecutionStateChanged {
-                            new_state: crate::debug::controller::DebugState::Stopped,
-                            iteration,
-                        },
-                    );
-                }
-                return false;
-            }
-
-            // Consume any pending rewind target during polling.
-            // Uses the unified apply_debug_rewind entry point so
-            // rewind logic lives in exactly one place.
-            {
-                let session_id = self
-                    .current_session_id()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                crate::agent::session::session_task::apply_debug_rewind(
-                    &ctrl,
-                    &session_id,
-                    self,
-                )
-                .await;
-            }
-
-            let state = {
-                let ctrl = ctrl.lock().await;
-                ctrl.state.clone()
-            };
-            match state {
-                crate::debug::controller::DebugState::Running => {
-                    // ADR-014: Paused → Streaming (debug resume)
-                    self.transition_status(SessionStatus::Streaming { message_id: None });
-                    return true;
-                }
-                crate::debug::controller::DebugState::Stepping => {
-                    // ADR-014: Paused → Streaming (debug step)
-                    self.transition_status(SessionStatus::Streaming { message_id: None });
-                    return true;
-                }
-                crate::debug::controller::DebugState::Stopped => {
-                    tracing::info!("Debug: agent loop stopped");
-                    // ADR-014: Paused → Idle (debug stop)
-                    self.transition_status(SessionStatus::Idle);
-                    return false;
-                }
-                crate::debug::controller::DebugState::Paused => {
-                    // ADR-014: Streaming → Paused (debug pause)
-                    self.transition_status(SessionStatus::Paused {
-                        iteration: None,
-                        max_iterations: None,
-                    });
-                    // Use tokio::select! with rewind_notify so that
-                    // rewinds are applied immediately (notification-driven)
-                    // instead of waiting up to 100ms for the next poll.
-                    // State changes are still picked up on the next
-                    // iteration after the select! resolves.
-                    if let Some(ref notify) = rewind_notify {
-                        tokio::select! {
-                            _ = notify.notified() => {},
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
-                        }
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                }
-            }
-        }
-    }
+    // ── Debug methods migrated to DebugObserverImpl (ADR-013) ──
+    // The following methods were moved to debug/observer_impl.rs:
+    //   - await_debug_resume → DebugObserverImpl::await_resume
+    //   - update_debug_phase → DebugObserverImpl::on_phase_enter
+    //   - push_debug_step → DebugObserverImpl::on_phase_step
+    //   - debug_auto_pause_if_stepping → DebugObserverImpl::on_phase_step_done
+    //   - capture_context_snapshot → DebugObserverImpl::on_context_built
 
     /// Await user approval decision for a tool execution request.
     ///
@@ -2662,241 +2616,6 @@ impl AgentLoop {
             // 3. Resolve the spawned task's oneshot
             let _ = decision_tx.send(decision);
         })
-    }
-
-    /// Update the debug phase and check for breakpoints.
-    ///
-    /// Pushes `onStateChange` events and checks if any breakpoint matches.
-    /// If a breakpoint hits, the controller is set to Paused and an
-    /// `onBreakpoint` event is pushed.
-    async fn update_debug_phase(&mut self, phase: crate::debug::protocol::DebugPhase) {
-        let Some(ctrl) = self.core.debug_ctrl() else {
-            return;
-        };
-
-        let mut ctrl_guard = ctrl.lock().await;
-        let old_phase = ctrl_guard.phase;
-        ctrl_guard.phase = phase;
-
-        // Push state change event
-        if let Some(event_tx) = self.core.debug_event_tx() {
-            let _ = event_tx.send(crate::debug::server::DebugEvent::StateChanged {
-                old_phase,
-                new_phase: phase,
-                iteration: ctrl_guard.iteration,
-            });
-        }
-
-        // Check breakpoints
-        let hit_ids = ctrl_guard.check_breakpoints(phase, None);
-        if !hit_ids.is_empty() {
-            for bp_id in &hit_ids {
-                tracing::info!(breakpoint_id = %bp_id, phase = ?phase, "Debug: breakpoint hit");
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(crate::debug::server::DebugEvent::BreakpointHit {
-                        breakpoint_id: bp_id.clone(),
-                        iteration: ctrl_guard.iteration,
-                        phase,
-                    });
-                }
-            }
-            ctrl_guard.state = crate::debug::controller::DebugState::Paused;
-            {
-                // Push execution state change event for frontend sync
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(
-                        crate::debug::server::DebugEvent::ExecutionStateChanged {
-                            new_state: crate::debug::controller::DebugState::Paused,
-                            iteration: ctrl_guard.iteration,
-                        },
-                    );
-                }
-            }
-            drop(ctrl_guard); // Release lock before blocking
-            self.await_debug_resume().await;
-        }
-    }
-
-    /// Push a step event to the debug client.
-    fn push_debug_step(
-        &self,
-        phase: crate::debug::protocol::DebugPhase,
-        input: Option<serde_json::Value>,
-        output: Option<serde_json::Value>,
-    ) {
-        if let (Some(ctrl), Some(event_tx)) =
-            (self.core.debug_ctrl(), self.core.debug_event_tx())
-        {
-            // Read iteration from controller (avoid holding lock across send)
-            let iteration = {
-                // Use try_lock to avoid blocking in non-async context;
-                // if lock is contested, just skip the event.
-                let Ok(ctrl) = ctrl.try_lock() else { return };
-                ctrl.iteration
-            };
-            let _ = event_tx.send(crate::debug::server::DebugEvent::Step {
-                iteration,
-                phase,
-                input,
-                output,
-                usage: None,
-            });
-        }
-    }
-
-    /// Auto-pause if in Stepping mode (after completing one iteration).
-    async fn debug_auto_pause_if_stepping(&self) {
-        if let Some(ctrl) = self.core.debug_ctrl() {
-            let mut ctrl_guard = ctrl.lock().await;
-            if ctrl_guard.state == crate::debug::controller::DebugState::Stepping {
-                ctrl_guard.state = crate::debug::controller::DebugState::Paused;
-                let iteration = ctrl_guard.iteration;
-                drop(ctrl_guard);
-                // Push execution state change event for frontend sync
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(
-                        crate::debug::server::DebugEvent::ExecutionStateChanged {
-                            new_state: crate::debug::controller::DebugState::Paused,
-                            iteration,
-                        },
-                    );
-                }
-                tracing::info!("Debug: stepping complete, auto-pausing");
-            }
-        }
-    }
-
-    /// Build a ContextSnapshot from the current ContextBuilder state
-    /// and store it in the debug controller, then push an onContextBuilt event.
-    ///
-    /// This is called after [`ContextBuilder::build()`] in each iteration
-    /// when DevMode is active. Captures the 5 control-plane sections with
-    /// metadata (size, token estimate, SHA-256 hash) for the debug panel's
-    /// context tree view.
-    ///
-    /// `debug_iter` is the iteration number captured *before* any yield
-    /// points in [`execute_single_iteration`].  Because rewind operations
-    /// can modify `ctrl.iteration` mid-flight (between the increment and
-    /// this snapshot), we must use the captured value rather than reading
-    /// the controller field again.
-    async fn capture_context_snapshot(
-        &self,
-        context_builder: &ContextBuilder,
-        debug_iter: Option<u32>,
-        current_model: &str,
-    ) {
-        let Some(iter) = debug_iter else {
-            return; // Not in DevMode
-        };
-        let Some(event_tx) =
-            self.core.debug_event_tx()
-        else {
-            return;
-        };
-
-        use crate::debug::controller::{ContextSnapshot, ContextSnapshotSections, SectionContent};
-
-        // Build tool_definitions string: merge ContextBuilder's built-in tools
-        // with MCP tools from AgentCore. MCP tools are only mixed at display time
-        // (debug panel) and at LLM injection time, not in active_tools/tool_definitions.
-        let mut all_defs: Vec<serde_json::Value> = context_builder
-            .tool_definitions()
-            .map(|defs| defs.to_vec())
-            .unwrap_or_default();
-        for tool in &self.core.all_tools {
-            let spec = tool.spec();
-            if spec.name.starts_with("mcp:") {
-                let val = serde_json::to_value(&spec).unwrap_or_default();
-                all_defs.push(val);
-            }
-        }
-        let tool_defs_str = serde_json::Value::Array(all_defs).to_string();
-
-        // Build skill_instructions from the ContextBuilder.
-        // Skill instructions are injected via ContextBuilder.set_skill_instructions()
-        // (from command-based skill selection in cli.rs), making them visible
-        // in the debug panel's context snapshot.
-        let skill_str = context_builder
-            .skill_instructions()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-
-        // ── Diagnostic: log workspace_context status for debugging zero-byte issue ──
-        tracing::info!(
-            iter = iter,
-            ws_has = context_builder.workspace_context().is_some(),
-            ws_len = context_builder.workspace_context().map(|s| s.len()).unwrap_or(0),
-            ws_preview = ?context_builder.workspace_context().map(|s| &s[..s.len().min(80)]),
-            "capture_context_snapshot: workspace_context status"
-        );
-
-        // All token counting goes through the unified crate::token::count_text API.
-        let sections = ContextSnapshotSections {
-            system_prompt: SectionContent::new(
-                context_builder.system_prompt().to_string(),
-                current_model,
-            ),
-            workspace_context: SectionContent::new(
-                context_builder.workspace_context().unwrap_or_default().to_string(),
-                current_model,
-            ),
-            environment: SectionContent::new(
-                context_builder
-                    .environment_override()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| crate::agent::context::detect_environment_text()),
-                current_model,
-            ),
-            tool_definitions: SectionContent::new(tool_defs_str, current_model),
-            skill_instructions: SectionContent::new(skill_str, current_model),
-            retrieved_memory: SectionContent::new(
-                context_builder.retrieved_memory().unwrap_or_default().to_string(),
-                current_model,
-            ),
-            identity_context: SectionContent::new(
-                context_builder.identity_context().unwrap_or_default().to_string(),
-                current_model,
-            ),
-        };
-
-        let total_token_estimate = sections.system_prompt.token_estimate
-            + sections.workspace_context.token_estimate
-            + sections.environment.token_estimate
-            + sections.tool_definitions.token_estimate
-            + sections.skill_instructions.token_estimate
-            + sections.retrieved_memory.token_estimate
-            + sections.identity_context.token_estimate;
-
-        let snapshot = ContextSnapshot {
-            iteration: iter,
-            built_at: chrono::Utc::now(),
-            sections,
-            total_token_estimate,
-        };
-
-        // Store in controller — also persist the model name so that
-        // patchContext can use model-aware token estimates.
-        if let Some(ctrl) = self.core.debug_ctrl() {
-            let mut ctrl_guard = ctrl.lock().await;
-            ctrl_guard.current_model = Some(current_model.to_string());
-            ctrl_guard.store_context_snapshot(snapshot.clone());
-        }
-
-        // Push onContextBuilt event to WebSocket client
-        let context_sections =
-            crate::debug::protocol::ContextSections::from(&snapshot.sections);
-        let sent = event_tx.send(crate::debug::server::DebugEvent::ContextBuilt {
-            iteration: snapshot.iteration,
-            sections: context_sections,
-            total_token_estimate: snapshot.total_token_estimate,
-        });
-
-        tracing::info!(
-            iteration = snapshot.iteration,
-            total_token_estimate,
-            event_sent = sent,
-            "Debug: context snapshot captured and event pushed"
-        );
     }
 
     /// Get reference to history manager
