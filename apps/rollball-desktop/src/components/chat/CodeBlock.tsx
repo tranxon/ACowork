@@ -11,11 +11,6 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
     const [collapsed, setCollapsed] = useState(false);
     const [copied, setCopied] = useState(false);
 
-    // Route mermaid diagrams to dedicated renderer
-    if (language === "mermaid") {
-        return <MermaidBlock chart={code} />;
-    }
-
     const handleCopy = useCallback(async () => {
         try {
             await navigator.clipboard.writeText(code);
@@ -32,6 +27,11 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
             setTimeout(() => setCopied(false), 2000);
         }
     }, [code]);
+
+    // Route mermaid diagrams to dedicated renderer (must be after ALL hooks)
+    if (language === "mermaid") {
+        return <MermaidBlock chart={code} />;
+    }
 
     const langLabel = language || "code";
 

@@ -347,7 +347,8 @@
         "stopped": "Stopped",
         "agent": "Agent",
         "version": "Version",
-        "noAgentSelected": "No agent selected"
+        "sessions": "Sessions",
+        "noAgentSelected": "No Agent selected"
     },
     "workspace": {
         "delete": "Delete",

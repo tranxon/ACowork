@@ -7,19 +7,28 @@
 //! - Tool activation filtering (done at registry build time — no runtime check needed)
 //! - Parallel execution with per-tool timeout + iteration deadline
 //! - Result collection with original ordering
+//! - Tool call preparation (dedup, history, JSONL persist, chunk emit)
+//! - Pre/post-execution loop detection
+//! - Tool result persistence and emission
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use rollball_core::providers::traits::ToolCall;
+use rollball_core::providers::traits::{ChatMessage, ToolCall};
 use rollball_core::tools::traits::Tool;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
+use crate::agent::context::ContextBuilder;
+use crate::agent::loop_detector::{LoopDetectionResult, LoopPattern, ResponseLevel};
+use crate::agent::session_state::SessionStatus;
+use crate::error::{Result, RuntimeError};
 use crate::security::approval_gate::{ApprovalGate, ApprovalRequest};
 use crate::security::shell_risk::{self, ShellRisk};
 use rollball_core::ShellApprovalThreshold;
 
-use super::loop_::{AgentLoop, ApprovalHandle};
+use super::loop_::{AgentLoop, ChunkEvent};
+use super::loop_approval::ApprovalHandle;
 
 impl AgentLoop {
     /// Execute tool calls in parallel with per-tool timeout and iteration-level deadline.
@@ -568,5 +577,303 @@ async fn check_shell_approval_handle(
             assessment.risk.label(),
             reject_reason
         ))
+    }
+}
+
+impl AgentLoop {
+// ── Tool pipeline methods (ADR-014 Phase 8: extracted from execute_single_iteration) ──
+
+    /// Prepare tool calls for execution.
+    ///
+    /// Persists think block to JSONL (via D2 dedup helper), deduplicates
+    /// same-iteration tool calls, appends assistant message to history,
+    /// persists tool calls to JSONL, and emits ToolCall chunk events.
+    ///
+    /// Returns the deduplicated tool call list.
+    pub(crate) fn prepare_tool_calls(
+        &mut self,
+        response: &rollball_core::providers::traits::ChatResponse,
+    ) -> Vec<ToolCall> {
+        // Persist think block to JSONL (D2 dedup)
+        if let Some(ref conversation) = self.session.conversation {
+            crate::agent::loop_session::persist_think_to_conversation(conversation, response);
+        }
+
+        // Has tool calls — process them
+        let tool_calls = response.tool_calls.clone().unwrap_or_default();
+
+        // Tool call deduplication (same iteration)
+        let mut seen = HashSet::new();
+        let deduped_calls: Vec<ToolCall> = tool_calls
+            .into_iter()
+            .filter(|tc| {
+                let sig = format!("{}:{}", tc.function.name, tc.function.arguments);
+                seen.insert(sig)
+            })
+            .collect();
+
+        // Add assistant message with tool_calls to history
+        self.session.history.append(ChatMessage {
+            reasoning_content: response.reasoning_content.clone(),
+            tool_calls: Some(deduped_calls.clone()),
+            ..ChatMessage::assistant(response.content.clone())
+        });
+
+        // Persist tool calls to JSONL
+        if let Some(ref conversation) = self.session.conversation {
+            for tc in &deduped_calls {
+                let metadata = serde_json::json!({
+                    "tool_name": tc.function.name,
+                    "tool_call_id": tc.id,
+                });
+                conversation.append_message("tool_call", &tc.function.arguments, Some(metadata));
+            }
+        }
+
+        // Emit ToolCall events via chunk channel (ensures ordering with content chunks)
+        for tc in &deduped_calls {
+            if !self.core.try_send_chunk(ChunkEvent::ToolCall {
+                name: tc.function.name.clone(),
+                args: tc.function.arguments.clone(),
+                id: tc.id.clone(),
+            }) {
+                tracing::debug!("on_chunk channel full or closed, dropping ToolCall event");
+            }
+        }
+
+        deduped_calls
+    }
+
+    /// Pre-execution loop detection: check tool calls before executing them.
+    ///
+    /// Tool calls that trigger Block or Break level are filtered out;
+    /// Warning-level calls are allowed through (handled post-execution).
+    ///
+    /// Returns `(calls_to_execute, blocked_info)` where blocked_info
+    /// contains the original index and detected pattern for each blocked call.
+    pub(crate) fn pre_check_loop_detection(
+        &mut self,
+        deduped_calls: &[ToolCall],
+    ) -> (Vec<ToolCall>, Vec<(usize, LoopPattern)>) {
+        let mut calls_to_execute: Vec<ToolCall> = Vec::new();
+        let mut blocked_info: Vec<(usize, LoopPattern)> = Vec::new();
+
+        for (idx, tc) in deduped_calls.iter().enumerate() {
+            match self.session.loop_detector.peek_check(&tc.function.name, &tc.function.arguments) {
+                LoopDetectionResult::NoLoop => {
+                    calls_to_execute.push(tc.clone());
+                }
+                LoopDetectionResult::LoopDetected { level, pattern, .. } => {
+                    match level {
+                        ResponseLevel::Warning => {
+                            // Warning is handled post-execution; allow the call
+                            calls_to_execute.push(tc.clone());
+                        }
+                        ResponseLevel::Block | ResponseLevel::Break => {
+                            tracing::warn!(
+                                tool = %tc.function.name,
+                                level = ?level,
+                                "Loop detected (pre-execution), blocking tool call"
+                            );
+                            blocked_info.push((idx, pattern));
+                        }
+                    }
+                }
+            }
+        }
+
+        (calls_to_execute, blocked_info)
+    }
+
+    /// Dispatch tool calls for execution and merge results.
+    ///
+    /// Intercepts special tools (ask_user_question, todo_write) for sequential
+    /// processing, executes remaining tools in parallel, then merges all
+    /// results back in original order. Also merges with pre-blocked results
+    /// from `pre_check_loop_detection`.
+    ///
+    /// Returns `(tool_results, was_stopped)`.
+    pub(crate) async fn dispatch_and_merge_tools(
+        &mut self,
+        calls_to_execute: Vec<ToolCall>,
+        deduped_calls: &[ToolCall],
+        blocked_info: &[(usize, LoopPattern)],
+        context_builder: &mut ContextBuilder,
+    ) -> (Vec<String>, bool) {
+        // Intercept special tools
+        let mut ask_question_results: Vec<(usize, String)> = Vec::new();
+        let mut todo_write_results: Vec<(usize, String)> = Vec::new();
+        let mut parallel_calls: Vec<(usize, ToolCall)> = Vec::new();
+
+        for (idx, tc) in calls_to_execute.into_iter().enumerate() {
+            if tc.function.name == "ask_user_question" {
+                let result = self.handle_ask_user_question(&tc).await;
+                ask_question_results.push((idx, result));
+            } else if tc.function.name == "todo_write" {
+                let result = self.handle_todo_write(&tc, context_builder);
+                todo_write_results.push((idx, result));
+            } else {
+                parallel_calls.push((idx, tc));
+            }
+        }
+
+        // Execute non-question tools in parallel
+        let calls_for_parallel: Vec<ToolCall> = parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
+        let (parallel_results, was_stopped) = self.execute_tools_parallel(&calls_for_parallel).await;
+
+        // Merge results: ask_question + todo_write + parallel, mapped back to original indices
+        let ask_result_map: std::collections::HashMap<usize, String> =
+            ask_question_results.into_iter().collect();
+        let todo_result_map: std::collections::HashMap<usize, String> =
+            todo_write_results.into_iter().collect();
+
+        let mut final_results: Vec<(usize, String)> = Vec::new();
+        for (parallel_idx, result) in parallel_results.into_iter().enumerate() {
+            if let Some((orig_idx, _)) = parallel_calls.get(parallel_idx) {
+                final_results.push((*orig_idx, result));
+            }
+        }
+        for (orig_idx, result) in &ask_result_map {
+            final_results.push((*orig_idx, result.clone()));
+        }
+        for (orig_idx, result) in &todo_result_map {
+            final_results.push((*orig_idx, result.clone()));
+        }
+        final_results.sort_by_key(|(idx, _)| *idx);
+
+        let executed_results: Vec<String> = final_results.into_iter().map(|(_, r)| r).collect();
+
+        // Merge executed results with pre-blocked results, preserving original order
+        let mut tool_results: Vec<String> = Vec::with_capacity(deduped_calls.len());
+        let mut executed_iter = executed_results.into_iter();
+        for idx in 0..deduped_calls.len() {
+            if let Some(pos) = blocked_info.iter().position(|(i, _)| *i == idx) {
+                let msg = match &blocked_info[pos].1 {
+                    LoopPattern::SameToolFlood => {
+                        "Loop detected: this tool has been called too many times in a short period. \
+                         Please STOP using this tool and try a different approach \
+                         (e.g., use file_read to verify results, or switch to another tool)."
+                    }
+                    _ => "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach.",
+                };
+                tool_results.push(msg.to_string());
+            } else {
+                tool_results.push(executed_iter.next().unwrap_or_default());
+            }
+        }
+
+        (tool_results, was_stopped)
+    }
+
+    /// Persist tool results to JSONL and emit ToolResult chunk events.
+    pub(crate) fn persist_and_emit_tool_results(
+        &mut self,
+        deduped_calls: &[ToolCall],
+        tool_results: &[String],
+    ) {
+        // Persist tool results to JSONL
+        if let Some(ref conversation) = self.session.conversation {
+            for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
+                let metadata = serde_json::json!({
+                    "tool_name": tc.function.name,
+                    "tool_call_id": tc.id,
+                });
+                conversation.append_message("tool_result", result_content, Some(metadata));
+            }
+        }
+
+        // Emit ToolResult events via chunk channel
+        for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
+            if !self.core.try_send_chunk(ChunkEvent::ToolResult {
+                name: tc.function.name.clone(),
+                result: result_content.clone(),
+                tool_call_id: tc.id.clone(),
+            }) {
+                tracing::debug!("on_chunk channel full or closed, dropping ToolResult event");
+            }
+        }
+    }
+
+    /// Post-execution loop detection.
+    ///
+    /// Checks tool results for loop patterns, appends deferred warning
+    /// messages to history after all tool results, and returns
+    /// `Err(RuntimeError::LoopDetected)` if a Break-level loop is detected.
+    /// Skips already-blocked tool calls to avoid false positives.
+    pub(crate) fn post_check_loop_detection(
+        &mut self,
+        deduped_calls: &[ToolCall],
+        tool_results: &[String],
+        blocked_info: &[(usize, LoopPattern)],
+    ) -> Result<()> {
+        let mut deferred_warnings: Vec<String> = Vec::new();
+        let mut break_error: Option<String> = None;
+
+        for (idx, (tc, result_content)) in deduped_calls.iter().zip(tool_results.iter()).enumerate() {
+            // Skip loop detection for pre-blocked tool calls to avoid self-reinforcing
+            // false positives: blocked tools return uniform error messages whose identical
+            // hashes would incorrectly trigger NoProgress detection.
+            if blocked_info.iter().any(|(i, _)| *i == idx) {
+                continue;
+            }
+
+            match self.session.loop_detector.check(
+                &tc.function.name,
+                &tc.function.arguments,
+                result_content,
+            ) {
+                LoopDetectionResult::NoLoop => {}
+                LoopDetectionResult::LoopDetected {
+                    pattern,
+                    level,
+                    count: _,
+                    message,
+                } => {
+                    tracing::warn!(message = %message, level = ?level, "Loop detected");
+                    match level {
+                        ResponseLevel::Warning => {
+                            let warning_content = match &pattern {
+                                LoopPattern::SameToolFlood => {
+                                    format!(
+                                        "[System Warning] {message} \
+                                         This tool has been called excessively. \
+                                         Please STOP using this tool and try a different approach \
+                                         (e.g., use file_read to verify results, or switch to another tool) \
+                                         to complete the task."
+                                    )
+                                }
+                                _ => format!("[System Warning] {message}"),
+                            };
+                            deferred_warnings.push(warning_content);
+                        }
+                        ResponseLevel::Block => {
+                            // Block was already handled by returning error as tool result
+                        }
+                        ResponseLevel::Break => {
+                            break_error = Some(message);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Append deferred warning messages AFTER all tool results
+        for warning_content in deferred_warnings {
+            self.session.history.append(ChatMessage {
+                role: rollball_core::providers::traits::MessageRole::User,
+                content: warning_content,
+                name: Some("system".to_string()),
+                ..Default::default()
+            });
+        }
+
+        // Handle Break-level loop detection
+        if let Some(msg) = break_error {
+            self.transition_status(SessionStatus::Idle);
+            return Err(RuntimeError::LoopDetected(msg));
+        }
+
+        Ok(())
     }
 }

@@ -347,6 +347,7 @@
         "stopped": "已停止",
         "agent": "Agent",
         "version": "版本",
+        "sessions": "会话数",
         "noAgentSelected": "未选择 Agent"
     },
     "workspace": {

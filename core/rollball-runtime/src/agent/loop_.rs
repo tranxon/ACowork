@@ -7,12 +7,11 @@
 //! S1.6: InboundQueue for external message injection
 //! S1.7: Parallel tool execution with per-tool timeout
 
-use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use rollball_core::providers::traits::{
-    ChatMessage, ChatResponse, MessageRole, Provider, ToolCall,
+    ChatMessage, Provider,
 };
 use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::tools::traits::Tool;
@@ -20,62 +19,16 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::agent::agent_core::AgentCore;
-use crate::agent::budget_guard::BudgetCheckResult;
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
-use crate::agent::loop_detector::{LoopDetectionResult, LoopPattern, ResponseLevel};
 use crate::agent::session_state::SessionState;
 use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
+use crate::agent::loop_approval::{ApprovalDecision, ApprovalHandle};
 use crate::security::approval_gate::ApprovalRequest;
-use crate::tools::builtin::ask_user_question::{AskUserQuestionTool, QuestionOption};
-
-/// User's decision on a tool approval request.
-#[derive(Debug, Clone)]
-pub(crate) struct ApprovalDecision {
-    pub approved: bool,
-    #[allow(dead_code)]
-    pub allow_all_session: bool,
-    /// Human-readable reason for timeout or rejection (for LLM feedback)
-    pub reason: Option<String>,
-}
-
-/// Lightweight handle for spawned tool tasks to request user approval.
-///
-/// The spawned task calls `request_approval()` (no timeout), which sends the
-/// request to the AgentLoop main loop via an mpsc channel and blocks on a
-/// oneshot. The main loop receives the request, emits ChunkEvent::ToolApprovalNeeded
-/// to the Gateway (which forwards to the Desktop App), pauses via
-/// `await_approval_decision()`, and resolves the oneshot when the user's
-/// decision arrives as InboundMessage::ApprovalDecision.
-#[derive(Clone)]
-pub(crate) struct ApprovalHandle {
-    request_tx: mpsc::Sender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
-}
-
-impl ApprovalHandle {
-    pub fn new(
-        request_tx: mpsc::Sender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
-    ) -> Self {
-        Self { request_tx }
-    }
-
-    /// Request user approval for a tool execution.
-    /// Blocks without timeout until the user decides (Allow/Deny).
-    pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
-        let (tx, rx) = oneshot::channel();
-        if self.request_tx.send((req, tx)).await.is_err() {
-            tracing::warn!("ApprovalHandle: request channel closed, auto-rejecting");
-            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
-        }
-        rx.await.unwrap_or_else(|_| {
-            tracing::warn!("ApprovalHandle: oneshot sender dropped, auto-rejecting");
-            ApprovalDecision { approved: false, allow_all_session: false, reason: None }
-        })
-    }
-}
+use crate::tools::builtin::ask_user_question::QuestionOption;
 
 use crate::agent::session_state::SessionStatus;
 
@@ -234,7 +187,51 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
+    /// Create a new agent loop runner with a pre-configured debug observer.
+    ///
+    /// This constructor supports integration testing and advanced embedding
+    /// scenarios where the caller needs to control the observer lifecycle.
+    /// For normal usage, prefer [`AgentLoop::new()`] which defaults to
+    /// Production mode (zero-cost no-ops). See ADR-013.
+    ///
+    /// The caller can use the returned sender to inject messages into the loop
+    /// from external sources (Gateway, cross-agent intents, system notifications).
+    ///
+    /// If `on_chunk` is provided, streaming LLM deltas are forwarded to it
+    /// so the caller can relay chunks to the Gateway via StreamChunk messages
+    /// (like ZeroClaw's on_delta / DraftEvent pattern).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_observer(
+        config: RuntimeConfig,
+        manifest: rollball_core::AgentManifest,
+        provider: Arc<dyn Provider>,
+        tools: Vec<Arc<dyn Tool>>,
+        budget: rollball_core::Budget,
+        on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
+        conversation: Option<ConversationSession>,
+        observer: crate::debug::DebugObserverSlot,
+    ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
+        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
+        let max_tokens = config.history_max_tokens;
+        let approval_handle = ApprovalHandle::new(approval_tx);
+        let mut loop_ = Self {
+            core: AgentCore::new_with_observer(config, manifest, provider, tools, on_chunk, observer),
+            session: SessionState::new(max_tokens, budget, conversation),
+            inbound_rx,
+            approval_rx,
+            approval_handle: approval_handle.clone(),
+            approval_next_id: AtomicU64::new(0),
+        };
+        // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
+        loop_.core.approval_handle = Some(approval_handle);
+        (loop_, inbound_tx)
+    }
+
     /// Create a new agent loop runner, returning both the loop and an inbound sender.
+    ///
+    /// Defaults to Production mode (zero-cost debug no-ops).
+    /// Use [`AgentLoop::new_with_observer()`] to inject a DevMode observer.
     ///
     /// The caller can use the sender to inject messages into the loop from
     /// external sources (Gateway, cross-agent intents, system notifications).
@@ -252,21 +249,10 @@ impl AgentLoop {
         on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
         conversation: Option<ConversationSession>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
-        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
-        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
-        let max_tokens = config.history_max_tokens;
-        let approval_handle = ApprovalHandle::new(approval_tx);
-        let mut loop_ = Self {
-            core: AgentCore::new(config, manifest, provider, tools, on_chunk),
-            session: SessionState::new(max_tokens, budget, conversation),
-            inbound_rx,
-            approval_rx,
-            approval_handle: approval_handle.clone(),
-            approval_next_id: AtomicU64::new(0),
-        };
-        // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
-        loop_.core.approval_handle = Some(approval_handle);
-        (loop_, inbound_tx)
+        Self::new_with_observer(
+            config, manifest, provider, tools, budget, on_chunk, conversation,
+            crate::debug::DebugObserverSlot::production(),
+        )
     }
 
     /// Create an AgentLoop from pre-built components (for multi-session Actor model).
@@ -292,254 +278,10 @@ impl AgentLoop {
         (session_loop, inbound_tx)
     }
 
-    /// Transition session status and emit SessionStateChanged event if the status changed.
-    ///
-    /// ADR-014 helper: ensures every status transition is paired with an event emission.
-    /// Returns true if the status actually changed (and event was emitted).
-    fn transition_status(&mut self, new_status: SessionStatus) -> bool {
-        if self.session.set_status(new_status) {
-            let status = self.session.status.clone();
-            // Emit chunk event to Gateway → frontend
-            if !self.core.try_send_chunk(ChunkEvent::SessionStateChanged {
-                status: status.clone(),
-                model: self.session.model().map(|s| s.to_string()),
-                provider: self.session.provider().map(|s| s.to_string()),
-                workspace_id: self.session.workspace_id(),
-            }) {
-                tracing::warn!(
-                    "SessionStateChanged event dropped (channel full/closed), status={:?}. Pull repair will correct frontend.",
-                    status
-                );
-            }
-            // Update watch channel for SessionHandle reads
-            if let Some(ref tx) = self.core.status_tx {
-                let _ = tx.send(status);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
-    /// LLMConfigDelivery from Gateway).
-    /// `provider_id` is the Vault provider ID (not protocol name) for
-    /// compact_model lookup.
-    pub fn update_provider(
-        &mut self,
-        new_provider: Arc<dyn Provider>,
-        model: String,
-        provider_id: Option<String>,
-    ) {
-        self.core.update_provider(new_provider, model);
-        if let Some(pid) = provider_id {
-            self.core.current_provider_id = Some(pid);
-        }
-    }
-
-    /// Update gateway model capabilities at runtime (e.g., after receiving a
-    /// hot-pushed LLMConfigDelivery from Gateway).
-    /// The capabilities are stored keyed by model ID for multi-model support.
-    pub fn update_gateway_model_capabilities(&mut self, model_id: &str, caps: ModelCapabilitiesInfo) {
-        self.core.update_gateway_model_capabilities(model_id, caps);
-    }
-
-    /// Update the max output tokens limit from Gateway config.
-    pub fn update_max_output_tokens_limit(&mut self, limit: u64) {
-        self.core.update_max_output_tokens_limit(limit);
-    }
-
-    /// Apply runtime config overrides from Gateway.
-    pub fn apply_runtime_config(
-        &mut self,
-        max_output_tokens: Option<u64>,
-        max_iterations: Option<u32>,
-        temperature: Option<f32>,
-        system_prompt_override: Option<String>,
-        shell_approval_threshold: Option<String>,
-    ) {
-        self.core.apply_runtime_config(max_output_tokens, max_iterations, temperature, system_prompt_override, shell_approval_threshold);
-    }
-
-    /// Apply a user operation delivered via the `send_inbound()` fast channel.
-    ///
-    /// This is the central dispatch point for all `UserOp` variants received
-    /// through `InboundMessage::UserOperation`. It handles operations that
-    /// must take effect immediately even while the agent loop is mid-execution.
-    ///
-    /// Returns `true` if the operation is an interrupt (caller should abort
-    /// the current loop).
-    pub(crate) fn apply_user_op(&mut self, op: &crate::agent::inbound::UserOp) -> bool {
-        match op {
-            crate::agent::inbound::UserOp::StopLoop { reason } => {
-                tracing::info!(reason = %reason, "UserOp: stop loop");
-                true
-            }
-            crate::agent::inbound::UserOp::ContinueLoop { reason } => {
-                tracing::info!(reason = %reason, "UserOp: continue loop (no-op here; handled at iteration limit pause)");
-                false
-            }
-            crate::agent::inbound::UserOp::ApprovalDecision { .. } => {
-                tracing::debug!("UserOp: approval decision (no-op here; handled via approval subsystem)");
-                false
-            }
-            crate::agent::inbound::UserOp::QuestionAnswer { .. } => {
-                tracing::debug!("UserOp: question answer (no-op here; handled via ask_user_question subsystem)");
-                false
-            }
-            crate::agent::inbound::UserOp::UpdateRuntimeConfig {
-                max_output_tokens,
-                max_iterations,
-                temperature,
-                system_prompt_override,
-                shell_approval_threshold,
-            } => {
-                tracing::info!(
-                    max_output_tokens,
-                    max_iterations,
-                    temperature,
-                    system_prompt_override = system_prompt_override.as_deref(),
-                    shell_approval_threshold = shell_approval_threshold.as_deref(),
-                    "UserOp: applying runtime config immediately in AgentLoop"
-                );
-                self.apply_runtime_config(
-                    *max_output_tokens,
-                    *max_iterations,
-                    *temperature,
-                    system_prompt_override.clone(),
-                    shell_approval_threshold.clone(),
-                );
-                false
-            }
-        }
-    }
-
-    /// Get the current conversation session ID (S1.14)
-    ///
-    /// Returns the session ID of the active ConversationSession,
-    /// or None if no session is active.
-    pub fn current_session_id(&self) -> Option<&str> {
-        self.session.conversation.as_ref().map(|c| c.session_id())
-    }
-
-    /// Initialize the Grafeo memory store at the given workspace path.
-    ///
-    /// Delegates to `AgentCore::init_memory_store()`.
-    /// Opens or creates `{work_dir}/memory/private.grafeo`.
-    pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
-        self.core.init_memory_store(work_dir);
-    }
-
-    /// Retrieve relevant long-term memories from Grafeo and inject them into
-    /// the ContextBuilder for the next LLM call.
-    ///
-    /// Runs once per `run()` invocation, before the first LLM iteration.
-    /// When the memory store is unavailable, this is a silent no-op.
-    ///
-    /// Returns the list of Grafeo node IDs that were retrieved (P2-4 fix).
-    /// These IDs are passed to `record_turn_to_memory` so that future
-    /// retrieval can trace which memories influenced each turn.
-    async fn retrieve_and_inject_memories(
-        &self,
-        user_message: &str,
-        context_builder: &mut ContextBuilder,
-    ) -> Vec<String> {
-        // P0 fix: Always clear stale memory from previous turns first.
-        // ContextBuilder is reused across turns (SessionTask loop), so
-        // without this, stale memory leaks into the next LLM call.
-        context_builder.clear_retrieved_memory();
-
-        let store = match self.core.memory_store() {
-            Some(s) => s,
-            None => return vec![], // No store available, already cleared above
-        };
-
-        let manager = self.core.init_memory_manager();
-
-        // Build exclude_session_id filter to avoid re-injecting Episode
-        // summaries that are already in the current session's context window.
-        let current_session_id = self
-            .session
-            .conversation
-            .as_ref()
-            .map(|c| c.session_id().to_string());
-
-        // Update MemorySessionHandle so memory_recall tool can see the
-        // current session_id for its own exclude_session_id filtering.
-        if let Some(ref handle) = self.core.memory_session {
-            if let Some(ref sid) = current_session_id {
-                handle.set_session_id(sid.clone());
-            }
-        }
-
-        let mut query = rollball_memory::MemoryQuery::auto_inject(
-            user_message.to_string(),
-            current_session_id,
-        );
-
-        // Pass embedding provider from AgentCore so retrieve() can auto-generate
-        // query embeddings on-demand (Ollama local → Remote fallback chain).
-        let emb_provider = self.core.embedding_provider.as_deref();
-
-        // P2-4 fix: Use retrieve + inject separately (instead of process_turn)
-        // so we can capture the node IDs of retrieved memories for traceability.
-        match manager.retrieve(store, &mut query, emb_provider).await {
-            Ok(retrieval) => {
-                // Capture node IDs before inject (inject discards the RetrievalResult)
-                let memory_ids: Vec<String> = retrieval
-                    .memories
-                    .iter()
-                    .filter(|m| m.node_id != 0) // 0 = RAG result, not Grafeo local
-                    .map(|m| m.node_id.to_string())
-                    .collect();
-
-                let metrics = retrieval.metrics.clone();
-                let injected = manager.inject(&retrieval);
-                if !injected.formatted_text.is_empty() {
-                    tracing::info!(
-                        memory_count = injected.memory_count,
-                        token_count = injected.token_count,
-                        avg_score = metrics.avg_score,
-                        "Retrieved and injected long-term memories into context"
-                    );
-                    context_builder.set_retrieved_memory(injected.formatted_text);
-                }
-                memory_ids
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to retrieve memories from Grafeo (non-fatal)"
-                );
-                vec![]
-            }
-        }
-    }
-
-    /// Write document upload entries to the conversation JSONL.
-    ///
-    /// Each document is persisted as a `ConversationEntry` with `role: "system"`
-    /// and `metadata.type: "document_upload"` so that the Desktop App can render
-    /// document chips when loading historical sessions.
-    pub fn write_document_entries(&self, documents: &[serde_json::Value]) {
-        if let Some(ref conversation) = self.session.conversation {
-            for doc in documents {
-                let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("");
-                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("");
-                let size = doc.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                let content = format!("Uploaded file: {} ({}, {} bytes)", filename, format, size);
-                let metadata = serde_json::json!({
-                    "type": "document_upload",
-                    "document_id": doc.get("id"),
-                    "filename": filename,
-                    "format": format,
-                    "size_bytes": size,
-                    "path": doc.get("abs_path"),
-                });
-                conversation.append_message("system", &content, Some(metadata));
-            }
-        }
-    }
+    // ── Memory system methods moved to loop_memory.rs (ADR-014 Phase 6) ──
+    //   - init_memory_store
+    //   - retrieve_and_inject_memories
+    //   - write_document_entries
 
     /// Execute a built-in tool by name, simulating an LLM tool call.
     ///
@@ -570,24 +312,6 @@ impl AgentLoop {
         }
     }
 
-    /// Update the title of the currently active conversation session.
-    ///
-    /// Returns `Some(true)` if the title was actually written (different from current),
-    /// `Some(false)` if the title was already the same (no-op),
-    /// or `None` if no active session exists.
-    pub fn update_session_title(&mut self, title: &str) -> Option<bool> {
-        self.session.conversation.as_ref().map(|conv| conv.update_title_force(title))
-    }
-
-    /// Persist the per-session workspace selection to the JSONL conversation file.
-    ///
-    /// Only effective when the session has an active `ConversationSession`.
-    pub fn update_session_workspace_id(&mut self, workspace_id: &str) {
-        if let Some(ref conv) = self.session.conversation {
-            conv.update_workspace_id(workspace_id);
-        }
-    }
-
     /// Look up model capabilities by exact model name (delegates to AgentCore).
     pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<&ModelCapabilitiesInfo> {
         self.core.get_model_capabilities(model_name)
@@ -603,393 +327,8 @@ impl AgentLoop {
             .unwrap_or_default()
     }
 
-    /// Get the context window budget for history trimming.
-    /// Uses Gateway model capabilities (context_window) if available,
-    /// otherwise falls back to config.history_max_tokens.
-    fn context_trim_budget(&self, model_name: &str) -> u64 {
-        self.core.context_trim_budget(model_name)
-    }
 
-    /// Trim history to fit within the context window budget.
-    ///
-    /// The budget comes from [`context_trim_budget`] →
-    /// [`ModelCapabilitiesInfo::effective_input_budget`], which already
-    /// reserves output space (capped at `max_output_tokens_limit`, default 32K).
-    /// No additional margin is applied here — [`compact_history_if_needed`]
-    /// provides early warning at 80% usage.
-    fn trim_history_to_budget(&mut self, model_name: &str) {
-        let budget = self.context_trim_budget(model_name);
 
-        // Sync HistoryManager::max_tokens to the actual model budget so
-        // trim_fifo uses the correct threshold. Without this, max_tokens
-        // remains at the static config default (128K) even after model
-        // switch, capabilities update, or max_output_tokens change.
-        self.session.history.set_max_tokens(budget);
-
-        // Stage 1: FIFO trim oldest non-system messages until within budget
-        self.session.history.trim_fifo();
-
-        // Stage 2: If still over budget after FIFO, use emergency trim as safety net
-        if self.session.history.token_count() > budget {
-            self.session.history.emergency_trim();
-        }
-
-        // Also truncate any single message that exceeds per-message limit
-        self.session.history.truncate_large_messages(budget / 4);
-    }
-
-    /// Check context usage after LLM response and trigger compaction if needed.
-    ///
-    /// Per [ADR-011], this implements the three-stage compaction strategy:
-    /// - 80% usage → LLM-based compaction (`compact_via_llm` + `replace_middle_with_summary`)
-    /// - 95% usage → emergency trim (safety net)
-    ///
-    /// When `force` is true (manual trigger from user), the 80% threshold is
-    /// bypassed and compaction proceeds regardless of current usage percentage.
-    ///
-    /// Called after each LLM response (force=false) and on manual user trigger
-    /// (force=true via `SessionMessage::CompactContext`).
-    pub(crate) async fn compact_history_if_needed(
-        &mut self,
-        model_name: &str,
-        force: bool,
-    ) {
-        /// Number of conversational rounds to keep at the tail after compaction.
-        /// Each round starts with a User message, so this keeps the last N user
-        /// messages and everything after them.
-        const KEEP_LAST_ROUNDS: usize = 3;
-        let budget = self.context_trim_budget(model_name);
-        let current_tokens = self.session.history.token_count();
-
-        if budget == 0 {
-            return;
-        }
-
-        let usage_percent = (current_tokens as f64 / budget as f64) * 100.0;
-
-        // Stage 2: 80% → LLM-based compaction (or force=true bypasses threshold)
-        if force || usage_percent >= 80.0 {
-            tracing::info!(
-                usage_percent = ?usage_percent,
-                current_tokens,
-                budget,
-                force,
-                "Triggering LLM compaction"
-            );
-
-            // Notify frontend that compaction has started (both manual and auto paths).
-            if let Some(ref tx) = self.core.on_chunk {
-                let _ = tx.send(SessionChunkEvent {
-                    session_id: self.core.session_id.clone().unwrap_or_default(),
-                    event: ChunkEvent::CompactingStarted,
-                }).await;
-            }
-
-            // Build combined text from history for model-aware token counting.
-            let combined_text: String = self.session.history.messages()
-                .iter()
-                .fold(String::new(), |mut acc, m| {
-                    acc.push_str(&m.content);
-                    acc.push('\n');
-                    acc
-                });
-            let compact_model = self.resolve_distill_model(&combined_text);
-            let system_prompt = self
-                .core
-                .system_prompt_override
-                .as_deref()
-                .unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT);
-            let provider = self.core.provider.clone();
-            let memory_store = self.core.memory_store().cloned();
-
-            match self
-                .session
-                .history
-                .compact_via_llm(provider.as_ref(), &compact_model, system_prompt)
-                .await
-            {
-                Ok(summary) => {
-                    let stripped = crate::episode_distill::strip_metadata_blocks(&summary);
-                    let removed = self.session.history.replace_middle_with_summary(&stripped, KEEP_LAST_ROUNDS);
-
-                    // Write compaction summary to Grafeo
-                    let session_id = self
-                        .session
-                        .conversation
-                        .as_ref()
-                        .map(|c| c.session_id().to_string())
-                        .unwrap_or_default();
-                    crate::episode_distill::EpisodeDistiller::write_summary_to_grafeo(
-                        &summary,
-                        &session_id,
-                        &memory_store,
-                        self.core.embedding_provider.as_deref(),
-                    ).await;
-
-                    // Mark session as compacted (zero new messages since compaction)
-                    self.session.is_compacted = true;
-
-                    // Recompute usage after compaction for stage 3 check
-                    let new_tokens = self.session.history.token_count();
-                    let new_usage = if budget > 0 {
-                        (new_tokens as f64 / budget as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-
-                    tracing::info!(
-                        removed,
-                        summary_len = summary.len(),
-                        before_tokens = current_tokens,
-                        after_tokens = new_tokens,
-                        before_usage = ?usage_percent,
-                        after_usage = ?new_usage,
-                        "LLM compaction completed"
-                    );
-
-                    // Stage 3: 95% → emergency trim (safety net, even after compaction)
-                    if new_usage >= 95.0 {
-                        let em_removed = self.session.history.emergency_trim();
-                        tracing::warn!(
-                            em_removed,
-                            after_usage = ?new_usage,
-                            "Emergency trim performed after compaction (still >= 95%)"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "LLM compaction failed, falling back to FIFO + emergency trim"
-                    );
-                    self.session.history.trim_fifo();
-                    if self.session.history.token_count() > budget {
-                        self.session.history.emergency_trim();
-                    }
-                }
-            }
-
-            // Notify frontend that compaction has finished, so it can clear
-            // the "compacting..." indicator (both success and error paths).
-            // Also send updated context usage so the frontend shows the new
-            // token count and percentage after compaction.
-            if let Some(ref tx) = self.core.on_chunk {
-                let session_id = self.core.session_id.clone().unwrap_or_default();
-                let _ = tx.try_send(SessionChunkEvent {
-                    session_id: session_id.clone(),
-                    event: ChunkEvent::CompactingEnded,
-                });
-
-                // Compute and send updated context usage after compaction.
-                // The history token count has changed, but the frontend still
-                // shows the old number from the last LLM API response.
-                let caps = self.core.gateway_model_capabilities.get(model_name);
-                if let Some(caps) = caps {
-                    let usable = caps.effective_input_budget(self.core.max_output_tokens_limit);
-                    let total_tokens = self.session.history.token_count();
-                    let usage_percent = if usable > 0 {
-                        ((total_tokens as f64 / usable as f64) * 100.0).min(100.0) as u8
-                    } else {
-                        0
-                    };
-                    let ctx_info = rollball_core::protocol::ContextUsageInfo {
-                        context_window: caps.context_window,
-                        input_tokens: total_tokens,
-                        output_tokens: 0,
-                        total_tokens,
-                        max_input_tokens: caps.max_input_tokens,
-                        usable_context: usable,
-                        usage_percent,
-                    };
-                    let _ = tx.try_send(SessionChunkEvent {
-                        session_id,
-                        event: ChunkEvent::ContextUsage(ctx_info),
-                    });
-                }
-            }
-        } else if usage_percent >= 95.0 {
-            // Stage 3: emergency trim without attempting compaction
-            // (when usage jumps directly to >= 95%)
-            let removed = self.session.history.emergency_trim();
-            tracing::warn!(
-                removed,
-                usage_percent = ?usage_percent,
-                current_tokens,
-                budget,
-                "Emergency trim performed (usage >= 95%)"
-            );
-        }
-    }
-
-    /// Close the conversation session and trigger session-level distillation.
-    ///
-    /// This method:
-    /// 1. Spawns an async distillation task for the entire session
-    /// 2. Closes the conversation writer
-    ///
-    /// Distillation is best-effort and non-blocking.
-    pub async fn close_session_with_distillation(&mut self) -> Result<()> {
-        self.close_session_inner().await
-    }
-
-    /// Resolve the model to use for session distillation or compaction.
-    ///
-    /// Uses [`crate::token::count_text`] — the single unified token counting API.
-    ///
-    /// Priority order:
-    /// 1. Provider's configured `compact_model` from provider_list (read from disk)
-    /// 2. Current model (fallback when compact model unavailable or context too small)
-    fn resolve_distill_model(&self, content_text: &str) -> String {
-        let current_model = self.resolve_current_model(None);
-        let estimated_tokens = crate::token::count_text(content_text, &current_model) as u64;
-
-        // Path 1: resolve compact_model from current provider (in-memory)
-        let compact_model = self
-            .core
-            .current_provider_id
-            .as_ref()
-            .and_then(|pid| self.core.provider_compact_models.get(pid))
-            .and_then(|cm| cm.clone());
-        if let Some(ref compact_model) = compact_model {
-            if let Some(cap) = self
-                .core
-                .gateway_model_capabilities
-                .get(compact_model)
-            {
-                if cap.context_window >= estimated_tokens {
-                    tracing::info!(
-                        compact_model = %compact_model,
-                        context_window = cap.context_window,
-                        estimated_tokens,
-                        "Using provider's compact model for distillation"
-                    );
-                    return compact_model.clone();
-                }
-                tracing::warn!(
-                    compact_model = %compact_model,
-                    context_window = cap.context_window,
-                    estimated_tokens,
-                    "Provider compact model context_window too small, falling back"
-                );
-            } else {
-                tracing::warn!(
-                    compact_model = %compact_model,
-                    "Provider compact model not found in capabilities, falling back"
-                );
-            }
-        }
-
-        // Path 2: compact model unavailable or context too small —
-        // fall back to the session's current model.
-        let current_model = self.resolve_current_model(None);
-        tracing::info!(
-            current_model = %current_model,
-            estimated_tokens,
-            "Compact model not available or insufficient, using current model for distillation"
-        );
-        current_model
-    }
-
-    /// Inner implementation for closing the current session.
-    ///
-    /// Per [ADR-011]: uses `last_compaction_index()` to determine the tail
-    /// distillation range. The `is_compacted` flag is used as a fast-path hint
-    /// but is NOT sufficient alone — the assistant response from the same round
-    /// that triggered compaction may land after the compaction marker, and must
-    /// still be distilled.
-    async fn close_session_inner(&mut self) -> Result<()> {
-        if let Some(ref conversation) = self.session.conversation {
-            let session_id = conversation.session_id().to_string();
-
-            // Determine tail range: everything after the last compaction marker,
-            // or full history (skipping leading system messages) if never compacted.
-            let tail_start = self
-                .session
-                .history
-                .last_compaction_index()
-                .map(|idx| idx + 1) // Start after compaction marker
-                .unwrap_or_else(|| {
-                    // No compaction ever — skip leading system messages
-                    self.session
-                        .history
-                        .messages()
-                        .iter()
-                        .take_while(|m| matches!(m.role, MessageRole::System))
-                        .count()
-                });
-
-            let messages = self.session.history.messages();
-            let tail_messages: Vec<ChatMessage> = messages[tail_start..].to_vec();
-
-            if tail_messages.is_empty() {
-                tracing::info!(
-                    session_id = %session_id,
-                    is_compacted = self.session.is_compacted,
-                    "No tail messages to distill — skipping"
-                );
-            } else {
-                let provider = self.core.provider.clone();
-                let memory_store = self.core.memory_store().cloned();
-                let emb_provider = self.core.embedding_provider.clone();
-                // Build combined text for model-aware token counting via the unified API.
-                let combined_text: String = tail_messages
-                    .iter()
-                    .fold(String::new(), |mut acc, m| {
-                        acc.push_str(&m.content);
-                        acc.push('\n');
-                        acc
-                    });
-                let model_name = self.resolve_distill_model(&combined_text);
-                let distill_max_tokens = self.core.config.distill_max_tokens;
-
-                tracing::info!(
-                    session_id = %session_id,
-                    tail_start,
-                    tail_message_count = tail_messages.len(),
-                    is_compacted = self.session.is_compacted,
-                    model = %model_name,
-                    "Spawning tail distillation for session close"
-                );
-
-                // Spawn tail distillation (best-effort, non-blocking)
-                tokio::spawn(async move {
-                    match crate::episode_distill::EpisodeDistiller::compact_messages(
-                        &tail_messages,
-                        provider.as_ref(),
-                        &model_name,
-                        distill_max_tokens,
-                    )
-                    .await
-                    {
-                        Ok(summary) => {
-                            crate::episode_distill::EpisodeDistiller::write_summary_to_grafeo(
-                                &summary,
-                                &session_id,
-                                &memory_store,
-                                emb_provider.as_deref(),
-                            ).await;
-                            tracing::info!(
-                                session_id = %session_id,
-                                summary_len = summary.len(),
-                                "Tail distillation completed for session close"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %e,
-                                "Tail distillation failed (non-fatal)"
-                            );
-                        }
-                    }
-                });
-            }
-
-            // Close the conversation writer
-            conversation.close().await?;
-        }
-        Ok(())
-    }
 
     /// Run the agent loop for a single user message.
     ///
@@ -1091,8 +430,7 @@ impl AgentLoop {
                             tracing::info!(reason = %reason, "User chose to stop during iteration limit pause");
                             // ADR-014: Paused → Idle
                             self.transition_status(SessionStatus::Idle);
-                            let name = self.core.user_display_name.as_deref().unwrap_or("user");
-                            return Ok(format!("Agent stopped by {} after reaching iteration limit.", name));
+                            return Ok(String::new());
                         }
                         Some(InboundMessage::UserOperation(user_op)) => {
                             match user_op {
@@ -1109,8 +447,7 @@ impl AgentLoop {
                                 crate::agent::inbound::UserOp::StopLoop { reason } => {
                                     tracing::info!(reason = %reason, "UserOp: stop via fast channel during iteration limit pause");
                                     self.transition_status(SessionStatus::Idle);
-                                    let name = self.core.user_display_name.as_deref().unwrap_or("user");
-                                    return Ok(format!("Agent stopped by {} after reaching iteration limit.", name));
+                                    return Ok(String::new());
                                 }
                                 other_op => {
                                     // Other UserOps (UpdateRuntimeConfig etc.) — apply inline
@@ -1119,32 +456,17 @@ impl AgentLoop {
                             }
                         }
                         Some(other) => {
-                            // Other messages (UserMessage, etc.) — inject into history
+                            // D1 dedup: inject message into history via shared helper
                             let (msg, _) = other.enforce_size_limit();
-                            match msg {
-                                InboundMessage::UserMessage(text) => {
-                                    self.session.history.append(ChatMessage::user(text));
-                                }
-                                InboundMessage::SystemNotification { notification_type, data } => {
-                                    self.session.history.append(ChatMessage {
-                                        role: MessageRole::User,
-                                        content: format!("[system:{}] {}", notification_type, data),
-                                        name: Some("system".to_string()),
-                                        ..Default::default()
-                                    });
-                                }
-                                InboundMessage::IntentMessage { from, action, params } => {
-                                    self.session.history.append(ChatMessage::user(
-                                        format!("[intent:{}:{}] {}", from, action, params),
-                                    ));
-                                }
-                                _ => {} // ContinueExecution, Interrupt, UserOperation handled above
-                            }
+                            crate::agent::loop_inbound::inject_inbound_into_history(
+                                msg,
+                                &mut self.session.history,
+                            );
                         }
                         None => {
                             // Channel closed — treat as stop
                             tracing::warn!("Inbound channel closed during iteration limit pause, stopping");
-                            return Ok("Agent stopped: inbound channel closed.".to_string());
+                            return Ok(String::new());
                         }
                     }
                 }
@@ -1154,9 +476,8 @@ impl AgentLoop {
             if self.drain_inbound_queue() {
                 // ADR-014: Streaming → Idle
                 self.transition_status(SessionStatus::Idle);
-                let name = self.core.user_display_name.as_deref().unwrap_or("user");
                 tracing::info!("Agent loop interrupted by inbound interrupt signal");
-                return Ok(format!("Agent stopped by {}.", name));
+                return Ok(String::new());
             }
 
             // ①-⑧ Execute single iteration (shared with debug mode)
@@ -1207,6 +528,97 @@ impl AgentLoop {
         }
     }
 
+    /// Await resume from paused/stepping state (DevMode only).
+    ///
+    /// When a debug controller is active, this method loops until the
+    /// controller transitions to Running or Stepping (resume) or
+    /// Stopped (abort). It also handles rewind requests by truncating
+    /// history to the target snapshot.
+    ///
+    /// Returns `Some(IterationResult::Stopped)` if the loop should stop,
+    /// or `None` if execution should continue.
+    async fn await_debug_resume(&mut self) -> Option<IterationResult> {
+        let ctrl = self.core.debug_observer.debug_ctrl().cloned();
+        if let Some(ctrl) = ctrl {
+            let rewind_notify = self.core.debug_observer.rewind_notify().cloned();
+            loop {
+                // Check for Chat Panel STOP
+                if self.poll_stop() {
+                    tracing::info!("Debug: agent loop stopped via inbound channel");
+                    let mut ctrl_guard = ctrl.lock().await;
+                    let iteration = ctrl_guard.iteration;
+                    ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
+                    drop(ctrl_guard);
+                    if let Some(event_tx) = self.core.debug_observer.debug_event_tx() {
+                        let _ = event_tx.send(
+                            crate::debug::server::DebugEvent::ExecutionStateChanged {
+                                new_state: crate::debug::controller::DebugState::Stopped,
+                                iteration,
+                            },
+                        );
+                    }
+                    return Some(IterationResult::Stopped(String::new()));
+                }
+
+                // Consume any pending rewind
+                {
+                    let mut ctrl_guard = ctrl.lock().await;
+                    if let Some(target_iter) = ctrl_guard.take_rewind_target() {
+                        let msg_count = ctrl_guard
+                            .conversation_snapshots
+                            .iter()
+                            .find(|s| s.iteration == target_iter)
+                            .map(|s| s.message_count);
+                        if let Some(count) = msg_count {
+                            self.session.history.truncate_to(count);
+                            tracing::info!(
+                                target_iteration = target_iter,
+                                messages_trimmed_to = count,
+                                "Debug rewind: history truncated"
+                            );
+                        }
+                        ctrl_guard.iteration = target_iter;
+                    }
+                }
+
+                let state = {
+                    let ctrl_guard = ctrl.lock().await;
+                    ctrl_guard.state.clone()
+                };
+                match state {
+                    crate::debug::controller::DebugState::Running => {
+                        self.transition_status(SessionStatus::Streaming { message_id: None });
+                        break;
+                    }
+                    crate::debug::controller::DebugState::Stepping => {
+                        self.transition_status(SessionStatus::Streaming { message_id: None });
+                        break;
+                    }
+                    crate::debug::controller::DebugState::Stopped => {
+                        tracing::info!("Debug: agent loop stopped");
+                        self.transition_status(SessionStatus::Idle);
+                        return Some(IterationResult::Stopped(String::new()));
+                    }
+                    crate::debug::controller::DebugState::Paused => {
+                        self.transition_status(SessionStatus::Paused {
+                            iteration: None,
+                            max_iterations: None,
+                        });
+                        if let Some(ref notify) = rewind_notify {
+                            tokio::select! {
+                                _ = notify.notified() => {},
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                            }
+                        } else {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Execute a single iteration of the agent loop (steps ① through ⑧).
     ///
     /// Shared between production [`run()`] and debug [`DebugSessionTask`].
@@ -1231,1678 +643,128 @@ impl AgentLoop {
         _retrieved_memory_ids: &[String],
         current_model: &str,
     ) -> Result<IterationResult> {
-            // ── Check for bypass-injected debug handles ──
-            // When Gateway pushes EnableDebugMode to an actively-running
-            // session, the SessionTask's message loop is blocked on
-            // agent_loop.run() and cannot process SessionMessage::EnableDebugMode.
-            // SessionManager writes the handles into the shared
-            // pending_debug_handles Arc; we pick them up here at the start
-            // of each iteration.
-            self.core.check_and_apply_pending_debug();
+        // ── ① Debug observer hooks + resume ──
+        self.core.debug_observer.check_pending_injection();
+        let debug_iter = self.core.debug_observer.on_iteration_start(
+            self.session.history.len(),
+        );
+        if let Some(result) = self.await_debug_resume().await {
+            return Ok(result);
+        }
+        self.core.debug_observer.apply_pending_patches(context_builder);
+        self.core.debug_observer.take_re_execute_pending();
 
-            // ── Debug mode hooks ──
-            // Increment session-level iteration counter (cumulative across
-            // all chat messages).  The local loop counter resets per message
-            // (see run() line 614), but the debug snapshot iteration must be
-            // globally unique within the session.
-            //
-            // Capture the incremented value into a local so that subsequent
-            // rewind operations (which reset ctrl.iteration mid-flight) do
-            // not cause capture_context_snapshot to read a wrong value.
-            let debug_iter = if let Some(ctrl) = self.core.debug_ctrl() {
-                let mut ctrl = ctrl.lock().await;
-                let prev_iter = ctrl.iteration;
-                ctrl.iteration += 1;
-                let current_iter = ctrl.iteration;
-                tracing::info!(
-                    prev_iter,
-                    new_iter = current_iter,
-                    "Debug: iteration counter incremented in execute_single_iteration"
-                );
-                // Create conversation snapshot for rewind support.
-                // Records the current message count and usage at this
-                // iteration so that rewinding can truncate history
-                // back to this point.
-                let msg_count = self.session.history.len();
-                let usage = crate::debug::protocol::DebugUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                };
-                let conv_snap = ctrl.create_conversation_snapshot(msg_count, usage);
-                tracing::info!(
-                    conv_iter = conv_snap.iteration,
-                    msg_count,
-                    snapshot_count = ctrl.conversation_snapshots.len(),
-                    "Debug: conversation snapshot created"
-                );
-                Some(current_iter)
-            } else {
-                None
-            };
+        // ── ② Budget + context build ──
+        self.core.debug_observer.on_phase_enter(
+            crate::debug::protocol::DebugPhase::BudgetCheck,
+        ).await;
+        self.check_budget_and_warn()?;
+        self.trim_history_to_budget(&current_model);
+        let mut chat_request = self.build_chat_request(context_builder, &current_model);
+        if self.check_context_overflow_and_trim(&current_model) {
+            chat_request = self.build_chat_request(context_builder, &current_model);
+        }
+        self.core.debug_observer.on_phase_enter(
+            crate::debug::protocol::DebugPhase::BuildContext,
+        ).await;
+        self.core.debug_observer.on_context_built(
+            crate::debug::observer::ContextSnapshotRequest {
+                context_builder,
+                iteration: debug_iter,
+                model: &current_model,
+                all_tools: &self.core.all_tools,
+            },
+        ).await;
 
-            // Await resume if paused (DevMode only)
-            if !self.await_debug_resume().await {
-                return Ok(IterationResult::Stopped(
-                    "[Debug] Agent loop stopped by debugger".to_string(),
-                ));
-            }
+        // ── ③ Call LLM + parse + usage ──
+        let response = self.call_llm_streaming(&chat_request, context_builder).await?;
+        self.core.debug_observer.on_phase_enter(
+            crate::debug::protocol::DebugPhase::LlmCall,
+        ).await;
+        let has_tool_calls = response.tool_calls.is_some();
+        self.core.debug_observer.on_phase_enter(
+            crate::debug::protocol::DebugPhase::ParseResponse,
+        ).await;
+        self.process_llm_response_usage(&response, &current_model).await;
 
-            // ── Apply pending patches to context_builder (DevMode only) ──
-            // When the agent is paused via debugger, SessionTask is blocked
-            // inside agent_loop.run() and cannot apply patches through its
-            // normal apply_debug_rewind_and_patches path.  Patches stored
-            // by patchContext in ctrl.pending_patches must be applied HERE,
-            // after resume, so that the LLM receives the patched context.
-            if let Some(ctrl) = self.core.debug_ctrl() {
-                let mut ctrl_guard = ctrl.lock().await;
-                if let Some(patches) = ctrl_guard.pending_patches.take() {
-                    context_builder.apply_patches(&patches);
-                    tracing::info!(
-                        iteration,
-                        "Debug: pending patches applied to context builder after resume"
-                    );
-                }
-                // Also consume the re_execute_pending flag so that
-                // apply_debug_rewind_and_patches at SessionTask level
-                // does not see a stale flag after agent_loop.run() finishes.
-                if ctrl_guard.take_re_execute_pending() {
-                    tracing::info!(
-                        iteration,
-                        "Debug: re_execute_pending consumed inside agent loop after resume"
-                    );
-                }
-            }
+        // ── ④ Text response → early return ──
+        if !has_tool_calls {
+            return Ok(self.handle_text_response(&response, iteration).await);
+        }
 
-            // Enter BudgetCheck phase
-            self.update_debug_phase(
-                crate::debug::protocol::DebugPhase::BudgetCheck,
-            )
-            .await;
+        // ── ⑤ Prepare + pre-check tool calls ──
+        let deduped_calls = self.prepare_tool_calls(&response);
+        let (calls_to_execute, blocked_info) = self.pre_check_loop_detection(&deduped_calls);
 
-            // ① Budget pre-check
-            let estimated_tokens = self.session.history.estimate_total_tokens() + 500; // +500 for new response
-            match self.session.budget_guard.check(estimated_tokens) {
-                BudgetCheckResult::Allowed => {}
-                BudgetCheckResult::Exceeded { reason, action } => {
-                    tracing::warn!(reason = %reason, action = %action, "Budget exceeded");
-                    match action.as_str() {
-                        "deny" => {
-                            // ADR-014: Streaming → Idle (budget exceeded)
-                            self.transition_status(SessionStatus::Idle);
-                            return Err(RuntimeError::BudgetExceeded(reason));
-                        }
-                        "warn" => {
-                            // Changed from System to User — MiniMax API rejects non-first system messages
-                            self.session.history.append(ChatMessage {
-                                role: MessageRole::User,
-                                content: format!("[System Warning] {reason}"),
-                                name: Some("system".to_string()),
-                                ..Default::default()
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        // ── ⑥ Pre-tool stop check ──
+        if self.poll_stop() {
+            tracing::info!("Stopped before tool execution — saving partial response");
+            return Ok(self.handle_stopped(&response.content).await);
+        }
 
-            // ② Preemptive trim — MUST happen BEFORE build() so the request
-            // is constructed with already-trimmed history.
-            self.trim_history_to_budget(&current_model);
+        // ── ⑦ Dispatch + merge tool results ──
+        self.core.debug_observer.on_phase_enter(
+            crate::debug::protocol::DebugPhase::ToolExecution,
+        ).await;
+        let (tool_results, was_stopped) = self.dispatch_and_merge_tools(
+            calls_to_execute, &deduped_calls, &blocked_info, context_builder,
+        ).await;
 
-            // ②.5 Build context (now with trimmed history)
-            // Inject current todo list into system prompt before building
-            context_builder.set_todo_context(self.session.format_todos());
-            let mut chat_request = context_builder.build(&self.core.manifest, &self.session.history, self.get_model_capabilities(&current_model), self.core.max_output_tokens_limit);
-
-            tracing::info!(
-                request_messages_count = chat_request.messages.len(),
-                request_model = %chat_request.model,
-                request_max_tokens = ?chat_request.max_tokens,
-                request_tools_count = chat_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
-                history_tokens = self.session.history.token_count(),
-                "Built chat request for LLM (after preemptive trim)"
-            );
-
-            // ②.6 Context usage check / circuit-breaking
-            // Dynamic token-based thresholds derived from model capabilities.
-            // Unlike the previous hardcoded 200KB/280KB byte thresholds, these
-            // scale correctly across models from 32K to 2M context windows.
-            let usable = self.context_trim_budget(&current_model);
-            let warn_threshold = (usable as f64 * 0.70) as u64;
-            let hard_threshold = (usable as f64 * 0.90) as u64;
-            let current_tokens = self.session.history.token_count();
-            if current_tokens > hard_threshold {
-                tracing::error!(
-                    current_tokens,
-                    hard_threshold,
-                    usable_context = usable,
-                    "Context usage exceeds hard limit, emergency trimming"
-                );
-                let removed = self.session.history.emergency_trim();
-                tracing::info!(removed, "Emergency trimmed messages for oversized context");
-                if removed > 0 {
-                    // Rebuild request with trimmed history.
-                    chat_request = context_builder.build(
-                        &self.core.manifest,
-                        &self.session.history,
-                        self.get_model_capabilities(&current_model),
-                        self.core.max_output_tokens_limit,
-                    );
-                    tracing::info!(
-                        current_tokens = self.session.history.token_count(),
-                        "Context usage after emergency trim"
-                    );
-                }
-            } else if current_tokens > warn_threshold {
-                tracing::warn!(
-                    current_tokens,
-                    warn_threshold,
-                    usable_context = usable,
-                    "Context usage approaching limit"
-                );
-            }
-
-            // Debug: enter BuildContext phase
-            self.update_debug_phase(
-                crate::debug::protocol::DebugPhase::BuildContext,
-            )
-            .await;
-
-            // Debug: create context snapshot and push onContextBuilt event
-            self.capture_context_snapshot(context_builder, debug_iter, &current_model).await;
-
-            // Merge MCP tool definitions into the LLM request right before
-            // injection. MCP tools are kept separate from active_tools and
-            // only mixed here (LLM injection) + in debug snapshot capture.
-            if let Some(ref mut tools) = chat_request.tools {
-                for tool in &self.core.all_tools {
-                    let spec = tool.spec();
-                    if spec.name.starts_with("mcp:") {
-                        let val = serde_json::to_value(&spec).unwrap_or_default();
-                        tools.push(val);
-                    }
-                }
-            }
-
-            // ③ Call LLM with streaming (S1.5)
-            let response = self.call_llm_streaming(&chat_request, context_builder).await?;
-
-            // Debug: enter LlmCall phase
-            self.update_debug_phase(crate::debug::protocol::DebugPhase::LlmCall)
-                .await;
-
-            // ④ Parse response
-            let has_tool_calls = response.tool_calls.is_some();
-
-            // Debug: enter ParseResponse phase
-            self.update_debug_phase(
-                crate::debug::protocol::DebugPhase::ParseResponse,
-            )
-            .await;
-
-            // Update budget
-            if let Some(usage) = &response.usage {
-                self.session.budget_guard.update_usage(usage.total_tokens, 0.0);
-
-                // Diagnostic: log local token estimate vs API ground truth
-                // before calibration overwrites the local estimate.
-                let local_estimate = self.session.history.token_count();
-                tracing::info!(
-                    model = %current_model,
-                    local_estimate,
-                    api_prompt_tokens = usage.prompt_tokens,
-                    api_completion_tokens = usage.completion_tokens,
-                    api_total_tokens = usage.total_tokens,
-                    "Context usage: local estimate vs API ground truth"
-                );
-
-                // Detect providers that return prompt_tokens=0 despite having
-                // non-trivial context (observed with MiniMax Anthropic-protocol
-                // API when message_start SSE event lacks usage fields).
-                // When this happens, skip calibration to avoid corrupting
-                // the internal token counter and use the local estimate
-                // for the context usage report instead.
-                let prompt_tokens_reliable = usage.prompt_tokens > 0;
-                if prompt_tokens_reliable {
-                    self.session.history.calibrate_from_usage(usage.prompt_tokens);
-                } else {
-                    tracing::warn!(
-                        local_estimate,
-                        "API returned prompt_tokens=0 despite non-trivial context; \
-                         skipping calibration and using local estimate"
-                    );
-                }
-
-                // Compute and emit context usage report — use exact model lookup
-                // to avoid capability confusion in multi-model scenarios.
-                let model_caps = self.get_model_capabilities(&current_model);
-                tracing::debug!(
-                    has_chunk_tx = self.core.on_chunk.is_some(),
-                    has_model_caps = model_caps.is_some(),
-                    caps_count = self.core.gateway_model_capabilities.len(),
-                    has_usage = true,
-                    "ContextUsage: checking preconditions"
-                );
-                if let Some(caps) = model_caps {
-                    let ctx_usage = if prompt_tokens_reliable {
-                        crate::agent::context::compute_context_usage(caps, usage, self.core.max_output_tokens_limit)
-                    } else {
-                        // Fall back to local estimate when API usage is unreliable
-                        let usable = caps.effective_input_budget(self.core.max_output_tokens_limit);
-                        let percent = if usable > 0 {
-                            ((local_estimate as f64 / usable as f64) * 100.0).min(100.0) as u8
-                        } else {
-                            0
-                        };
-                        rollball_core::protocol::ContextUsageInfo {
-                            context_window: caps.context_window,
-                            input_tokens: local_estimate,
-                            output_tokens: usage.completion_tokens,
-                            total_tokens: local_estimate + usage.completion_tokens,
-                            max_input_tokens: caps.max_input_tokens,
-                            usable_context: usable,
-                            usage_percent: percent,
-                        }
-                    };
-                    tracing::debug!(
-                        context_window = ctx_usage.context_window,
-                        total_tokens = ctx_usage.total_tokens,
-                        usage_percent = ctx_usage.usage_percent,
-                        "ContextUsage: sending report"
-                    );
-                    if !self.core.try_send_chunk(ChunkEvent::ContextUsage(ctx_usage)) {
-                        tracing::debug!("ContextUsage: on_chunk channel full/closed or session_id missing");
-                    }
-                } else {
-                    // Model capabilities not found — notify frontend so the user is aware.
-                    // Context usage and compaction are still attempted with
-                    // history_max_tokens as fallback budget.
-                    let available: Vec<&str> = self.core.gateway_model_capabilities.keys().map(|s| s.as_str()).collect();
-                    let msg = format!(
-                        "Model capabilities not found for '{}'. Available: {:?}. \
-                         Check that the model name matches exactly (case-sensitive). \
-                         Context usage display and compaction accuracy may be affected.",
-                        current_model, available
-                    );
-                    tracing::warn!("ContextUsage: NOT sent — missing model capabilities for '{}'", current_model);
-                    let _ = self.core.try_send_chunk(ChunkEvent::Error {
-                        message: msg,
-                        message_id: format!("caps-missing-{}", current_model),
-                    });
-                }
-
-                // ADR-011: check if context usage triggers compaction.
-                // Runs regardless of model_caps availability —
-                // context_trim_budget falls back to history_max_tokens when caps are missing.
-                self.compact_history_if_needed(&current_model, false).await;
-            }
-
-            if !has_tool_calls {
-                // Pure text response — normal exit
-                let content = response.content.clone();
-
-                // Persist think block (if present) and assistant response to JSONL
-                if let Some(ref conversation) = self.session.conversation {
-                    let think_meta = build_think_metadata(&response);
-                    if let Some(ref reasoning) = response.reasoning_content {
-                        if !reasoning.is_empty() {
-                            conversation.append_message("thought", reasoning, think_meta.clone());
-                        }
-                    } else if let Some(think_content) = extract_think_block(&content) {
-                        // Fallback: extract from <think> tags in content
-                        conversation.append_message("thought", &think_content, think_meta);
-                    }
-                    let assistant_text = strip_think_block(&content);
-                    conversation.append_message("assistant", &assistant_text, None);
-                }
-
-                self.session.history.append(ChatMessage {
-                    ..ChatMessage::assistant(response.content)
-                });
-
-                // Per ADR-011: per-turn episodic writes are removed.
-                // Grafeo is now written only via compaction summaries and
-                // session-close distillation.
-                self.session.turn_counter += 1;
-
-                tracing::info!(iteration, "Agent returned text response");
-
-                // Debug: enter AppendHistory phase and push step event
-                self.update_debug_phase(
-                    crate::debug::protocol::DebugPhase::AppendHistory,
-                )
-                .await;
-                self.push_debug_step(
-                    crate::debug::protocol::DebugPhase::Idle,
-                    None,
-                    Some(serde_json::json!({"content": content})),
-                );
-                self.debug_auto_pause_if_stepping().await;
-
-                return Ok(IterationResult::TextResponse(content));
-            }
-
-            // Persist think block (if present) to JSONL
-            if let Some(ref conversation) = self.session.conversation {
-                let think_meta = build_think_metadata(&response);
-                // DeepSeek reasoning_content (separate field) takes priority
-                if let Some(ref reasoning) = response.reasoning_content {
-                    if !reasoning.is_empty() {
-                        conversation.append_message("thought", reasoning, think_meta.clone());
-                    }
-                } else if let Some(think_content) = extract_think_block(&response.content) {
-                    conversation.append_message("thought", &think_content, think_meta);
-                }
-            }
-
-            // Has tool calls — process them (moved after think metadata to avoid partial move)
-            let tool_calls = response.tool_calls.unwrap_or_default();
-
-            // ④.5 Tool call deduplication (same iteration)
-            let mut seen = HashSet::new();
-            let deduped_calls: Vec<ToolCall> = tool_calls
-                .into_iter()
-                .filter(|tc| {
-                    let sig = format!("{}:{}", tc.function.name, tc.function.arguments);
-                    seen.insert(sig)
-                })
-                .collect();
-
-            // Add assistant message with tool_calls to history
+        // ── ⑧ Persist + emit + append + pre-trim tool results ──
+        self.persist_and_emit_tool_results(&deduped_calls, &tool_results);
+        self.pre_trim_for_tool_results(&tool_results, current_model);
+        for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
             self.session.history.append(ChatMessage {
-                reasoning_content: response.reasoning_content.clone(),
-                tool_calls: Some(deduped_calls.clone()),
-                ..ChatMessage::assistant(response.content.clone())
+                name: Some(tc.function.name.clone()),
+                ..ChatMessage::tool(tc.id.clone(), result_content.clone())
             });
-
-            // Persist tool calls to JSONL
-            if let Some(ref conversation) = self.session.conversation {
-                for tc in &deduped_calls {
-                    let metadata = serde_json::json!({
-                        "tool_name": tc.function.name,
-                        "tool_call_id": tc.id,
-                    });
-                    conversation.append_message("tool_call", &tc.function.arguments, Some(metadata));
-                }
-            }
-
-            // Emit ToolCall events via chunk channel (ensures ordering with content chunks)
-            for tc in &deduped_calls {
-                if !self.core.try_send_chunk(ChunkEvent::ToolCall {
-                    name: tc.function.name.clone(),
-                    args: tc.function.arguments.clone(),
-                    id: tc.id.clone(),
-                }) {
-                    tracing::debug!("on_chunk channel full or closed, dropping ToolCall event");
-                }
-            }
-
-            // ⑤ Tool dispatch — parallel execution (S1.7)
-            // ⑤.1 Pre-execution loop detection: block repeated calls before wasting an iteration
-            let mut calls_to_execute: Vec<ToolCall> = Vec::new();
-            let mut blocked_info: Vec<(usize, LoopPattern)> = Vec::new();
-            for (idx, tc) in deduped_calls.iter().enumerate() {
-                match self.session.loop_detector.peek_check(&tc.function.name, &tc.function.arguments) {
-                    LoopDetectionResult::NoLoop => {
-                        calls_to_execute.push(tc.clone());
-                    }
-                    LoopDetectionResult::LoopDetected { level, pattern, .. } => {
-                        match level {
-                            ResponseLevel::Warning => {
-                                // Warning is handled post-execution; allow the call
-                                calls_to_execute.push(tc.clone());
-                            }
-                            ResponseLevel::Block | ResponseLevel::Break => {
-                                tracing::warn!(
-                                    tool = %tc.function.name,
-                                    level = ?level,
-                                    "Loop detected (pre-execution), blocking tool call"
-                                );
-                                blocked_info.push((idx, pattern));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check for stop before executing tools
-            if self.poll_stop() {
-                tracing::info!("Stopped before tool execution — saving partial response");
-                // ADR-014: Streaming → Idle (stopped before tool execution)
-                self.transition_status(SessionStatus::Idle);
-                let content = response.content.clone();
-
-                // Persist stopped assistant message to JSONL conversation.
-                if let Some(ref conversation) = self.session.conversation {
-                    let assistant_text = strip_think_block(&content);
-                    conversation.append_message("assistant", &assistant_text, None);
-                }
-
-                // Notify frontend via chunk channel
-                let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
-                    content: content.clone(),
-                });
-
-                // Debug: push step event and auto-pause if stepping
-                self.push_debug_step(
-                    crate::debug::protocol::DebugPhase::Idle,
-                    None,
-                    Some(serde_json::json!({"stopped": true, "content": content})),
-                );
-                self.debug_auto_pause_if_stepping().await;
-
-                return Ok(IterationResult::Stopped(format!("...Stopped by User...\n{}", content)));
-            }
-
-            // Debug: enter ToolExecution phase
-            self.update_debug_phase(
-                crate::debug::protocol::DebugPhase::ToolExecution,
-            )
-            .await;
-
-            // ⑤.2 Intercept ask_user_question and todo_write calls.
-            // - ask_user_question requires user interaction via ChunkEvent::AskQuestion.
-            // - todo_write mutates SessionState.todos directly (in-memory state).
-            // Both are processed sequentially before parallel tool dispatch.
-            let mut ask_question_results: Vec<(usize, String)> = Vec::new();
-            let mut todo_write_results: Vec<(usize, String)> = Vec::new();
-            let mut parallel_calls: Vec<(usize, ToolCall)> = Vec::new();
-            for (idx, tc) in calls_to_execute.into_iter().enumerate() {
-                if tc.function.name == "ask_user_question" {
-                    let result = self.handle_ask_user_question(&tc).await;
-                    ask_question_results.push((idx, result));
-                } else if tc.function.name == "todo_write" {
-                    let result = self.handle_todo_write(&tc, context_builder);
-                    todo_write_results.push((idx, result));
-                } else {
-                    parallel_calls.push((idx, tc));
-                }
-            }
-
-            // Execute non-question tools in parallel
-            let calls_for_parallel: Vec<ToolCall> = parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
-            let (parallel_results, was_stopped) = self.execute_tools_parallel(&calls_for_parallel).await;
-
-            // Merge results: ask_question + todo_write results + parallel results, mapped back to original indices
-            // Build a map from original index → result for ask_question calls
-            let ask_result_map: std::collections::HashMap<usize, String> =
-                ask_question_results.into_iter().collect();
-            let todo_result_map: std::collections::HashMap<usize, String> =
-                todo_write_results.into_iter().collect();
-
-            // Reconstruct executed_results in the order matching calls_for_parallel
-            // Then map back to the original calls_to_execute indices
-            let mut final_results: Vec<(usize, String)> = Vec::new();
-            for (parallel_idx, result) in parallel_results.into_iter().enumerate() {
-                if let Some((orig_idx, _)) = parallel_calls.get(parallel_idx) {
-                    final_results.push((*orig_idx, result));
-                }
-            }
-            // Add ask_question results
-            for (orig_idx, result) in &ask_result_map {
-                final_results.push((*orig_idx, result.clone()));
-            }
-            // Add todo_write results
-            for (orig_idx, result) in &todo_result_map {
-                final_results.push((*orig_idx, result.clone()));
-            }
-            // Sort by original index to maintain order
-            final_results.sort_by_key(|(idx, _)| *idx);
-
-            let executed_results: Vec<String> = final_results.into_iter().map(|(_, r)| r).collect();
-
-            // Merge executed results with pre-blocked results, preserving original order
-            let mut tool_results: Vec<String> = Vec::with_capacity(deduped_calls.len());
-            let mut executed_iter = executed_results.into_iter();
-            for idx in 0..deduped_calls.len() {
-                if let Some(pos) = blocked_info.iter().position(|(i, _)| *i == idx) {
-                    let msg = match &blocked_info[pos].1 {
-                        LoopPattern::SameToolFlood => {
-                            "Loop detected: this tool has been called too many times in a short period. \
-                             Please STOP using this tool and try a different approach \
-                             (e.g., use file_read to verify results, or switch to another tool)."
-                        }
-                        _ => "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach.",
-                    };
-                    tool_results.push(msg.to_string());
-                } else {
-                    tool_results.push(executed_iter.next().unwrap_or_default());
-                }
-            }
-
-            // Persist tool results to JSONL
-            if let Some(ref conversation) = self.session.conversation {
-                for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
-                    let metadata = serde_json::json!({
-                        "tool_name": tc.function.name,
-                        "tool_call_id": tc.id,
-                    });
-                    conversation.append_message("tool_result", result_content, Some(metadata));
-                }
-            }
-
-            // Emit ToolResult events via chunk channel (ensures ordering with content chunks)
-            for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
-                if !self.core.try_send_chunk(ChunkEvent::ToolResult {
-                    name: tc.function.name.clone(),
-                    result: result_content.clone(),
-                    tool_call_id: tc.id.clone(),
-                }) {
-                    tracing::debug!("on_chunk channel full or closed, dropping ToolResult event");
-                }
-            }
-
-            // ⑥ Pre-trim: make room for tool results before appending.
-            // Large tool outputs (e.g. content_search returning 320+ results)
-            // can blow up the context window.  Trimming BEFORE the append
-            // ensures the LLM request remains within budget on the next
-            // iteration.  Threshold: 70 % of the usable context window.
-            // Use the unified token API for model-aware estimation.
-            let result_tokens_estimate: u64 = tool_results
-                .iter()
-                .map(|r| crate::token::count_text(r, current_model) as u64)
-                .sum();
-            let usable_budget = self.context_trim_budget(current_model);
-            let trim_threshold = (usable_budget as f64 * 0.70) as u64;
-            let current_tokens = self.session.history.token_count();
-            if current_tokens.saturating_add(result_tokens_estimate) > trim_threshold {
-                tracing::info!(
-                    current_tokens,
-                    result_tokens_estimate,
-                    trim_threshold,
-                    usable_budget,
-                    "Pre-trimming history before appending tool results"
-                );
-                self.trim_history_to_budget(current_model);
-            }
-
-            // ── ⑦ Append ALL tool results to history (must be contiguous after assistant tool_calls)
-            for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
-                let tool_result_message = ChatMessage {
-                    name: Some(tc.function.name.clone()),
-                    ..ChatMessage::tool(tc.id.clone(), result_content.clone())
-                };
-                self.session.history.append(tool_result_message);
-            }
-
-            // ⑧ Loop detection — run AFTER all tool results are appended to avoid
-            // inserting warning messages between tool results (which breaks DeepSeek API
-            // requirement that all tool messages must immediately follow assistant tool_calls).
-            let mut deferred_warnings: Vec<String> = Vec::new();
-            let mut break_error: Option<String> = None;
-            for (idx, (tc, result_content)) in deduped_calls.iter().zip(tool_results.iter()).enumerate() {
-                // Skip loop detection for pre-blocked tool calls to avoid self-reinforcing
-                // false positives: blocked tools return uniform error messages whose identical
-                // hashes would incorrectly trigger NoProgress detection.
-                if blocked_info.iter().any(|(i, _)| *i == idx) {
-                    continue;
-                }
-
-                match self.session.loop_detector.check(
-                    &tc.function.name,
-                    &tc.function.arguments,
-                    result_content,
-                ) {
-                    LoopDetectionResult::NoLoop => {}
-                    LoopDetectionResult::LoopDetected {
-                        pattern,
-                        level,
-                        count: _,
-                        message,
-                    } => {
-                        tracing::warn!(message = %message, level = ?level, "Loop detected");
-                        match level {
-                            ResponseLevel::Warning => {
-                                let warning_content = match &pattern {
-                                    LoopPattern::SameToolFlood => {
-                                        format!(
-                                            "[System Warning] {message} \
-                                             This tool has been called excessively. \
-                                             Please STOP using this tool and try a different approach \
-                                             (e.g., use file_read to verify results, or switch to another tool) \
-                                             to complete the task."
-                                        )
-                                    }
-                                    _ => format!("[System Warning] {message}"),
-                                };
-                                deferred_warnings.push(warning_content);
-                            }
-                            ResponseLevel::Block => {
-                                // Block was already handled by returning error as tool result
-                            }
-                            ResponseLevel::Break => {
-                                break_error = Some(message);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Append deferred warning messages AFTER all tool results
-            for warning_content in deferred_warnings {
-                self.session.history.append(ChatMessage {
-                    role: MessageRole::User,
-                    content: warning_content,
-                    name: Some("system".to_string()),
-                    ..Default::default()
-                });
-            }
-
-            // Handle Break-level loop detection
-            if let Some(msg) = break_error {
-                // ADR-014: Streaming → Idle (loop detected)
-                self.transition_status(SessionStatus::Idle);
-                return Err(RuntimeError::LoopDetected(msg));
-            }
-
-            // ── Check for stop detected during tool execution ──
-            // poll_stop() consumed the stop signal inside execute_tools_parallel(),
-            // so we must propagate it here to prevent the loop from continuing.
-            if was_stopped {
-                tracing::info!("Stopped during tool execution — saving partial results");
-                // ADR-014: Streaming → Idle (interrupted during tool execution)
-                self.transition_status(SessionStatus::Idle);
-                let content = response.content.clone();
-
-                // Persist assistant message to JSONL (normal tool_call path only
-                // persists think + tool_calls; assistant text needs explicit save).
-                if let Some(ref conversation) = self.session.conversation {
-                    let assistant_text = strip_think_block(&content);
-                    conversation.append_message("assistant", &assistant_text, None);
-                }
-
-                // Notify frontend via chunk channel
-                let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
-                    content: content.clone(),
-                });
-
-                // Debug: push step event and auto-pause if stepping
-                self.push_debug_step(
-                    crate::debug::protocol::DebugPhase::Idle,
-                    None,
-                    Some(serde_json::json!({"stopped": true, "content": content})),
-                );
-                self.debug_auto_pause_if_stepping().await;
-
-                return Ok(IterationResult::Stopped(format!("...Stopped by User...\n{}", content)));
-            }
-
-            // ⑦ Usage report (async, non-blocking)
-            tracing::debug!(iteration, "Loop iteration complete");
-
-            // Debug: enter AppendHistory phase and push step event
-            self.update_debug_phase(
-                crate::debug::protocol::DebugPhase::AppendHistory,
-            )
-            .await;
-            self.push_debug_step(
-                crate::debug::protocol::DebugPhase::Idle,
-                None,
-                None,
-            );
-            self.debug_auto_pause_if_stepping().await;
-
-            Ok(IterationResult::ToolCallsExecuted)
-    }
-
-    /// Non-blocking stop poll — returns true if the user requested stop.
-    ///
-    /// Non-Stop messages drained during this poll are buffered in
-    /// `session.deferred_inbound` and re-injected by `drain_inbound_queue()`
-    /// at the start of the next loop iteration. No message is silently lost.
-    ///
-    /// ALL `Stop` messages are consumed (not just the first one) to
-    /// prevent residual stops from poisoning subsequent `run_inner()`
-    /// calls when the user clicks Stop rapidly.
-    pub(crate) fn poll_stop(&mut self) -> bool {
-        let mut should_stop = false;
-        while let Ok(msg) = self.inbound_rx.try_recv() {
-            match msg {
-                InboundMessage::Stop { .. } => {
-                    should_stop = true;
-                    // Consume and continue — drain all pending stops
-                }
-                InboundMessage::UserOperation(op) => {
-                    match &op {
-                        crate::agent::inbound::UserOp::StopLoop { .. } => {
-                            should_stop = true;
-                            // Consume and continue — drain all pending stops
-                        }
-                        _ => {
-                            // Buffer non-Stop UserOp for re-injection
-                            // by drain_inbound_queue().
-                            tracing::info!(
-                                op = ?std::mem::discriminant(&op),
-                                "poll_stop(): buffering UserOp for re-injection by drain_inbound_queue()"
-                            );
-                            self.session.deferred_inbound.push(InboundMessage::UserOperation(op));
-                        }
-                    }
-                }
-                other => {
-                    // Buffer non-Stop messages for re-injection at the
-                    // next drain_inbound_queue() call. This guarantees that
-                    // queued user messages (sent via the "Stop to queue" UX)
-                    // survive if they happen to arrive in this channel.
-                    tracing::info!(
-                        msg_type = ?std::mem::discriminant(&other),
-                        "poll_stop(): buffering non-Stop message for re-injection by drain_inbound_queue()"
-                    );
-                    self.session.deferred_inbound.push(other);
-                }
-            }
-        }
-        should_stop
-    }
-
-    /// Drain inbound message queue (non-blocking).
-    ///
-    /// First processes any messages buffered by `poll_stop()` from
-    /// the `deferred_inbound` stash, then drains the live channel.
-    /// Injects external messages (user, system, intent) into history
-    /// before each loop iteration. Applies size limits to prevent
-    /// token explosion from oversized payloads.
-    ///
-    /// Returns `true` if at least one stop signal was found
-    /// (the caller should stop the current agent loop).  ALL stop
-    /// messages are consumed (not just the first one) to prevent
-    /// residual stops from poisoning subsequent `run_inner()` calls.
-    fn drain_inbound_queue(&mut self) -> bool {
-        let mut should_stop = false;
-
-        // ── Step 1: process messages deferred from poll_stop() ──
-        // Collect to release the drain iterator's borrow on self.session
-        // before calling apply_user_op() (which needs &mut self).
-        let deferred: Vec<_> = self.session.deferred_inbound.drain(..).collect();
-        for msg in deferred {
-            let (msg, _truncated) = msg.enforce_size_limit();
-            match msg {
-                InboundMessage::UserMessage(text) => {
-                    tracing::info!(
-                        text_preview = %text.chars().take(80).collect::<String>(),
-                        "drain_inbound_queue: injecting deferred UserMessage into history"
-                    );
-                    self.session.history.append(ChatMessage::user(text));
-                }
-                InboundMessage::SystemNotification { notification_type, data } => {
-                    tracing::info!("drain_inbound_queue: injecting deferred system notification: {} = {:?}", notification_type, data);
-                    self.session.history.append(ChatMessage {
-                        role: MessageRole::User,
-                        content: format!("[system:{}] {}", notification_type, data),
-                        name: Some("system".to_string()),
-                        ..Default::default()
-                    });
-                }
-                InboundMessage::IntentMessage { from, action, params } => {
-                    tracing::info!("drain_inbound_queue: injecting deferred intent from {}: {} params={:?}", from, action, params);
-                    self.session.history.append(ChatMessage::user(
-                        format!("[intent:{}:{}] {}", from, action, params),
-                    ));
-                }
-                InboundMessage::Stop { reason } => {
-                    tracing::info!(reason = %reason, "Received deferred stop signal (consumed)");
-                    should_stop = true;
-                    // Consume and continue — more stops (or other messages)
-                    // may be queued in the live channel.
-                }
-                InboundMessage::ContinueExecution { .. } => {
-                    tracing::debug!("Ignoring deferred ContinueExecution");
-                }
-                InboundMessage::ApprovalDecision { .. } => {
-                    // Approval decisions arrive via inbound channel during
-                    // approval pause; during normal drain, ignore.
-                    tracing::debug!("Ignoring deferred ApprovalDecision");
-                }
-                InboundMessage::QuestionAnswer { .. } => {
-                    // Question answers arrive via inbound channel during
-                    // question wait; during normal drain, ignore.
-                    tracing::debug!("Ignoring deferred QuestionAnswer");
-                }
-                InboundMessage::UserOperation(user_op) => {
-                    tracing::info!(
-                        op = ?std::mem::discriminant(&user_op),
-                        "drain_inbound_queue: processing deferred UserOperation"
-                    );
-                    if self.apply_user_op(&user_op) {
-                        should_stop = true;
-                    }
-                }
-            }
         }
 
-        // ── Step 2: drain the live channel ──
-        while let Ok(msg) = self.inbound_rx.try_recv() {
-            // Enforce size limits before injecting
-            let (msg, _truncated) = msg.enforce_size_limit();
-            match msg {
-                InboundMessage::UserMessage(text) => {
-                    tracing::info!(
-                        text_preview = %text.chars().take(80).collect::<String>(),
-                        "drain_inbound_queue: injecting UserMessage into history"
-                    );
-                    self.session.history.append(ChatMessage::user(text));
-                }
-                InboundMessage::SystemNotification { notification_type, data } => {
-                    tracing::info!("System notification: {} = {:?}", notification_type, data);
-                    // Changed from System to User — MiniMax API rejects non-first system messages
-                    self.session.history.append(ChatMessage {
-                        role: MessageRole::User,
-                        content: format!("[system:{}] {}", notification_type, data),
-                        name: Some("system".to_string()),
-                        ..Default::default()
-                    });
-                }
-                InboundMessage::IntentMessage { from, action, params } => {
-                    tracing::info!("Intent from {}: {} params={:?}", from, action, params);
-                    self.session.history.append(ChatMessage::user(
-                        format!("[intent:{}:{}] {}", from, action, params),
-                    ));
-                }
-                InboundMessage::Stop { reason } => {
-                    tracing::info!(reason = %reason, "Received stop signal (consumed)");
-                    should_stop = true;
-                    // Consume and continue — multiple stops may be queued
-                    // from rapid Stop button clicks.  We must drain ALL of them
-                    // so subsequent run_inner() calls aren't poisoned.
-                }
-                InboundMessage::ContinueExecution { .. } => {
-                    // Continue is only meaningful during iteration limit pause;
-                    // during normal drain, ignore it.
-                    tracing::debug!("Ignoring ContinueExecution during normal drain");
-                }
-                InboundMessage::ApprovalDecision { .. } => {
-                    // Approval decisions are only meaningful during approval pause.
-                    tracing::debug!("Ignoring ApprovalDecision during normal drain");
-                }
-                InboundMessage::QuestionAnswer { .. } => {
-                    // Question answers are only meaningful during question wait.
-                    tracing::debug!("Ignoring QuestionAnswer during normal drain");
-                }
-                InboundMessage::UserOperation(user_op) => {
-                    tracing::info!(
-                        op = ?std::mem::discriminant(&user_op),
-                        "drain_inbound_queue: processing live UserOperation"
-                    );
-                    if self.apply_user_op(&user_op) {
-                        should_stop = true;
-                    }
-                }
-            }
+        // ── ⑨ Post-execution loop detection ──
+        self.post_check_loop_detection(&deduped_calls, &tool_results, &blocked_info)?;
+
+        // ── ⑩ Post-tool stop check ──
+        if was_stopped {
+            tracing::info!("Stopped during tool execution — saving partial results");
+            return Ok(self.handle_stopped(&response.content).await);
         }
-        should_stop
+
+        // ── ⑪ Debug phase completion ──
+        tracing::debug!(iteration, "Loop iteration complete");
+        self.core.debug_observer.on_phase_enter(
+            crate::debug::protocol::DebugPhase::AppendHistory,
+        ).await;
+        self.core.debug_observer.on_phase_step(
+            crate::debug::protocol::DebugPhase::Idle, None, None,
+        );
+        self.core.debug_observer.on_phase_step_done().await;
+
+        Ok(IterationResult::ToolCallsExecuted)
     }
+
+    // ── Inbound message methods moved to loop_inbound.rs (ADR-014 Phase 3) ──
+    //   - apply_user_op
+    //   - poll_stop
+    //   - drain_inbound_queue
+    // D1 dedup helper: inject_inbound_into_history (shared function)
+
+    // ── User interaction methods moved to loop_interaction.rs (ADR-014 Phase 4) ──
+    //   - handle_ask_user_question
+    //   - handle_todo_write
 
     // ── LLM streaming methods extracted to loop_llm.rs ──
 
     // ── Tool execution extracted to loop_tools.rs ──
 
-    // ── Debug mode control methods ──
-
-    /// Await debug resume: blocks if the debug controller is in Paused state.
-    ///
-    /// Uses `rewind_notify` via `tokio::select!` so that rewinds requested
-    /// via the Debug Panel are applied **immediately** (notification-driven)
-    /// rather than after up to 100ms of polling.  State changes (Running /
-    /// Stepping / Stopped) are still checked on each loop iteration.
-    ///
-    /// Also checks the inbound channel for Chat Panel STOP signals
-    /// (InboundMessage::Stop), which arrive via the Gateway gRPC push
-    /// path rather than the debug WebSocket.
-    /// Returns `true` if execution should continue, `false` if stopped.
-    async fn await_debug_resume(&mut self) -> bool {
-        let Some(ctrl) = self.core.debug_ctrl().cloned() else {
-            return true; // Production mode, no debug controller
-        };
-
-        // Clone the rewind notify handle so the Paused branch can use
-        // tokio::select! for instant rewind response.
-        let rewind_notify = self.core.debug_rewind_notify().cloned();
-
-        loop {
-            // Check for Chat Panel STOP (arrives via inbound channel).
-            // The Debug Panel STOP sets ctrl.state directly; the Chat Panel
-            // STOP sends InboundMessage::Stop through the Gateway gRPC
-            // push path.  Without this check, the stop sits unread in
-            // the channel while await_debug_resume only polls ctrl.state.
-            if self.poll_stop() {
-                tracing::info!("Debug: agent loop stopped via inbound channel");
-                // Synchronize debug controller state so the frontend sees Stopped
-                let mut ctrl_guard = ctrl.lock().await;
-                let iteration = ctrl_guard.iteration;
-                ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
-                drop(ctrl_guard);
-                // Push execution state change event for frontend sync
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(
-                        crate::debug::server::DebugEvent::ExecutionStateChanged {
-                            new_state: crate::debug::controller::DebugState::Stopped,
-                            iteration,
-                        },
-                    );
-                }
-                return false;
-            }
-
-            // Consume any pending rewind target during polling.
-            // Uses the unified apply_debug_rewind entry point so
-            // rewind logic lives in exactly one place.
-            {
-                let session_id = self
-                    .current_session_id()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                crate::agent::session::session_task::apply_debug_rewind(
-                    &ctrl,
-                    &session_id,
-                    self,
-                )
-                .await;
-            }
-
-            let state = {
-                let ctrl = ctrl.lock().await;
-                ctrl.state.clone()
-            };
-            match state {
-                crate::debug::controller::DebugState::Running => {
-                    // ADR-014: Paused → Streaming (debug resume)
-                    self.transition_status(SessionStatus::Streaming { message_id: None });
-                    return true;
-                }
-                crate::debug::controller::DebugState::Stepping => {
-                    // ADR-014: Paused → Streaming (debug step)
-                    self.transition_status(SessionStatus::Streaming { message_id: None });
-                    return true;
-                }
-                crate::debug::controller::DebugState::Stopped => {
-                    tracing::info!("Debug: agent loop stopped");
-                    // ADR-014: Paused → Idle (debug stop)
-                    self.transition_status(SessionStatus::Idle);
-                    return false;
-                }
-                crate::debug::controller::DebugState::Paused => {
-                    // ADR-014: Streaming → Paused (debug pause)
-                    self.transition_status(SessionStatus::Paused {
-                        iteration: None,
-                        max_iterations: None,
-                    });
-                    // Use tokio::select! with rewind_notify so that
-                    // rewinds are applied immediately (notification-driven)
-                    // instead of waiting up to 100ms for the next poll.
-                    // State changes are still picked up on the next
-                    // iteration after the select! resolves.
-                    if let Some(ref notify) = rewind_notify {
-                        tokio::select! {
-                            _ = notify.notified() => {},
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
-                        }
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Await user approval decision for a tool execution request.
-    ///
-    /// Blocks the main loop on `inbound_rx` without timeout until the
-    /// matching `InboundMessage::ApprovalDecision` arrives. Non-matching
-    /// messages are buffered in `deferred_inbound` for later processing
-    /// (mirrors `await_debug_resume`'s `poll_stop` pattern).
-    ///
-    /// Also polls `approval_rx` so that concurrent approval requests from
-    /// parallel tool execution are processed (queued) rather than blocking
-    /// the channel. Each new approval request gets its own `ChunkEvent`
-    /// sent to the Gateway before we continue waiting for the current one.
-    ///
-    /// Returns `ApprovalDecision` with the user's choice, auto-rejects
-    /// on timeout / Interrupt / channel close.
-    async fn await_approval_decision(&mut self, request_id: &str) -> ApprovalDecision {
-        // Approval timeout: auto-reject after 5 minutes to prevent deadlock.
-        const APPROVAL_TIMEOUT_SECS: u64 = 300;
-
-        loop {
-            tokio::select! {
-                // Primary: wait for the matching approval decision from inbound channel
-                msg = self.inbound_rx.recv() => {
-                    match msg {
-                        Some(InboundMessage::ApprovalDecision {
-                            request_id: rid,
-                            approved,
-                            allow_all_session,
-                            ..
-                        }) if rid == request_id => {
-                            tracing::info!(
-                                request_id = %request_id,
-                                approved,
-                                allow_all_session,
-                                "Approval decision received"
-                            );
-                            return ApprovalDecision { approved, allow_all_session, reason: None };
-                        }
-                        Some(InboundMessage::ApprovalDecision {
-                            request_id: rid,
-                            approved,
-                            allow_all_session,
-                            ..
-                        }) => {
-                            // Approval decision for a DIFFERENT request — buffer it.
-                            // This can happen when multiple concurrent approval requests
-                            // are in flight and responses arrive out of order.
-                            tracing::debug!(
-                                expected = %request_id,
-                                got = %rid,
-                                "Buffering approval decision for different request"
-                            );
-                            self.session.deferred_inbound.push(InboundMessage::ApprovalDecision {
-                                request_id: rid,
-                                approved,
-                                allow_all_session,
-                                reason: None,
-                            });
-                        }
-                        Some(InboundMessage::Stop { reason }) => {
-                            tracing::info!(
-                                reason = %reason,
-                                request_id = %request_id,
-                                "Approval stopped, auto-rejecting"
-                            );
-                            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
-                        }
-                        Some(other) => {
-                            tracing::debug!(
-                                ?other,
-                                "Buffering non-approval message during approval wait"
-                            );
-                            self.session.deferred_inbound.push(other);
-                        }
-                        None => {
-                            tracing::warn!(
-                                request_id = %request_id,
-                                "Inbound channel closed during approval wait, auto-rejecting"
-                            );
-                            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
-                        }
-                    }
-                }
-                // Secondary: process concurrent approval requests from other spawned tasks.
-                // Without this branch, a second tool needing approval would block on the
-                // mpsc channel, its ToolApprovalNeeded event would never reach the Gateway,
-                // and the user would never see the second approval dialog.
-                approval_req = self.approval_rx.recv() => {
-                    match approval_req {
-                        Some((req, decision_tx)) => {
-                            tracing::info!(
-                                current_request_id = %request_id,
-                                new_tool = %req.tool_name,
-                                "Queuing concurrent approval request while waiting for decision"
-                            );
-                            self.handle_approval_request(req, decision_tx).await;
-                            // After handling the concurrent request, continue waiting
-                            // for the ORIGINAL request's decision.
-                        }
-                        None => {
-                            tracing::warn!("Approval channel closed during approval wait");
-                        }
-                    }
-                }
-                // Timeout: auto-reject to prevent permanent deadlock when
-                // a concurrent approval request is orphaned.
-                _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
-                    let reason_msg = format!("tool approval timed out after {}s", APPROVAL_TIMEOUT_SECS);
-                    tracing::warn!(
-                        request_id = %request_id,
-                        timeout_secs = APPROVAL_TIMEOUT_SECS,
-                        "Approval timed out, auto-rejecting"
-                    );
-                    return ApprovalDecision { approved: false, allow_all_session: false, reason: Some(reason_msg) };
-                }
-            }
-        }
-    }
-
-    /// Send ToolApprovalNeeded chunk event to Gateway (via on_chunk channel).
-    fn send_tool_approval_needed(&self, request_id: &str, req: &ApprovalRequest) {
-        // Approval timeout: 300s (5 min) — same as await_approval_decision.
-        const APPROVAL_TIMEOUT_SECS: u64 = 300;
-        let _ = self.core.try_send_chunk(ChunkEvent::ToolApprovalNeeded {
-            request_id: request_id.to_string(),
-            tool_name: req.tool_name.clone(),
-            action: req.action.clone(),
-            risk_level: req.risk_level.label().to_string(),
-            reason: req.reason.clone(),
-            tool_call_id: req.tool_call_id.clone(),
-            approval_timeout_secs: APPROVAL_TIMEOUT_SECS,
-        });
-    }
-
-    /// Handle an ask_user_question tool call.
-    ///
-    /// Validates the params, emits ChunkEvent::AskQuestion, transitions
-    /// status to WaitingApproval, and blocks until the user responds.
-    /// Returns the user's answer as a tool result string.
-    async fn handle_ask_user_question(&mut self, tc: &rollball_core::providers::traits::ToolCall) -> String {
-
-        // Validate params
-        let params: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
-            Ok(p) => p,
-            Err(e) => {
-                return format!("Error: ask_user_question arguments are not valid JSON: {}", e);
-            }
-        };
-
-        let parsed = match AskUserQuestionTool::validate_params(&params) {
-            Ok(p) => p,
-            Err(e) => {
-                return format!("Error: ask_user_question invalid params: {}", e);
-            }
-        };
-
-        // Generate unique request ID
-        let request_id = format!(
-            "q-{}",
-            self.approval_next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-
-        tracing::info!(
-            request_id = %request_id,
-            question = %parsed.question,
-            options_count = parsed.options.len(),
-            "AskUserQuestion: emitting AskQuestion event and waiting for answer"
-        );
-
-        // Emit ChunkEvent::AskQuestion
-        let _ = self.core.try_send_chunk(ChunkEvent::AskQuestion {
-            request_id: request_id.clone(),
-            question: parsed.question.clone(),
-            options: parsed.options,
-            title: parsed.title.clone(),
-            timeout_seconds: parsed.timeout_seconds,
-        });
-
-        // Transition to WaitingApproval
-        self.transition_status(SessionStatus::WaitingApproval {
-            request_id: request_id.clone(),
-        });
-
-        // Wait for the user's answer (with optional timeout)
-        let answer = self.await_question_answer(&request_id, parsed.timeout_seconds).await;
-
-        // Transition back to Streaming (the loop will continue)
-        self.transition_status(SessionStatus::Streaming { message_id: None });
-
-        tracing::info!(
-            request_id = %request_id,
-            answer_preview = %answer.chars().take(100).collect::<String>(),
-            "AskUserQuestion: received answer"
-        );
-
-        // Return the answer as the tool result
-        answer
-    }
-
-    /// Handle a `todo_write` tool call by updating SessionState.todos and
-    /// injecting the updated list into the ContextBuilder for the next build().
-    ///
-    /// This is synchronous (no I/O or user interaction) since todos are
-    /// pure in-memory state on SessionState.
-    fn handle_todo_write(
-        &mut self,
-        tc: &rollball_core::providers::traits::ToolCall,
-        context_builder: &mut ContextBuilder,
-    ) -> String {
-        use crate::agent::session_state::TodoItem;
-
-        let params: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
-            Ok(p) => p,
-            Err(e) => {
-                return format!("Error: todo_write arguments are not valid JSON: {}", e);
-            }
-        };
-
-        let todos_array = match params.get("todos").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
-            None => return "Error: todo_write requires a 'todos' array parameter".to_string(),
-        };
-
-        let merge = params
-            .get("merge")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let mut items: Vec<TodoItem> = Vec::with_capacity(todos_array.len());
-        for item in todos_array {
-            let id = match item.get("id").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => return "Error: each todo item must have a string 'id' field".to_string(),
-            };
-            let content = match item.get("content").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => {
-                    return format!("Error: todo item '{}' missing required 'content' field", id)
-                }
-            };
-            let status = match item.get("status").and_then(|v| v.as_str()) {
-                Some("pending") => crate::agent::session_state::TodoStatus::Pending,
-                Some("in_progress") => crate::agent::session_state::TodoStatus::InProgress,
-                Some("completed") => crate::agent::session_state::TodoStatus::Completed,
-                Some(other) => {
-                    return format!(
-                        "Error: todo item '{}' has invalid status '{}'. Must be one of: pending, in_progress, completed",
-                        id, other
-                    )
-                }
-                None => {
-                    return format!("Error: todo item '{}' missing required 'status' field", id)
-                }
-            };
-            items.push(TodoItem {
-                id,
-                content,
-                status,
-            });
-        }
-
-        // Update the session todos
-        self.session.update_todos(items, merge);
-
-        // Inject the updated list into context builder for the next build()
-        context_builder.set_todo_context(self.session.format_todos());
-
-        // Emit TodoListUpdated event to frontend for UI rendering
-        let _ = self.core.try_send_chunk(ChunkEvent::TodoListUpdated {
-            todos: self.session.todos.clone(),
-        });
-
-        // Return formatted list as the tool result
-        match self.session.format_todos() {
-            Some(formatted) => {
-                let count = self.session.todos.len();
-                format!(
-                    "Todo list updated ({} items, merge={}):\n{}",
-                    count, merge, formatted
-                )
-            }
-            None => "Todo list is now empty.".to_string(),
-        }
-    }
-
-    /// Await user's answer to an ask_user_question prompt.
-    ///
-    /// Blocks the main loop on `inbound_rx` until the matching
-    /// `InboundMessage::QuestionAnswer` arrives or the optional timeout expires.
-    /// Non-matching messages are buffered in `deferred_inbound` for later processing.
-    async fn await_question_answer(&mut self, request_id: &str, timeout_seconds: Option<u32>) -> String {
-        /// Default timeout when none specified
-        const DEFAULT_TIMEOUT_SECS: u32 = 300;
-        let timeout_duration = std::time::Duration::from_secs(
-            timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS) as u64
-        );
-
-        let timeout_future = tokio::time::timeout(timeout_duration, async {
-            loop {
-                tokio::select! {
-                    msg = self.inbound_rx.recv() => {
-                        match msg {
-                        Some(InboundMessage::QuestionAnswer {
-                            request_id: rid,
-                            answer,
-                        }) if rid == request_id => {
-                            return answer;
-                        }
-                        Some(InboundMessage::QuestionAnswer {
-                            request_id: rid,
-                            answer,
-                        }) => {
-                            // Answer for a different question — buffer it
-                            tracing::debug!(
-                                expected = %request_id,
-                                got = %rid,
-                                "Buffering question answer for different request"
-                            );
-                            self.session.deferred_inbound.push(InboundMessage::QuestionAnswer {
-                                request_id: rid,
-                                answer,
-                            });
-                        }
-                        Some(InboundMessage::Stop { reason }) => {
-                            tracing::info!(
-                                reason = %reason,
-                                request_id = %request_id,
-                                "Question wait stopped, returning cancelled"
-                            );
-                            return "[Cancelled: user stopped]".to_string();
-                        }
-                        Some(other) => {
-                            tracing::debug!(
-                                ?other,
-                                "Buffering non-question message during question wait"
-                            );
-                            self.session.deferred_inbound.push(other);
-                        }
-                        None => {
-                            tracing::warn!(
-                                request_id = %request_id,
-                                "Inbound channel closed during question wait, returning cancelled"
-                            );
-                            return "[Cancelled: channel closed]".to_string();
-                        }
-                    }
-                }
-                // Also process concurrent approval requests
-                approval_req = self.approval_rx.recv() => {
-                    match approval_req {
-                        Some((req, decision_tx)) => {
-                            tracing::info!(
-                                "Queuing concurrent approval request while waiting for question answer"
-                            );
-                            self.handle_approval_request(req, decision_tx).await;
-                        }
-                        None => {
-                            tracing::warn!("Approval channel closed during question wait");
-                        }
-                    }
-                }
-            }
-        }
-    });
-        let result = timeout_future.await;
-
-        match result {
-            Ok(answer) => answer,
-            Err(_elapsed) => {
-                tracing::warn!(
-                    request_id = %request_id,
-                    timeout_secs = %timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS),
-                    "Question answer timed out"
-                );
-                "[Timeout: user did not respond]".to_string()
-            }
-        }
-    }
-
-    /// Handle an approval request received on the approval_rx channel.
-    ///
-    /// Called from `execute_tools_parallel`'s `select!` when a spawned tool
-    /// task sends an approval request. Generates a unique request ID, sends
-    /// `ChunkEvent::ToolApprovalNeeded` to the Gateway, blocks the main loop
-    /// via `await_approval_decision()`, and resolves the spawned task's
-    /// oneshot with the user's decision.
-    pub(crate) fn handle_approval_request(
-        &mut self,
-        req: ApprovalRequest,
-        decision_tx: oneshot::Sender<ApprovalDecision>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let request_id = self
-                .approval_next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                .to_string();
-
-            tracing::info!(
-                request_id = %request_id,
-                tool_name = %req.tool_name,
-                action = %req.action,
-                risk = %req.risk_level.label(),
-                "Handling approval request from spawned tool task"
-            );
-
-            // 1. Send ChunkEvent to Gateway → Desktop App
-            self.send_tool_approval_needed(&request_id, &req);
-
-            // ADR-014: Streaming → WaitingApproval
-            self.transition_status(SessionStatus::WaitingApproval {
-                request_id: request_id.clone(),
-            });
-
-            // 2. Pause and wait for user decision (no timeout)
-            let decision = self.await_approval_decision(&request_id).await;
-
-            // ADR-014: WaitingApproval → Streaming (resume after approval/rejection)
-            self.transition_status(SessionStatus::Streaming { message_id: None });
-
-            // 3. Resolve the spawned task's oneshot
-            let _ = decision_tx.send(decision);
-        })
-    }
-
-    /// Update the debug phase and check for breakpoints.
-    ///
-    /// Pushes `onStateChange` events and checks if any breakpoint matches.
-    /// If a breakpoint hits, the controller is set to Paused and an
-    /// `onBreakpoint` event is pushed.
-    async fn update_debug_phase(&mut self, phase: crate::debug::protocol::DebugPhase) {
-        let Some(ctrl) = self.core.debug_ctrl() else {
-            return;
-        };
-
-        let mut ctrl_guard = ctrl.lock().await;
-        let old_phase = ctrl_guard.phase;
-        ctrl_guard.phase = phase;
-
-        // Push state change event
-        if let Some(event_tx) = self.core.debug_event_tx() {
-            let _ = event_tx.send(crate::debug::server::DebugEvent::StateChanged {
-                old_phase,
-                new_phase: phase,
-                iteration: ctrl_guard.iteration,
-            });
-        }
-
-        // Check breakpoints
-        let hit_ids = ctrl_guard.check_breakpoints(phase, None);
-        if !hit_ids.is_empty() {
-            for bp_id in &hit_ids {
-                tracing::info!(breakpoint_id = %bp_id, phase = ?phase, "Debug: breakpoint hit");
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(crate::debug::server::DebugEvent::BreakpointHit {
-                        breakpoint_id: bp_id.clone(),
-                        iteration: ctrl_guard.iteration,
-                        phase,
-                    });
-                }
-            }
-            ctrl_guard.state = crate::debug::controller::DebugState::Paused;
-            {
-                // Push execution state change event for frontend sync
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(
-                        crate::debug::server::DebugEvent::ExecutionStateChanged {
-                            new_state: crate::debug::controller::DebugState::Paused,
-                            iteration: ctrl_guard.iteration,
-                        },
-                    );
-                }
-            }
-            drop(ctrl_guard); // Release lock before blocking
-            self.await_debug_resume().await;
-        }
-    }
-
-    /// Push a step event to the debug client.
-    fn push_debug_step(
-        &self,
-        phase: crate::debug::protocol::DebugPhase,
-        input: Option<serde_json::Value>,
-        output: Option<serde_json::Value>,
-    ) {
-        if let (Some(ctrl), Some(event_tx)) =
-            (self.core.debug_ctrl(), self.core.debug_event_tx())
-        {
-            // Read iteration from controller (avoid holding lock across send)
-            let iteration = {
-                // Use try_lock to avoid blocking in non-async context;
-                // if lock is contested, just skip the event.
-                let Ok(ctrl) = ctrl.try_lock() else { return };
-                ctrl.iteration
-            };
-            let _ = event_tx.send(crate::debug::server::DebugEvent::Step {
-                iteration,
-                phase,
-                input,
-                output,
-                usage: None,
-            });
-        }
-    }
-
-    /// Auto-pause if in Stepping mode (after completing one iteration).
-    async fn debug_auto_pause_if_stepping(&self) {
-        if let Some(ctrl) = self.core.debug_ctrl() {
-            let mut ctrl_guard = ctrl.lock().await;
-            if ctrl_guard.state == crate::debug::controller::DebugState::Stepping {
-                ctrl_guard.state = crate::debug::controller::DebugState::Paused;
-                let iteration = ctrl_guard.iteration;
-                drop(ctrl_guard);
-                // Push execution state change event for frontend sync
-                if let Some(event_tx) = self.core.debug_event_tx() {
-                    let _ = event_tx.send(
-                        crate::debug::server::DebugEvent::ExecutionStateChanged {
-                            new_state: crate::debug::controller::DebugState::Paused,
-                            iteration,
-                        },
-                    );
-                }
-                tracing::info!("Debug: stepping complete, auto-pausing");
-            }
-        }
-    }
-
-    /// Build a ContextSnapshot from the current ContextBuilder state
-    /// and store it in the debug controller, then push an onContextBuilt event.
-    ///
-    /// This is called after [`ContextBuilder::build()`] in each iteration
-    /// when DevMode is active. Captures the 5 control-plane sections with
-    /// metadata (size, token estimate, SHA-256 hash) for the debug panel's
-    /// context tree view.
-    ///
-    /// `debug_iter` is the iteration number captured *before* any yield
-    /// points in [`execute_single_iteration`].  Because rewind operations
-    /// can modify `ctrl.iteration` mid-flight (between the increment and
-    /// this snapshot), we must use the captured value rather than reading
-    /// the controller field again.
-    async fn capture_context_snapshot(
-        &self,
-        context_builder: &ContextBuilder,
-        debug_iter: Option<u32>,
-        current_model: &str,
-    ) {
-        let Some(iter) = debug_iter else {
-            return; // Not in DevMode
-        };
-        let Some(event_tx) =
-            self.core.debug_event_tx()
-        else {
-            return;
-        };
-
-        use crate::debug::controller::{ContextSnapshot, ContextSnapshotSections, SectionContent};
-
-        // Build tool_definitions string: merge ContextBuilder's built-in tools
-        // with MCP tools from AgentCore. MCP tools are only mixed at display time
-        // (debug panel) and at LLM injection time, not in active_tools/tool_definitions.
-        let mut all_defs: Vec<serde_json::Value> = context_builder
-            .tool_definitions()
-            .map(|defs| defs.to_vec())
-            .unwrap_or_default();
-        for tool in &self.core.all_tools {
-            let spec = tool.spec();
-            if spec.name.starts_with("mcp:") {
-                let val = serde_json::to_value(&spec).unwrap_or_default();
-                all_defs.push(val);
-            }
-        }
-        let tool_defs_str = serde_json::Value::Array(all_defs).to_string();
-
-        // Build skill_instructions from the ContextBuilder.
-        // Skill instructions are injected via ContextBuilder.set_skill_instructions()
-        // (from command-based skill selection in cli.rs), making them visible
-        // in the debug panel's context snapshot.
-        let skill_str = context_builder
-            .skill_instructions()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-
-        // ── Diagnostic: log workspace_context status for debugging zero-byte issue ──
-        tracing::info!(
-            iter = iter,
-            ws_has = context_builder.workspace_context().is_some(),
-            ws_len = context_builder.workspace_context().map(|s| s.len()).unwrap_or(0),
-            ws_preview = ?context_builder.workspace_context().map(|s| &s[..s.len().min(80)]),
-            "capture_context_snapshot: workspace_context status"
-        );
-
-        // All token counting goes through the unified crate::token::count_text API.
-        let sections = ContextSnapshotSections {
-            system_prompt: SectionContent::new(
-                context_builder.system_prompt().to_string(),
-                current_model,
-            ),
-            workspace_context: SectionContent::new(
-                context_builder.workspace_context().unwrap_or_default().to_string(),
-                current_model,
-            ),
-            environment: SectionContent::new(
-                context_builder
-                    .environment_override()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| crate::agent::context::detect_environment_text()),
-                current_model,
-            ),
-            tool_definitions: SectionContent::new(tool_defs_str, current_model),
-            skill_instructions: SectionContent::new(skill_str, current_model),
-            retrieved_memory: SectionContent::new(
-                context_builder.retrieved_memory().unwrap_or_default().to_string(),
-                current_model,
-            ),
-            identity_context: SectionContent::new(
-                context_builder.identity_context().unwrap_or_default().to_string(),
-                current_model,
-            ),
-        };
-
-        let total_token_estimate = sections.system_prompt.token_estimate
-            + sections.workspace_context.token_estimate
-            + sections.environment.token_estimate
-            + sections.tool_definitions.token_estimate
-            + sections.skill_instructions.token_estimate
-            + sections.retrieved_memory.token_estimate
-            + sections.identity_context.token_estimate;
-
-        let snapshot = ContextSnapshot {
-            iteration: iter,
-            built_at: chrono::Utc::now(),
-            sections,
-            total_token_estimate,
-        };
-
-        // Store in controller — also persist the model name so that
-        // patchContext can use model-aware token estimates.
-        if let Some(ctrl) = self.core.debug_ctrl() {
-            let mut ctrl_guard = ctrl.lock().await;
-            ctrl_guard.current_model = Some(current_model.to_string());
-            ctrl_guard.store_context_snapshot(snapshot.clone());
-        }
-
-        // Push onContextBuilt event to WebSocket client
-        let context_sections =
-            crate::debug::protocol::ContextSections::from(&snapshot.sections);
-        let sent = event_tx.send(crate::debug::server::DebugEvent::ContextBuilt {
-            iteration: snapshot.iteration,
-            sections: context_sections,
-            total_token_estimate: snapshot.total_token_estimate,
-        });
-
-        tracing::info!(
-            iteration = snapshot.iteration,
-            total_token_estimate,
-            event_sent = sent,
-            "Debug: context snapshot captured and event pushed"
-        );
-    }
+    // ── Debug methods migrated to DebugObserverImpl (ADR-013) ──
+    // The following methods were moved to loop_approval.rs (ADR-014 Phase 2):
+    //   - await_approval_decision
+    //   - send_tool_approval_needed
+    //   - await_question_answer
+    //   - handle_approval_request
+    // The following types were moved to loop_approval.rs:
+    //   - ApprovalDecision
+    //   - ApprovalHandle
 
     /// Get reference to history manager
     pub fn history(&self) -> &HistoryManager {
@@ -2920,43 +782,11 @@ impl AgentLoop {
     }
 }
 
-/// Extract content inside `<think>...</think>` tags if present.
-fn extract_think_block(content: &str) -> Option<String> {
-    let start_tag = "<think>";
-    let end_tag = "</think>";
-    let start = content.find(start_tag)?;
-    let end = content.find(end_tag)?;
-    if end <= start + start_tag.len() {
-        return None;
-    }
-    Some(content[start + start_tag.len()..end].trim().to_string())
-}
-
-/// Remove `<think>...</think>` block from content, returning the remaining text.
-fn strip_think_block(content: &str) -> String {
-    let start_tag = "<think>";
-    let end_tag = "</think>";
-    if let Some(start) = content.find(start_tag)
-        && let Some(end) = content.find(end_tag)
-    {
-        let before = &content[..start];
-        let after = &content[end + end_tag.len()..];
-        return format!("{}{}", before.trim(), after.trim()).trim().to_string();
-    }
-    content.to_string()
-}
-
-/// Build think message metadata with timing info from ChatResponse.
-fn build_think_metadata(response: &ChatResponse) -> Option<serde_json::Value> {
-    if response.reasoning_started_at.is_some() || response.reasoning_finished_at.is_some() {
-        Some(serde_json::json!({
-            "startTime": response.reasoning_started_at,
-            "endTime": response.reasoning_finished_at,
-        }))
-    } else {
-        None
-    }
-}
+// ── Think block utilities moved to loop_session.rs (ADR-014 Phase 5) ──
+//   - extract_think_block
+//   - strip_think_block
+//   - build_think_metadata
+// Use via: use crate::agent::loop_session::{extract_think_block, strip_think_block, build_think_metadata};
 
 #[cfg(test)]
 mod tests {
@@ -2964,7 +794,7 @@ mod tests {
     use crate::agent::loop_llm::make_incomplete_marker;
     use crate::agent::loop_tools::execute_single_tool;
     use rollball_core::providers::mock::MockProvider;
-    use rollball_core::providers::traits::FunctionCall;
+    use rollball_core::providers::traits::{ChatResponse, FunctionCall, MessageRole, ToolCall};
 
     /// Simple echo tool for testing
     struct EchoTool;

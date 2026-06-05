@@ -693,10 +693,6 @@ async fn async_main(
     // Step 6: Build context builder
     // User identity is delivered via AgentHelloResult (Gateway IPC),
     // formatted from the active UserProfile. Falls back to None in standalone mode.
-    let user_display_name: Option<String> = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.user_identity.as_ref())
-        .map(|u| u.display_name.clone());
     let identity_context: Option<String> = hello_config
         .as_ref()
         .and_then(|cfg| cfg.user_identity.as_ref())
@@ -882,7 +878,6 @@ async fn async_main(
             if let Some(pid) = gateway_current_provider_id {
                 c.current_provider_id = Some(pid);
             }
-            c.user_display_name = user_display_name.clone();
 
             // Populate provider_compact_models from cached provider_list
             // (resource_cache).  Each ProviderListItem carries a compact_model
@@ -1471,8 +1466,6 @@ async fn async_main(
         // Initialize Grafeo memory store at agent workspace
         agent_loop.init_memory_store(work_dir_path);
 
-        // Inject user display name from identity delivery
-        agent_loop.core.user_display_name = user_display_name.clone();
         if let Some(caps) = gateway_model_capabilities {
             let mid = gateway_model_id.as_deref().unwrap_or("default");
             agent_loop.update_gateway_model_capabilities(mid, caps);

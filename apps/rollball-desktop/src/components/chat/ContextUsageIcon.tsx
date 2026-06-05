@@ -3,38 +3,50 @@ import { useChatStore } from "../../stores/chatStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 
-/** Six-bar SVG icon showing context usage percentage.
- *  Width 16px to match the adjacent Send button icon. */
-function SixBarIcon({ usagePercent }: { usagePercent: number }) {
-  const barCount = 6;
+/** Circular progress ring showing context usage percentage.
+ *  Starts from bottom (6 o'clock), goes clockwise.
+ *  16x16 SVG to match adjacent send button icon size. */
+function CircularProgressIcon({ usagePercent }: { usagePercent: number }) {
+  const size = 16;
+  const strokeWidth = 2;
+  const radius = (size - strokeWidth) / 2;
+  const center = size / 2;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference * (1 - usagePercent / 100);
+
   const fillColor = "var(--color-text-secondary, hsl(240 3.7% 46.9%))";
   const emptyColor = "var(--shimmer-mid, #e8e8ec)";
 
   return (
     <svg
-      width="16"
-      height="14"
-      viewBox="0 0 16 14"
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {Array.from({ length: barCount }).map((_, i) => {
-        const threshold = ((barCount - i) / barCount) * 100;
-        const isFilled = usagePercent >= threshold;
-        const y = i * 2.6;
-        return (
-          <rect
-            key={i}
-            x="2"
-            y={y}
-            width="12"
-            height="1.8"
-            rx="0.9"
-            fill={isFilled ? fillColor : emptyColor}
-            opacity={isFilled ? 1 : 0.35}
-          />
-        );
-      })}
+      {/* Background ring (total capacity) */}
+      <circle
+        cx={center}
+        cy={center}
+        r={radius}
+        stroke={emptyColor}
+        strokeWidth={strokeWidth}
+        opacity={0.35}
+      />
+      {/* Progress ring (used amount) — starts from bottom, goes clockwise */}
+      <circle
+        cx={center}
+        cy={center}
+        r={radius}
+        stroke={fillColor}
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={offset}
+        transform={`rotate(90 ${center} ${center})`}
+        style={{ transition: "stroke-dashoffset 0.3s ease" }}
+      />
     </svg>
   );
 }
@@ -139,7 +151,7 @@ export function ContextUsageIcon() {
             <span className="h-3 w-3 rounded-full border-2 border-[var(--color-accent)] border-t-transparent animate-spin" />
           </span>
         ) : (
-          <SixBarIcon usagePercent={usagePercent} />
+          <CircularProgressIcon usagePercent={usagePercent} />
         )}
       </button>
 

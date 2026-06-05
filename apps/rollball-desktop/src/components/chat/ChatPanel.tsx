@@ -1573,7 +1573,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             size={40}
             className="shrink-0 mt-1"
           />
-          <div className="min-w-0 flex-1 flex flex-col items-start">
+          <div className="min-w-0 flex-1 flex flex-col">
             <div className="flex items-center gap-1.5 mt-[5px]">
               {liveAgentName && (
                 <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
@@ -1613,7 +1613,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             size={40}
             className="shrink-0 mt-1"
           />
-          <div className="min-w-0 flex-1 flex flex-col items-start">
+          <div className="min-w-0 flex-1 flex flex-col">
             <div className="flex items-center gap-1.5 mt-[5px]">
               {liveAgentName && (
                 <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
@@ -1648,7 +1648,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             size={40}
             className="shrink-0 mt-1"
           />
-          <div className="min-w-0 flex-1 flex flex-col items-start">
+          <div className="min-w-0 flex-1 flex flex-col">
             <div className="flex items-center gap-1.5 mt-[5px]">
               {liveAgentName && (
                 <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>

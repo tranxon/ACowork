@@ -1832,27 +1832,16 @@ function handleMessageEvent(
 
     case "stopped": {
       if (!sid) break;
-      const stoppedContent = data.content as string | undefined;
       set((state) => {
         const ss = getSessionState(state, agentId, sid!);
         let messages = [...ss.messages];
-        // If we have a streaming message, finalize it with current content
+        // Finalize streaming message (Stopped is only emitted mid-streaming)
         if (ss.streamingMessageId) {
           messages = messages.map((msg) =>
             msg.id === ss.streamingMessageId
               ? { ...msg, endTime: Date.now() }
               : msg,
           );
-        } else if (stoppedContent) {
-          // No streaming message — add a new assistant message with the partial content
-          const assistantMsgId = `msg-assistant-${Date.now()}`;
-          const assistantMsg: ChatMessage = {
-            id: assistantMsgId,
-            type: "assistant",
-            content: stoppedContent,
-            timestamp: Date.now(),
-          };
-          messages = [...messages, assistantMsg];
         }
         return {
           ...updateSessionState(state, agentId, sid!, {
@@ -1865,7 +1854,6 @@ function handleMessageEvent(
             isCompacting: false,
             pendingSend: false,
           }),
-          // stopped handler continues
         };
       });
       break;

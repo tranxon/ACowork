@@ -52,6 +52,11 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.sessionStatus ?? null;
   });
+  const openSessionCount = useChatStore((s) => {
+    if (!selectedAgentId) return 0;
+    const agent = s.agentStates[selectedAgentId];
+    return agent?.openSessionIds?.length ?? 0;
+  });
   const isCompacting = useChatStore((s) => {
     if (!selectedAgentId) return false;
     const agent = s.agentStates[selectedAgentId];
@@ -491,6 +496,10 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
                   <div className="flex justify-between py-1">
                     <span className="text-zinc-500">{t("resultsPanel.version")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{selectedAgent.version}</span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.sessions")}</span>
+                    <span className="text-zinc-700 dark:text-zinc-300">{openSessionCount}</span>
                   </div>
                 </>
               ) : (
