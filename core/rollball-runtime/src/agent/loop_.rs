@@ -29,8 +29,9 @@ use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
 use crate::agent::loop_approval::{ApprovalDecision, ApprovalHandle};
+use crate::agent::loop_session::{build_think_metadata, extract_think_block, strip_think_block};
 use crate::security::approval_gate::ApprovalRequest;
-use crate::tools::builtin::ask_user_question::{AskUserQuestionTool, QuestionOption};
+use crate::tools::builtin::ask_user_question::QuestionOption;
 
 use crate::agent::session_state::SessionStatus;
 
@@ -280,165 +281,10 @@ impl AgentLoop {
         (session_loop, inbound_tx)
     }
 
-    /// Transition session status and emit SessionStateChanged event if the status changed.
-    ///
-    /// ADR-014 helper: ensures every status transition is paired with an event emission.
-    /// Returns true if the status actually changed (and event was emitted).
-    pub(crate) fn transition_status(&mut self, new_status: SessionStatus) -> bool {
-        if self.session.set_status(new_status) {
-            let status = self.session.status.clone();
-            // Emit chunk event to Gateway → frontend
-            if !self.core.try_send_chunk(ChunkEvent::SessionStateChanged {
-                status: status.clone(),
-                model: self.session.model().map(|s| s.to_string()),
-                provider: self.session.provider().map(|s| s.to_string()),
-                workspace_id: self.session.workspace_id(),
-            }) {
-                tracing::warn!(
-                    "SessionStateChanged event dropped (channel full/closed), status={:?}. Pull repair will correct frontend.",
-                    status
-                );
-            }
-            // Update watch channel for SessionHandle reads
-            if let Some(ref tx) = self.core.status_tx {
-                let _ = tx.send(status);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-
-
-
-
-    /// Get the current conversation session ID (S1.14)
-    ///
-    /// Returns the session ID of the active ConversationSession,
-    /// or None if no session is active.
-    pub fn current_session_id(&self) -> Option<&str> {
-        self.session.conversation.as_ref().map(|c| c.session_id())
-    }
-
-    /// Initialize the Grafeo memory store at the given workspace path.
-    ///
-    /// Delegates to `AgentCore::init_memory_store()`.
-    /// Opens or creates `{work_dir}/memory/private.grafeo`.
-    pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
-        self.core.init_memory_store(work_dir);
-    }
-
-    /// Retrieve relevant long-term memories from Grafeo and inject them into
-    /// the ContextBuilder for the next LLM call.
-    ///
-    /// Runs once per `run()` invocation, before the first LLM iteration.
-    /// When the memory store is unavailable, this is a silent no-op.
-    ///
-    /// Returns the list of Grafeo node IDs that were retrieved (P2-4 fix).
-    /// These IDs are passed to `record_turn_to_memory` so that future
-    /// retrieval can trace which memories influenced each turn.
-    async fn retrieve_and_inject_memories(
-        &self,
-        user_message: &str,
-        context_builder: &mut ContextBuilder,
-    ) -> Vec<String> {
-        // P0 fix: Always clear stale memory from previous turns first.
-        // ContextBuilder is reused across turns (SessionTask loop), so
-        // without this, stale memory leaks into the next LLM call.
-        context_builder.clear_retrieved_memory();
-
-        let store = match self.core.memory_store() {
-            Some(s) => s,
-            None => return vec![], // No store available, already cleared above
-        };
-
-        let manager = self.core.init_memory_manager();
-
-        // Build exclude_session_id filter to avoid re-injecting Episode
-        // summaries that are already in the current session's context window.
-        let current_session_id = self
-            .session
-            .conversation
-            .as_ref()
-            .map(|c| c.session_id().to_string());
-
-        // Update MemorySessionHandle so memory_recall tool can see the
-        // current session_id for its own exclude_session_id filtering.
-        if let Some(ref handle) = self.core.memory_session {
-            if let Some(ref sid) = current_session_id {
-                handle.set_session_id(sid.clone());
-            }
-        }
-
-        let mut query = rollball_memory::MemoryQuery::auto_inject(
-            user_message.to_string(),
-            current_session_id,
-        );
-
-        // Pass embedding provider from AgentCore so retrieve() can auto-generate
-        // query embeddings on-demand (Ollama local → Remote fallback chain).
-        let emb_provider = self.core.embedding_provider.as_deref();
-
-        // P2-4 fix: Use retrieve + inject separately (instead of process_turn)
-        // so we can capture the node IDs of retrieved memories for traceability.
-        match manager.retrieve(store, &mut query, emb_provider).await {
-            Ok(retrieval) => {
-                // Capture node IDs before inject (inject discards the RetrievalResult)
-                let memory_ids: Vec<String> = retrieval
-                    .memories
-                    .iter()
-                    .filter(|m| m.node_id != 0) // 0 = RAG result, not Grafeo local
-                    .map(|m| m.node_id.to_string())
-                    .collect();
-
-                let metrics = retrieval.metrics.clone();
-                let injected = manager.inject(&retrieval);
-                if !injected.formatted_text.is_empty() {
-                    tracing::info!(
-                        memory_count = injected.memory_count,
-                        token_count = injected.token_count,
-                        avg_score = metrics.avg_score,
-                        "Retrieved and injected long-term memories into context"
-                    );
-                    context_builder.set_retrieved_memory(injected.formatted_text);
-                }
-                memory_ids
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to retrieve memories from Grafeo (non-fatal)"
-                );
-                vec![]
-            }
-        }
-    }
-
-    /// Write document upload entries to the conversation JSONL.
-    ///
-    /// Each document is persisted as a `ConversationEntry` with `role: "system"`
-    /// and `metadata.type: "document_upload"` so that the Desktop App can render
-    /// document chips when loading historical sessions.
-    pub fn write_document_entries(&self, documents: &[serde_json::Value]) {
-        if let Some(ref conversation) = self.session.conversation {
-            for doc in documents {
-                let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("");
-                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("");
-                let size = doc.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                let content = format!("Uploaded file: {} ({}, {} bytes)", filename, format, size);
-                let metadata = serde_json::json!({
-                    "type": "document_upload",
-                    "document_id": doc.get("id"),
-                    "filename": filename,
-                    "format": format,
-                    "size_bytes": size,
-                    "path": doc.get("abs_path"),
-                });
-                conversation.append_message("system", &content, Some(metadata));
-            }
-        }
-    }
+    // ── Memory system methods moved to loop_memory.rs (ADR-014 Phase 6) ──
+    //   - init_memory_store
+    //   - retrieve_and_inject_memories
+    //   - write_document_entries
 
     /// Execute a built-in tool by name, simulating an LLM tool call.
     ///
@@ -469,24 +315,6 @@ impl AgentLoop {
         }
     }
 
-    /// Update the title of the currently active conversation session.
-    ///
-    /// Returns `Some(true)` if the title was actually written (different from current),
-    /// `Some(false)` if the title was already the same (no-op),
-    /// or `None` if no active session exists.
-    pub fn update_session_title(&mut self, title: &str) -> Option<bool> {
-        self.session.conversation.as_ref().map(|conv| conv.update_title_force(title))
-    }
-
-    /// Persist the per-session workspace selection to the JSONL conversation file.
-    ///
-    /// Only effective when the session has an active `ConversationSession`.
-    pub fn update_session_workspace_id(&mut self, workspace_id: &str) {
-        if let Some(ref conv) = self.session.conversation {
-            conv.update_workspace_id(workspace_id);
-        }
-    }
-
     /// Look up model capabilities by exact model name (delegates to AgentCore).
     pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<&ModelCapabilitiesInfo> {
         self.core.get_model_capabilities(model_name)
@@ -504,119 +332,6 @@ impl AgentLoop {
 
 
 
-
-    /// Close the conversation session and trigger session-level distillation.
-    ///
-    /// This method:
-    /// 1. Spawns an async distillation task for the entire session
-    /// 2. Closes the conversation writer
-    ///
-    /// Distillation is best-effort and non-blocking.
-    pub async fn close_session_with_distillation(&mut self) -> Result<()> {
-        self.close_session_inner().await
-    }
-
-
-    /// Inner implementation for closing the current session.
-    ///
-    /// Per [ADR-011]: uses `last_compaction_index()` to determine the tail
-    /// distillation range. The `is_compacted` flag is used as a fast-path hint
-    /// but is NOT sufficient alone — the assistant response from the same round
-    /// that triggered compaction may land after the compaction marker, and must
-    /// still be distilled.
-    async fn close_session_inner(&mut self) -> Result<()> {
-        if let Some(ref conversation) = self.session.conversation {
-            let session_id = conversation.session_id().to_string();
-
-            // Determine tail range: everything after the last compaction marker,
-            // or full history (skipping leading system messages) if never compacted.
-            let tail_start = self
-                .session
-                .history
-                .last_compaction_index()
-                .map(|idx| idx + 1) // Start after compaction marker
-                .unwrap_or_else(|| {
-                    // No compaction ever — skip leading system messages
-                    self.session
-                        .history
-                        .messages()
-                        .iter()
-                        .take_while(|m| matches!(m.role, MessageRole::System))
-                        .count()
-                });
-
-            let messages = self.session.history.messages();
-            let tail_messages: Vec<ChatMessage> = messages[tail_start..].to_vec();
-
-            if tail_messages.is_empty() {
-                tracing::info!(
-                    session_id = %session_id,
-                    is_compacted = self.session.is_compacted,
-                    "No tail messages to distill — skipping"
-                );
-            } else {
-                let provider = self.core.provider.clone();
-                let memory_store = self.core.memory_store().cloned();
-                let emb_provider = self.core.embedding_provider.clone();
-                // Build combined text for model-aware token counting via the unified API.
-                let combined_text: String = tail_messages
-                    .iter()
-                    .fold(String::new(), |mut acc, m| {
-                        acc.push_str(&m.content);
-                        acc.push('\n');
-                        acc
-                    });
-                let model_name = self.resolve_distill_model(&combined_text);
-                let distill_max_tokens = self.core.config.distill_max_tokens;
-
-                tracing::info!(
-                    session_id = %session_id,
-                    tail_start,
-                    tail_message_count = tail_messages.len(),
-                    is_compacted = self.session.is_compacted,
-                    model = %model_name,
-                    "Spawning tail distillation for session close"
-                );
-
-                // Spawn tail distillation (best-effort, non-blocking)
-                tokio::spawn(async move {
-                    match crate::episode_distill::EpisodeDistiller::compact_messages(
-                        &tail_messages,
-                        provider.as_ref(),
-                        &model_name,
-                        distill_max_tokens,
-                    )
-                    .await
-                    {
-                        Ok(summary) => {
-                            crate::episode_distill::EpisodeDistiller::write_summary_to_grafeo(
-                                &summary,
-                                &session_id,
-                                &memory_store,
-                                emb_provider.as_deref(),
-                            ).await;
-                            tracing::info!(
-                                session_id = %session_id,
-                                summary_len = summary.len(),
-                                "Tail distillation completed for session close"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %e,
-                                "Tail distillation failed (non-fatal)"
-                            );
-                        }
-                    }
-                });
-            }
-
-            // Close the conversation writer
-            conversation.close().await?;
-        }
-        Ok(())
-    }
 
     /// Run the agent loop for a single user message.
     ///
@@ -1389,6 +1104,10 @@ impl AgentLoop {
     //   - drain_inbound_queue
     // D1 dedup helper: inject_inbound_into_history (shared function)
 
+    // ── User interaction methods moved to loop_interaction.rs (ADR-014 Phase 4) ──
+    //   - handle_ask_user_question
+    //   - handle_todo_write
+
     // ── LLM streaming methods extracted to loop_llm.rs ──
 
     // ── Tool execution extracted to loop_tools.rs ──
@@ -1403,159 +1122,6 @@ impl AgentLoop {
     //   - ApprovalDecision
     //   - ApprovalHandle
 
-    /// Handle an ask_user_question tool call.
-    ///
-    /// Validates the params, emits ChunkEvent::AskQuestion, transitions
-    /// status to WaitingApproval, and blocks until the user responds.
-    /// Returns the user's answer as a tool result string.
-    async fn handle_ask_user_question(&mut self, tc: &rollball_core::providers::traits::ToolCall) -> String {
-
-        // Validate params
-        let params: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
-            Ok(p) => p,
-            Err(e) => {
-                return format!("Error: ask_user_question arguments are not valid JSON: {}", e);
-            }
-        };
-
-        let parsed = match AskUserQuestionTool::validate_params(&params) {
-            Ok(p) => p,
-            Err(e) => {
-                return format!("Error: ask_user_question invalid params: {}", e);
-            }
-        };
-
-        // Generate unique request ID
-        let request_id = format!(
-            "q-{}",
-            self.approval_next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-
-        tracing::info!(
-            request_id = %request_id,
-            question = %parsed.question,
-            options_count = parsed.options.len(),
-            "AskUserQuestion: emitting AskQuestion event and waiting for answer"
-        );
-
-        // Emit ChunkEvent::AskQuestion
-        let _ = self.core.try_send_chunk(ChunkEvent::AskQuestion {
-            request_id: request_id.clone(),
-            question: parsed.question.clone(),
-            options: parsed.options,
-            title: parsed.title.clone(),
-            timeout_seconds: parsed.timeout_seconds,
-        });
-
-        // Transition to WaitingApproval
-        self.transition_status(SessionStatus::WaitingApproval {
-            request_id: request_id.clone(),
-        });
-
-        // Wait for the user's answer (with optional timeout)
-        let answer = self.await_question_answer(&request_id, parsed.timeout_seconds).await;
-
-        // Transition back to Streaming (the loop will continue)
-        self.transition_status(SessionStatus::Streaming { message_id: None });
-
-        tracing::info!(
-            request_id = %request_id,
-            answer_preview = %answer.chars().take(100).collect::<String>(),
-            "AskUserQuestion: received answer"
-        );
-
-        // Return the answer as the tool result
-        answer
-    }
-
-    /// Handle a `todo_write` tool call by updating SessionState.todos and
-    /// injecting the updated list into the ContextBuilder for the next build().
-    ///
-    /// This is synchronous (no I/O or user interaction) since todos are
-    /// pure in-memory state on SessionState.
-    fn handle_todo_write(
-        &mut self,
-        tc: &rollball_core::providers::traits::ToolCall,
-        context_builder: &mut ContextBuilder,
-    ) -> String {
-        use crate::agent::session_state::TodoItem;
-
-        let params: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
-            Ok(p) => p,
-            Err(e) => {
-                return format!("Error: todo_write arguments are not valid JSON: {}", e);
-            }
-        };
-
-        let todos_array = match params.get("todos").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
-            None => return "Error: todo_write requires a 'todos' array parameter".to_string(),
-        };
-
-        let merge = params
-            .get("merge")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let mut items: Vec<TodoItem> = Vec::with_capacity(todos_array.len());
-        for item in todos_array {
-            let id = match item.get("id").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => return "Error: each todo item must have a string 'id' field".to_string(),
-            };
-            let content = match item.get("content").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => {
-                    return format!("Error: todo item '{}' missing required 'content' field", id)
-                }
-            };
-            let status = match item.get("status").and_then(|v| v.as_str()) {
-                Some("pending") => crate::agent::session_state::TodoStatus::Pending,
-                Some("in_progress") => crate::agent::session_state::TodoStatus::InProgress,
-                Some("completed") => crate::agent::session_state::TodoStatus::Completed,
-                Some(other) => {
-                    return format!(
-                        "Error: todo item '{}' has invalid status '{}'. Must be one of: pending, in_progress, completed",
-                        id, other
-                    )
-                }
-                None => {
-                    return format!("Error: todo item '{}' missing required 'status' field", id)
-                }
-            };
-            items.push(TodoItem {
-                id,
-                content,
-                status,
-            });
-        }
-
-        // Update the session todos
-        self.session.update_todos(items, merge);
-
-        // Inject the updated list into context builder for the next build()
-        context_builder.set_todo_context(self.session.format_todos());
-
-        // Emit TodoListUpdated event to frontend for UI rendering
-        let _ = self.core.try_send_chunk(ChunkEvent::TodoListUpdated {
-            todos: self.session.todos.clone(),
-        });
-
-        // Return formatted list as the tool result
-        match self.session.format_todos() {
-            Some(formatted) => {
-                let count = self.session.todos.len();
-                format!(
-                    "Todo list updated ({} items, merge={}):\n{}",
-                    count, merge, formatted
-                )
-            }
-            None => "Todo list is now empty.".to_string(),
-        }
-    }
-
-    /// Await user's answer to an ask_user_question prompt.
-    ///
     /// Get reference to history manager
     pub fn history(&self) -> &HistoryManager {
         &self.session.history
@@ -1572,43 +1138,11 @@ impl AgentLoop {
     }
 }
 
-/// Extract content inside `<think>...</think>` tags if present.
-fn extract_think_block(content: &str) -> Option<String> {
-    let start_tag = "<think>";
-    let end_tag = "</think>";
-    let start = content.find(start_tag)?;
-    let end = content.find(end_tag)?;
-    if end <= start + start_tag.len() {
-        return None;
-    }
-    Some(content[start + start_tag.len()..end].trim().to_string())
-}
-
-/// Remove `<think>...</think>` block from content, returning the remaining text.
-fn strip_think_block(content: &str) -> String {
-    let start_tag = "<think>";
-    let end_tag = "</think>";
-    if let Some(start) = content.find(start_tag)
-        && let Some(end) = content.find(end_tag)
-    {
-        let before = &content[..start];
-        let after = &content[end + end_tag.len()..];
-        return format!("{}{}", before.trim(), after.trim()).trim().to_string();
-    }
-    content.to_string()
-}
-
-/// Build think message metadata with timing info from ChatResponse.
-fn build_think_metadata(response: &ChatResponse) -> Option<serde_json::Value> {
-    if response.reasoning_started_at.is_some() || response.reasoning_finished_at.is_some() {
-        Some(serde_json::json!({
-            "startTime": response.reasoning_started_at,
-            "endTime": response.reasoning_finished_at,
-        }))
-    } else {
-        None
-    }
-}
+// ── Think block utilities moved to loop_session.rs (ADR-014 Phase 5) ──
+//   - extract_think_block
+//   - strip_think_block
+//   - build_think_metadata
+// Use via: use crate::agent::loop_session::{extract_think_block, strip_think_block, build_think_metadata};
 
 #[cfg(test)]
 mod tests {
