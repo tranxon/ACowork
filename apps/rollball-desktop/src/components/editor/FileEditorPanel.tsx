@@ -5,6 +5,8 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { cn } from "../../lib/utils";
 import { X, Save, Loader2, FileText } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
+import { ScrollableTabBar } from "../common/ScrollableTabBar";
+import { TabItem } from "../common/tab";
 
 export function FileEditorPanel({ width }: { width: number }) {
     const { t } = useTranslation();
@@ -17,7 +19,9 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     const theme = useSettingsStore((s) => s.theme);
     const [closingFileId, setClosingFileId] = useState<string | null>(null);
-    const scrollRef = useRef<HTMLDivElement>(null);
+    const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+    const [cursor, setCursor] = useState({ line: 1, column: 1 });
+    const [selectedCount, setSelectedCount] = useState(0);
 
     const activeFile = openFiles.find((f) => f.id === activeFileId) ?? null;
 
@@ -45,7 +49,22 @@ export function FileEditorPanel({ width }: { width: number }) {
         ? (systemDark ? "vs-dark" : "vs")
         : monacoTheme;
 
-    const handleEditorMount: OnMount = useCallback((editor) => {
+    const handleEditorMount: OnMount = useCallback((editor, _monaco) => {
+        editorRef.current = editor;
+        // Track cursor position + selection
+        editor.onDidChangeCursorPosition((e) => {
+            setCursor({ line: e.position.lineNumber, column: e.position.column });
+            // Sync selection count
+            const sel = editor.getSelection();
+            if (sel && !sel.isEmpty()) {
+                const model = editor.getModel();
+                if (model) {
+                    setSelectedCount(model.getValueInRange(sel).length);
+                    return;
+                }
+            }
+            setSelectedCount(0);
+        });
         // Ctrl+S / Cmd+S to save
         editor.addCommand(
             // eslint-disable-next-line no-bitwise
@@ -78,13 +97,6 @@ export function FileEditorPanel({ width }: { width: number }) {
         setClosingFileId(null);
     }, [closingFileId, closeFile]);
 
-    // Scroll active tab into view
-    useEffect(() => {
-        if (!scrollRef.current || !activeFileId) return;
-        const el = scrollRef.current.querySelector(`[data-file-id="${activeFileId}"]`);
-        el?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    }, [activeFileId]);
-
     return (
         <div
             className="flex flex-col border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
@@ -92,24 +104,18 @@ export function FileEditorPanel({ width }: { width: number }) {
         >
             {/* Tab bar */}
             <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
-                <div
-                    ref={scrollRef}
-                    className="flex flex-1 min-w-0 items-center overflow-x-auto gap-0.5 [&::-webkit-scrollbar]:hidden"
-                    style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+                <ScrollableTabBar
+                    activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
+                    activeItemId={activeFileId ?? undefined}
                 >
                     {openFiles.map((file) => {
                         const isActive = file.id === activeFileId;
                         return (
-                            <div
+                            <TabItem
                                 key={file.id}
                                 data-file-id={file.id}
                                 onClick={() => setActiveFile(file.id)}
-                                className={cn(
-                                    "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-[var(--tab-py)] min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0 border-b",
-                                    isActive
-                                        ? "border-current text-zinc-700 dark:text-zinc-200"
-                                        : "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300",
-                                )}
+                                active={isActive}
                                 title={file.relPath}
                             >
                                 {/* Dirty indicator / loading */}
@@ -135,10 +141,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 >
                                     <X className="h-3 w-3" />
                                 </button>
-                            </div>
+                            </TabItem>
                         );
                     })}
-                </div>
+                </ScrollableTabBar>
 
                 {/* Save button */}
                 {activeFile && !activeFile.loading && (
@@ -196,6 +202,14 @@ export function FileEditorPanel({ width }: { width: number }) {
                     />
                 )}
             </div>
+
+            {/* Status bar */}
+            {activeFile && !activeFile.loading && (
+                <div className="flex items-center justify-between border-t border-zinc-200 bg-zinc-100 px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-800 dark:text-zinc-400">
+                    <span className="uppercase">{activeFile.language || "plain text"}</span>
+                    <span>Ln {cursor.line}, Col {cursor.column}{selectedCount > 0 ? ` (${selectedCount} selected)` : ""}</span>
+                </div>
+            )}
 
             {/* Close confirmation dialog */}
             {closingFileId && (

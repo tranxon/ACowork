@@ -10,6 +10,7 @@ import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, D
 import { Bug, Monitor } from "lucide-react";
 import { inputReadonly, inputBase } from "../../lib/ui-styles";
 import { ProfileTab } from "./ProfileTab";
+import { TabButton } from "../common/tab";
 
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
 
@@ -31,18 +32,13 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
       {/* Tabs */}
       <div className="flex gap-1 border-b border-zinc-200 px-6 pt-2 dark:border-zinc-800">
         {tabs.map((tab) => (
-          <button
+          <TabButton
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={cn(
-              "border-b px-3 py-2 text-sm transition-colors",
-              activeTab === tab.id
-                ? "border-current font-semibold text-zinc-700 dark:text-zinc-200"
-                : "border-transparent font-normal text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
-            )}
+            active={activeTab === tab.id}
           >
             {tab.label}
-          </button>
+          </TabButton>
         ))}
       </div>
 

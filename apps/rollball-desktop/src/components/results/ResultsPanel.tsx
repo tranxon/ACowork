@@ -21,6 +21,7 @@ import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { isGatewayLocal } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
+import { TabButton } from "../common/tab";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
@@ -214,6 +215,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
         <div className="flex items-center px-3 pt-1">
           <div className="flex gap-0">
             <TabButton
+              className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
               active={activeTab === "workspace"}
               onClick={() => setActiveTab("workspace")}
             >
@@ -221,6 +223,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
             </TabButton>
             {isDebugMode && (
               <TabButton
+                className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
                 active={activeTab === "debug"}
                 onClick={() => setActiveTab("debug")}
               >
@@ -242,6 +245,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
               </TabButton>
             )}
             <TabButton
+              className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
               active={activeTab === "status"}
               onClick={() => setActiveTab("status")}
             >
@@ -249,6 +253,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
             </TabButton>
             {selectedAgent?.running && (
               <TabButton
+                className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
                 active={activeTab === "memory"}
                 onClick={() => setActiveTab("memory")}
               >
@@ -257,6 +262,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
             )}
             {selectedAgent?.running && (
               <TabButton
+                className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
                 active={activeTab === "setup"}
                 onClick={() => setActiveTab("setup")}
               >
@@ -541,29 +547,5 @@ function StatRow({ label, value }: { label: string; value?: string }) {
       <span className="text-zinc-500">{label}</span>
       <span className="font-mono text-zinc-700 dark:text-zinc-300">{value ?? "\u2014"}</span>
     </div>
-  );
-}
-
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "border-b px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)] transition-colors",
-        active
-          ? "border-current font-semibold text-zinc-700 dark:text-zinc-200"
-          : "border-transparent font-normal text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
-      )}
-    >
-      {children}
-    </button>
   );
 }

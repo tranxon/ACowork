@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -6,6 +6,8 @@ import { useDebugStore } from "../../stores/debugStore";
 import { isSessionActive } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert } from "lucide-react";
+import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
+import { TabItem } from "../common/tab";
 
 // ── Relative time formatter ──────────────────────────────────────────────
 
@@ -233,16 +235,8 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const { switchSession, createSession, saveSessionForAgent, closeSession } = useSessionStore();
 
   const [listOpen, setListOpen] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
-
-  // Drag-to-scroll state
-  const isDragging = useRef(false);
-  const dragStartX = useRef(0);
-  const dragScrollLeft = useRef(0);
-  const hasMoved = useRef(false);
+  const scrollableRef = useRef<ScrollableTabBarHandle>(null);
 
   // Get title for a session
   const getTitle = (sessionId: string): string => {
@@ -258,7 +252,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
   const handleTabClick = async (sessionId: string) => {
     // Ignore clicks that ended a drag
-    if (hasMoved.current) return;
+    if (scrollableRef.current?.hasMoved.current) return;
     if (sessionId === activeSessionId) return;
     await switchSession(sessionId, agentId);
     useDebugStore.getState().setCurrentSessionId(sessionId);
@@ -307,90 +301,14 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     createSession(agentId);
   };
 
-  // ── Scroll arrow logic ───────────────────────────────────────────────
-
-  const updateScrollState = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setCanScrollLeft(el.scrollLeft > 2);
-    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
-  }, []);
-
-  useEffect(() => {
-    updateScrollState();
-    const el = scrollRef.current;
-    if (!el) return;
-    el.addEventListener("scroll", updateScrollState, { passive: true });
-    const ro = new ResizeObserver(updateScrollState);
-    ro.observe(el);
-    return () => {
-      el.removeEventListener("scroll", updateScrollState);
-      ro.disconnect();
-    };
-  }, [updateScrollState, openSessionIds.length]);
-
-  const scrollBy = (dir: "left" | "right") => {
-    scrollRef.current?.scrollBy({ left: dir === "left" ? -160 : 160, behavior: "smooth" });
-  };
-
-  // Scroll active tab into view
-  useEffect(() => {
-    if (!scrollRef.current || !activeSessionId) return;
-    const activeEl = scrollRef.current.querySelector(`[data-session-id="${activeSessionId}"]`);
-    activeEl?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [activeSessionId]);
-
-  // ── Drag-to-scroll ──────────────────────────────────────────────────
-
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    const el = scrollRef.current;
-    if (!el) return;
-    isDragging.current = true;
-    hasMoved.current = false;
-    dragStartX.current = e.clientX;
-    dragScrollLeft.current = el.scrollLeft;
-    el.style.cursor = "grabbing";
-    el.style.userSelect = "none";
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!isDragging.current) return;
-      const dx = ev.clientX - dragStartX.current;
-      if (Math.abs(dx) > 3) hasMoved.current = true;
-      el.scrollLeft = dragScrollLeft.current - dx;
-    };
-
-    const onMouseUp = () => {
-      isDragging.current = false;
-      el.style.cursor = "";
-      el.style.userSelect = "";
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, []);
-
   if (!agent) return null;
 
   return (
     <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
-      {/* Left scroll arrow */}
-      {canScrollLeft && (
-        <button
-          onClick={() => scrollBy("left")}
-          className="shrink-0 flex items-center justify-center w-5 h-full text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-        >
-          <ChevronLeft className="h-3.5 w-3.5" />
-        </button>
-      )}
-
-      {/* Scrollable tab area — drag-to-scroll enabled */}
-      <div
-        ref={scrollRef}
-        className="flex flex-1 min-w-0 items-center overflow-x-auto gap-0.5 cursor-grab active:cursor-grabbing [&::-webkit-scrollbar]:hidden"
-        style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
-        onMouseDown={handleDragStart}
+      <ScrollableTabBar
+        ref={scrollableRef}
+        activeItemSelector={activeSessionId ? `[data-session-id="${activeSessionId}"]` : undefined}
+        activeItemId={activeSessionId ?? undefined}
       >
         {openSessionIds.map((sessionId) => {
           const isActive = sessionId === activeSessionId;
@@ -398,16 +316,11 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
           const isProcessing = isSessionActive(status);
 
           return (
-            <div
+            <TabItem
               key={sessionId}
               data-session-id={sessionId}
               onClick={() => handleTabClick(sessionId)}
-              className={cn(
-                "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-[var(--tab-py)] min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0 border-b",
-                isActive
-                  ? "border-current text-zinc-700 dark:text-zinc-200"
-                  : "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300",
-              )}
+              active={isActive}
               title={getTitle(sessionId)}
             >
               {/* Streaming indicator dot (only when processing and not active) */}
@@ -432,20 +345,10 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               >
                 <X className="h-3 w-3" />
               </button>
-            </div>
+            </TabItem>
           );
         })}
-      </div>
-
-      {/* Right scroll arrow */}
-      {canScrollRight && (
-        <button
-          onClick={() => scrollBy("right")}
-          className="shrink-0 flex items-center justify-center w-5 h-full text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-        >
-          <ChevronRight className="h-3.5 w-3.5" />
-        </button>
-      )}
+      </ScrollableTabBar>
 
       {/* Action buttons */}
       <div className="flex items-center shrink-0 px-1 gap-0.5">

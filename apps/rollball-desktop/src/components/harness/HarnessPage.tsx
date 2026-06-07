@@ -12,6 +12,7 @@ import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { SearchTab } from "./SearchTab";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
 import { useTranslation } from "../../i18n/useTranslation";
+import { TabButton } from "../common/tab";
 
 type HarnessTab = "providers" | "search" | "mcp" | "embedding";
 
@@ -31,18 +32,13 @@ export function HarnessPage() {
       {/* Tabs */}
       <div className="flex gap-1 border-b border-zinc-200 px-6 pt-2 dark:border-zinc-800">
         {tabs.map((tab) => (
-          <button
+          <TabButton
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={cn(
-              "border-b px-3 py-2 text-sm transition-colors",
-              activeTab === tab.id
-                ? "border-current font-semibold text-zinc-700 dark:text-zinc-200"
-                : "border-transparent font-normal text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",
-            )}
+            active={activeTab === tab.id}
           >
             {tab.label}
-          </button>
+          </TabButton>
         ))}
       </div>
 
