@@ -252,7 +252,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         { method: "POST" },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = (await resp.json()) as { closed: boolean; session_id: string };
+      await resp.json();
 
       // Remove the closed session from local state
       const isCurrent = useSessionStore.getState().currentSessionId === sessionId;

@@ -14,6 +14,85 @@ import type { MonacoLanguageClient } from "monaco-languageclient";
 import { getGatewayUrl } from "../../lib/config";
 import { buildAbsoluteUri } from "../../hooks/useLspClient";
 
+// ── Preview Model Pool (LRU) ───────────────────────────────────────────
+
+/**
+ * LRU tracker for preview models created by ensureModelsForUris.
+ * These models are needed for LSP peek widgets but are not explicitly
+ * opened in a tab. We cap them at MAX_PREVIEW_MODELS to avoid memory leaks.
+ */
+const MAX_PREVIEW_MODELS = 20;
+
+// Ordered list: most recently accessed at the end
+const previewModelUris: string[] = [];
+
+/**
+ * Register a model URI as a preview model (created for LSP, not opened in tab).
+ * If the pool exceeds MAX_PREVIEW_MODELS, dispose the least recently used.
+ */
+function trackPreviewModel(
+    monacoInst: typeof import("monaco-editor"),
+    uri: import("monaco-editor").Uri
+): void {
+    const key = uri.toString();
+
+    // Move to end if already tracked (mark as recently used)
+    const idx = previewModelUris.indexOf(key);
+    if (idx >= 0) {
+        previewModelUris.splice(idx, 1);
+    }
+    previewModelUris.push(key);
+
+    // Evict oldest if over limit
+    while (previewModelUris.length > MAX_PREVIEW_MODELS) {
+        const oldestKey = previewModelUris.shift()!;
+        const oldUri = monacoInst.Uri.parse(oldestKey);
+        const oldModel = monacoInst.editor.getModel(oldUri);
+        if (oldModel) {
+            console.log("[LSP] ModelPool: evicting preview model:", oldestKey);
+            oldModel.dispose();
+        }
+    }
+}
+
+/**
+ * Remove a URI from the preview model tracker (e.g. when user opens it in a tab).
+ * This prevents the model from being evicted by LRU since it's now "pinned" by the tab.
+ */
+export function unpinPreviewModel(uri: string): void {
+    const idx = previewModelUris.indexOf(uri);
+    if (idx >= 0) {
+        previewModelUris.splice(idx, 1);
+    }
+}
+
+/**
+ * Check if a model URI is tracked as a preview model.
+ */
+export function isPreviewModel(uri: string): boolean {
+    return previewModelUris.includes(uri);
+}
+
+/**
+ * Dispose a Monaco model when its tab is closed.
+ * Only the caller should ensure no other tab references the same file.
+ * Also removes from preview model tracker if present.
+ */
+export function disposeModelForFile(
+    monacoInst: typeof import("monaco-editor"),
+    relPath: string
+): void {
+    const monacoUri = monacoInst.Uri.parse(relPath);
+    const model = monacoInst.editor.getModel(monacoUri);
+    if (model) {
+        // Remove from preview tracker (covers both pinned-tab and stray entries)
+        unpinPreviewModel(monacoUri.toString());
+
+        model.dispose();
+        console.log("[LSP] ModelPool: disposed model for closed tab:", relPath);
+    }
+}
+
 // ── Coordinate helpers ─────────────────────────────────────────────────
 
 /** Convert Monaco 1-based position to LSP 0-based position */
@@ -235,6 +314,8 @@ async function ensureModelsForUris(
                     }
                     monacoInst.editor.createModel(data.content, lang, monacoUri);
                     console.log("[LSP] Created model for:", relPath, "lang:", lang, "size:", data.content.length);
+                    // Register as preview model — capped by LRU eviction
+                    trackPreviewModel(monacoInst, monacoUri);
                     // Notify the LSP server about the new model so it can
                     // provide language features (hover, definition, etc.)
                     const newModel = monacoInst.editor.getModel(monacoUri);

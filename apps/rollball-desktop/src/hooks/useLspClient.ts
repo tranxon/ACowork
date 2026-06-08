@@ -30,7 +30,7 @@ import { getGatewayUrl } from "../lib/config";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-export type LspStatus = "disconnected" | "connecting" | "connected" | "indexing" | "error";
+export type LspStatus = "disconnected" | "connecting" | "connected" | "indexing" | "ready" | "error";
 
 export interface LspClientState {
     /** Current connection status */
@@ -52,7 +52,7 @@ let vscodeApiInitDone = false;
  * Initialize VS Code API services (required by MonacoLanguageClient).
  * Called lazily on first LSP connection attempt; runs only once.
  */
-async function ensureVscodeApiInitialized(): Promise<void> {
+export async function ensureVscodeApiInitialized(): Promise<void> {
     if (vscodeApiInitDone) return;
     if (!vscodeApiInitPromise) {
         console.log("[LSP] Initializing VS Code API services (first time)...");
@@ -81,7 +81,7 @@ async function ensureVscodeApiInitialized(): Promise<void> {
 /**
  * Adapt a browser WebSocket to vscode-ws-jsonrpc's IWebSocket interface.
  */
-function adaptWebSocket(ws: WebSocket): IWebSocket {
+export function adaptWebSocket(ws: WebSocket): IWebSocket {
     const listeners: Array<() => void> = [];
     return {
         send(content: string): void {
@@ -112,7 +112,7 @@ function adaptWebSocket(ws: WebSocket): IWebSocket {
 // ── WebSocket URL builder ──────────────────────────────────────────────
 
 /** Build the Gateway LSP WebSocket URL from an HTTP Gateway URL */
-function buildLspWsUrl(language: string, agentId?: string, workspaceId?: string): string {
+export function buildLspWsUrl(language: string, agentId?: string, workspaceId?: string): string {
     const httpUrl = getGatewayUrl();
     const wsUrl = httpUrl.replace(/^http/, "ws");
     let url = `${wsUrl}/lsp/${encodeURIComponent(language)}`;
@@ -174,6 +174,12 @@ export function useLspClient(
     const [status, setStatus] = useState<LspStatus>("disconnected");
     const [statusMessage, setStatusMessage] = useState("");
     const [client, setClient] = useState<MonacoLanguageClient | null>(null);
+    // Mirror of `status` for use inside async callbacks/timeouts where reading
+    // the closed-over state value would be stale.
+    const statusRef = useRef<LspStatus>("disconnected");
+    useEffect(() => {
+        statusRef.current = status;
+    }, [status]);
     const wsRef = useRef<WebSocket | null>(null);
     // Ref to the active LSP client for cleanup without triggering React re-renders.
     // We use this instead of setClient(null) during connect() to avoid the race:
@@ -270,6 +276,18 @@ export function useLspClient(
         connectingRef.current = true;
 
         let cancelled = false;
+        // Fallback timer: some LSP servers never emit workDoneProgress
+        // (e.g. ts-server). If no indexing begin arrives within 5s after
+        // the handshake, treat the client as fully ready.
+        let readyTimeoutId: ReturnType<typeof setTimeout> | null = null;
+        // Debounce timer for indexing→ready transitions. rust-analyzer starts
+        // through several sequential phases (Roots Scanned → Fetching →
+        // cachePriming → flycheck) with brief gaps between them; an immediate
+        // ready flip during a gap causes the status to flicker between
+        // ready and indexing. We wait 1.5s after every progress token has
+        // ended before declaring ready, so a new phase beginning within
+        // the gap can cancel the transition.
+        let readyDebounceId: ReturnType<typeof setTimeout> | null = null;
 
         async function connect() {
             // Clean up any existing client BEFORE starting a new one.
@@ -356,8 +374,12 @@ export function useLspClient(
                 // auto-tracking models. This avoids sending textDocument/didOpen
                 // with the model's relative URI (file:///core/...) which the LSP
                 // server would reject. We handle document sync manually instead.
+                const monaco = await import("monaco-editor");
+                const wsRoot = workspaceRoot!.replace(/\\/g, "/");
+                const rootFolderUri = monaco.Uri.file(wsRoot);
                 const clientOptions: LanguageClientOptions = {
                     documentSelector: [],
+                    workspaceFolder: { uri: rootFolderUri, name: "workspace", index: 0 },
                 };
 
                 console.log("[LSP] Creating MonacoLanguageClient — name:", `${language!} LSP`, "documentSelector: [] (manual doc sync)");
@@ -474,14 +496,14 @@ export function useLspClient(
                 // then update React state so consuming components see it.
                 clientRef.current = lspClient;
                 setClient(lspClient);
-                setStatus("connected");
-                setStatusMessage(language!);
 
                 // ── Monitor rust-analyzer indexing progress ───────────
                 // rust-analyzer sends workDoneProgress notifications:
                 //   1. "window/workDoneProgress/create" — server requests a progress token
                 //   2. "$/progress" with value.kind = "begin"|"report"|"end"
-                // We track the "Indexing" progress to show "analyzing" in the status bar.
+                // Register listeners BEFORE flipping the status to "connected"
+                // so we never miss progress notifications that arrive
+                // immediately after the handshake.
                 let activeProgressTokens = new Set<string | number>();
 
                 lspClient.onNotification("window/workDoneProgress/create", (params: any) => {
@@ -491,7 +513,8 @@ export function useLspClient(
                     }
                 });
 
-                lspClient.onNotification("$.progress" as any, (params: any) => {
+                lspClient.onNotification("$/progress" as any, (params: any) => {
+                    console.log("[LSP] $/progress received —", params?.value?.kind, params?.value?.title || "", "token:", params?.token);
                     const token = params?.token;
                     const kind = params?.value?.kind;
                     const title = params?.value?.title || "";
@@ -499,8 +522,21 @@ export function useLspClient(
                     if (kind === "begin") {
                         if (token != null) activeProgressTokens.add(token);
                         console.log("[LSP] Progress begin:", title);
+                        // A new phase started — cancel any pending ready debounce
+                        // so the status stays in "indexing" rather than flipping
+                        // to ready and back during the inter-phase gap.
+                        if (readyDebounceId != null) {
+                            console.log("[LSP] $/progress — debounce cancelled, new phase started");
+                            clearTimeout(readyDebounceId);
+                            readyDebounceId = null;
+                        }
+                        // Indexing started — cancel the ready-fallback timer.
+                        if (readyTimeoutId != null) {
+                            clearTimeout(readyTimeoutId);
+                            readyTimeoutId = null;
+                        }
                         setStatus("indexing");
-                        setStatusMessage(title || `${language} analyzing`);
+                        setStatusMessage(title || `${language} indexing`);
                     } else if (kind === "report") {
                         const percentage = params?.value?.percentage;
                         if (percentage != null) {
@@ -508,13 +544,40 @@ export function useLspClient(
                         }
                     } else if (kind === "end") {
                         if (token != null) activeProgressTokens.delete(token);
-                        // If all progress tokens are done, we're back to connected
+                        // Only mark ready when every active progress has ended.
+                        // Debounce 1.5s: rust-analyzer has multiple sequential
+                        // phases with brief gaps; declaring ready immediately
+                        // would cause flicker when the next phase begins.
                         if (activeProgressTokens.size === 0) {
-                            setStatus("connected");
-                            setStatusMessage(language!);
+                            console.log("[LSP] $/progress — all tokens cleared, debouncing ready (1.5s)");
+                            if (readyDebounceId != null) {
+                                clearTimeout(readyDebounceId);
+                            }
+                            readyDebounceId = setTimeout(() => {
+                                readyDebounceId = null;
+                                if (cancelled) return;
+                                setStatus("ready");
+                                setStatusMessage(language!);
+                            }, 1500);
                         }
                     }
                 });
+
+                // Now that progress listeners are wired up, mark the
+                // handshake as connected (waiting for indexing to begin).
+                setStatus("connected");
+                setStatusMessage(language!);
+
+                // Fallback for servers that never emit workDoneProgress:
+                // if we're still in "connected" after 5s with no indexing
+                // notification, assume the server is ready.
+                readyTimeoutId = setTimeout(() => {
+                    readyTimeoutId = null;
+                    if (cancelled) return;
+                    if (statusRef.current === "connected") {
+                        setStatus("ready");
+                    }
+                }, 5000);
             } catch (err) {
                 if (!cancelled) {
                     console.error("[LSP] Connection/start failed:", err);
@@ -537,6 +600,14 @@ export function useLspClient(
         return () => {
             console.log("[LSP] effect cleanup — cancelling, disconnecting");
             cancelled = true;
+            if (readyTimeoutId != null) {
+                clearTimeout(readyTimeoutId);
+                readyTimeoutId = null;
+            }
+            if (readyDebounceId != null) {
+                clearTimeout(readyDebounceId);
+                readyDebounceId = null;
+            }
             connectingRef.current = false;
             disconnect();
         };

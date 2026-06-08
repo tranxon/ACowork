@@ -186,6 +186,8 @@ pub struct AppState {
     pub pusher: Option<Arc<GlobalResourcePusher>>,
     /// Whether CORS is enabled (allows any origin for remote Desktop connections)
     pub cors_enabled: bool,
+    /// Shared LSP process pool (lifecycle bound to Gateway, not WebSocket)
+    pub lsp_pool: std::sync::Arc<crate::lsp::LspPool>,
 }
 
 impl AppState {
@@ -210,6 +212,7 @@ impl AppState {
             grpc_session_mgr: None,
             pusher: None,
             cors_enabled: false,
+            lsp_pool: std::sync::Arc::new(crate::lsp::LspPool::new()),
         }
     }
 
@@ -236,6 +239,7 @@ impl AppState {
             grpc_session_mgr: None,
             pusher: None,
             cors_enabled: false,
+            lsp_pool: std::sync::Arc::new(crate::lsp::LspPool::new()),
         }
     }
 }

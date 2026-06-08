@@ -16,6 +16,14 @@
 //! ```text
 //! Monaco (webview) ← WS (JSON text) → Gateway ← stdin/stdout (framed) → LSP Server
 //! ```
+//!
+//! ## Process Pool
+//!
+//! LSP processes are pooled: their lifetime is bound to the Gateway process,
+//! NOT individual WebSocket sessions. This avoids re-indexing (e.g. rust-analyzer)
+//! every time the Desktop App reconnects.
+
+pub mod pool;
 
 use axum::{
     extract::{
@@ -27,11 +35,10 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use std::sync::Arc;
 
 use crate::http::routes::AppState;
+pub use pool::LspPool;
 
 // ── LSP server command lookup ──────────────────────────────────────────
 
@@ -112,7 +119,7 @@ pub struct LspQuery {
 
 /// `GET /lsp/{language}` — WebSocket upgrade for LSP relay
 ///
-/// Opens a WebSocket connection, spawns the appropriate language server,
+/// Opens a WebSocket connection, gets/spawns an LSP process from the pool,
 /// and relays bytes bidirectionally.
 pub async fn lsp_handler(
     ws: WebSocketUpgrade,
@@ -150,51 +157,68 @@ pub async fn lsp_handler(
         lang_lower, lsp_cmd, workspace_root
     );
 
-    ws.on_upgrade(move |socket| lsp_relay(socket, lsp_cmd, workspace_root))
+    let pool = Arc::clone(&state.lsp_pool);
+    ws.on_upgrade(move |socket| lsp_relay(socket, lsp_cmd, workspace_root, pool))
 }
 
-/// Bidirectional LSP relay: WebSocket ↔ LSP process stdin/stdout
+/// Bidirectional LSP relay: WebSocket ↔ pooled LSP process
 ///
-/// Converts between LSP Base Protocol frames (stdin/stdout) and
-/// plain JSON-RPC text messages (WebSocket).
-async fn lsp_relay(socket: WebSocket, lsp_cmd: String, workspace_root: String) {
-    // Spawn the LSP server process
-    let mut child = match spawn_lsp(&lsp_cmd, &workspace_root).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("[LSP] Failed to spawn '{}': {}", lsp_cmd, e);
+/// Uses the process pool to get/spawn an LSP process. When the WebSocket
+/// disconnects, the LSP process stays alive for future reconnections.
+async fn lsp_relay(
+    socket: WebSocket,
+    lsp_cmd: String,
+    workspace_root: String,
+    pool: Arc<LspPool>,
+) {
+    // Get or spawn from pool
+    let entry = match pool.get_or_spawn(&lsp_cmd, &workspace_root).await {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::error!("[LSP] Failed to get/spawn '{}': {}", lsp_cmd, err);
             return;
         }
     };
 
-    // Split the child process stdin/stdout
-    let mut child_stdin = match child.stdin.take() {
-        Some(stdin) => stdin,
-        None => {
-            tracing::error!("[LSP] Failed to take stdin from child process");
-            let _ = child.kill().await;
-            return;
-        }
-    };
-    let child_stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            tracing::error!("[LSP] Failed to take stdout from child process");
-            let _ = child.kill().await;
-            return;
-        }
-    };
+    let stdin_tx = entry.stdin_tx.clone();
+    let mut stdout_rx = entry.stdout_tx.subscribe();
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // Task 1: WebSocket (plain JSON) → LSP stdin (Content-Length framed)
-    let stdin_cmd = lsp_cmd.clone();
-    let ws_to_stdin = tokio::spawn(async move {
+    // Task: LSP stdout (broadcast) → WebSocket
+    let cmd_for_send = lsp_cmd.clone();
+    let send_task = tokio::spawn(async move {
+        loop {
+            match stdout_rx.recv().await {
+                Ok(msg) => {
+                    if ws_tx.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        "[LSP] WebSocket client lagged {} messages for '{}'",
+                        n, cmd_for_send
+                    );
+                    // Continue — we lost some messages but can still relay future ones
+                }
+                Err(_) => {
+                    // Channel closed — LSP process died
+                    break;
+                }
+            }
+        }
+        // Attempt to send close frame
+        let _ = ws_tx.send(Message::Close(None)).await;
+    });
+
+    // Task: WebSocket → LSP stdin (via mpsc)
+    let cmd_for_recv = lsp_cmd.clone();
+    let recv_task = tokio::spawn(async move {
         while let Some(msg) = ws_rx.next().await {
             let text: String = match msg {
                 Ok(Message::Text(t)) => t.to_string(),
                 Ok(Message::Binary(data)) => {
-                    // Fallback: treat binary as UTF-8 text
                     match String::from_utf8(data.to_vec()) {
                         Ok(s) => s,
                         Err(_) => continue,
@@ -204,102 +228,25 @@ async fn lsp_relay(socket: WebSocket, lsp_cmd: String, workspace_root: String) {
                 _ => continue,
             };
 
-            // Frame the JSON-RPC message with Content-Length header
-            let header = format!("Content-Length: {}\r\n\r\n", text.len());
-            if let Err(e) = child_stdin.write_all(header.as_bytes()).await {
-                tracing::warn!("[LSP] Write header to '{}' stdin failed: {}", stdin_cmd, e);
-                break;
-            }
-            if let Err(e) = child_stdin.write_all(text.as_bytes()).await {
-                tracing::warn!("[LSP] Write body to '{}' stdin failed: {}", stdin_cmd, e);
-                break;
-            }
-            let _ = child_stdin.flush().await;
-        }
-        // Close stdin to signal EOF to the LSP process
-        let _ = child_stdin.shutdown().await;
-    });
-
-    // Task 2: LSP stdout (Content-Length framed) → WebSocket (plain JSON)
-    let stdout_cmd = lsp_cmd.clone();
-    let stdout_to_ws = tokio::spawn(async move {
-        let mut reader = BufReader::new(child_stdout);
-        loop {
-            // 1. Read Content-Length header line
-            let mut header_line = String::new();
-            match reader.read_line(&mut header_line).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("[LSP] Read header from '{}' stdout failed: {}", stdout_cmd, e);
-                    break;
-                }
-            }
-
-            // Parse "Content-Length: N"
-            let content_length = match parse_content_length(&header_line) {
-                Some(n) => n,
-                None => {
-                    // Skip unknown header lines (e.g., Content-Type)
-                    continue;
-                }
-            };
-
-            // 2. Read remaining header lines until empty line (\r\n)
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if line == "\r\n" || line == "\n" {
-                            break;
-                        }
-                        // Skip other headers
-                    }
-                    Err(_) => break,
-                };
-            }
-
-            // 3. Read the body (exactly content_length bytes)
-            let mut body = vec![0u8; content_length];
-            if let Err(e) = reader.read_exact(&mut body).await {
-                tracing::warn!(
-                    "[LSP] Read body ({} bytes) from '{}' stdout failed: {}",
-                    content_length, stdout_cmd, e
-                );
-                break;
-            }
-
-            // 4. Send as WebSocket text message
-            let text = match String::from_utf8(body) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("[LSP] Non-UTF8 body from '{}': {}", stdout_cmd, e);
-                    break;
-                }
-            };
-
-            if let Err(e) = ws_tx.send(Message::Text(text.into())).await {
-                tracing::warn!("[LSP] WebSocket send failed for '{}': {}", stdout_cmd, e);
+            if stdin_tx.send(text).is_err() {
+                tracing::warn!("[LSP] stdin channel closed for '{}'", cmd_for_recv);
                 break;
             }
         }
-        // Send close frame
-        let _ = ws_tx.send(Message::Close(None)).await;
     });
 
-    // Wait for both tasks to complete
+    // Wait for either task to complete
     tokio::select! {
-        _ = ws_to_stdin => {}
-        _ = stdout_to_ws => {}
+        _ = send_task => {}
+        _ = recv_task => {}
     }
 
-    // Clean up the child process
-    if let Err(e) = child.kill().await {
-        tracing::warn!("[LSP] Failed to kill '{}' process: {}", lsp_cmd, e);
-    } else {
-        tracing::info!("[LSP] Process '{}' terminated", lsp_cmd);
-    }
+    // Client disconnected — mark in pool (process stays alive)
+    pool.client_disconnected(&lsp_cmd, &workspace_root).await;
+    tracing::info!(
+        "[LSP] WebSocket client disconnected for '{}' in '{}'",
+        lsp_cmd, workspace_root
+    );
 }
 
 /// Parse `Content-Length: N` from a header line.
@@ -316,25 +263,7 @@ pub fn parse_content_length(line: &str) -> Option<usize> {
     }
 }
 
-/// Spawn the LSP server process with the workspace as its working directory
-async fn spawn_lsp(cmd: &str, workspace_root: &str) -> anyhow::Result<Child> {
-    let child = Command::new(cmd)
-        .current_dir(workspace_root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit()) // Let stderr flow to Gateway's stderr for debugging
-        .kill_on_drop(true)
-        .spawn()?;
-
-    tracing::info!(
-        "[LSP] Spawned '{}' (PID {}) in workspace '{}'",
-        cmd,
-        child.id().unwrap_or(0),
-        workspace_root
-    );
-
-    Ok(child)
-}
+// spawn_lsp removed — spawning is now handled by LspPool::spawn_pooled
 
 // ── Workspace root resolution ─────────────────────────────────────────
 

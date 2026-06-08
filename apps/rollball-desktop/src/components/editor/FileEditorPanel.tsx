@@ -3,54 +3,219 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { useLspClient, type LspStatus } from "../../hooks/useLspClient";
+import { useLspClientPool, type LspStatus } from "../../hooks/useLspClientPool";
 import { cn } from "../../lib/utils";
-import { X, Save, Loader2, FileText, CircleDot, Circle } from "lucide-react";
+import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
-import { registerLspProviders, sendDidOpenForModel } from "./lspProviders";
+import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
+import { LspDocumentTracker } from "./LspDocumentTracker";
 import type { IDisposable } from "monaco-editor";
+
+// ── LSP Install Hints ─────────────────────────────────────────────────
+
+const LSP_INSTALL_HINTS: Record<string, { name: string; command: string; url?: string }> = {
+    rust: {
+        name: "rust-analyzer",
+        command: "rustup component add rust-analyzer",
+        url: "https://rust-analyzer.github.io/",
+    },
+    python: {
+        name: "python-lsp-server",
+        command: "pip install python-lsp-server",
+        url: "https://github.com/python-lsp/python-lsp-server",
+    },
+    typescript: {
+        name: "typescript-language-server",
+        command: "npm install -g typescript-language-server typescript",
+        url: "https://github.com/typescript-language-server/typescript-language-server",
+    },
+    javascript: {
+        name: "typescript-language-server",
+        command: "npm install -g typescript-language-server typescript",
+    },
+    go: {
+        name: "gopls",
+        command: "go install golang.org/x/tools/gopls@latest",
+        url: "https://pkg.go.dev/golang.org/x/tools/gopls",
+    },
+    cpp: {
+        name: "clangd",
+        command: "Windows: winget install LLVM.LLVM | Linux: apt install clangd | macOS: brew install llvm",
+        url: "https://clangd.llvm.org/",
+    },
+    c: {
+        name: "clangd",
+        command: "Windows: winget install LLVM.LLVM | Linux: apt install clangd | macOS: brew install llvm",
+    },
+    java: {
+        name: "jdtls (Eclipse JDT Language Server)",
+        command: "Windows / Linux / macOS: Install VS Code Java Extension Pack, or download jdtls from https://download.eclipse.org/jdtls/",
+        url: "https://github.com/eclipse-jdtls/eclipse.jdt.ls",
+    },
+    kotlin: {
+        name: "kotlin-language-server",
+        command: "Windows: Download from https://github.com/fwcd/kotlin-language-server/releases | Linux: Download from https://github.com/fwcd/kotlin-language-server/releases | macOS: brew install kotlin-language-server",
+        url: "https://github.com/fwcd/kotlin-language-server",
+    },
+    swift: {
+        name: "sourcekit-lsp",
+        command: "Windows: Install Swift toolchain from https://swift.org/install | Linux: Included with Swift toolchain (https://swift.org/install) | macOS: Included with Xcode Command Line Tools",
+        url: "https://github.com/swiftlang/sourcekit-lsp",
+    },
+    "objective-c": {
+        name: "clangd / sourcekit-lsp",
+        command: "Windows: winget install LLVM.LLVM | Linux: apt install clangd | macOS: Included with Xcode (sourcekit-lsp)",
+        url: "https://clangd.llvm.org/",
+    },
+    dart: {
+        name: "Dart Analysis Server",
+        command: "Included with Dart SDK / Flutter SDK: dart pub global activate dart_language_server",
+        url: "https://dart.dev/get-dart",
+    },
+};
 
 // ── LSP Status Indicator ──────────────────────────────────────────────
 
 function LspIndicator({ status, statusMessage, language }: { status: LspStatus; statusMessage: string; language: string }) {
-    if (status === "disconnected") return null;
+    const [showPopover, setShowPopover] = useState(false);
+    const [copied, setCopied] = useState(false);
+    const popoverRef = useRef<HTMLDivElement>(null);
 
-    if (status === "connecting") {
-        return (
+    const isUnavailable = status === "disconnected" || status === "error";
+    const hint = LSP_INSTALL_HINTS[language];
+
+    // Close popover on outside click or Escape
+    useEffect(() => {
+        if (!showPopover) return;
+
+        const handleClickOutside = (e: MouseEvent) => {
+            if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+                setShowPopover(false);
+            }
+        };
+        const handleEscape = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setShowPopover(false);
+        };
+
+        document.addEventListener("mousedown", handleClickOutside);
+        document.addEventListener("keydown", handleEscape);
+        return () => {
+            document.removeEventListener("mousedown", handleClickOutside);
+            document.removeEventListener("keydown", handleEscape);
+        };
+    }, [showPopover]);
+
+    const handleClick = () => {
+        if (isUnavailable && hint) {
+            setShowPopover((v) => !v);
+        }
+    };
+
+    const copyToClipboard = () => {
+        if (!hint) return;
+        void navigator.clipboard.writeText(hint.command).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        });
+    };
+
+    // Render the status text
+    let content: React.ReactNode;
+    if (status === "disconnected") {
+        content = (
+            <span className="flex items-center gap-1 text-[10px] text-zinc-400 dark:text-zinc-500">
+                <Circle className="h-2 w-2" />
+                <span>{language} LSP unavailable</span>
+            </span>
+        );
+    } else if (status === "connecting") {
+        content = (
             <span className="flex items-center gap-1 text-[10px] text-zinc-400">
                 <Circle className="h-2 w-2 animate-pulse" />
-                <span>{language} connecting</span>
+                <span>{language} LSP connecting...</span>
             </span>
         );
-    }
-
-    if (status === "indexing") {
-        return (
-            <span className="flex items-center gap-1 text-[10px] text-blue-500 dark:text-blue-400">
+    } else if (status === "indexing") {
+        content = (
+            <span className="flex items-center gap-1 text-[10px] text-amber-500 dark:text-amber-400">
                 <Circle className="h-2 w-2 animate-pulse" />
-                <span>{statusMessage || `${language} analyzing`}</span>
+                <span>{statusMessage ? `${language} ${statusMessage}` : `${language} LSP indexing...`}</span>
             </span>
         );
-    }
-
-    if (status === "connected") {
-        return (
+    } else if (status === "connected") {
+        // Handshake done, but indexing has not started/finished yet —
+        // hover/definition results may be incomplete.
+        content = (
+            <span className="flex items-center gap-1 text-[10px] text-emerald-500/70 dark:text-emerald-400/70">
+                <Circle className="h-2 w-2" />
+                <span>{language} LSP connected</span>
+            </span>
+        );
+    } else if (status === "ready") {
+        content = (
             <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
                 <CircleDot className="h-2 w-2" />
-                <span>{language}</span>
+                <span>{language} LSP ready</span>
+            </span>
+        );
+    } else {
+        // error
+        const tooltip = statusMessage || "unknown error";
+        content = (
+            <span className="flex items-center gap-1 text-[10px] text-amber-500" title={tooltip}>
+                <Circle className="h-2 w-2" />
+                <span>{language} LSP unavailable</span>
             </span>
         );
     }
 
-    // error — show the actual error reason as tooltip
-    const tooltip = statusMessage || "unknown error";
     return (
-        <span className="flex items-center gap-1 text-[10px] text-amber-500" title={tooltip}>
-            <Circle className="h-2 w-2" />
-            <span>{language} unavailable</span>
-        </span>
+        <div className="relative" ref={popoverRef}>
+            <button
+                type="button"
+                onClick={handleClick}
+                className={cn(
+                    "flex items-center",
+                    isUnavailable && hint ? "cursor-pointer hover:opacity-80" : "cursor-default",
+                )}
+            >
+                {content}
+            </button>
+
+            {/* Install hint popover */}
+            {showPopover && hint && (
+                <div className="absolute bottom-full left-0 z-50 mb-1 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800 text-xs">
+                    <div className="font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
+                        Install {hint.name}
+                    </div>
+                    <div className="flex items-center gap-1.5 rounded bg-zinc-100 dark:bg-zinc-900 px-2 py-1.5 font-mono text-[11px]">
+                        <span className="flex-1 select-all break-all text-zinc-700 dark:text-zinc-300">
+                            {hint.command}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={copyToClipboard}
+                            title="Copy"
+                            className="shrink-0 rounded p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors"
+                        >
+                            {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                    </div>
+                    {hint.url && (
+                        <a
+                            href={hint.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-2 inline-block text-blue-500 hover:underline text-[11px]"
+                        >
+                            Documentation →
+                        </a>
+                    )}
+                </div>
+            )}
+        </div>
     );
 }
 
@@ -70,10 +235,19 @@ export function FileEditorPanel({ width }: { width: number }) {
     const [cursor, setCursor] = useState({ line: 1, column: 1 });
     const [selectedCount, setSelectedCount] = useState(0);
     const lspProvidersRef = useRef<IDisposable | null>(null);
+    const documentTrackerRef = useRef<LspDocumentTracker | null>(null);
+    // Track the previous lspClient to detect reconnections
+    const prevLspClientRef = useRef<typeof lspClient>(null);
     // When Monaco's peek widget navigates to a different file, we store the
-    // target position here and apply it after the editor is remounted with
-    // the new file (because key={activeFile.id} causes editor recreation).
-    const pendingNavigationRef = useRef<{ line: number; column: number } | null>(null);
+    // target position here and apply it inside onDidChangeModel — the single
+    // authoritative entry point for cross-file navigation. The Editor is no
+    // longer keyed on activeFile.id, so model switching is synchronous and
+    // we no longer need a separate useEffect-based fallback.
+    const pendingNavigationRef = useRef<{ line: number; column: number; endLineNumber?: number; endColumn?: number } | null>(null);
+    // Per-model view state cache (cursor / scroll / selection / folding).
+    // Without per-file Editor remounts, undo history and scroll position would
+    // bleed across files; we save/restore view state on model boundaries.
+    const viewStatesRef = useRef<Map<string, unknown>>(new Map());
     // Guard to prevent overriding ICodeEditorService.openCodeEditor more than once
     // (it's a shared singleton service, not per-editor).
     const codeEditorOverriddenRef = useRef(false);
@@ -95,21 +269,38 @@ export function FileEditorPanel({ width }: { width: number }) {
     // Determine the active language for LSP — use the active file's language
     const lspLanguage = activeFile?.language ?? null;
 
-    // Determine if LSP should be enabled: there must be at least one open file
-    // of the active language (not loading)
-    const lspEnabled = lspLanguage != null && openFiles.some(
-        (f) => f.language === lspLanguage && !f.loading
-    );
+    // Compute the set of all languages open in tabs (for pool lifecycle).
+    // As long as a language appears here, its LSP connection stays alive.
+    const openLanguages = useMemo(() => {
+        const langs = new Set<string>();
+        for (const file of openFiles) {
+            if (file.language && !file.loading) langs.add(file.language);
+        }
+        return langs;
+    }, [openFiles]);
 
-    // LSP client
-    console.log("[LSP] FileEditorPanel — lspLanguage:", lspLanguage, "agentId:", activeFile?.agentId, "workspaceId:", activeFile?.workspaceId, "lspEnabled:", lspEnabled);
-    const { status: lspStatus, statusMessage: lspStatusMessage, client: lspClient } = useLspClient(
+    // LSP pool is enabled when there is at least one open language
+    const lspEnabled = openLanguages.size > 0;
+
+    // LSP client pool — maintains connections for all open languages,
+    // disconnects only after a 30s grace period once a language's last file closes.
+    const { activeStatus: lspStatus, activeStatusMessage: lspStatusMessage, activeClient: lspClient } = useLspClientPool(
         lspLanguage,
+        openLanguages,
         activeFile?.agentId,
         activeFile?.workspaceId,
         lspEnabled,
         workspaceRoot
     );
+
+    // Diagnostic logging — only when key inputs change, not on every render.
+    useEffect(() => {
+        console.log(
+            "[LSP] FileEditorPanel — lspLanguage:", lspLanguage,
+            "status:", lspStatus,
+            "lspEnabled:", lspEnabled,
+        );
+    }, [lspLanguage, lspStatus, lspEnabled]);
 
     // Determine Monaco theme based on app theme
     const monacoTheme = useMemo(() => {
@@ -153,10 +344,11 @@ export function FileEditorPanel({ width }: { width: number }) {
             setSelectedCount(0);
         });
 
-        // Handle cross-file navigation from LSP peek widget (F12 / Shift+F12).
-        // When the user clicks a reference/definition in a different file, Monaco
-        // sets the editor model to the target file's model. We need to update
-        // React state so the tab bar and editor stay in sync.
+        // Handle model switches — the authoritative lifecycle hook for both
+        // tab switches (driven by `path` prop change) and LSP peek-widget
+        // cross-file navigation (driven by ICodeEditorService.openCodeEditor).
+        // The Editor instance is no longer recreated per file, so this fires
+        // synchronously when @monaco-editor/react calls editor.setModel().
         editor.onDidChangeModel(() => {
             const newModel = editor.getModel();
             if (!newModel) {
@@ -164,31 +356,80 @@ export function FileEditorPanel({ width }: { width: number }) {
                 return;
             }
 
-            // The model's URI path is the relative path (e.g. "core/runtime/src/foo.rs")
-            const relPath = newModel.uri.path.replace(/^\/+/, "");
-            console.log("[LSP] onDidChangeModel — new relPath:", relPath, "uri:", newModel.uri.toString());
-            const store = useFileEditorStore.getState();
-            const activeFile = store.openFiles.find((f) => f.id === store.activeFileId);
-
-            // Skip if the model change is due to React switching files (same relPath)
-            if (activeFile && activeFile.relPath === relPath) {
-                console.log("[LSP] onDidChangeModel — same file as active, skipping");
+            // Only process file:// URIs — ignore inmemory://, output://, etc.
+            const scheme = newModel.uri.scheme;
+            if (scheme !== 'file') {
+                console.log("[LSP] onDidChangeModel — ignoring non-file model:", newModel.uri.toString());
                 return;
             }
 
-            // Check if the file is already open
+            // The model's URI path is the relative path (e.g. "core/runtime/src/foo.rs")
+            const relPath = newModel.uri.path.replace(/^\/+/, "");
+            console.log("[LSP] onDidChangeModel — new relPath:", relPath, "uri:", newModel.uri.toString());
+
+            // Restore previously saved view state for this model unless a
+            // pending navigation will override it below.
+            if (!pendingNavigationRef.current) {
+                const savedState = viewStatesRef.current.get(relPath);
+                if (savedState) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    editor.restoreViewState(savedState as any);
+                }
+            }
+
+            // Apply pending cross-file navigation (takes priority over restored view state).
+            // Deferred via requestAnimationFrame so that @monaco-editor/react's internal
+            // viewState restoration (which runs AFTER onDidChangeModel) does not override
+            // our navigation target.
+            if (pendingNavigationRef.current) {
+                const nav = pendingNavigationRef.current;
+                pendingNavigationRef.current = null;
+                requestAnimationFrame(() => {
+                    const ed = editorRef.current;
+                    if (!ed) return;
+                    const currentModel = ed.getModel();
+                    const lineCount = currentModel ? currentModel.getLineCount() : nav.line;
+                    const safeLine = Math.min(Math.max(nav.line, 1), lineCount);
+                    ed.setPosition({ lineNumber: safeLine, column: nav.column });
+                    ed.revealLineInCenter(safeLine);
+                    if (nav.endColumn !== undefined) {
+                        ed.setSelection({
+                            startLineNumber: safeLine,
+                            startColumn: nav.column,
+                            endLineNumber: nav.endLineNumber ?? safeLine,
+                            endColumn: nav.endColumn,
+                        });
+                        ed.revealRangeInCenter({
+                            startLineNumber: safeLine,
+                            startColumn: nav.column,
+                            endLineNumber: nav.endLineNumber ?? safeLine,
+                            endColumn: nav.endColumn,
+                        });
+                    }
+                    console.log(`[LSP] onDidChangeModel — deferred navigation applied to line: ${safeLine}`);
+                });
+            }
+
+            // Sync store active file when the model switch was triggered by
+            // Monaco internals (peek widget) rather than React state. If the
+            // store's active file already matches relPath, this is a no-op.
+            const store = useFileEditorStore.getState();
+            const activeFile = store.openFiles.find((f) => f.id === store.activeFileId);
+            if (activeFile && activeFile.relPath === relPath) {
+                console.log("[LSP] onDidChangeModel — same file as active, skipping store sync");
+                return;
+            }
+
             const existingFile = store.openFiles.find((f) => f.relPath === relPath);
             if (existingFile) {
-                // Just activate the existing tab
                 console.log("[LSP] onDidChangeModel — activating existing tab:", existingFile.id);
                 store.setActiveFile(existingFile.id);
                 return;
             }
 
             // The file isn't open — it must be a model created by ensureModelsForUris
-            // for LSP cross-file reference preview. Open it via the store which will
-            // re-use the existing model content (already fetched).
-            // Find agentId/workspaceId from the current active file
+            // for LSP cross-file reference preview. Open it via the store, which
+            // re-uses the existing model content (already fetched).
             if (activeFile) {
                 console.log("[LSP] onDidChangeModel — cross-file navigation, opening:", relPath);
                 void store.openFile(activeFile.agentId, activeFile.workspaceId, relPath);
@@ -259,7 +500,28 @@ export function FileEditorPanel({ width }: { width: number }) {
                     // Try default behavior first (same-file navigation)
                     const result = await originalOpenCodeEditor(input, source);
                     if (result) {
-                        console.log("[LSP] openCodeEditor — default handled it (same file)");
+                        // Same-file navigation — Monaco's default handler returned
+                        // an editor, but it may not correctly apply position/selection
+                        // for subsequent navigations within the same file. We must
+                        // explicitly apply the selection to ensure the cursor moves.
+                        const selection = input?.options?.selection;
+                        if (selection && editorRef.current) {
+                            const pos = { lineNumber: selection.startLineNumber, column: selection.startColumn };
+                            editorRef.current.setPosition(pos);
+                            editorRef.current.revealLineInCenter(pos.lineNumber);
+                            // If selection has an end range, set the full selection
+                            if (selection.endLineNumber && selection.endColumn) {
+                                editorRef.current.setSelection({
+                                    startLineNumber: selection.startLineNumber,
+                                    startColumn: selection.startColumn,
+                                    endLineNumber: selection.endLineNumber,
+                                    endColumn: selection.endColumn,
+                                });
+                            }
+                            console.log(`[LSP] openCodeEditor — same-file nav, applied selection to line: ${pos.lineNumber}`);
+                        } else {
+                            console.log("[LSP] openCodeEditor — default handled it (same file, no selection to apply)");
+                        }
                         return result;
                     }
 
@@ -271,28 +533,71 @@ export function FileEditorPanel({ width }: { width: number }) {
                         return null;
                     }
 
+                    // Not a file URI — let Monaco handle natively (inmemory://, output://, etc.)
+                    if (targetUri.scheme !== 'file') {
+                        console.log("[LSP] openCodeEditor — ignoring non-file URI:", targetUri.toString());
+                        return null;
+                    }
+
                     // Extract relPath from model URI (e.g. file:///core/.../foo.rs → core/.../foo.rs)
                     const relPath = targetUri.path.replace(/^\/+/, "");
                     console.log("[LSP] openCodeEditor — cross-file navigation to:", relPath);
 
-                    // Store target position for applying after editor remount
+                    // Check if the target file is already the active file — in this
+                    // case setActiveFile() won't change the model, so onDidChangeModel
+                    // won't fire and pendingNavigationRef won't be consumed. We must
+                    // apply the position directly.
+                    const store = useFileEditorStore.getState();
+                    const currentActiveFile = store.openFiles.find((f) => f.id === store.activeFileId);
+                    if (currentActiveFile && currentActiveFile.relPath === relPath) {
+                        // Target is already the active file — defer position application
+                        // to avoid being overridden by any internal Monaco state restore.
+                        if (selection) {
+                            const sel = selection;
+                            requestAnimationFrame(() => {
+                                const ed = editorRef.current;
+                                if (!ed) return;
+                                const pos = { lineNumber: sel.startLineNumber, column: sel.startColumn };
+                                ed.setPosition(pos);
+                                ed.revealLineInCenter(pos.lineNumber);
+                                if (sel.endLineNumber && sel.endColumn) {
+                                    ed.setSelection({
+                                        startLineNumber: sel.startLineNumber,
+                                        startColumn: sel.startColumn,
+                                        endLineNumber: sel.endLineNumber,
+                                        endColumn: sel.endColumn,
+                                    });
+                                    ed.revealRangeInCenter({
+                                        startLineNumber: sel.startLineNumber,
+                                        startColumn: sel.startColumn,
+                                        endLineNumber: sel.endLineNumber,
+                                        endColumn: sel.endColumn,
+                                    });
+                                }
+                                console.log(`[LSP] openCodeEditor — deferred navigation applied (same file) to line: ${pos.lineNumber}`);
+                            });
+                        }
+                        return editorRef.current ?? null;
+                    }
+
+                    // Store target position for applying after model switch
                     if (selection) {
                         pendingNavigationRef.current = {
                             line: selection.startLineNumber,
                             column: selection.startColumn,
+                            endLineNumber: selection.endLineNumber,
+                            endColumn: selection.endColumn,
                         };
                     }
 
                     // Switch to the target file
-                    const store = useFileEditorStore.getState();
                     const existingFile = store.openFiles.find((f) => f.relPath === relPath);
 
                     if (existingFile) {
                         console.log("[LSP] openCodeEditor — activating existing tab:", existingFile.id);
                         store.setActiveFile(existingFile.id);
                     } else {
-                        const currentActive = store.openFiles.find((f) => f.id === store.activeFileId);
-                        if (currentActive) {
+                        if (currentActiveFile) {
                             // Check if a Monaco model already exists for this file
                             // (created by ensureModelsForUris). If so, reuse its
                             // content to avoid a second fetch and ensure the line
@@ -308,12 +613,12 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 const lang = existingModel.getLanguageId();
                                 console.log("[LSP] openCodeEditor — reusing model content, lines:", content.split("\n").length);
                                 store.openFileWithContent(
-                                    currentActive.agentId, currentActive.workspaceId,
+                                    currentActiveFile.agentId, currentActiveFile.workspaceId,
                                     relPath, content, lang
                                 );
                             } else {
                                 console.log("[LSP] openCodeEditor — opening new file (fetch):", relPath);
-                                void store.openFile(currentActive.agentId, currentActive.workspaceId, relPath);
+                                void store.openFile(currentActiveFile.agentId, currentActiveFile.workspaceId, relPath);
                             }
                         }
                     }
@@ -327,59 +632,79 @@ export function FileEditorPanel({ width }: { width: number }) {
             }
         }
 
-        // ── Apply pending navigation ──────────────────────────────────
-        // If a cross-file navigation was queued before this editor mount,
-        // apply the target position after the model is fully loaded.
-        // NOTE: We do NOT apply it here because at this point the editor
-        // might still be loading the file content. Instead, we apply it
-        // in a separate useEffect that watches activeFile.loading.
+        // Note: handleEditorMount only runs once now (Editor is no longer keyed
+        // by activeFile.id), so all listeners and the openCodeEditor override
+        // above are registered exactly once for the lifetime of this panel.
     }, [saveFile]);
 
-    // ── Apply pending cross-file navigation ──────────────────────────────
-    // When a cross-file navigation was queued by openCodeEditor, apply the
-    // target position once the file is loaded and the editor is ready.
+    // ── Save view state before model switch ──────────────────────────────
+    // The cleanup of this effect fires during React's effect-cleanup phase,
+    // BEFORE @monaco-editor/react's setup effect calls editor.setModel() with
+    // the new path. At that moment the editor still has the previous model
+    // bound, so saveViewState() captures the outgoing file's cursor/scroll/
+    // selection state. We restore it inside onDidChangeModel when the model
+    // switches back.
+    const activeReadyRelPath = activeFile && !activeFile.loading ? activeFile.relPath : undefined;
     useEffect(() => {
-        if (!pendingNavigationRef.current) return;
-        if (!activeFile || activeFile.loading) return;
-        if (!editorRef.current) return;
+        return () => {
+            if (editorRef.current && activeReadyRelPath) {
+                const state = editorRef.current.saveViewState();
+                if (state) {
+                    viewStatesRef.current.set(activeReadyRelPath, state);
+                }
+            }
+        };
+    }, [activeReadyRelPath]);
 
-        const { line, column } = pendingNavigationRef.current;
-        pendingNavigationRef.current = null;
-        console.log("[LSP] Applying pending navigation — line:", line, "column:", column,
-            "file:", activeFile.relPath, "loading:", activeFile.loading);
-
-        // Double-check the model's line count to avoid setting position
-        // beyond the file length (content mismatch between ensureModelsForUris
-        // and openFile can cause this).
-        const model = editorRef.current.getModel();
-        console.log("[LSP] Applying pending navigation — model URI:", model?.uri?.toString(),
-            "lineCount:", model?.getLineCount(), "target line:", line, "target column:", column);
-        if (model && line > model.getLineCount()) {
-            console.warn("[LSP] Pending navigation line", line, "exceeds model line count",
-                model.getLineCount(), "— clamping to last line");
-            editorRef.current.revealLineInCenter(model.getLineCount());
-            editorRef.current.setPosition({ lineNumber: model.getLineCount(), column: 1 });
-        } else {
-            editorRef.current.revealLineInCenter(line);
-            editorRef.current.setPosition({ lineNumber: line, column });
+    // ── Document Tracker lifecycle (bound to workspaceRoot) ────────────
+    useEffect(() => {
+        if (workspaceRoot) {
+            documentTrackerRef.current = new LspDocumentTracker(workspaceRoot);
         }
-    }, [activeFile]);
+        return () => {
+            documentTrackerRef.current?.dispose(lspClient ?? null);
+            documentTrackerRef.current = null;
+        };
+    }, [workspaceRoot]);
 
-    // ── Send textDocument/didOpen for newly mounted models ────────────
+    // ── Track open documents via LspDocumentTracker ──────────────────────
     // When the editor mounts a new file (tab switch or cross-file navigation),
-    // @monaco-editor/react may create a new model. We must notify the LSP
-    // server about it so that hover/definition/references work for this file.
+    // notify the LSP server via the tracker. Also handles LSP client
+    // reconnection by re-opening all previously tracked documents.
     useEffect(() => {
         if (!lspClient || !workspaceRoot || !activeFile || activeFile.loading) return;
         if (!monacoRef.current) return;
+        const tracker = documentTrackerRef.current;
+        if (!tracker) return;
 
+        // Detect LSP client reconnection — re-open all tracked documents
+        if (prevLspClientRef.current !== null && prevLspClientRef.current !== lspClient) {
+            console.log("[LSP] DocumentTracker: client reconnected, re-opening all tracked docs");
+            tracker.reopenAll(lspClient, monacoRef.current);
+        }
+        prevLspClientRef.current = lspClient;
+
+        // Track the current active model as open
         const relPath = activeFile.relPath;
         const monacoUri = monacoRef.current.Uri.parse(relPath);
         const model = monacoRef.current.editor.getModel(monacoUri);
         if (model) {
-            sendDidOpenForModel(lspClient, model, workspaceRoot);
+            tracker.trackOpen(lspClient, model);
         }
     }, [activeFile, lspClient, workspaceRoot]);
+
+    // ── Unpin opened tabs from the preview-model LRU pool ───────────────
+    // Any file currently shown in a tab must not be LRU-evicted by
+    // ensureModelsForUris peek-widget activity. Unpin them here so the
+    // pool only tracks transient preview models.
+    useEffect(() => {
+        const monacoInst = monacoRef.current;
+        if (!monacoInst) return;
+        for (const f of openFiles) {
+            const uriStr = monacoInst.Uri.parse(f.relPath).toString();
+            unpinPreviewModel(uriStr);
+        }
+    }, [openFiles]);
 
     // ── LSP providers registration ──────────────────────────────────────
 
@@ -428,18 +753,55 @@ export function FileEditorPanel({ width }: { width: number }) {
             setClosingFileId(file.id);
             return;
         }
+        // Send didClose before removing from store
+        if (lspClient && monacoRef.current && documentTrackerRef.current) {
+            const monacoUri = monacoRef.current.Uri.parse(file.relPath);
+            const model = monacoRef.current.editor.getModel(monacoUri);
+            if (model) {
+                documentTrackerRef.current.trackClose(lspClient, model);
+            }
+        }
         closeFile(file.id);
-    }, [closeFile]);
+        // Dispose Monaco model if no other tab still references the same file
+        if (monacoRef.current) {
+            const remaining = useFileEditorStore.getState().openFiles;
+            const stillReferenced = remaining.some(
+                (f) => f.id !== file.id && f.relPath === file.relPath
+            );
+            if (!stillReferenced) {
+                disposeModelForFile(monacoRef.current, file.relPath);
+            }
+        }
+    }, [closeFile, lspClient]);
 
     const confirmClose = useCallback(() => {
         if (!closingFileId) return;
+        const closingFile = openFiles.find((f) => f.id === closingFileId);
+        // Send didClose before discarding
+        if (lspClient && monacoRef.current && documentTrackerRef.current && closingFile) {
+            const monacoUri = monacoRef.current.Uri.parse(closingFile.relPath);
+            const model = monacoRef.current.editor.getModel(monacoUri);
+            if (model) {
+                documentTrackerRef.current.trackClose(lspClient, model);
+            }
+        }
         closeFile(closingFileId, true);
         setClosingFileId(null);
-    }, [closingFileId, closeFile]);
+        // Dispose Monaco model if no other tab still references the same file
+        if (monacoRef.current && closingFile) {
+            const remaining = useFileEditorStore.getState().openFiles;
+            const stillReferenced = remaining.some(
+                (f) => f.id !== closingFile.id && f.relPath === closingFile.relPath
+            );
+            if (!stillReferenced) {
+                disposeModelForFile(monacoRef.current, closingFile.relPath);
+            }
+        }
+    }, [closingFileId, closeFile, lspClient, openFiles]);
 
     return (
         <div
-            className="flex flex-col border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+            className="flex flex-col border-l border-zinc-200 bg-[#FAFAFA] dark:border-zinc-800 dark:bg-zinc-900"
             style={{ width }}
         >
             {/* Tab bar */}
@@ -508,39 +870,45 @@ export function FileEditorPanel({ width }: { width: number }) {
                 )}
             </div>
 
-            {/* Editor area */}
-            <div className="flex-1 overflow-hidden">
+            {/* Editor area — Editor is mounted whenever there is at least one
+                open file. Switching tabs changes `path` (and therefore the
+                Monaco model) without recreating the Editor instance, so LSP
+                cross-file navigation no longer races with editor remounts. */}
+            <div className="relative flex-1 overflow-hidden">
                 {!activeFile ? (
                     <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
                         {t("fileEditor.emptyState")}
                     </div>
-                ) : activeFile.loading ? (
-                    <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        Loading...
-                    </div>
                 ) : (
-                    <Editor
-                        key={activeFile.id}
-                        path={activeFile.relPath}
-                        value={activeFile.content}
-                        language={activeFile.language}
-                        theme={resolvedMonacoTheme}
-                        onChange={handleEditorChange}
-                        onMount={handleEditorMount}
-                        options={{
-                            minimap: { enabled: false },
-                            fontSize: 13,
-                            lineNumbers: "on",
-                            scrollBeyondLastLine: false,
-                            wordWrap: "on",
-                            tabSize: 2,
-                            renderWhitespace: "selection",
-                            padding: { top: 8 },
-                            automaticLayout: true,
-                            readOnly: false,
-                        }}
-                    />
+                    <>
+                        <Editor
+                            path={activeReadyRelPath}
+                            value={activeFile && !activeFile.loading ? activeFile.content : undefined}
+                            language={activeFile && !activeFile.loading ? activeFile.language : undefined}
+                            theme={resolvedMonacoTheme}
+                            onChange={handleEditorChange}
+                            onMount={handleEditorMount}
+                            keepCurrentModel
+                            options={{
+                                minimap: { enabled: false },
+                                fontSize: 13,
+                                lineNumbers: "on",
+                                scrollBeyondLastLine: false,
+                                wordWrap: "on",
+                                tabSize: 2,
+                                renderWhitespace: "selection",
+                                padding: { top: 8 },
+                                automaticLayout: true,
+                                readOnly: false,
+                            }}
+                        />
+                        {activeFile.loading && (
+                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-[#FAFAFA]/80 text-xs text-zinc-400 dark:bg-zinc-900/80">
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                                Loading...
+                            </div>
+                        )}
+                    </>
                 )}
             </div>
 

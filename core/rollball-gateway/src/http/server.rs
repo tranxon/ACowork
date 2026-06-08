@@ -155,6 +155,9 @@ pub(crate) async fn start_http_server(
     app_state.pusher = pusher;
     app_state.cors_enabled = http_config.cors_enabled;
 
+    // Start background LSP pool reaper (evicts idle processes after timeout)
+    crate::lsp::LspPool::start_reaper(Arc::clone(&app_state.lsp_pool));
+
     // S5.9: Clean up stale pidfile from a previous Gateway run before writing a new one.
     // If the previous process is still alive, this returns an error (prevents dual Gateway).
     cleanup_stale_pidfile(data_dir)?;
