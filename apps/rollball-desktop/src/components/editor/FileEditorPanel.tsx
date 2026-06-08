@@ -12,6 +12,7 @@ import { TabItem } from "../common/tab";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
 import type { IDisposable } from "monaco-editor";
+import { GoToFilePalette } from "./GoToFilePalette";
 
 // ── LSP Install Hints ─────────────────────────────────────────────────
 
@@ -230,6 +231,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     const theme = useSettingsStore((s) => s.theme);
     const [closingFileId, setClosingFileId] = useState<string | null>(null);
+    const [showGoToFile, setShowGoToFile] = useState(false);
     const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
     const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
     const [cursor, setCursor] = useState({ line: 1, column: 1 });
@@ -443,6 +445,20 @@ export function FileEditorPanel({ width }: { width: number }) {
             () => {
                 const currentId = useFileEditorStore.getState().activeFileId;
                 if (currentId) void saveFile(currentId);
+            },
+        );
+
+        // Ctrl+P / Cmd+P — Go to File (Monaco QuickInput-style palette).
+        // Monaco standalone has no built-in "Go to File" provider and
+        // IQuickInputService is not accessible from the editor's local DI
+        // container, so we render a custom React component that replicates
+        // the QuickInput visual style (same colors, typography, layout).
+        // KeyCode.KeyP = 46 in monaco-editor 0.55.x (NOT 80).
+        editor.addCommand(
+            // eslint-disable-next-line no-bitwise
+            2048 | 46, // KeyMod.CtrlCmd | KeyCode.KeyP
+            () => {
+                setShowGoToFile(true);
             },
         );
 
@@ -801,7 +817,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     return (
         <div
-            className="flex flex-col border-l border-zinc-200 bg-[#FAFAFA] dark:border-zinc-800 dark:bg-zinc-900"
+            className="relative flex flex-col border-l border-zinc-200 bg-[#FAFAFA] dark:border-zinc-800 dark:bg-zinc-900"
             style={{ width }}
         >
             {/* Tab bar */}
@@ -962,6 +978,18 @@ export function FileEditorPanel({ width }: { width: number }) {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Go to File palette (Ctrl+P) */}
+            {showGoToFile && activeFile && (
+                <GoToFilePalette
+                    agentId={activeFile.agentId}
+                    workspaceId={activeFile.workspaceId}
+                    onClose={() => {
+                        setShowGoToFile(false);
+                        editorRef.current?.focus();
+                    }}
+                />
             )}
         </div>
     );

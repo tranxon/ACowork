@@ -166,11 +166,11 @@ export function useLspClientPool(
             }
             const c = st.client;
             if (c) {
-                try {
-                    c.stop();
-                } catch {
-                    // ignore cleanup errors
-                }
+                // Do NOT call c.stop() — it triggers global StandaloneServices
+                // shutdown, which is a non-reversible singleton state.  Just
+                // close the WebSocket below; the transport teardown is enough.
+                // Null the ref so GC can collect it.
+                st.client = null;
             }
             const ws = st.ws;
             if (ws) {
@@ -249,13 +249,10 @@ export function useLspClientPool(
             st.statusMessage = "";
             publish(language);
 
-            // Stop a stale client if one exists (e.g. after reconnect path).
+            // Drop stale client ref without calling stop() — stop()
+            // triggers global StandaloneServices shutdown which is a
+            // non-reversible singleton; closing the WS below is enough.
             if (st.client) {
-                try {
-                    st.client.stop();
-                } catch {
-                    // ignore
-                }
                 st.client = null;
             }
             if (st.ws) {
@@ -340,6 +337,19 @@ export function useLspClientPool(
                         "→",
                         State[e.newState]
                     );
+                    // Guard: only act if the state ref still points to the
+                    // same ClientState that created this listener.  If the
+                    // pool was evicted and a fresh connectLanguage() call
+                    // created a new ClientState, this callback belongs to
+                    // the old (zombie) client and must be ignored.
+                    const cur = statesRef.current.get(language);
+                    if (cur !== st) {
+                        console.log(
+                            "[LSP] pool state change ignored (stale client) —",
+                            language
+                        );
+                        return;
+                    }
                     if (e.newState === State.Stopped && !st!.cancelled) {
                         st!.status = "disconnected";
                         st!.statusMessage = "";
@@ -375,17 +385,47 @@ export function useLspClientPool(
                     }
                 };
 
-                // Start the LSP handshake with a timeout.
-                let timeoutId: ReturnType<typeof setTimeout>;
-                const startResult = await Promise.race([
-                    lspClient.start().then(() => {
-                        clearTimeout(timeoutId);
-                        return "ok" as const;
-                    }),
-                    new Promise<"timeout">((resolve) => {
-                        timeoutId = setTimeout(() => resolve("timeout"), START_TIMEOUT_MS);
-                    }),
-                ]);
+                // Start the LSP handshake with a timeout and retry for
+                // "Shutdown already requested" races (see evict comment).
+                let attempt = 0;
+                let startResult: "ok" | "timeout";
+                // eslint-disable-next-line no-constant-condition
+                while (true) {
+                    // eslint-disable-next-line prefer-const
+                    let timeoutId: undefined | ReturnType<typeof setTimeout> = undefined;
+                    attempt++;
+                    try {
+                        startResult = await Promise.race([
+                            lspClient.start().then(() => {
+                                clearTimeout(timeoutId);
+                                return "ok" as const;
+                            }),
+                            new Promise<"timeout">((resolve) => {
+                                timeoutId = setTimeout(() => resolve("timeout"), START_TIMEOUT_MS);
+                            }),
+                        ]);
+                        break; // success
+                    } catch (err: any) {
+                        if (timeoutId !== undefined) clearTimeout(timeoutId);
+                        const msg = String(err?.message ?? err ?? "");
+                        if (
+                            msg.includes("Shutdown already requested") &&
+                            attempt < 5
+                        ) {
+                            console.warn(
+                                "[LSP] pool start retry —",
+                                language,
+                                "attempt",
+                                attempt,
+                                "reason:",
+                                msg
+                            );
+                            await new Promise((r) => setTimeout(r, 600 * attempt));
+                            continue;
+                        }
+                        throw err;
+                    }
+                }
 
                 if (st.cancelled) return;
 
