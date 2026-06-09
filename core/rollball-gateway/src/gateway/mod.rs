@@ -475,19 +475,10 @@ impl Gateway {
         let http_session_mgr = Some(session_mgr.clone());
 
         // Store session manager in shared state so HTTP API can access it
-        // Also store models_cache so IPC server can look up model capabilities
-        let models_cache: crate::http::models_api::ModelsCache =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
         {
             let mut gw = shared_state.write().await;
             gw.ipc_sessions = Some(session_mgr.clone());
-            gw.models_cache = Some(models_cache.clone());
         }
-
-        // Note: models.dev data is NOT eagerly fetched at startup.
-        // The first API request to /api/models triggers a background fetch
-        // and returns offline data immediately. Network data is persisted to
-        // disk so reset/reload doesn't require re-fetching.
 
         // Rebuild resource cache from Vault and MCP catalog at startup.
         // provider_list.json / mcp_list.json are only persisted when explicitly
@@ -500,7 +491,6 @@ impl Gateway {
             crate::resource_cache::rebuild_and_save_provider_cache(
                 &mut gw,
                 &data_dir_path,
-                &models_cache,
             ).await;
             if let Ok(catalog) = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir_path) {
                 crate::resource_cache::rebuild_and_save_mcp_cache(
@@ -560,7 +550,6 @@ impl Gateway {
         // Start HTTP server in a separate tokio task (parallel with IPC)
         let http_state = shared_state.clone();
         let http_socket_path = socket_path.clone();
-        let http_models_cache = models_cache.clone();
         
         // Create unified global resource pusher for hot-push of provider_list,
         // search_config, MCP catalog, and user profile changes to running agents.
@@ -569,7 +558,6 @@ impl Gateway {
                 http_grpc_session_mgr.clone(),
                 http_state.clone(),
                 data_dir_path.clone(),
-                http_models_cache.clone(),
             ),
         ));
         
@@ -582,7 +570,6 @@ impl Gateway {
                 http_session_mgr,
                 http_grpc_session_mgr,
                 http_bridge_tx,
-                http_models_cache,
                 http_session_pending,
                 log_reload_handle,
                 pusher,

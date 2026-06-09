@@ -62,7 +62,7 @@ impl Tool for IntentSendTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let target = match params.get("target").and_then(|v| v.as_str()) {
             Some(t) if !t.trim().is_empty() => t.trim().to_string(),
             _ => {
@@ -137,7 +137,7 @@ mod tests {
     async fn test_intent_send_missing_target() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({ "action": "schedule" }))
+            .execute(serde_json::json!({ "action": "schedule" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -148,7 +148,7 @@ mod tests {
     async fn test_intent_send_missing_action() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({ "target": "com.example.calendar" }))
+            .execute(serde_json::json!({ "target": "com.example.calendar" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -159,7 +159,7 @@ mod tests {
     async fn test_intent_send_invalid_target() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({ "target": "calendar", "action": "schedule" }))
+            .execute(serde_json::json!({ "target": "calendar", "action": "schedule" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -174,7 +174,7 @@ mod tests {
                 "target": "com.example.calendar",
                 "action": "schedule",
                 "params": { "time": "10:00", "title": "Team sync" }
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -191,7 +191,7 @@ mod tests {
                 "target": "com.example.weather",
                 "action": "query",
                 "async": true
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -205,7 +205,7 @@ mod tests {
             .execute(serde_json::json!({
                 "target": "com.example.agent",
                 "action": "ping"
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);

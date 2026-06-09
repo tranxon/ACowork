@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use rollball_core::protocol::ModelCapabilitiesInfo;
+use rollball_core::protocol::{ModelCapabilitiesInfo, ProviderListItem};
 use rollball_core::providers::traits::Provider;
 use rollball_core::tools::traits::Tool;
 use rollball_grafeo::grafeo::GrafeoStore;
@@ -37,7 +37,7 @@ use rollball_core::ShellApprovalThreshold;
 /// Cross-session shared state for the agent loop.
 ///
 /// Fields here are immutable or rarely mutated at runtime (e.g. provider swap
-/// via LLMConfigDelivery), and are shared across all sessions of the same agent.
+/// via model_switch), and are shared across all sessions of the same agent.
 pub struct AgentCore {
     /// Runtime configuration
     pub(crate) config: RuntimeConfig,
@@ -53,21 +53,21 @@ pub struct AgentCore {
     /// Merged tool list for dispatch — always contains built-in + MCP tools.
     /// Rebuilt once when MCP tools change, instead of per-dispatch merge.
     pub(crate) all_tools: Vec<Arc<dyn Tool>>,
-    /// Model capabilities from Gateway, keyed by model name.
-    /// When Gateway delivers capabilities for a model, they are stored here
-    /// so that ContextBuilder can look them up at build() time.
-    pub(crate) gateway_model_capabilities: HashMap<String, ModelCapabilitiesInfo>,
+    /// Global provider list — full metadata including models, capabilities,
+    /// base_url, protocol_type, compact_model for all configured providers.
+    /// Populated at AgentHello, updated by ProviderListUpdate pushes.
+    /// Wrapped in Arc<RwLock> for cross-session shared read access.
+    pub(crate) global_provider_list: Arc<std::sync::RwLock<Vec<ProviderListItem>>>,
+    /// Provider list version for diff sync with Gateway.
+    pub(crate) provider_list_version: u64,
+    /// Provider key vault (in-memory only, never persisted).
+    /// Keyed by provider_id → api_key for O(1) lookup.
+    /// Wrapped in Arc<RwLock> for cross-session shared read access.
+    pub(crate) provider_key_vault: Arc<std::sync::RwLock<HashMap<String, String>>>,
     /// Provider→compact_model mapping from provider_list at AgentHello.
     /// Keyed by Vault provider ID.  Static after init — provider changes
     /// (add/remove model, compact_model) require agent restart.
     pub(crate) provider_compact_models: HashMap<String, Option<String>>,
-    /// The Vault provider ID currently in use (updated on model_switch / AgentHello).
-    /// Used with `provider_compact_models` to resolve compact_model in memory.
-    pub(crate) current_provider_id: Option<String>,
-    /// Global max output tokens limit from Gateway config.
-    /// When a model's max_output_tokens exceeds this value, the value is capped.
-    /// Default: 32768 (32K). Set to 0 to disable the limit.
-    pub(crate) max_output_tokens_limit: u64,
     /// LLM temperature override (from Gateway config).
     /// None = use model/provider default.
     pub(crate) temperature_override: Option<f32>,
@@ -136,6 +136,10 @@ pub struct AgentCore {
     /// Dropping this cancels the background task.
     /// None if memory store is not initialized or embedding provider is unavailable.
     pub(crate) consolidation_bg_task: Option<ConsolidationBgTask>,
+    /// Current workspace directory for tool execution.
+    /// Set by SessionTask before run(), updated via SetWorkDir message.
+    /// Filesystem tools use this as the base directory for relative path resolution.
+    pub(crate) current_work_dir: Option<String>,
 }
 
 impl AgentCore {
@@ -155,6 +159,7 @@ impl AgentCore {
         on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
         observer: crate::debug::DebugObserverSlot,
     ) -> Self {
+        let initial_work_dir = config.work_dir.clone();
         let shell_approval_threshold = ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
             .unwrap_or_default();
         Self {
@@ -164,10 +169,10 @@ impl AgentCore {
             tools: tools.clone(),
             mcp_tools: None,
             all_tools: tools,
-            gateway_model_capabilities: HashMap::new(),
+            global_provider_list: Arc::new(std::sync::RwLock::new(Vec::new())),
+            provider_list_version: 0,
+            provider_key_vault: Arc::new(std::sync::RwLock::new(HashMap::new())),
             provider_compact_models: HashMap::new(),
-            current_provider_id: None,
-            max_output_tokens_limit: 32_768,
             temperature_override: None,
             system_prompt_override: None,
             session_id: None,
@@ -184,6 +189,7 @@ impl AgentCore {
             metrics_aggregator: Arc::new(std::sync::Mutex::new(MetricsAggregator::with_defaults(1.0))),
             consolidation_scheduler: None,
             consolidation_bg_task: None,
+            current_work_dir: Some(initial_work_dir),
         }
     }
 
@@ -235,13 +241,31 @@ impl AgentCore {
     }
 
     /// Access Gateway model capabilities.
-    pub fn gateway_model_capabilities(&self) -> &HashMap<String, ModelCapabilitiesInfo> {
-        &self.gateway_model_capabilities
+    /// Deprecated: use get_model_capabilities(model_id) instead.
+    pub fn gateway_model_capabilities(&self) -> HashMap<String, ModelCapabilitiesInfo> {
+        // Build a HashMap view from global_provider_list for backward compat.
+        let list = self.global_provider_list.read().unwrap();
+        let mut map = HashMap::new();
+        for provider in list.iter() {
+            for model in &provider.models {
+                map.insert(model.id.clone(), model.capabilities.clone());
+            }
+        }
+        map
     }
 
-    /// Access the max output tokens limit.
-    pub fn max_output_tokens_limit(&self) -> u64 {
-        self.max_output_tokens_limit
+    /// Get the max output tokens limit for a given model from its provider entry.
+    /// Falls back to the system default (32768) if not found.
+    pub fn max_output_tokens_limit_for_model(&self, model_id: &str) -> u64 {
+        let list = self.global_provider_list.read().unwrap();
+        for provider in list.iter() {
+            for model in &provider.models {
+                if model.id == model_id {
+                    return model.max_output_tokens_limit;
+                }
+            }
+        }
+        32_768
     }
 
     /// Access the streaming chunk sender.
@@ -276,8 +300,8 @@ impl AgentCore {
         }
     }
 
-    /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
-    /// LLMConfigDelivery from Gateway).
+    /// Update the LLM provider at runtime (e.g., after receiving a
+    /// model_switch from Gateway).
     pub fn update_provider(&mut self, new_provider: Arc<dyn Provider>, model: String) {
         let old_name = self.provider.name().to_string();
         self.provider = new_provider;
@@ -285,7 +309,7 @@ impl AgentCore {
             old_provider = %old_name,
             new_provider = %self.provider.name(),
             model = %model,
-            "LLM provider updated at runtime via LLMConfigDelivery"
+            "LLM provider updated at runtime (model_switch)"
         );
     }
 
@@ -310,12 +334,9 @@ impl AgentCore {
         );
     }
 
-    /// Update gateway model capabilities at runtime (e.g., after receiving a
-    /// hot-pushed LLMConfigDelivery from Gateway).
-    /// The capabilities are stored keyed by model ID for multi-model support.
-    /// `model_id` is the model identifier string (e.g. "deepseek-v4-flash"),
-    /// always provided by the caller — never derived from `caps.name` which
-    /// may be None for models not in models.dev.
+    /// Update gateway model capabilities at runtime.
+    /// Now inserts into the global_provider_list for the matching model.
+    /// `model_id` is the model identifier string.
     pub fn update_gateway_model_capabilities(&mut self, model_id: &str, caps: ModelCapabilitiesInfo) {
         tracing::info!(
             model = %model_id,
@@ -328,17 +349,31 @@ impl AgentCore {
             source = "gateway",
             "AgentCore received model capabilities from Gateway"
         );
-        self.gateway_model_capabilities.insert(model_id.to_string(), caps);
+        // Update capabilities in global_provider_list for matching model.
+        let mut list = self.global_provider_list.write().unwrap();
+        for provider in list.iter_mut() {
+            for model in provider.models.iter_mut() {
+                if model.id == model_id {
+                    model.capabilities = caps;
+                    return;
+                }
+            }
+        }
     }
 
     /// Update the max output tokens limit from Gateway config.
+    /// Now updates per-model limits in the global_provider_list.
     pub fn update_max_output_tokens_limit(&mut self, limit: u64) {
         tracing::info!(
-            old_limit = self.max_output_tokens_limit,
             new_limit = limit,
-            "AgentCore max_output_tokens_limit updated from Gateway"
+            "AgentCore max_output_tokens_limit updated from Gateway (all models)"
         );
-        self.max_output_tokens_limit = limit;
+        let mut list = self.global_provider_list.write().unwrap();
+        for provider in list.iter_mut() {
+            for model in provider.models.iter_mut() {
+                model.max_output_tokens_limit = limit;
+            }
+        }
     }
 
     /// Apply runtime config overrides from Gateway.
@@ -352,8 +387,8 @@ impl AgentCore {
         shell_approval_threshold: Option<String>,
     ) {
         if let Some(limit) = max_output_tokens {
-            tracing::info!(old = self.max_output_tokens_limit, new = limit, "runtime config: max_output_tokens updated");
-            self.max_output_tokens_limit = limit;
+            tracing::info!(new = limit, "runtime config: max_output_tokens updated (all models)");
+            self.update_max_output_tokens_limit(limit);
         }
         if let Some(n) = max_iterations {
             tracing::info!(
@@ -604,9 +639,15 @@ impl AgentCore {
         use std::time::Duration;
 
         // Resolve the model name for the LLM adapter.
-        // Try gateway capabilities first, then fall back to "default".
-        let model = self.gateway_model_capabilities.keys().next().cloned()
-            .unwrap_or_else(|| "default".to_string());
+        // Try global_provider_list first model, then fall back to "default".
+        let model = {
+            let list = self.global_provider_list.read().unwrap();
+            list.iter()
+                .flat_map(|p| p.models.iter())
+                .next()
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| "default".to_string())
+        };
         let params = ConsolidationParams {
             store: store.clone(),
             provider: self.provider.clone(),
@@ -648,10 +689,10 @@ impl AgentCore {
             tools: self.tools.clone(),
             mcp_tools: self.mcp_tools.clone(),
             all_tools: self.all_tools.clone(),
-            gateway_model_capabilities: self.gateway_model_capabilities.clone(),
+            global_provider_list: self.global_provider_list.clone(),
+            provider_list_version: self.provider_list_version,
+            provider_key_vault: self.provider_key_vault.clone(),
             provider_compact_models: self.provider_compact_models.clone(),
-            current_provider_id: self.current_provider_id.clone(),
-            max_output_tokens_limit: self.max_output_tokens_limit,
             temperature_override: self.temperature_override,
             system_prompt_override: self.system_prompt_override.clone(),
             session_id: Some(session_id),
@@ -678,20 +719,30 @@ impl AgentCore {
             // Background task is NOT cloned — it's owned by the primary AgentCore.
             // Session clones don't need their own bg task.
             consolidation_bg_task: None,
+            // work_dir is set separately by SessionTask after clone;
+            // default to agent_home to avoid None window before SetWorkDir arrives.
+            current_work_dir: Some(self.config.work_dir.clone()),
         }
     }
 
     /// Look up model capabilities by exact model name.
     ///
+    /// Searches across all providers in the global_provider_list.
     /// Returns `None` when the requested model is not found — callers must
-    /// handle this case explicitly. The legacy `.values().next()` fallback
-    /// has been removed because it silently picks wrong model capabilities
-    /// when model names don't match (e.g. case sensitivity), causing incorrect
-    /// context usage percentages and preventing compaction from triggering.
-    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<&ModelCapabilitiesInfo> {
-        let caps = self.gateway_model_capabilities.get(model_name);
-        if caps.is_none() && !self.gateway_model_capabilities.is_empty() {
-            let available: Vec<&str> = self.gateway_model_capabilities.keys().map(|s| s.as_str()).collect();
+    /// handle this case explicitly.
+    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<ModelCapabilitiesInfo> {
+        let list = self.global_provider_list.read().unwrap();
+        for provider in list.iter() {
+            for model in &provider.models {
+                if model.id == model_name {
+                    return Some(model.capabilities.clone());
+                }
+            }
+        }
+        if !list.is_empty() {
+            let available: Vec<&str> = list.iter()
+                .flat_map(|p| p.models.iter().map(|m| m.id.as_str()))
+                .collect();
             tracing::warn!(
                 model = %model_name,
                 available = ?available,
@@ -701,7 +752,34 @@ impl AgentCore {
                 model_name
             );
         }
-        caps
+        None
+    }
+
+    /// Look up a provider's full metadata from the global cache.
+    pub fn get_provider(&self, provider_id: &str) -> Option<ProviderListItem> {
+        let list = self.global_provider_list.read().unwrap();
+        list.iter().find(|p| p.id == provider_id).cloned()
+    }
+
+    /// Look up a provider's API key from the in-memory vault.
+    pub fn get_provider_api_key(&self, provider_id: &str) -> Option<String> {
+        let vault = self.provider_key_vault.read().unwrap();
+        vault.get(provider_id).cloned()
+    }
+
+    /// Rebuild Provider instance for a given provider_id from global cache.
+    /// Returns None if provider not found in cache or no API key available.
+    pub fn build_provider_for(&self, provider_id: &str) -> Option<Arc<dyn Provider>> {
+        let provider_meta = self.get_provider(provider_id)?;
+        let api_key = self.get_provider_api_key(provider_id);
+        let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&self.config));
+        Some(crate::providers::router::create_provider(
+            &provider_meta.id,
+            &provider_meta.protocol_type,
+            api_key.as_deref(),
+            if provider_meta.base_url.is_empty() { None } else { Some(&provider_meta.base_url) },
+            timeouts,
+        ))
     }
 
     /// Set debug mode by replacing the observer slot with a DevMode observer.
@@ -756,18 +834,19 @@ impl AgentCore {
 
     /// Get the usable context budget for history trimming.
     /// Uses Gateway model capabilities if available: delegates to
-    /// [`ModelCapabilitiesInfo::effective_input_budget`] with the global
+    /// [`ModelCapabilitiesInfo::effective_input_budget`] with the per-model
     /// `max_output_tokens_limit` as the output cap.
     /// Falls back to config.history_max_tokens when no capabilities are present.
     pub fn context_trim_budget(&self, model_name: &str) -> u64 {
+        let max_output_limit = self.max_output_tokens_limit_for_model(model_name);
         self.get_model_capabilities(model_name)
             .map(|caps| {
-                let usable = caps.effective_input_budget(self.max_output_tokens_limit);
+                let usable = caps.effective_input_budget(max_output_limit);
                 tracing::debug!(
                     model = %model_name,
                     context_window = caps.context_window,
                     max_input_tokens = ?caps.max_input_tokens,
-                    max_output_tokens_limit = self.max_output_tokens_limit,
+                    max_output_tokens_limit = max_output_limit,
                     effective_input_budget = usable,
                     "Computed usable context budget from model capabilities"
                 );

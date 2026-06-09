@@ -21,7 +21,10 @@ use tokio::task::JoinHandle;
 
 use rollball_core::budget;
 use rollball_core::proto;
-use rollball_core::protocol::{GatewayResponse, ProtocolType};
+use rollball_core::protocol::{
+    GatewayResponse, ModelCapabilitiesInfo, ProtocolType, ProviderKeyEntry, ProviderListItem,
+    ProviderModelEntry,
+};
 
 use rollball_gateway::gateway::state::{AgentInfo, GatewayState, RunningAgentInfo};
 use rollball_gateway::grpc::server::GrpcSessionManager;
@@ -594,24 +597,8 @@ async fn test_t20_create_session() {
     assert!(result.is_ok(), "T20 timed out");
 }
 
-/// T21: GetCurrentSessionId → CurrentSessionId
-#[tokio::test]
-async fn test_t21_get_current_session_id() {
-    let server = TestServer::start().await;
-    let result = tokio::time::timeout(TEST_TIMEOUT, async {
-        let client = server.connect_and_register("com.test.agent").await;
-
-        let result = client.get_current_session_id().await;
-        match result {
-            Ok(session_id) => {
-                assert!(session_id.is_none());
-            }
-            Err(_) => {}
-        }
-    })
-    .await;
-    assert!(result.is_ok(), "T21 timed out");
-}
+/// T21: GetCurrentSessionId — removed (method no longer exists on GatewayGrpcClient;
+/// current session is a Runtime-local concept, not a Gateway query).
 
 /// T22: StreamChunk → fire-and-forget (Gateway receives but no response).
 #[tokio::test]
@@ -718,27 +705,48 @@ async fn test_t24_capability_update_broadcast() {
     assert!(result.is_ok(), "T24 timed out");
 }
 
-/// T25: LLMConfigDelivery content verification.
+/// T25: ProviderListUpdate content verification.
 #[tokio::test]
-async fn test_t25_llm_config_delivery_push() {
+async fn test_t25_provider_list_update_push() {
     let server = TestServer::start().await;
     let result = tokio::time::timeout(TEST_TIMEOUT, async {
         let mut client = server.connect_and_register("com.test.agent").await;
 
-        // Inject an LLMConfigDelivery push
+        // Inject a ProviderListUpdate push
         {
             let mgr = server.session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id("com.test.agent") {
                 let pushed = session
-                    .push_message(GatewayResponse::LLMConfigDelivery {
-                        provider: "openai".to_string(),
-                        model: Some("gpt-4".to_string()),
-                        api_key: "sk-test-key-123".to_string(),
-                        base_url: Some("https://api.openai.com/v1".to_string()),
-                        models: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
-                        model_capabilities: None,
-                        max_output_tokens_limit: 4096,
-                        protocol_type: ProtocolType::default(),
+                    .push_message(GatewayResponse::ProviderListUpdate {
+                        provider_list: vec![ProviderListItem {
+                            id: "openai".to_string(),
+                            base_url: "https://api.openai.com/v1".to_string(),
+                            protocol_type: ProtocolType::default(),
+                            models: vec![ProviderModelEntry {
+                                id: "gpt-4".to_string(),
+                                capabilities: ModelCapabilitiesInfo {
+                                    context_window: 128_000,
+                                    max_output_tokens: 4096,
+                                    max_input_tokens: None,
+                                    supports_tool_calling: true,
+                                    supports_reasoning: None,
+                                    supports_attachment: None,
+                                    supports_temperature: None,
+                                    cost: None,
+                                    modalities: None,
+                                    name: None,
+                                    family: None,
+                                    knowledge_cutoff: None,
+                                },
+                                max_output_tokens_limit: 4096,
+                            }],
+                            compact_model: None,
+                        }],
+                        provider_list_version: 1,
+                        provider_key_vault: vec![ProviderKeyEntry {
+                            provider_id: "openai".to_string(),
+                            api_key: "sk-test-key-123".to_string(),
+                        }],
                     })
                     .await;
                 assert!(pushed, "Push should succeed");
@@ -746,21 +754,22 @@ async fn test_t25_llm_config_delivery_push() {
         }
 
         match tokio::time::timeout(Duration::from_secs(5), client.recv_message()).await {
-            Ok(Ok(Some(GatewayResponse::LLMConfigDelivery {
-                provider,
-                model,
-                api_key,
-                base_url,
-                models,
-                max_output_tokens_limit,
-                ..
+            Ok(Ok(Some(GatewayResponse::ProviderListUpdate {
+                provider_list,
+                provider_list_version,
+                provider_key_vault,
             }))) => {
-                assert_eq!(provider, "openai");
-                assert_eq!(model, Some("gpt-4".to_string()));
-                assert_eq!(api_key, "sk-test-key-123");
-                assert_eq!(base_url, Some("https://api.openai.com/v1".to_string()));
-                assert_eq!(models, vec!["gpt-4", "gpt-3.5-turbo"]);
-                assert_eq!(max_output_tokens_limit, 4096);
+                assert_eq!(provider_list_version, 1);
+                assert_eq!(provider_list.len(), 1);
+                let provider = &provider_list[0];
+                assert_eq!(provider.id, "openai");
+                assert_eq!(provider.base_url, "https://api.openai.com/v1");
+                assert_eq!(provider.models.len(), 1);
+                assert_eq!(provider.models[0].id, "gpt-4");
+                assert_eq!(provider.models[0].max_output_tokens_limit, 4096);
+                assert_eq!(provider_key_vault.len(), 1);
+                assert_eq!(provider_key_vault[0].provider_id, "openai");
+                assert_eq!(provider_key_vault[0].api_key, "sk-test-key-123");
             }
             Ok(Ok(Some(other))) => {
                 let _ = other;
@@ -1182,20 +1191,41 @@ async fn test_t37_full_conversation_chain() {
         let mut client = server.connect_and_register("com.test.agent").await;
         assert!(client.is_connected(), "Step 1: Should be connected after AgentHello");
 
-        // 2. Receive LLM config (push from Gateway after AgentHello)
+        // 2. Receive provider list (push from Gateway after AgentHello)
         {
             let mgr = server.session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id("com.test.agent") {
                 session
-                    .push_message(GatewayResponse::LLMConfigDelivery {
-                        provider: "openai".to_string(),
-                        model: Some("gpt-4".to_string()),
-                        api_key: "sk-test-key".to_string(),
-                        base_url: Some("https://api.openai.com/v1".to_string()),
-                        models: vec!["gpt-4".to_string()],
-                        model_capabilities: None,
-                        max_output_tokens_limit: 4096,
-                        protocol_type: ProtocolType::default(),
+                    .push_message(GatewayResponse::ProviderListUpdate {
+                        provider_list: vec![ProviderListItem {
+                            id: "openai".to_string(),
+                            base_url: "https://api.openai.com/v1".to_string(),
+                            protocol_type: ProtocolType::default(),
+                            models: vec![ProviderModelEntry {
+                                id: "gpt-4".to_string(),
+                                capabilities: ModelCapabilitiesInfo {
+                                    context_window: 128_000,
+                                    max_output_tokens: 4096,
+                                    max_input_tokens: None,
+                                    supports_tool_calling: true,
+                                    supports_reasoning: None,
+                                    supports_attachment: None,
+                                    supports_temperature: None,
+                                    cost: None,
+                                    modalities: None,
+                                    name: None,
+                                    family: None,
+                                    knowledge_cutoff: None,
+                                },
+                                max_output_tokens_limit: 4096,
+                            }],
+                            compact_model: None,
+                        }],
+                        provider_list_version: 1,
+                        provider_key_vault: vec![ProviderKeyEntry {
+                            provider_id: "openai".to_string(),
+                            api_key: "sk-test-key".to_string(),
+                        }],
                     })
                     .await;
             }
@@ -1275,9 +1305,7 @@ async fn test_t37_full_conversation_chain() {
             .await;
         let _ = messages_result;
 
-        // 13. GetCurrentSessionId
-        let current_session = client.get_current_session_id().await;
-        let _ = current_session;
+        // 13. GetCurrentSessionId — skipped (removed from gRPC API)
 
         // 14. CapabilityQuery
         let cap_result = client.query_capabilities(None).await;

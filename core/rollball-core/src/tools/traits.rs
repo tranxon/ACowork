@@ -51,8 +51,13 @@ pub trait Tool: Send + Sync {
         self.spec().name.clone()
     }
 
-    /// Execute the tool with given parameters
-    async fn execute(&self, params: Value) -> Result<ToolResult>;
+    /// Execute the tool with given parameters.
+    ///
+    /// `work_dir` is the caller-resolved workspace directory path.
+    /// Filesystem tools (file_read, file_write, etc.) use this as the
+    /// base directory for relative path resolution, overriding any
+    /// construction-time default. Non-filesystem tools may ignore it.
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> Result<ToolResult>;
 }
 
 #[cfg(test)]

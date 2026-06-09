@@ -165,9 +165,9 @@ export function MemoryPanel() {
 
       {/* Consolidate feedback banner */}
       {consolidateMessage && (
-        <div className="flex items-center gap-1.5 border-b border-blue-200 bg-blue-50 px-3 py-1.5 dark:border-blue-900 dark:bg-blue-950">
-          <Info className="h-3 w-3 shrink-0 text-blue-600 dark:text-blue-400" />
-          <span className="text-[11px] text-blue-700 dark:text-blue-300">{consolidateMessage}</span>
+        <div className="flex items-center gap-1.5 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5">
+          <Info className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
+          <span className="text-[11px] text-[var(--color-accent)]">{consolidateMessage}</span>
         </div>
       )}
 

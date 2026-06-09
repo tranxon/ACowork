@@ -52,7 +52,7 @@ impl Tool for WebSearchTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let query = params["query"].as_str().unwrap_or("");
         if query.is_empty() {
             return Ok(ToolResult {

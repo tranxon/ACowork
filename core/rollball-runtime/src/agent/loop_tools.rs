@@ -89,6 +89,7 @@ impl AgentLoop {
                 let approval_handle = approval_handle.clone();
                 let approval_gate = approval_gate.clone();
                 let shell_threshold = shell_threshold.clone();
+                let work_dir = self.core.current_work_dir.clone();
                 tokio::spawn(async move {
                     // Shell risk check: if this is a shell command and risk >= threshold,
                     // request user approval before execution.
@@ -130,7 +131,7 @@ impl AgentLoop {
 
                     let result = match tokio::time::timeout(
                         tool_timeout,
-                        execute_single_tool(&tools, &tc),
+                        execute_single_tool(&tools, &tc, work_dir.as_deref()),
                     )
                     .await
                     {
@@ -303,7 +304,7 @@ impl AgentLoop {
 /// Execute a single tool call against the tool registry.
 ///
 /// Returns the result content string (success or error message).
-pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall) -> String {
+pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall, work_dir: Option<&str>) -> String {
     let tool_name = &tool_call.function.name;
     let params_str = &tool_call.function.arguments;
 
@@ -353,7 +354,7 @@ pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &Too
     });
 
     match tool {
-        Some(tool) => match tool.execute(params).await {
+        Some(tool) => match tool.execute(params, work_dir).await {
             Ok(result) => {
                 if result.ok {
                     result.content

@@ -53,13 +53,11 @@ const MAX_DOC_SIZE_BYTES: u64 = 50 * 1024 * 1024;
 /// Built-in document reader tool.
 ///
 /// Reads PDF, DOCX, PPTX, and XLSX files and extracts their text content.
-pub struct DocReaderTool {
-    work_dir: String,
-}
+pub struct DocReaderTool;
 
 impl DocReaderTool {
-    pub fn new(work_dir: &str) -> Self {
-        Self { work_dir: work_dir.to_string() }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn spec_value() -> ToolSpec {
@@ -104,7 +102,7 @@ impl Tool for DocReaderTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let raw_path = params["path"].as_str().unwrap_or("");
         if raw_path.is_empty() {
             return Ok(ToolResult {
@@ -122,7 +120,8 @@ impl Tool for DocReaderTool {
             std::path::PathBuf::from(raw_path)
         } else {
             let relative = raw_path.trim_start_matches('/');
-            std::path::Path::new(&self.work_dir).join(relative)
+            let base = work_dir.unwrap_or(".");
+            std::path::Path::new(base).join(relative)
         };
 
         // Size check

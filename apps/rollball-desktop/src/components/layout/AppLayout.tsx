@@ -304,7 +304,7 @@ export function AppLayout() {
               {/* Visible divider line */}
               <div className="absolute inset-y-0 left-0 w-px bg-zinc-200 dark:bg-zinc-800" />
               {/* Hover/active area for resize */}
-              <div className="absolute inset-y-0 -left-2 w-[7px] group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
+              <div className="absolute inset-y-0 -left-2 w-[7px] group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
             </div>
 
             {/* Chat panel — elastic */}
@@ -321,7 +321,7 @@ export function AppLayout() {
                   aria-label="Resize file editor"
                 >
                   <div className="absolute inset-y-0 left-0 w-px bg-zinc-200 dark:bg-zinc-800" />
-                  <div className="absolute inset-y-0 -left-2 w-[7px] group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
+                  <div className="absolute inset-y-0 -left-2 w-[7px] group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
                 </div>
                 <FileEditorPanel width={fileWidth} />
               </>

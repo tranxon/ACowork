@@ -222,7 +222,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                         RollBall.AI
                     </h1>
                     <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">
-                        Collaborate with your AI colleagues
+                        Collaborate with your robotic colleagues
                     </p>
                 </div>
 

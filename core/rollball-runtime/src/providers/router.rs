@@ -4,9 +4,10 @@
 //! Supports OpenAI-compatible, Anthropic, Google Gemini, and Ollama protocols.
 //!
 //! DESIGN: Runtime always runs under Gateway. base_url and api_key are
-//! delivered via LLMConfigDelivery from Gateway (which has full models.dev
-//! offline data). Protocol selection is data-driven via ProtocolType —
-//! no hardcoded provider name matching.
+//! delivered via ProviderListUpdate (and the bundled AgentHelloConfig)
+//! from Gateway, which has full models.dev offline data. Protocol
+//! selection is data-driven via ProtocolType — no hardcoded provider
+//! name matching.
 //!
 //! If Gateway does not deliver a usable provider/model, Runtime refuses
 //! service with a clear error — no silent fallbacks.
@@ -55,9 +56,9 @@ impl ProviderTimeouts {
 ///
 /// Protocol selection is data-driven: Gateway determines the correct
 /// ProtocolType from offline provider metadata and delivers it via
-/// LLMConfigDelivery. Runtime simply instantiates the matching provider.
+/// ProviderListUpdate. Runtime simply instantiates the matching provider.
 ///
-/// base_url is always supplied by Gateway LLMConfigDelivery.
+/// base_url is always supplied by the Gateway-delivered provider list.
 /// If missing, the provider will likely fail - this is expected since
 /// Runtime cannot function without Gateway.
 pub fn create_provider(
@@ -117,10 +118,10 @@ pub fn create_provider(
 /// In standalone mode (no Gateway), there is no offline metadata to
 /// determine protocol type. This function provides a fallback inference
 /// based on the provider name. Gateway mode should always use the
-/// protocol_type from LLMConfigDelivery instead.
+/// protocol_type from the Gateway-delivered provider list instead.
 pub fn infer_protocol_type(provider_name: &str) -> ProtocolType {
     match provider_name {
-        "anthropic" | "claude" | "minimax" | "minimax-cn" => ProtocolType::Anthropic,
+        "anthropic" | "claude" => ProtocolType::Anthropic,
         "ollama" => ProtocolType::Ollama,
         "google" | "gemini" => ProtocolType::Google,
         _ => ProtocolType::OpenAI,
@@ -206,7 +207,8 @@ mod tests {
     fn test_infer_protocol_type() {
         assert_eq!(infer_protocol_type("anthropic"), ProtocolType::Anthropic);
         assert_eq!(infer_protocol_type("claude"), ProtocolType::Anthropic);
-        assert_eq!(infer_protocol_type("minimax"), ProtocolType::Anthropic);
+        assert_eq!(infer_protocol_type("minimax"), ProtocolType::OpenAI);
+        assert_eq!(infer_protocol_type("minimax-cn"), ProtocolType::OpenAI);
         assert_eq!(infer_protocol_type("ollama"), ProtocolType::Ollama);
         assert_eq!(infer_protocol_type("openai"), ProtocolType::OpenAI);
         assert_eq!(infer_protocol_type("deepseek"), ProtocolType::OpenAI);

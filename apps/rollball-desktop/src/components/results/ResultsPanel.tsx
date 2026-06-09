@@ -208,7 +208,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
         className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize z-10 group"
         onMouseDown={onResizeStart}
       >
-        <div className="absolute inset-y-0 left-0 w-2 group-hover:bg-blue-400/30 group-active:bg-blue-400/60 transition-colors" />
+        <div className="absolute inset-y-0 left-0 w-2 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
       </div>
       {/* Header with tabs */}
       <div className="border-b border-zinc-200 pt-px dark:border-zinc-800">

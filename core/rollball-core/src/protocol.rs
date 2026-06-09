@@ -784,51 +784,18 @@ pub enum GatewayResponse {
         granted: bool,
         retry_after_ms: Option<u64>,
     },
-    /// LLM configuration delivery (Gateway → Runtime, handshake)
+    /// Provider list update (Gateway → Runtime, hot-push)
     ///
-    /// After AgentHello, Gateway pushes the user's configured LLM provider
-    /// to the Agent Runtime. This satisfies PRD GTW-05 and SEC-07:
-    /// API keys are distributed via IPC, not environment variables.
-    ///
-    /// The provider always overrides any session default.
-    /// model=None means Gateway has no model preference — Runtime uses
-    /// the first model from the provider list.
-    LLMConfigDelivery {
-        /// Provider name (e.g. "minimax", "openai", "anthropic")
-        provider: String,
-        /// Model identifier (e.g. "MiniMax-M2.7", "minimax-m2.5").
-        /// None when Gateway has no model preference — Runtime uses the first model from the provider list.
-        model: Option<String>,
-        /// API key for the provider (one-time delivery, not stored on disk by Runtime)
-        api_key: String,
-        /// Base URL override (optional, provider-specific)
-        base_url: Option<String>,
-        /// Available models for this provider (user-selected from models.dev).
-        /// The agent can switch between these models at runtime.
-        models: Vec<String>,
-        /// Model capabilities (context_window, max_output_tokens, tool_calling).
-        /// Populated by Gateway from models.dev / offline data.
-        /// None when model capabilities are not available (e.g. unknown model).
-        #[serde(default)]
-        model_capabilities: Option<ModelCapabilitiesInfo>,
-        /// Global max output tokens limit (from Gateway config).
-        /// When set, this value caps the max_output_tokens used in API requests
-        /// and context usage calculations, overriding model capabilities if they exceed it.
-        /// Default: 32768 (32K). Set to 0 to disable the limit.
-        #[serde(default = "default_max_output_tokens_limit")]
-        max_output_tokens_limit: u64,
-        /// Protocol type for the LLM API (anthropic/openai/ollama)
-        #[serde(default)]
-        protocol_type: ProtocolType,
-        /// Compact/distillation model for this provider (from Vault).
-        /// Used by the Runtime as Path 1 in distillation model selection.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        compact_model: Option<String>,
-        /// Current provider list version from Gateway.
-        /// Runtime should persist this to resource_cache.json for
-        /// next-startup AgentHello diff sync.
-        #[serde(default)]
+    /// Replaces the old LLMConfigDelivery with a full-list push of all
+    /// providers + models + capabilities. Sent when a provider is added,
+    /// removed, or has its model list or API key changed.
+    ProviderListUpdate {
+        /// Full provider list (replaces any previous state)
+        provider_list: Vec<ProviderListItem>,
+        /// Monotonic version for diff-sync at next AgentHello
         provider_list_version: u64,
+        /// Full provider key vault (in-memory only, never persisted)
+        provider_key_vault: Vec<ProviderKeyEntry>,
     },
     /// Web Search configuration delivery (Gateway → Runtime, hot-push)
     ///

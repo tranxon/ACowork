@@ -434,6 +434,9 @@ fn parse_response(resp: AnthropicResponse) -> ChatResponse {
             prompt_tokens: input + cache_creation + cache_read,
             completion_tokens: output,
             total_tokens: input + cache_creation + cache_read + output,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_creation,
+            reasoning_tokens: 0, // Anthropic reasoning is in thinking blocks, not a separate field
         }
     });
 
@@ -459,6 +462,26 @@ impl Provider for AnthropicProvider {
 
     async fn chat(&self, request: ChatRequest) -> rollball_core::error::Result<ChatResponse> {
         let (messages, system) = convert_messages(&request.messages);
+
+        // Anthropic API requires at least one non-system message.
+        // When context trimming removes all user/assistant messages,
+        // only the system prompt remains (extracted to the `system` field),
+        // leaving `messages` empty — which the API rejects with 400.
+        // Insert a minimal user message as a safety net.
+        let messages = if messages.is_empty() {
+            tracing::warn!(
+                model = %request.model,
+                "Anthropic: no non-system messages after conversion, inserting placeholder"
+            );
+            vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: Some(serde_json::Value::String(
+                    "[Context too large — all conversation history was trimmed. Please start a new conversation or reduce attached files.]".to_string()
+                )),
+            }]
+        } else {
+            messages
+        };
 
         let anthropic_request = AnthropicRequest {
             model: request.model,
@@ -535,6 +558,26 @@ impl Provider for AnthropicProvider {
     ) -> rollball_core::error::Result<Box<dyn Stream<Item = StreamEvent> + Send>> {
         let (messages, system) = convert_messages(&request.messages);
 
+        // Anthropic API requires at least one non-system message.
+        // When context trimming removes all user/assistant messages,
+        // only the system prompt remains (extracted to the `system` field),
+        // leaving `messages` empty — which the API rejects with 400.
+        // Insert a minimal user message as a safety net.
+        let messages = if messages.is_empty() {
+            tracing::warn!(
+                model = %request.model,
+                "Anthropic: no non-system messages after conversion, inserting placeholder"
+            );
+            vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: Some(serde_json::Value::String(
+                    "[Context too large — all conversation history was trimmed. Please start a new conversation or reduce attached files.]".to_string()
+                )),
+            }]
+        } else {
+            messages
+        };
+
         let anthropic_request = AnthropicRequest {
             model: request.model,
             messages,
@@ -597,6 +640,8 @@ impl Provider for AnthropicProvider {
             let mut pending_tool_id: Option<String> = None;
             let mut pending_tool_name: Option<String> = None;
             let mut accumulated_input_tokens: u64 = 0;
+            let mut accumulated_cache_read_tokens: u64 = 0;
+            let mut accumulated_cache_write_tokens: u64 = 0;
             let mut block_index_map: HashMap<u64, u64> = HashMap::new();
 
             use futures_util::StreamExt;
@@ -614,6 +659,8 @@ impl Provider for AnthropicProvider {
                                 &mut pending_tool_id,
                                 &mut pending_tool_name,
                                 &mut accumulated_input_tokens,
+                                &mut accumulated_cache_read_tokens,
+                                &mut accumulated_cache_write_tokens,
                                 &mut block_index_map,
                             )
                                 && tx.send(Some(event)).await.is_err()
@@ -716,6 +763,8 @@ fn parse_anthropic_sse_line(
     pending_tool_id: &mut Option<String>,
     pending_tool_name: &mut Option<String>,
     accumulated_input_tokens: &mut u64,
+    accumulated_cache_read_tokens: &mut u64,
+    accumulated_cache_write_tokens: &mut u64,
     block_index_map: &mut HashMap<u64, u64>,
 ) -> Option<StreamEvent> {
     let line = line.trim();
@@ -789,6 +838,8 @@ fn parse_anthropic_sse_line(
             // from message_delta to produce a complete usage report.
             if let Some(usage) = event.usage {
                 let input = *accumulated_input_tokens;
+                let cache_read = *accumulated_cache_read_tokens;
+                let cache_write = *accumulated_cache_write_tokens;
                 let output = usage.output_tokens.unwrap_or(0);
                 return Some(StreamEvent::Finished(ChatResponse {
                     content: String::new(),
@@ -797,6 +848,9 @@ fn parse_anthropic_sse_line(
                         prompt_tokens: input,
                         completion_tokens: output,
                         total_tokens: input + output,
+                        cache_read_tokens: cache_read,
+                        cache_write_tokens: cache_write,
+                        reasoning_tokens: 0,
                     }),
                     ..Default::default()
                 }));
@@ -805,11 +859,18 @@ fn parse_anthropic_sse_line(
         }
         "message_start" => {
             // Extract input_tokens from message_start's usage for later combination
-            // with output_tokens from message_delta.
+            // with output_tokens from message_delta. Include cache tokens
+            // (cache_creation_input_tokens + cache_read_input_tokens) which
+            // are also part of the input cost but only appear in this event.
             if let Some(ref msg) = event.message
                 && let Some(ref usage) = msg.usage
             {
-                *accumulated_input_tokens = usage.input_tokens.unwrap_or(0);
+                let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+                *accumulated_input_tokens =
+                    usage.input_tokens.unwrap_or(0) + cache_creation + cache_read;
+                *accumulated_cache_read_tokens = cache_read;
+                *accumulated_cache_write_tokens = cache_creation;
             }
             None
         }
@@ -1013,12 +1074,16 @@ mod tests {
         let mut tool_id = None;
         let mut tool_name = None;
         let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
         let mut block_index_map: HashMap<u64, u64> = HashMap::new();
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         assert!(event.is_some());
@@ -1034,12 +1099,16 @@ mod tests {
         let mut tool_id = None;
         let mut tool_name = None;
         let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
         let mut block_index_map: HashMap<u64, u64> = HashMap::new();
         let event = parse_anthropic_sse_line(
             r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_xyz","name":"calculator","input":{}}}"#,
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         assert!(event.is_some());
@@ -1058,6 +1127,8 @@ mod tests {
         let mut tool_id = None;
         let mut tool_name = None;
         let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
         let mut block_index_map: HashMap<u64, u64> = HashMap::new();
         // First register the tool_use at content_block index 1 -> tool-call index 0
         let _ = parse_anthropic_sse_line(
@@ -1065,6 +1136,8 @@ mod tests {
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         // Now send a delta for content_block index 1 — should be mapped to tool-call index 0
@@ -1073,6 +1146,8 @@ mod tests {
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         assert!(event.is_some());
@@ -1093,6 +1168,8 @@ mod tests {
         let mut tool_id = None;
         let mut tool_name = None;
         let mut input_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
         let mut block_index_map: HashMap<u64, u64> = HashMap::new();
 
         // content_block_start for first tool (content_block index 1, e.g. after text block at index 0)
@@ -1101,6 +1178,8 @@ mod tests {
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         assert!(matches!(e1, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_001" && tc.function.name == "shell"));
@@ -1111,6 +1190,8 @@ mod tests {
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         assert!(matches!(e2, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_002" && tc.function.name == "read_file"));
@@ -1121,6 +1202,8 @@ mod tests {
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         if let Some(StreamEvent::ToolCallChunk { index, arguments }) = e3 {
@@ -1136,6 +1219,8 @@ mod tests {
             &mut tool_id,
             &mut tool_name,
             &mut input_tokens,
+            &mut cache_read_tokens,
+            &mut cache_write_tokens,
             &mut block_index_map,
         );
         if let Some(StreamEvent::ToolCallChunk { index, arguments }) = e4 {

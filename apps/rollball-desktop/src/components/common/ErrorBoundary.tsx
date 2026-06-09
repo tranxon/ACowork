@@ -55,7 +55,10 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
             </button>
             <button
               onClick={onRefresh}
-              className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+              style={{ backgroundColor: "var(--color-accent)" }}
+              onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.85)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
             >
               <RefreshCw className="h-4 w-4" />
               {t("errorBoundary.refreshPage")}

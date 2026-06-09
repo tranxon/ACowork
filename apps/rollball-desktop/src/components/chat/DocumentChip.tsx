@@ -30,7 +30,7 @@ function formatIcon(format: string) {
       return <FileText className="h-4 w-4 shrink-0 text-red-500" />;
     case "docx":
     case "pptx":
-      return <FileSpreadsheet className="h-4 w-4 shrink-0 text-blue-500" />;
+      return <FileSpreadsheet className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />;
     case "xlsx":
       return <Table className="h-4 w-4 shrink-0 text-green-600" />;
     default:
@@ -56,7 +56,7 @@ export function DocumentChip({
 }: DocumentChipProps) {
   const { t } = useTranslation();
   const borderClass = status === "uploading"
-    ? "border-blue-400 dark:border-blue-500 animate-pulse"
+    ? "border-[var(--color-accent)] animate-pulse"
     : status === "error"
       ? "border-red-400 dark:border-red-500 bg-red-50 dark:bg-red-900/20"
       : "border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800";

@@ -157,8 +157,8 @@ impl AgentManifest {
             ));
         }
 
-        // Provider/model selection is now governed by resource_cache.providers
-        // and the Gateway's LLMConfigDelivery, not by manifest fields.
+        // Provider/model selection is now governed by global_provider_list
+        // and the Gateway's ProviderListUpdate, not by manifest fields.
 
         Ok(())
     }

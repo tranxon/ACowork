@@ -91,7 +91,7 @@ impl Tool for MemoryStoreTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         // --- Validate content ---
         let content = match params.get("content").and_then(|v| v.as_str()) {
             Some(c) if !c.trim().is_empty() => c.trim().to_string(),
@@ -256,7 +256,7 @@ mod tests {
     async fn test_memory_store_missing_content() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({ "category": "fact" }))
+            .execute(serde_json::json!({ "category": "fact" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -267,7 +267,7 @@ mod tests {
     async fn test_memory_store_missing_category() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({ "content": "User prefers Rust" }))
+            .execute(serde_json::json!({ "content": "User prefers Rust" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -281,7 +281,7 @@ mod tests {
             .execute(serde_json::json!({
                 "content": "User prefers Rust",
                 "category": "daily"
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -292,7 +292,7 @@ mod tests {
     async fn test_memory_store_empty_content() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({ "content": "", "category": "fact" }))
+            .execute(serde_json::json!({ "content": "", "category": "fact" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -306,7 +306,7 @@ mod tests {
                 "content": "User lives in Beijing",
                 "category": "fact",
                 "confidence": 0.9
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -322,7 +322,7 @@ mod tests {
                 "content": "User prefers dark mode",
                 "category": "preference",
                 "confidence": 0.6
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -338,7 +338,7 @@ mod tests {
                 "content": "Alice is the team lead of Bob",
                 "category": "relation",
                 "keywords": ["alice", "bob", "team"]
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -352,7 +352,7 @@ mod tests {
             .execute(serde_json::json!({
                 "content": "User likes coffee",
                 "category": "preference"
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -369,7 +369,7 @@ mod tests {
                 "content": "2 + 2 = 4",
                 "category": "fact",
                 "confidence": 99.0
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -381,7 +381,7 @@ mod tests {
                 "content": "Maybe it will rain",
                 "category": "fact",
                 "confidence": -5.0
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -396,7 +396,7 @@ mod tests {
                 "content": "When user asks for summary, reply concisely",
                 "category": "procedure",
                 "confidence": 0.9
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -412,7 +412,7 @@ mod tests {
                 "content": "User might prefer tables",
                 "category": "procedure",
                 "confidence": 0.5
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);

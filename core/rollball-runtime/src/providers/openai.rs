@@ -180,6 +180,22 @@ struct NativeUsage {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<NativePromptTokenDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<NativeCompletionTokenDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativePromptTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeCompletionTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 // Streaming SSE types
@@ -393,10 +409,25 @@ fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> Cha
         }
     }).collect::<Vec<_>>();
 
-    let usage_info = usage.map(|u| UsageInfo {
-        prompt_tokens: u.prompt_tokens.unwrap_or(0),
-        completion_tokens: u.completion_tokens.unwrap_or(0),
-        total_tokens: u.prompt_tokens.unwrap_or(0) + u.completion_tokens.unwrap_or(0),
+    let usage_info = usage.map(|u| {
+        let prompt = u.prompt_tokens.unwrap_or(0);
+        let completion = u.completion_tokens.unwrap_or(0);
+        let cache_read = u.prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .unwrap_or(0);
+        let reasoning = u.completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+            .unwrap_or(0);
+        UsageInfo {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: 0, // OpenAI protocol has no cache write field
+            reasoning_tokens: reasoning,
+        }
     });
 
     ChatResponse {
@@ -737,6 +768,14 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
     if let Some(usage) = chunk.usage {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let completion = usage.completion_tokens.unwrap_or(0);
+        let cache_read = usage.prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .unwrap_or(0);
+        let reasoning = usage.completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+            .unwrap_or(0);
         return vec![StreamEvent::Finished(ChatResponse {
             content: String::new(),
             tool_calls: None,
@@ -744,6 +783,9 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
                 prompt_tokens: prompt,
                 completion_tokens: completion,
                 total_tokens: prompt + completion,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: 0,
+                reasoning_tokens: reasoning,
             }),
             ..Default::default()
         })];
@@ -914,6 +956,8 @@ mod tests {
         let resp = parse_response(msg_with_tc, Some(NativeUsage {
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
         }));
         assert!(resp.tool_calls.is_some());
         assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);

@@ -59,7 +59,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
     success: "text-green-600 dark:text-green-400",
     error: "text-red-500 dark:text-red-400",
     warning: "text-yellow-500 dark:text-yellow-400",
-    info: "text-blue-500 dark:text-blue-400",
+    info: "text-[var(--color-accent)]",
   };
 
   const iconMap: Record<ToastType, string> = {

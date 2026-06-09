@@ -37,7 +37,7 @@ impl Default for WebFetchTool { fn default() -> Self { Self::new() } }
 impl Tool for WebFetchTool {
     fn spec(&self) -> ToolSpec { Self::spec_value() }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let url = params["url"].as_str().unwrap_or("");
         if url.is_empty() { return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing 'url'".to_string()), token_usage: None }); }
 

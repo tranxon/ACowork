@@ -160,7 +160,7 @@ export const FileTreeNode = memo(function FileTreeNode({
       <div
         className={cn(
           "flex cursor-pointer items-center gap-1 py-[2px] pr-3 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800",
-          isSelected && "bg-blue-50 dark:bg-blue-900/20",
+          isSelected && "bg-[var(--color-accent)]/10",
         )}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}

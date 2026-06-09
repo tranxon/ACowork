@@ -1149,7 +1149,7 @@ export function ChatPanel() {
                     <button
                       type="button"
                       onClick={() => handleEditQueued(i)}
-                      className="rounded-sm p-0.5 text-zinc-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:text-blue-400 dark:hover:bg-blue-900/30"
+                      className="rounded-sm p-0.5 text-zinc-400 hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
                       aria-label={`Edit message ${i + 1}`}
                     >
                       <Pencil size={12} />
@@ -1179,7 +1179,7 @@ export function ChatPanel() {
                 <button
                   type="button"
                   onClick={clearActiveSkill}
-                  className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-blue-100 dark:hover:bg-blue-800"
+                  className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
                   aria-label="Clear active skill"
                 >
                   <X size={12} />

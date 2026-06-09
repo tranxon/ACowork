@@ -113,7 +113,7 @@ pub struct SessionState {
     ///   `false` means distill the tail (new messages after last compaction).
     pub(crate) is_compacted: bool,
     /// Per-session model selection (ADR-012).
-    /// Initialized from JSONL metadata or Gateway LLMConfigDelivery.
+    /// Initialized from JSONL metadata, ProviderListUpdate, or model_switch.
     pub(crate) model: Option<String>,
     /// Per-session provider selection (ADR-012).
     pub(crate) provider: Option<String>,

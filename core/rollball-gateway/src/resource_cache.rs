@@ -420,7 +420,6 @@ pub fn save_embedding_models(data_dir: &Path, list: &EmbeddingModelsFile) -> Res
 pub(crate) async fn rebuild_and_save_provider_cache(
     gw: &mut crate::gateway::state::GatewayState,
     data_dir: &Path,
-    _models_cache: &crate::http::models_api::ModelsCache,
 ) {
     let max_output_tokens = gw
         .config
@@ -437,7 +436,7 @@ pub(crate) async fn rebuild_and_save_provider_cache(
             Err(_) => continue,
         };
 
-        // Look up protocol type and base API URL from models.dev data.
+        // Look up protocol type and base API URL from offline data.
         // Note: lookup_protocol_info is sync (uses offline data).
         let (protocol_type, api_base_url) =
             crate::http::models_api::lookup_protocol_info(name, None);

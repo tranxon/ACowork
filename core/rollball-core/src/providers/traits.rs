@@ -470,11 +470,40 @@ pub struct ChatResponse {
 }
 
 /// Usage information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `prompt_tokens` and `completion_tokens` are the **total** values reported
+/// by the API -- they **already include** cache tokens and reasoning tokens.
+/// The `cache_*` and `reasoning_tokens` fields are breakouts for cost
+/// calculation only and do NOT affect the totals.
+///
+/// ## OpenAI protocol mapping
+/// - `prompt_tokens` <- API `usage.prompt_tokens` (includes cached)
+/// - `completion_tokens` <- API `usage.completion_tokens` (includes reasoning)
+/// - `cache_read_tokens` <- API `usage.prompt_tokens_details.cached_tokens`
+/// - `reasoning_tokens` <- API `usage.completion_tokens_details.reasoning_tokens`
+///
+/// ## Anthropic protocol mapping
+/// - `prompt_tokens` <- `input_tokens + cache_creation + cache_read`
+/// - `completion_tokens` <- `output_tokens`
+/// - `cache_read_tokens` <- `cache_read_input_tokens`
+/// - `cache_write_tokens` <- `cache_creation_input_tokens`
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageInfo {
+    /// Total input tokens (including cache read/write).
     pub prompt_tokens: u64,
+    /// Total output tokens (including reasoning).
     pub completion_tokens: u64,
+    /// Total tokens (prompt + completion).
     pub total_tokens: u64,
+    /// Tokens served from prompt cache.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Tokens written to prompt cache.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// Reasoning/thinking tokens.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 /// Stream event for streaming responses

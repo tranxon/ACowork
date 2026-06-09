@@ -10,38 +10,30 @@
 
 use std::sync::Arc;
 
-use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::providers::traits::Provider;
 
 use crate::agent::loop_::{AgentLoop, ChunkEvent, SessionChunkEvent};
 
 impl AgentLoop {
-    /// Update the LLM provider at runtime (e.g., after receiving a hot-pushed
-    /// LLMConfigDelivery from Gateway).
-    /// `provider_id` is the Vault provider ID (not protocol name) for
-    /// compact_model lookup.
+    /// Update the LLM provider at runtime (e.g., after a `ModelSwitch`
+    /// message rebuilds the Provider from the global cache).
+    ///
+    /// The current provider_id is tracked in `SessionState.provider`,
+    /// which the ModelSwitch handler updates before invoking this method.
+    /// At distillation time, `resolve_distill_model` looks up the
+    /// compact_model via `self.session.provider()`.
     pub fn update_provider(
         &mut self,
         new_provider: Arc<dyn Provider>,
         model: String,
         provider_id: Option<String>,
     ) {
+        // `self.core` is an owned `AgentCore` (per-session clone), so we
+        // can mutate it directly. The optional `provider_id` is kept as
+        // a parameter for caller compatibility but is now persisted on
+        // `SessionState.provider` instead of on `AgentCore`.
         self.core.update_provider(new_provider, model);
-        if let Some(pid) = provider_id {
-            self.core.current_provider_id = Some(pid);
-        }
-    }
-
-    /// Update gateway model capabilities at runtime (e.g., after receiving a
-    /// hot-pushed LLMConfigDelivery from Gateway).
-    /// The capabilities are stored keyed by model ID for multi-model support.
-    pub fn update_gateway_model_capabilities(&mut self, model_id: &str, caps: ModelCapabilitiesInfo) {
-        self.core.update_gateway_model_capabilities(model_id, caps);
-    }
-
-    /// Update the max output tokens limit from Gateway config.
-    pub fn update_max_output_tokens_limit(&mut self, limit: u64) {
-        self.core.update_max_output_tokens_limit(limit);
+        let _ = provider_id;
     }
 
     /// Apply runtime config overrides from Gateway.
@@ -102,18 +94,19 @@ impl AgentLoop {
         let current_model = self.resolve_current_model(None);
         let estimated_tokens = crate::token::count_text(content_text, &current_model) as u64;
 
-        // Path 1: resolve compact_model from current provider (in-memory)
-        let compact_model = self
-            .core
-            .current_provider_id
-            .as_ref()
+        // Path 1: resolve compact_model from current provider (in-memory).
+        // The current provider id lives on the per-session SessionState
+        // (set by ModelSwitch handler) — there is no global "current
+        // provider" on AgentCore anymore.
+        let compact_model: Option<String> = self
+            .session
+            .provider()
             .and_then(|pid| self.core.provider_compact_models.get(pid))
             .and_then(|cm| cm.clone());
         if let Some(ref compact_model) = compact_model {
             if let Some(cap) = self
                 .core
-                .gateway_model_capabilities
-                .get(compact_model)
+                .get_model_capabilities(compact_model)
             {
                 if cap.context_window >= estimated_tokens {
                     tracing::info!(
@@ -304,9 +297,10 @@ impl AgentLoop {
                 // Compute and send updated context usage after compaction.
                 // The history token count has changed, but the frontend still
                 // shows the old number from the last LLM API response.
-                let caps = self.core.gateway_model_capabilities.get(model_name);
+                let caps = self.core.get_model_capabilities(model_name);
                 if let Some(caps) = caps {
-                    let usable = caps.effective_input_budget(self.core.max_output_tokens_limit);
+                    let max_output_limit = self.core.max_output_tokens_limit_for_model(model_name);
+                    let usable = caps.effective_input_budget(max_output_limit);
                     let total_tokens = self.session.history.token_count();
                     let usage_percent = if usable > 0 {
                         ((total_tokens as f64 / usable as f64) * 100.0).min(100.0) as u8
@@ -391,11 +385,13 @@ impl AgentLoop {
     ) -> rollball_core::providers::traits::ChatRequest {
         // Inject current todo list into system prompt before building
         context_builder.set_todo_context(self.session.format_todos());
+        let caps = self.get_model_capabilities(current_model);
+        let max_output_limit = self.core.max_output_tokens_limit_for_model(current_model);
         let mut chat_request = context_builder.build(
             &self.core.manifest,
             &self.session.history,
-            self.get_model_capabilities(current_model),
-            self.core.max_output_tokens_limit,
+            caps.as_ref(),
+            max_output_limit,
         );
 
         tracing::info!(
@@ -496,18 +492,18 @@ impl AgentLoop {
 
             // Compute and emit context usage report
             let model_caps = self.get_model_capabilities(current_model);
+            let max_output_limit = self.core.max_output_tokens_limit_for_model(current_model);
             tracing::debug!(
                 has_chunk_tx = self.core.on_chunk.is_some(),
                 has_model_caps = model_caps.is_some(),
-                caps_count = self.core.gateway_model_capabilities.len(),
                 has_usage = true,
                 "ContextUsage: checking preconditions"
             );
             if let Some(caps) = model_caps {
                 let ctx_usage = if prompt_tokens_reliable {
-                    crate::agent::context::compute_context_usage(caps, usage, self.core.max_output_tokens_limit)
+                    crate::agent::context::compute_context_usage(&caps, usage, max_output_limit)
                 } else {
-                    let usable = caps.effective_input_budget(self.core.max_output_tokens_limit);
+                    let usable = caps.effective_input_budget(max_output_limit);
                     let percent = if usable > 0 {
                         ((local_estimate as f64 / usable as f64) * 100.0).min(100.0) as u8
                     } else {
@@ -533,7 +529,12 @@ impl AgentLoop {
                     tracing::debug!("ContextUsage: on_chunk channel full/closed or session_id missing");
                 }
             } else {
-                let available: Vec<&str> = self.core.gateway_model_capabilities.keys().map(|s| s.as_str()).collect();
+                let available: Vec<String> = {
+                    let list = self.core.global_provider_list.read().unwrap();
+                    list.iter()
+                        .flat_map(|p| p.models.iter().map(|m| m.id.clone()))
+                        .collect()
+                };
                 let msg = format!(
                     "Model capabilities not found for '{}'. Available: {:?}. \
                      Check that the model name matches exactly (case-sensitive). \

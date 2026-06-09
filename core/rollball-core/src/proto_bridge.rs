@@ -76,109 +76,11 @@ impl From<proto::ContextUsageInfo> for protocol::ContextUsageInfo {
     }
 }
 
-// ── ModelCostInfo ↔ ModelCostInfo ────────────────────────────────────────
-
-impl From<&protocol::ModelCostInfo> for proto::ModelCostInfo {
-    fn from(c: &protocol::ModelCostInfo) -> Self {
-        Self {
-            input_per_million: c.input_per_million.unwrap_or(0.0),
-            output_per_million: c.output_per_million.unwrap_or(0.0),
-        }
-    }
-}
-
-impl From<proto::ModelCostInfo> for protocol::ModelCostInfo {
-    fn from(c: proto::ModelCostInfo) -> Self {
-        Self {
-            input_per_million: if c.input_per_million == 0.0 {
-                None
-            } else {
-                Some(c.input_per_million)
-            },
-            output_per_million: if c.output_per_million == 0.0 {
-                None
-            } else {
-                Some(c.output_per_million)
-            },
-        }
-    }
-}
-
-// ── ModelModalities ↔ ModelModalities ────────────────────────────────────
-
-impl From<&protocol::ModelModalities> for proto::ModelModalities {
-    fn from(m: &protocol::ModelModalities) -> Self {
-        Self {
-            input: m.input.clone(),
-            output: m.output.clone(),
-        }
-    }
-}
-
-impl From<proto::ModelModalities> for protocol::ModelModalities {
-    fn from(m: proto::ModelModalities) -> Self {
-        Self {
-            input: m.input,
-            output: m.output,
-        }
-    }
-}
-
-// ── ModelCapabilitiesInfo ↔ ModelCapabilitiesInfo ────────────────────────
-
-impl From<&protocol::ModelCapabilitiesInfo> for proto::ModelCapabilitiesInfo {
-    fn from(m: &protocol::ModelCapabilitiesInfo) -> Self {
-        Self {
-            context_window: m.context_window,
-            max_output_tokens: m.max_output_tokens,
-            max_input_tokens: m.max_input_tokens.unwrap_or(0),
-            supports_tool_calling: m.supports_tool_calling,
-            supports_reasoning: m.supports_reasoning.unwrap_or(false),
-            supports_attachment: m.supports_attachment.unwrap_or(false),
-            supports_temperature: m.supports_temperature.unwrap_or(true),
-            cost: m.cost.as_ref().map(|c| c.into()),
-            modalities: m.modalities.as_ref().map(|m| m.into()),
-            name: m.name.clone().unwrap_or_default(),
-            family: m.family.clone().unwrap_or_default(),
-            knowledge_cutoff: m.knowledge_cutoff.clone().unwrap_or_default(),
-        }
-    }
-}
-
-impl From<proto::ModelCapabilitiesInfo> for protocol::ModelCapabilitiesInfo {
-    fn from(m: proto::ModelCapabilitiesInfo) -> Self {
-        Self {
-            context_window: m.context_window,
-            max_output_tokens: m.max_output_tokens,
-            max_input_tokens: if m.max_input_tokens == 0 {
-                None
-            } else {
-                Some(m.max_input_tokens)
-            },
-            supports_tool_calling: m.supports_tool_calling,
-            supports_reasoning: if !m.supports_reasoning {
-                None
-            } else {
-                Some(true)
-            },
-            supports_attachment: if !m.supports_attachment {
-                None
-            } else {
-                Some(true)
-            },
-            supports_temperature: if m.supports_temperature {
-                None // default true, so None preserves default behavior
-            } else {
-                Some(false)
-            },
-            cost: m.cost.map(|c| c.into()),
-            modalities: m.modalities.map(|m| m.into()),
-            name: if m.name.is_empty() { None } else { Some(m.name) },
-            family: if m.family.is_empty() { None } else { Some(m.family) },
-            knowledge_cutoff: if m.knowledge_cutoff.is_empty() { None } else { Some(m.knowledge_cutoff) },
-        }
-    }
-}
+// ── ModelCostInfo / ModelModalities / ModelCapabilitiesInfo proto bridges ──
+// REMOVED: These proto messages have been deleted from gateway_ipc.proto.
+// The Rust structs in protocol.rs are retained (used in ProviderListItem JSON),
+// but they no longer need proto ↔ domain conversion since they travel as JSON
+// inside ProviderListUpdate.provider_list_json.
 
 // ── SessionInfoDto ↔ SessionInfoDto ──────────────────────────────────────
 
@@ -605,30 +507,16 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     },
                 ))
             }
-            protocol::GatewayResponse::LLMConfigDelivery {
-                provider,
-                model,
-                api_key,
-                base_url,
-                models,
-                model_capabilities,
-                max_output_tokens_limit,
-                protocol_type,
-                compact_model,
+            protocol::GatewayResponse::ProviderListUpdate {
+                provider_list,
                 provider_list_version,
+                provider_key_vault,
             } => {
-                Some(proto::server_message::Payload::LlmConfigDelivery(
-                    proto::LlmConfigDelivery {
-                        provider: provider.clone(),
-                        model: model.clone().unwrap_or_default(),
-                        api_key: api_key.clone(),
-                        base_url: base_url.clone().unwrap_or_default(),
-                        models: models.clone(),
-                        model_capabilities: model_capabilities.as_ref().map(|m| m.into()),
-                        max_output_tokens_limit: *max_output_tokens_limit,
-                        protocol_type: format!("{:?}", protocol_type).to_lowercase(),
-                        compact_model: compact_model.clone(),
+                Some(proto::server_message::Payload::ProviderListUpdate(
+                    proto::ProviderListUpdate {
+                        provider_list_json: serde_json::to_string(provider_list).unwrap_or_default(),
                         provider_list_version: *provider_list_version,
+                        provider_key_vault_json: serde_json::to_string(provider_key_vault).unwrap_or_default(),
                     },
                 ))
             }
@@ -931,36 +819,18 @@ mod tests {
     }
 
     #[test]
-    fn test_model_capabilities_info_roundtrip() {
-        let original = protocol::ModelCapabilitiesInfo {
-            context_window: 128000,
-            max_output_tokens: 16384,
-            max_input_tokens: Some(120000),
-            supports_tool_calling: true,
-            supports_reasoning: Some(true),
-            supports_attachment: Some(true),
-            supports_temperature: None,
-            cost: Some(protocol::ModelCostInfo {
-                input_per_million: Some(2.5),
-                output_per_million: Some(10.0),
-            }),
-            modalities: Some(protocol::ModelModalities {
-                input: vec!["text".to_string(), "image".to_string()],
-                output: vec!["text".to_string()],
-            }),
-            name: Some("GPT-4o".to_string()),
-            family: Some("gpt".to_string()),
-            knowledge_cutoff: Some("2025-04".to_string()),
+    fn test_provider_list_update_to_proto() {
+        let resp = protocol::GatewayResponse::ProviderListUpdate {
+            provider_list: vec![],
+            provider_list_version: 42,
+            provider_key_vault: vec![],
         };
-
-        let proto_msg: proto::ModelCapabilitiesInfo = (&original).into();
-        let restored: protocol::ModelCapabilitiesInfo = proto_msg.into();
-
-        assert_eq!(restored.context_window, original.context_window);
-        assert_eq!(restored.max_output_tokens, original.max_output_tokens);
-        assert_eq!(restored.max_input_tokens, original.max_input_tokens);
-        assert_eq!(restored.supports_tool_calling, original.supports_tool_calling);
-        assert_eq!(restored.name, original.name);
+        let msg = resp.to_proto(0);
+        assert_eq!(msg.request_id, 0);
+        assert!(matches!(
+            msg.payload,
+            Some(proto::server_message::Payload::ProviderListUpdate(_))
+        ));
     }
 
     #[test]

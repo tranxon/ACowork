@@ -217,7 +217,10 @@ function ModelCard({
                     <div className="flex items-center gap-2">
                         <span className="text-xs font-semibold">{model.name}</span>
                         {model.recommended && (
-                            <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                            <span
+                              className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                              style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }}
+                            >
                                 {t("embedding.recommended")}
                             </span>
                         )}

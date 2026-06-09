@@ -222,7 +222,7 @@ pub async fn add_key(
 
     // Rebuild provider_list cache so AgentHello picks up the new provider.
     let data_dir = get_data_dir_from_gw(&gw);
-    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir, &state.models_cache).await;
+    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir).await;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
 
     // Hot-push resource version change to all connected agents
@@ -245,7 +245,7 @@ pub async fn remove_key(
 
     // Rebuild provider_list cache after removal.
     let data_dir = get_data_dir_from_gw(&gw);
-    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir, &state.models_cache).await;
+    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir).await;
 
     Ok(Json(MessageResponse {
         message: format!("Key removed for provider: {}", provider),
@@ -349,7 +349,7 @@ pub async fn update_key(
 
     // Rebuild provider_list cache after update.
     let data_dir = get_data_dir_from_gw(&gw);
-    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir, &state.models_cache).await;
+    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir).await;
     drop(gw); // Release write lock before hot-push (which acquires read lock)
 
     // Hot-push resource version change to all connected agents

@@ -244,11 +244,13 @@ impl AgentLoop {
                                 "Emergency trim completed, retrying with trimmed context"
                             );
                             let model_name = self.resolve_current_model(context_builder);
+                            let caps = self.get_model_capabilities(&model_name);
+                            let max_output_limit = self.core.max_output_tokens_limit_for_model(&model_name);
                             let chat_request = context_builder.unwrap().build(
                                 &self.core.manifest,
                                 &self.session.history,
-                                self.get_model_capabilities(&model_name),
-                                self.core.max_output_tokens_limit,
+                                caps.as_ref(),
+                                max_output_limit,
                             );
                             return self
                                 .call_llm_streaming_no_retry(&chat_request)

@@ -409,11 +409,12 @@ async fn async_main(
     //   in the AgentHelloResult response.
     //
     // In Standalone mode: no Gateway provider available (development only).
-    let mut gateway_model_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo> =
-        None;
-    let mut gateway_model_id: Option<String> = None;
+    // Per-session provider/model resolution after LLMConfigDelivery elimination.
+    // We only retain `gateway_current_provider_id` to detect a startup vs.
+    // resumed-session provider mismatch — capabilities and per-model output
+    // limits are now queried on demand via `AgentCore::get_model_capabilities`
+    // and `AgentCore::max_output_tokens_limit_for_model`.
     let mut gateway_current_provider_id: Option<String> = None;
-    let mut gateway_max_output_tokens_limit: u64 = 32_768;
 
     // FIXME(Task10): Process provider_list, mcp_list, key_vault from AgentHelloConfig.
     // In Gateway mode: use AgentHelloConfig (provider_list + key_vault).
@@ -463,13 +464,6 @@ async fn async_main(
                         .first()
                         .map(|m| m.id.clone())
                         .unwrap_or_else(|| "default".to_string());
-
-                    // Look up capabilities for the selected model
-                    if let Some(m) = prov.models.iter().find(|m| m.id == model_id) {
-                        gateway_model_capabilities = Some(m.capabilities.clone());
-                        gateway_model_id = Some(model_id.clone());
-                        gateway_max_output_tokens_limit = m.max_output_tokens_limit;
-                    }
 
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&config));
                     let provider = crate::providers::router::create_provider(
@@ -891,34 +885,50 @@ async fn async_main(
         // between the startup provider and a resumed session's provider.
         let startup_provider_id = gateway_current_provider_id.clone();
 
-        // Inject Gateway model capabilities into the shared core.
+        // Inject the global provider list and key vault into the shared core.
+        // Source of truth: AgentHelloConfig (fresh from Gateway). When the GW
+        // didn't send a new list (version match), fall back to the on-disk
+        // resource cache. Provider API keys live in the in-memory key vault
+        // and are never persisted to disk.
+        //
         // Arc::get_mut only succeeds when the refcount is 1, so we must use
-        // `&mut core` directly (not `core.clone()` which bumps refcount to 2
-        // and makes get_mut always return None).
+        // `&mut core` directly (not `core.clone()` which bumps refcount to 2).
         if let Some(c) = Arc::get_mut(&mut core) {
-            if let Some(caps) = gateway_model_capabilities {
-                let mid = gateway_model_id.as_deref().unwrap_or("default");
-                c.update_gateway_model_capabilities(mid, caps);
-            }
+            let providers_for_init: Option<&Vec<rollball_core::protocol::ProviderListItem>> =
+                hello_config
+                    .as_ref()
+                    .and_then(|cfg| cfg.provider_list.as_ref())
+                    .or(resource_cache.providers.as_ref());
 
-            c.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
-            if let Some(pid) = gateway_current_provider_id {
-                c.current_provider_id = Some(pid);
-            }
-
-            // Populate provider_compact_models from cached provider_list
-            // (resource_cache).  Each ProviderListItem carries a compact_model
-            // field that maps provider_id → distillation model.  This ensures
-            // compact_model survives agent restarts — without it, the map would
-            // stay empty until the next LLMConfigDelivery hot-push.
-            if let Some(ref providers) = resource_cache.providers {
+            if let Some(providers) = providers_for_init {
+                // Populate provider_compact_models for distillation lookups.
                 for p in providers {
                     c.provider_compact_models
                         .insert(p.id.clone(), p.compact_model.clone());
                 }
+                // Replace the shared global provider list under RwLock.
+                {
+                    let mut list = c.global_provider_list.write().unwrap();
+                    *list = providers.clone();
+                }
                 tracing::info!(
-                    count = c.provider_compact_models.len(),
-                    "Populated provider_compact_models from resource cache"
+                    provider_count = providers.len(),
+                    compact_count = c.provider_compact_models.len(),
+                    "Populated AgentCore.global_provider_list from hello_config / resource cache"
+                );
+            }
+
+            if let Some(ref cfg) = hello_config {
+                c.provider_list_version = cfg.provider_list_version;
+                let mut vault = c.provider_key_vault.write().unwrap();
+                vault.clear();
+                for entry in &cfg.provider_key_vault {
+                    vault.insert(entry.provider_id.clone(), entry.api_key.clone());
+                }
+                tracing::info!(
+                    version = c.provider_list_version,
+                    key_count = vault.len(),
+                    "Populated AgentCore provider_key_vault from hello_config"
                 );
             }
 
@@ -947,6 +957,11 @@ async fn async_main(
             protocol_type: protocol_type.clone(),
         };
         let mut session_manager = SessionManager::new(core, session_manager_config);
+
+        // Inject the shared WorkspaceResolver into SessionManager so that
+        // set_session_workspace() can resolve workspace_id → path and send
+        // SetWorkDir to sessions automatically.
+        session_manager.set_resolver(workspace_resolver.clone());
 
         // Set the default workspace for new sessions from last_active in agent_workspaces.json
         // This makes new sessions inherit the user's last selected workspace instead of agent home.
@@ -990,39 +1005,27 @@ async fn async_main(
         // the startup-resolved provider (e.g. session saved with different provider).
         if let (Some(sm), Some(sp)) = (&resumed_model, &resumed_provider) {
             if startup_provider_id.as_deref() != Some(sp.as_str()) {
-                if let Some(providers) = resource_cache.providers.as_ref() {
-                    if let Some(prov_info) = providers.iter().find(|p| p.id == *sp) {
-                        let api_key = hello_config.as_ref().and_then(|cfg| {
-                            cfg.provider_key_vault
-                                .iter()
-                                .find(|k| k.provider_id == *sp)
-                                .map(|k| k.api_key.clone())
-                        });
-                        if let Some(ref key) = api_key {
-                            let model_info = prov_info.models.iter().find(|m| m.id == *sm);
-                            let caps = model_info.map(|m| m.capabilities.clone());
-                            let limit = model_info
-                                .map(|m| m.max_output_tokens_limit)
-                                .unwrap_or(gateway_max_output_tokens_limit);
-
-                            tracing::info!(
-                                session_provider = %sp,
-                                session_model = %sm,
-                                startup_provider = ?startup_provider_id,
-                                "Session provider differs from startup, rebuilding Provider"
-                            );
-                            session_manager.update_llm_config(
-                                sp.clone(),
-                                prov_info.protocol_type.clone(),
-                                key.clone(),
-                                Some(prov_info.base_url.clone()),
-                                sm.clone(),
-                                caps,
-                                limit,
-                                prov_info.compact_model.clone(),
-                            );
-                        }
-                    }
+                tracing::info!(
+                    session_id = %initial_session_id,
+                    session_provider = %sp,
+                    session_model = %sm,
+                    startup_provider = ?startup_provider_id,
+                    "Session provider differs from startup, dispatching ModelSwitch to rebuild Provider"
+                );
+                // Route a ModelSwitch to the resumed session — the SessionTask
+                // will rebuild the per-session Provider via
+                // `AgentCore::build_provider_for(provider_id)` using the global
+                // provider list and key vault populated above.
+                if let Err(e) = session_manager.route_model_switch(
+                    &initial_session_id,
+                    sm.clone(),
+                    Some(sp.clone()),
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        session_id = %initial_session_id,
+                        "route_model_switch failed for resumed session"
+                    );
                 }
             }
         }
@@ -1493,12 +1496,10 @@ async fn async_main(
         // Initialize Grafeo memory store at agent workspace
         agent_loop.init_memory_store(work_dir_path);
 
-        if let Some(caps) = gateway_model_capabilities {
-            let mid = gateway_model_id.as_deref().unwrap_or("default");
-            agent_loop.update_gateway_model_capabilities(mid, caps);
-        }
-
-        agent_loop.update_max_output_tokens_limit(gateway_max_output_tokens_limit);
+        // Standalone mode: per-model capabilities/output-limits are queried on
+        // demand from AgentCore (see `get_model_capabilities` /
+        // `max_output_tokens_limit_for_model`). No global injection needed.
+        let _ = &gateway_current_provider_id; // currently unused in standalone
         run_chat_loop(&mut agent_loop, &mut context_builder).await
     }
 }
@@ -2450,74 +2451,35 @@ async fn process_gateway_recv(
                     return LoopAction::Continue;
                 }
 
-                GatewayResponse::LLMConfigDelivery {
-                    provider,
-                    model,
-                    api_key,
-                    base_url,
-                    models: available_models,
-                    model_capabilities,
-                    max_output_tokens_limit,
-                    protocol_type,
-                    compact_model,
+                GatewayResponse::ProviderListUpdate {
+                    provider_list,
                     provider_list_version,
+                    provider_key_vault,
                 } => {
                     tracing::info!(
-                        provider = %provider,
-                        model = ?model,
-                        max_output_tokens_limit = max_output_tokens_limit,
-                        provider_list_version = provider_list_version,
-                        "Received LLMConfigDelivery at runtime — caching and broadcasting to all sessions"
+                        provider_count = provider_list.len(),
+                        version = provider_list_version,
+                        key_count = provider_key_vault.len(),
+                        "Received ProviderListUpdate at runtime — updating global provider cache"
                     );
 
-                    // Model resolution: prefer explicit model > first from user-selected models
-                    let resolved_model = model
-                            .or_else(|| available_models.first().cloned())
-                            .unwrap_or_else(|| {
-                                tracing::error!(
-                                    provider = %provider,
-                                    "No model available from Gateway hot-push. Please configure a provider and select a model in Settings."
-                                );
-                                format!("NO_MODEL_FOR_{}", provider.to_uppercase())
-                            });
-
-                    // Delegate to SessionManager: it caches the config for new sessions
-                    // AND broadcasts to all existing sessions. Follows the same
-                    // cache+broadcast pattern as RuntimeConfigOverrides.
-                    session_manager.update_llm_config(
-                        provider.clone(),
-                        protocol_type,
-                        api_key,
-                        base_url,
-                        resolved_model.clone(),
-                        model_capabilities,
-                        max_output_tokens_limit,
-                        compact_model.clone(),
+                    // Update the shared AgentCore via SessionManager — sessions
+                    // will pick up new provider/key data on demand. Clone the
+                    // provider list so we can also persist it to disk below.
+                    let providers_for_cache = provider_list.clone();
+                    session_manager.update_global_provider_list(
+                        provider_list,
+                        provider_list_version,
+                        provider_key_vault,
                     );
 
-                    // ADR-012: Per-session model — no global agent_model.json.
-                    // Persist provider_list_version + compact_model to
-                    // resource_cache.json for next-startup AgentHello diff sync
-                    // and distillation model resolution.
-                    if provider_list_version > 0 || compact_model.is_some() {
-                        let mut cache = read_resource_cache(std::path::Path::new(&work_dir));
-                        if provider_list_version > 0 {
-                            cache.provider_list_version = provider_list_version;
-                        }
-                        // Update compact_model in the cached provider list so
-                        // it survives agent restarts (populated into
-                        // provider_compact_models at startup).
-                        if let Some(ref cm) = compact_model {
-                            if let Some(ref mut providers) = cache.providers {
-                                if let Some(p) =
-                                    providers.iter_mut().find(|p| p.id == provider)
-                                {
-                                    p.compact_model = Some(cm.clone());
-                                }
-                            }
-                        }
-                        save_resource_cache(std::path::Path::new(&work_dir), &cache);
-                    }
+                    // Persist provider_list + version to resource_cache.json
+                    // for next-startup AgentHello diff sync. Provider API keys
+                    // are NEVER persisted (kept only in the in-memory vault).
+                    let mut cache = read_resource_cache(std::path::Path::new(&work_dir));
+                    cache.provider_list_version = provider_list_version;
+                    cache.providers = Some(providers_for_cache);
+                    save_resource_cache(std::path::Path::new(&work_dir), &cache);
 
                     return LoopAction::Continue;
                 }
@@ -2618,10 +2580,10 @@ async fn process_gateway_recv(
                     );
 
                     // Validate workspace exists or is "__agent_home__"
+                    // Use a single lock acquisition to avoid TOCTOU issues.
+                    let resolver_guard = resolver.read().unwrap();
                     let is_valid = workspace_id == "__agent_home__"
-                        || resolver
-                            .read()
-                            .unwrap()
+                        || resolver_guard
                             .allowed_dirs()
                             .iter()
                             .any(|d| d.id == workspace_id);
@@ -2634,14 +2596,15 @@ async fn process_gateway_recv(
                         session_manager
                             .pending_workspaces
                             .insert(session_id.clone(), workspace_id.clone());
-                        session_manager.set_session_workspace(&session_id, "__agent_home__");
+                        session_manager.set_session_workspace_with_resolver(&session_id, "__agent_home__", &resolver_guard);
                     } else {
-                        session_manager.set_session_workspace(&session_id, &workspace_id);
+                        session_manager.set_session_workspace_with_resolver(&session_id, &workspace_id, &resolver_guard);
                     }
 
                     // Format and send per-session workspace context
                     session_manager
-                        .update_session_workspace_context(&session_id, &resolver.read().unwrap());
+                        .update_session_workspace_context(&session_id, &resolver_guard);
+                    drop(resolver_guard);
                     return LoopAction::Continue;
                 }
 

@@ -335,9 +335,10 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
               <label
                 className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${
                   access === "read-only"
-                    ? "border-blue-500 bg-blue-50 dark:border-blue-600 dark:bg-blue-900/20"
+                    ? "border-[var(--color-accent)]/50"
                     : "border-zinc-300 dark:border-zinc-600"
                 }`}
+                style={access === "read-only" ? { backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)" } : undefined}
               >
                 <input
                   type="radio"
@@ -396,7 +397,10 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
           <button
             onClick={handleSubmit}
             disabled={!path}
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            className="rounded-md px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            style={{ backgroundColor: "var(--color-accent)" }}
+            onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.85)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
           >
             Add
           </button>

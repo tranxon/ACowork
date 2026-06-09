@@ -1,34 +1,23 @@
-//! Models API — provider model lists with offline fallback
+//! Models API — provider model lists (offline-only)
 //!
 //! Endpoints:
 //!   GET /api/models              — list all providers with models
 //!   GET /api/models/{provider}   — get models for a specific provider
 //!
-//! Data sources (in priority order):
-//!   1. In-memory cache (TTL 5 minutes)
-//!   2. models.dev API (https://models.dev/api.json)
-//!   3. External offline data file (loaded at runtime)
-//!   4. Empty result
+//! Data source: offline_providers.json loaded at startup into a static cache.
 
 use axum::{
-    extract::{Path, State},
+    extract::Path,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::get,
     Json,
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, OnceLock};
-use tokio::sync::RwLock;
+use std::sync::OnceLock;
 
 use crate::http::routes::AppState;
-
-/// Cache TTL: 5 minutes
-const CACHE_TTL_SECS: u64 = 300;
-
-/// models.dev API base URL
-const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 
 // ── Local provider registry ───────────────────────────────────────────
 
@@ -130,17 +119,6 @@ pub struct ProviderModels {
     pub models: Vec<ModelInfo>,
 }
 
-/// Cached response from models.dev
-pub(crate) struct CachedData {
-    /// JSON value from models.dev
-    data: serde_json::Value,
-    /// When the cache was populated
-    fetched_at: std::time::Instant,
-}
-
-/// Shared cache state
-pub(crate) type ModelsCache = Arc<RwLock<Option<CachedData>>>;
-
 // ── Route builder ─────────────────────────────────────────────────────
 
 pub fn models_routes() -> Router<AppState> {
@@ -149,31 +127,14 @@ pub fn models_routes() -> Router<AppState> {
         .route("/api/models/{provider}", get(get_provider_models))
 }
 
-/// Reset routes — Gateway lifecycle management
-pub fn reset_routes() -> Router<AppState> {
-    Router::new().route("/api/gateway/reset", post(reset_gateway))
-}
-
 // ── Offline data ──────────────────────────────────────────────────────
-
-/// Global data directory path, set once during server startup.
-/// Used as the primary search location for `offline_providers.json`
-/// (writable, kept up-to-date by background network refresh).
-static DATA_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-
-/// Set the data directory for offline provider file search.
-/// Must be called once before any request handling.
-pub(crate) fn set_data_dir(dir: &std::path::Path) {
-    let _ = DATA_DIR.set(dir.to_path_buf());
-}
 
 /// Load offline provider data from a file on disk.
 ///
 /// Search order:
 ///   1. $CARGO_MANIFEST_DIR/../../assets/offline_providers.json  (dev / test via cargo)
-///   2. {data_dir}/offline_providers.json                         (network-updated, writable)
-///   3. {exe_dir}/offline_providers.json                          (installer-provided)
-///   4. {cwd}/offline_providers.json                              (dev convenience)
+///   2. {exe_dir}/offline_providers.json                          (installer-provided)
+///   3. {cwd}/offline_providers.json                              (dev convenience)
 ///
 /// Returns an empty JSON object if no file is found anywhere.
 fn offline_providers() -> &'static serde_json::Value {
@@ -234,19 +195,14 @@ fn build_offline_file_candidates() -> Vec<std::path::PathBuf> {
         }
     }
 
-    // 1. Data directory (writable, kept up-to-date by background refresh)
-    if let Some(data_dir) = DATA_DIR.get() {
-        candidates.push(data_dir.join("offline_providers.json"));
-    }
-
-    // 2. Same directory as the executable (installer-provided, read-only)
+    // 1. Same directory as the executable (installer-provided, read-only)
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(exe_dir) = exe_path.parent()
     {
         candidates.push(exe_dir.join("offline_providers.json"));
     }
 
-    // 3. Current working directory (dev convenience)
+    // 2. Current working directory (dev convenience)
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("offline_providers.json"));
     }
@@ -275,74 +231,6 @@ fn provider_ids_to_query(provider_id: &str) -> Vec<String> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
-
-/// Fetch models.dev data synchronously (blocking caller until network completes).
-/// Returns Err only when both cache miss and network fetch fail.
-async fn fetch_models(cache: &ModelsCache) -> Result<serde_json::Value, String> {
-    // Check cache
-    {
-        let guard = cache.read().await;
-        if let Some(ref cached) = *guard
-            && cached.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS
-        {
-            return Ok(cached.data.clone());
-        }
-    }
-
-    // Fetch from models.dev
-    let response = reqwest::get(MODELS_DEV_URL)
-        .await
-        .map_err(|e| format!("Failed to fetch models.dev: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("models.dev returned status {}", response.status()));
-    }
-
-    let data: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse models.dev response: {}", e))?;
-
-    // Update cache
-    {
-        let mut guard = cache.write().await;
-        *guard = Some(CachedData {
-            data: data.clone(),
-            fetched_at: std::time::Instant::now(),
-        });
-    }
-
-    Ok(data)
-}
-
-/// Fetch models.dev data in the background, updating the cache on success.
-/// Returns immediately — does NOT wait for the network request.
-/// On success the data is persisted to `{data_dir}/offline_providers.json`
-/// so the full provider list stays available on next launch.
-pub(crate) fn fetch_models_background(cache: ModelsCache) {
-    tokio::spawn(async move {
-        match fetch_models(&cache).await {
-            Ok(data) => {
-                // Persist to data_dir so next launch can use updated data.
-                // Write to a temp file first, then rename — avoids readers
-                // (e.g. reset_gateway) seeing a half-written file.
-                if let Some(dir) = DATA_DIR.get() {
-                    let path = dir.join("offline_providers.json");
-                    let tmp = dir.join("offline_providers.json.tmp");
-                    let content = serde_json::to_string_pretty(&data).unwrap_or_default();
-                    if let Err(e) = std::fs::write(&tmp, &content) {
-                        tracing::warn!("Failed to write offline providers tmp: {}", e);
-                    } else if let Err(e) = std::fs::rename(&tmp, &path) {
-                        tracing::warn!("Failed to rename offline providers tmp: {}", e);
-                        let _ = std::fs::remove_file(&tmp);
-                    }
-                }
-                tracing::debug!("Background models.dev refresh succeeded");
-            }
-            Err(e) => tracing::warn!("Background models.dev refresh failed: {}", e),
-        }
-    });
-}
 
 /// Extract models from a provider JSON object.
 /// Works with both models.dev API response and offline_providers.json format.
@@ -469,29 +357,10 @@ fn resolve_provider(
 
 /// GET /api/models — list all providers with model counts
 ///
-/// Response strategy: offline-first, background-refresh.
-/// Returns offline provider data immediately (sub-ms), then spawns a background
-/// task to fetch models.dev for subsequent requests. This avoids blocking the
-/// UI (especially the onboarding page) on slow network calls.
+/// Returns offline provider data from the static in-memory cache.
 async fn list_all_providers(
-    State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    // Always use offline data for the immediate response — it's always available
-    // and contains the full provider list. The network refresh happens in background.
     let data = offline_providers().clone();
-
-    // If cache is missing or stale, trigger a background refresh.
-    // We do this AFTER cloning offline data so the response isn't blocked.
-    {
-        let guard = state.models_cache.read().await;
-        let needs_refresh = match &*guard {
-            None => true,
-            Some(cached) => cached.fetched_at.elapsed().as_secs() >= CACHE_TTL_SECS,
-        };
-        if needs_refresh {
-            fetch_models_background(state.models_cache.clone());
-        }
-    }
 
     let providers = match data.as_object() {
         Some(obj) => obj,
@@ -566,17 +435,14 @@ async fn list_all_providers(
 /// Resolution order:
 ///   0. (local providers only) Query the running local server directly
 ///   1. Built-in offline data (instant, always available)
-///   2. models.dev cache/API (fallback for providers not in offline data)
-///   3. Empty result
+///   2. Empty result
 ///
 /// For local providers (ollama, lmstudio), their models depend on what the
 /// user has actually loaded in their local server. We query the server first
-/// (with a short timeout), then fall back to static/offline data if unreachable.
+/// (with a short timeout), then return empty if unreachable.
 ///
-/// For remote providers, works as before: offline data first with background
-/// refresh of models.dev cache.
+/// For remote providers, returns offline data only.
 async fn get_provider_models(
-    State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     // 0. For local providers, try querying the running server first
@@ -611,20 +477,8 @@ async fn get_provider_models(
         }));
     }
 
-    // 1. Try offline data first (instant, no network)
-    //    (local providers skip this — handled by step 0 above)
+    // 1. Try offline data (instant, no network)
     if let Some((name, models)) = resolve_provider(offline_providers(), &provider_id) {
-        // Background refresh: if cache is stale, update it asynchronously
-        {
-            let guard = state.models_cache.read().await;
-            let needs_refresh = match &*guard {
-                None => true,
-                Some(cached) => cached.fetched_at.elapsed().as_secs() >= CACHE_TTL_SECS,
-            };
-            if needs_refresh {
-                fetch_models_background(state.models_cache.clone());
-            }
-        }
         return Ok(Json(ProviderModels {
             id: provider_id,
             name,
@@ -632,18 +486,7 @@ async fn get_provider_models(
         }));
     }
 
-    // 2. Try models.dev cache/API (for providers not in offline data)
-    if let Ok(data) = fetch_models(&state.models_cache).await
-        && let Some((name, models)) = resolve_provider(&data, &provider_id)
-    {
-        return Ok(Json(ProviderModels {
-            id: provider_id,
-            name,
-            models,
-        }));
-    }
-
-    // 3. Provider not found — return empty model list
+    // 2. Provider not found — return empty model list
     Ok(Json(ProviderModels {
         id: provider_id.clone(),
         name: provider_id,
@@ -851,45 +694,6 @@ fn enrich_model_from_offline(model: &mut ModelInfo) {
     }
 }
 
-/// POST /api/gateway/reset — reset Gateway state (reload models cache from disk)
-///
-/// When the frontend resets onboarding, this endpoint reloads the models.dev
-/// cache from disk (if previously persisted) instead of re-fetching from the
-/// network. If no disk cache exists (first use), triggers a background fetch.
-async fn reset_gateway(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    // Try loading the latest data from data_dir/offline_providers.json
-    let path = DATA_DIR.get().map(|d| d.join("offline_providers.json"));
-    match path {
-        Some(ref p) if p.exists() => {
-            match std::fs::read_to_string(p)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            {
-                Some(data) => {
-                    let mut guard = state.models_cache.write().await;
-                    *guard = Some(CachedData {
-                        data,
-                        fetched_at: std::time::Instant::now(),
-                    });
-                    tracing::info!("Gateway reset: reloaded from {}", p.display());
-                    Ok(Json(serde_json::json!({"status": "ok", "source": "disk"})))
-                }
-                None => {
-                    // File exists but failed to parse — fall back to background fetch
-                    fetch_models_background(state.models_cache.clone());
-                    Ok(Json(serde_json::json!({"status": "ok", "source": "network"})))
-                }
-            }
-        }
-        _ => {
-            fetch_models_background(state.models_cache.clone());
-            Ok(Json(serde_json::json!({"status": "ok", "source": "network"})))
-        }
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────
 
 // ── Model capabilities lookup (used by IPC and vault hot-push) ──────────
@@ -903,25 +707,6 @@ pub fn lookup_model_capabilities(
 ) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
     let data = offline_providers();
     lookup_model_capabilities_from_data(data, provider, model_id)
-}
-
-/// Look up model capabilities for a specific provider + model_id.
-/// Tries the in-memory cache first (if data has been fetched from models.dev),
-/// then falls back to built-in offline provider data.
-/// Returns None if the model is not found in either source.
-pub(crate) async fn lookup_model_capabilities_with_cache(
-    cache: &ModelsCache,
-    provider: &str,
-    model_id: &str,
-) -> Option<rollball_core::protocol::ModelCapabilitiesInfo> {
-    // 1. Try in-memory cache (may have fresher data from models.dev)
-    if let Ok(data) = fetch_models(cache).await
-        && let Some(caps) = lookup_model_capabilities_from_data(&data, provider, model_id)
-    {
-        return Some(caps);
-    }
-    // 2. Fall back to offline data
-    lookup_model_capabilities(provider, model_id)
 }
 
 /// Internal helper: look up model capabilities from a JSON data source.
@@ -999,20 +784,6 @@ pub fn lookup_protocol_info(
     lookup_protocol_info_from_data(data, provider_id, model_id)
 }
 
-/// Look up protocol info with cache freshness (tries network cache first).
-/// Falls back to offline data when cache is unavailable.
-pub(crate) async fn lookup_protocol_info_with_cache(
-    cache: &ModelsCache,
-    provider_id: &str,
-    model_id: Option<&str>,
-) -> (rollball_core::protocol::ProtocolType, Option<String>) {
-    let data = match fetch_models(cache).await {
-        Ok(d) => d,
-        Err(_) => offline_providers().clone(),
-    };
-    lookup_protocol_info_from_data(&data, provider_id, model_id)
-}
-
 /// Internal helper: look up protocol info from a JSON data source.
 ///
 /// Priority: local provider registry > model-level npm > provider-level npm > default OpenAI.
@@ -1080,6 +851,7 @@ fn lookup_protocol_info_from_data(
     let provider_api = provider_obj.get("api")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
     (derive_protocol_type(provider_npm), provider_api)
 }
 

@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rollball_core::protocol::ModelCapabilitiesInfo;
 use rollball_core::protocol::ProtocolType;
 use rollball_core::protocol::{SearchKeyEntry, SearchProviderListItem};
 use rollball_core::tools::traits::Tool;
@@ -136,23 +135,6 @@ impl RuntimeConfigOverrides {
     }
 }
 
-/// Cached LLM configuration from the latest Gateway LLMConfigDelivery push.
-///
-/// Stored so that sessions created *after* a model/provider switch inherit
-/// the correct provider (via `UpdateProvider`) and capabilities, rather
-/// than falling back to the stale values in the `AgentCore` template.
-#[derive(Debug, Clone)]
-struct CachedLLMConfig {
-    provider_name: String,
-    protocol_type: ProtocolType,
-    api_key: String,
-    base_url: Option<String>,
-    model: String,
-    capabilities: Option<ModelCapabilitiesInfo>,
-    max_output_tokens_limit: u64,
-    compact_model: Option<String>,
-}
-
 /// Pending embedding config from Gateway EmbeddingConfigUpdate.
 ///
 /// Stored so that the config can be persisted to `agent_config.json`
@@ -193,9 +175,6 @@ pub struct SessionManager {
     /// After the session-workspace refactor, this is kept for backward
     /// compatibility; new code should use `session_workspaces`.
     workspace_context: Option<String>,
-    /// Cached LLM config from LLMConfigDelivery (provider params, caps, limit)
-    /// that must be re-applied to every newly created session.
-    cached_llm: Option<CachedLLMConfig>,
     /// MCP tool wrappers, built when MCP servers are connected.
     /// Merged into each new session's tools at creation time.
     mcp_tools: Option<Vec<Arc<dyn Tool>>>,
@@ -212,6 +191,11 @@ pub struct SessionManager {
     /// Default workspace ID for new sessions (no persisted workspace).
     /// Falls back to "__agent_home__" when no last_active workspace is set.
     default_workspace_id: String,
+    /// Shared WorkspaceResolver for resolving workspace_id → filesystem path.
+    /// Set once via `set_resolver()` after construction. When available,
+    /// `set_session_workspace()` will also send `SetWorkDir` to the session
+    /// so that `AgentCore::current_work_dir` is kept in sync automatically.
+    resolver: Option<Arc<std::sync::RwLock<WorkspaceResolver>>>,
     /// Runtime-injected debug handles (set when Gateway pushes EnableDebugMode).
     /// When Some, new sessions inherit the debug controller, event sender,
     /// and notify handles. Existing sessions restart via urgent_interrupt
@@ -240,17 +224,26 @@ impl SessionManager {
             config,
             runtime_overrides: RuntimeConfigOverrides::default(),
             workspace_context: None,
-            cached_llm: None,
             mcp_tools: None,
             mcp_manager: McpManager::new(),
             session_workspaces: HashMap::new(),
             pending_workspaces: HashMap::new(),
             default_workspace_id: "__agent_home__".to_string(),
+            resolver: None,
             runtime_debug_handles: None,
             debug_controllers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             urgent_stops: HashMap::new(),
             pending_embed_config: None,
         }
+    }
+
+    /// Set the shared WorkspaceResolver.
+    ///
+    /// Must be called once after construction (before any session is created)
+    /// so that `set_session_workspace()` can resolve workspace IDs to actual
+    /// filesystem paths and send `SetWorkDir` to sessions.
+    pub fn set_resolver(&mut self, resolver: Arc<std::sync::RwLock<WorkspaceResolver>>) {
+        self.resolver = Some(resolver);
     }
 
     /// Create a new session, spawning it as an independent tokio task.
@@ -465,36 +458,10 @@ impl SessionManager {
             }
         }
 
-        // Re-apply the cached LLM config (provider params, capabilities,
-        // max_output_tokens) to the new session. This mirrors the
-        // RuntimeConfigOverrides replay pattern for consistency.
-        if let Some(ref cached) = self.cached_llm {
-            tracing::info!(
-                session_id = %session_id,
-                provider = %cached.provider_name,
-                model = %cached.model,
-                "SessionManager: replaying LLM config to new session"
-            );
-            if let Some(handle) = self.sessions.get(&session_id) {
-                let _ = handle.send(SessionMessage::UpdateProvider {
-                    provider_name: cached.provider_name.clone(),
-                    protocol_type: cached.protocol_type.clone(),
-                    api_key: Some(cached.api_key.clone()),
-                    base_url: cached.base_url.clone(),
-                    model: cached.model.clone(),
-                    compact_model: cached.compact_model.clone(),
-                });
-                if let Some(ref caps) = cached.capabilities {
-                    let _ = handle.send(SessionMessage::UpdateCapabilities {
-                        model: cached.model.clone(),
-                        caps: caps.clone(),
-                    });
-                }
-                let _ = handle.send(SessionMessage::UpdateMaxOutputTokens {
-                    limit: cached.max_output_tokens_limit,
-                });
-            }
-        }
+        // Provider list / capabilities / max-output limits are now read
+        // on demand from the shared `AgentCore.global_provider_list`
+        // populated at AgentHello and updated via ProviderListUpdate. No
+        // per-session replay is required — sessions query AgentCore directly.
 
         Ok(session_id)
     }
@@ -782,76 +749,59 @@ impl SessionManager {
         self.config.full_tool_specs = specs;
     }
 
-    /// Cache LLM config (provider, capabilities, limit) from LLMConfigDelivery
-    /// and broadcast to all active sessions.
+    /// Update the global provider list from a ProviderListUpdate push.
     ///
-    /// Follows the same cache+broadcast pattern: the config is cached so
-    /// sessions created *after* a model switch inherit the correct provider,
-    /// capabilities, and token limits.
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_llm_config(
+    /// Updates the shared AgentCore's `global_provider_list`, version, and
+    /// `provider_key_vault`. No per-session broadcast is needed — sessions
+    /// query the shared cache on demand via
+    /// [`AgentCore::get_provider`] / [`AgentCore::get_model_capabilities`].
+    pub fn update_global_provider_list(
         &mut self,
-        provider_name: String,
-        protocol_type: ProtocolType,
-        api_key: String,
-        base_url: Option<String>,
-        model: String,
-        capabilities: Option<ModelCapabilitiesInfo>,
-        max_output_tokens_limit: u64,
-        compact_model: Option<String>,
-    ) -> Vec<String> {
+        provider_list: Vec<rollball_core::protocol::ProviderListItem>,
+        provider_list_version: u64,
+        provider_key_vault: Vec<rollball_core::protocol::ProviderKeyEntry>,
+    ) {
         tracing::info!(
-            provider = %provider_name,
-            model = %model,
-            max_output_tokens_limit = max_output_tokens_limit,
-            compact_model = ?compact_model,
-            "SessionManager: caching LLM config"
+            provider_count = provider_list.len(),
+            version = provider_list_version,
+            key_count = provider_key_vault.len(),
+            "SessionManager: updating global provider list"
         );
-        self.cached_llm = Some(CachedLLMConfig {
-            provider_name: provider_name.clone(),
-            protocol_type: protocol_type.clone(),
-            api_key: api_key.clone(),
-            base_url: base_url.clone(),
-            model: model.clone(),
-            capabilities: capabilities.clone(),
-            max_output_tokens_limit,
-            compact_model: compact_model.clone(),
-        });
 
-        // Broadcast to existing sessions (matching broadcast() pattern:
-        // iterate &self.sessions directly to avoid active_sessions() allocation
-        // and send_to_session() double-lookup).
-        let mut failed = Vec::new();
-        for (sid, handle) in &self.sessions {
-            if handle.send(SessionMessage::UpdateProvider {
-                provider_name: provider_name.clone(),
-                protocol_type: protocol_type.clone(),
-                api_key: Some(api_key.clone()),
-                base_url: base_url.clone(),
-                model: model.clone(),
-                compact_model: compact_model.clone(),
-            }).is_err() {
-                failed.push(sid.clone());
+        // The shared `core` is wrapped in `Arc<AgentCore>` and may be cloned
+        // by SessionTasks; mutate `provider_compact_models` and the version
+        // counter only when we are the sole owner. The provider_list and
+        // key vault live behind `Arc<RwLock<...>>` and can be updated
+        // regardless of refcount.
+        if let Some(c) = Arc::get_mut(&mut self.core) {
+            c.provider_compact_models.clear();
+            for provider in &provider_list {
+                c.provider_compact_models
+                    .insert(provider.id.clone(), provider.compact_model.clone());
             }
-            if let Some(ref caps) = capabilities {
-                if handle.send(SessionMessage::UpdateCapabilities {
-                    model: model.clone(),
-                    caps: caps.clone(),
-                }).is_err() {
-                    if !failed.contains(sid) {
-                        failed.push(sid.clone());
-                    }
-                }
-            }
-            if handle.send(SessionMessage::UpdateMaxOutputTokens {
-                limit: max_output_tokens_limit,
-            }).is_err() {
-                if !failed.contains(sid) {
-                    failed.push(sid.clone());
-                }
+            c.provider_list_version = provider_list_version;
+        } else {
+            tracing::warn!(
+                "SessionManager: AgentCore Arc has multiple owners; \
+                 provider_compact_models / provider_list_version not updated. \
+                 Sessions will still see new provider_list + key vault via shared RwLock."
+            );
+        }
+
+        // Replace the shared global provider list (live read-view for sessions).
+        {
+            let mut list = self.core.global_provider_list.write().unwrap();
+            *list = provider_list;
+        }
+
+        // Replace the shared key vault (in-memory only, never persisted).
+        {
+            let mut vault = self.core.provider_key_vault.write().unwrap();
+            vault.clear();
+            for entry in provider_key_vault {
+                vault.insert(entry.provider_id, entry.api_key);
             }
         }
-        failed
     }
 
     /// Cache workspace context and broadcast to all active sessions.
@@ -1009,19 +959,20 @@ impl SessionManager {
         self.core.manifest()
     }
 
-    /// Get the current provider name from cached LLM config.
+    /// Get the name of the first available provider from the global cache.
     /// Used for budget queries in the Gateway loop and ConfigSnapshot.
+    /// Returns an empty string if no providers are configured.
     pub fn provider_name(&self) -> String {
-        self.cached_llm
-            .as_ref()
-            .map(|c| c.provider_name.clone())
-            .unwrap_or_default()
+        let list = self.core.global_provider_list.read().unwrap();
+        list.first().map(|p| p.id.clone()).unwrap_or_default()
     }
 
-    /// Get the current model name from cached LLM config.
-    /// Used for ConfigSnapshot responses.
+    /// Per-session model is owned by SessionState, not SessionManager.
+    /// This method is kept as a stub returning `None` so legacy ConfigSnapshot
+    /// code paths can still compile; callers should query the target session
+    /// directly via `SessionState.model` instead.
     pub fn current_model_name(&self) -> Option<String> {
-        self.cached_llm.as_ref().map(|c| c.model.clone())
+        None
     }
 
     /// Access the Grafeo memory store from the shared core.
@@ -1114,7 +1065,9 @@ impl SessionManager {
     /// Set the current workspace for a specific session.
     ///
     /// Updates both the in-memory map and persists to the session's JSONL
-    /// conversation file (when one exists).
+    /// conversation file (when one exists). When a `resolver` has been
+    /// set via [`set_resolver`], also sends `SetWorkDir` so that
+    /// `AgentCore::current_work_dir` is updated for tool execution.
     pub fn set_session_workspace(&mut self, session_id: &str, workspace_id: &str) {
         self.session_workspaces
             .insert(session_id.to_string(), workspace_id.to_string());
@@ -1129,6 +1082,41 @@ impl SessionManager {
         if let Some(handle) = self.sessions.get(session_id) {
             let _ = handle.send(SessionMessage::SetWorkspaceId {
                 workspace_id: workspace_id.to_string(),
+            });
+        }
+        // When resolver is available, also send SetWorkDir so that
+        // AgentCore::current_work_dir is updated for tool execution.
+        // Without this, the session would keep using the default agent_home
+        // path until an explicit SetSessionWorkspace message arrives from
+        // the Gateway.
+        if let Some(ref resolver) = self.resolver {
+            let (resolved_path, _is_home) = {
+                let guard = resolver.read().unwrap();
+                self.current_dir_for(session_id, &guard)
+            };
+            if let Some(handle) = self.sessions.get(session_id) {
+                let _ = handle.send(SessionMessage::SetWorkDir {
+                    path: resolved_path,
+                });
+            }
+        }
+    }
+
+    /// Set the session workspace and also send the resolved workspace path
+    /// for tool execution. This is the preferred method when the resolver
+    /// is available.
+    pub fn set_session_workspace_with_resolver(
+        &mut self,
+        session_id: &str,
+        workspace_id: &str,
+        resolver: &WorkspaceResolver,
+    ) {
+        self.set_session_workspace(session_id, workspace_id);
+        // Resolve and send the workspace path for tool execution
+        let (resolved_path, _is_home) = self.current_dir_for(session_id, resolver);
+        if let Some(handle) = self.sessions.get(session_id) {
+            let _ = handle.send(SessionMessage::SetWorkDir {
+                path: resolved_path,
             });
         }
     }

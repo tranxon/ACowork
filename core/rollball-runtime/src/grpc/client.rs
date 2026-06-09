@@ -26,7 +26,7 @@ use rollball_core::error::RollballError;
 use rollball_core::proto;
 use rollball_core::proto::server_message::Payload as ServerPayload;
 use rollball_core::proto_bridge::GatewayRequestToProto;
-use rollball_core::protocol::{GatewayRequest, GatewayResponse, McpKeyEntry, McpListItem, ProtocolType, ProviderKeyEntry, ProviderListItem};
+use rollball_core::protocol::{GatewayRequest, GatewayResponse, McpKeyEntry, McpListItem, ProviderKeyEntry, ProviderListItem};
 
 /// Configuration delivered by Gateway in the AgentHelloResult handshake.
 ///
@@ -985,29 +985,18 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             actions: cu.actions,
             removed: cu.removed,
         },
-        Some(ServerPayload::LlmConfigDelivery(cfg)) => GatewayResponse::LLMConfigDelivery {
-            provider: cfg.provider,
-            model: if cfg.model.is_empty() {
-                None
+        Some(ServerPayload::ProviderListUpdate(plu)) => GatewayResponse::ProviderListUpdate {
+            provider_list: if plu.provider_list_json.is_empty() {
+                vec![]
             } else {
-                Some(cfg.model)
+                serde_json::from_str(&plu.provider_list_json).unwrap_or_default()
             },
-            api_key: cfg.api_key,
-            base_url: if cfg.base_url.is_empty() {
-                None
+            provider_list_version: plu.provider_list_version,
+            provider_key_vault: if plu.provider_key_vault_json.is_empty() {
+                vec![]
             } else {
-                Some(cfg.base_url)
+                serde_json::from_str(&plu.provider_key_vault_json).unwrap_or_default()
             },
-            models: cfg.models,
-            model_capabilities: cfg.model_capabilities.map(|c| c.into()),
-            max_output_tokens_limit: cfg.max_output_tokens_limit,
-            protocol_type: match cfg.protocol_type.as_str() {
-                "anthropic" => ProtocolType::Anthropic,
-                "ollama" => ProtocolType::Ollama,
-                _ => ProtocolType::OpenAI,
-            },
-            compact_model: cfg.compact_model,
-            provider_list_version: cfg.provider_list_version,
         },
         Some(ServerPayload::WorkspaceConfigUpdate(wcu)) => {
             GatewayResponse::WorkspaceConfigUpdate {
@@ -1331,37 +1320,6 @@ mod tests {
                 assert_eq!(params["content"], "hello");
             }
             _ => panic!("Expected IntentReceived"),
-        }
-    }
-
-    #[test]
-    fn test_proto_to_gateway_response_empty_optional_fields() {
-        let msg = proto::ServerMessage {
-            request_id: 0,
-            payload: Some(ServerPayload::LlmConfigDelivery(
-                proto::LlmConfigDelivery {
-                    provider: "test".to_string(),
-                    model: String::new(),   // empty → None
-                    api_key: "key".to_string(),
-                    base_url: String::new(), // empty → None
-                    models: vec![],
-                    model_capabilities: None,
-                    max_output_tokens_limit: 32768,
-                    protocol_type: "openai".to_string(),
-                    compact_model: None,
-                    provider_list_version: 5,
-                },
-            )),
-        };
-        let resp = proto_to_gateway_response(msg);
-        match resp {
-            GatewayResponse::LLMConfigDelivery {
-                model, base_url, ..
-            } => {
-                assert!(model.is_none());
-                assert!(base_url.is_none());
-            }
-            _ => panic!("Expected LLMConfigDelivery"),
         }
     }
 

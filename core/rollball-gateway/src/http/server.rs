@@ -124,7 +124,6 @@ pub(crate) async fn start_http_server(
     session_mgr: Option<SharedSessionMgr>,
     grpc_session_mgr: Option<crate::grpc::SharedGrpcSessionMgr>,
     bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-    models_cache: crate::http::models_api::ModelsCache,
     session_pending: Option<SessionPendingRequests>,
     log_reload_handle: Option<crate::LogReloadHandle>,
     pusher: Option<Arc<GlobalResourcePusher>>,
@@ -138,16 +137,12 @@ pub(crate) async fn start_http_server(
     let auth = Arc::new(HttpAuth::new(http_config.auth_enabled));
     auth.write_token_file(data_dir)?;
 
-    // Set data directory for offline_providers.json search & persistence
-    crate::http::models_api::set_data_dir(data_dir);
-
     // Build app state
-    let mut app_state = AppState::with_models_cache(
+    let mut app_state = AppState::with_config(
         gateway_state,
         auth,
         session_mgr,
         bridge_tx,
-        models_cache,
         session_pending,
         log_reload_handle,
     );

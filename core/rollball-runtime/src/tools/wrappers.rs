@@ -60,7 +60,7 @@ impl Tool for RateLimitedTool {
         self.inner.spec()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         if let Err(e) = self.check_rate_limit() {
             return Ok(ToolResult {
                 ok: false,
@@ -69,7 +69,7 @@ impl Tool for RateLimitedTool {
                 token_usage: None,
             });
         }
-        self.inner.execute(params).await
+        self.inner.execute(params, work_dir).await
     }
 }
 
@@ -204,7 +204,7 @@ impl PathGuardedTool {
     fn is_filesystem_tool(&self) -> bool {
         matches!(
             self.inner.name().as_str(),
-            "file_read" | "file_write" | "file_edit" | "glob_search" | "content_search"
+            "file_read" | "file_write" | "file_edit" | "glob_search" | "content_search" | "doc_reader"
         )
     }
 
@@ -223,11 +223,12 @@ impl Tool for PathGuardedTool {
         self.inner.spec()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
+        let mut params = params;
         if self.is_filesystem_tool() {
             // Check path parameter
-            if let Some(path) = params["path"].as_str() {
-                match self.validate_path(path) {
+            if let Some(path) = params["path"].as_str().map(|s| s.to_string()) {
+                match self.validate_path(&path) {
                     Ok(access) => {
                         // Write tools require ReadWrite access
                         if self.is_write_tool() && access != WorkspaceAccess::ReadWrite {
@@ -241,33 +242,40 @@ impl Tool for PathGuardedTool {
                                 token_usage: None,
                             });
                         }
-                    }
-                    Err(e) => {
-                        return Ok(ToolResult {
-                            ok: false,
-                            content: String::new(),
-                            error: Some(e),
-                            token_usage: None,
-                        });
-                    }
-                }
-            }
-            // file_edit uses "file_path" instead of "path"
-            if self.inner.name() == "file_edit"
-                && let Some(file_path) = params["file_path"].as_str() {
-                match self.validate_path(file_path) {
-                    Ok(access) => {
-                        // file_edit requires ReadWrite access
-                        if access != WorkspaceAccess::ReadWrite {
-                            return Ok(ToolResult {
-                                ok: false,
-                                content: String::new(),
-                                error: Some(format!(
-                                    "Write access denied for path '{}': directory is read-only",
-                                    file_path
-                                )),
-                                token_usage: None,
-                            });
+                        // Rewrite relative paths to absolute using work_dir
+                        if let Some(wd) = work_dir {
+                            let target = std::path::Path::new(&path);
+                            if !target.is_absolute() {
+                                let abs_path = std::path::Path::new(wd).join(&path);
+                                let abs_path_str = abs_path.to_string_lossy();
+                                // Re-validate the rewritten absolute path to ensure it
+                                // still falls within an allowed directory and has the
+                                // correct access level for the actual target location.
+                                match self.validate_path(&abs_path_str) {
+                                    Ok(resolved_access) => {
+                                        if self.is_write_tool() && resolved_access != WorkspaceAccess::ReadWrite {
+                                            return Ok(ToolResult {
+                                                ok: false,
+                                                content: String::new(),
+                                                error: Some(format!(
+                                                    "Write access denied for resolved path '{}': directory is read-only",
+                                                    abs_path_str
+                                                )),
+                                                token_usage: None,
+                                            });
+                                        }
+                                        params["path"] = serde_json::Value::String(abs_path_str.into_owned());
+                                    }
+                                    Err(e) => {
+                                        return Ok(ToolResult {
+                                            ok: false,
+                                            content: String::new(),
+                                            error: Some(e),
+                                            token_usage: None,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -281,7 +289,7 @@ impl Tool for PathGuardedTool {
                 }
             }
         }
-        self.inner.execute(params).await
+        self.inner.execute(params, work_dir).await
     }
 }
 
@@ -301,7 +309,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }
         }
-        async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+        async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
             Ok(ToolResult {
                 ok: true,
                 content: params.to_string(),
@@ -321,7 +329,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }
         }
-        async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+        async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
             Ok(ToolResult {
                 ok: true,
                 content: format!("Read: {}", params["path"].as_str().unwrap_or("")),
@@ -337,7 +345,7 @@ mod tests {
         let tool = RateLimitedTool::new(inner, 3);
         for _ in 0..3 {
             let result = tool
-                .execute(serde_json::json!({"msg": "hi"}))
+                .execute(serde_json::json!({"msg": "hi"}), None)
                 .await
                 .unwrap();
             assert!(result.ok);
@@ -348,9 +356,9 @@ mod tests {
     async fn test_rate_limited_blocks_over_limit() {
         let inner = Arc::new(EchoTool);
         let tool = RateLimitedTool::new(inner, 2);
-        let _ = tool.execute(serde_json::json!({})).await;
-        let _ = tool.execute(serde_json::json!({})).await;
-        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        let _ = tool.execute(serde_json::json!({}), None).await;
+        let _ = tool.execute(serde_json::json!({}), None).await;
+        let result = tool.execute(serde_json::json!({}), None).await.unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("Rate limit"));
     }
@@ -365,7 +373,7 @@ mod tests {
             last_active: false,
         }]);
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/file.txt" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/file.txt" }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -381,7 +389,7 @@ mod tests {
             last_active: false,
         }]);
         let result = tool
-            .execute(serde_json::json!({ "path": "/etc/passwd" }))
+            .execute(serde_json::json!({ "path": "/etc/passwd" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -398,7 +406,7 @@ mod tests {
             last_active: false,
         }]);
         let result = tool
-            .execute(serde_json::json!({ "path": "subdir/file.txt" }))
+            .execute(serde_json::json!({ "path": "subdir/file.txt" }), None)
             .await
             .unwrap();
         assert!(result.ok); // relative path resolved within allowed dir
@@ -415,7 +423,7 @@ mod tests {
         }]);
         // echo is not a filesystem tool, so no path check
         let result = tool
-            .execute(serde_json::json!({ "path": "/etc/passwd" }))
+            .execute(serde_json::json!({ "path": "/etc/passwd" }), None)
             .await
             .unwrap();
         assert!(result.ok); // Not checked because not a filesystem tool
@@ -432,7 +440,7 @@ mod tests {
         }]);
         // Path traversal via ".." resolves to /etc/passwd which is outside allowed dir
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/../../etc/passwd" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/../../etc/passwd" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -450,7 +458,7 @@ mod tests {
         }]);
         // Prefix-suffix attack: "/tmp/agent-workdir-eval" starts with "/tmp/agent-workdir"
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-workdir-eval/secret" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-workdir-eval/secret" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -468,7 +476,7 @@ mod tests {
             last_active: false,
         }]);
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -487,7 +495,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+            async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
                 Ok(ToolResult {
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
@@ -505,7 +513,7 @@ mod tests {
             last_active: false,
         }]);
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -525,10 +533,10 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+            async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
                 Ok(ToolResult {
                     ok: true,
-                    content: format!("Edited: {}", params["file_path"].as_str().unwrap_or("")),
+                    content: format!("Edited: {}", params["path"].as_str().unwrap_or("")),
                     error: None,
                     token_usage: None,
                 })
@@ -543,7 +551,7 @@ mod tests {
             last_active: false,
         }]);
         let result = tool
-            .execute(serde_json::json!({ "file_path": "/tmp/agent-pkg/prompts/system.md" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/prompts/system.md" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -572,7 +580,7 @@ mod tests {
         ]);
         // Read within workspace should succeed (ReadWrite wins)
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/workspace/file.txt" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/workspace/file.txt" }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -608,7 +616,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+            async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
                 Ok(ToolResult {
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
@@ -635,7 +643,7 @@ mod tests {
         ]);
         // Write within /tmp/agent-pkg/readonly should be blocked
         let result = write_tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/readonly/secret.txt" }))
+            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/readonly/secret.txt" }), None)
             .await
             .unwrap();
         assert!(!result.ok);

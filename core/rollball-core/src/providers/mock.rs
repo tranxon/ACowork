@@ -135,6 +135,7 @@ impl Provider for MockProvider {
                     prompt_tokens: 100,
                     completion_tokens: 50,
                     total_tokens: 150,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -145,6 +146,7 @@ impl Provider for MockProvider {
                     prompt_tokens: 200,
                     completion_tokens: 100,
                     total_tokens: 300,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),

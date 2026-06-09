@@ -11,10 +11,10 @@ use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 use std::path::Path;
 
-pub struct FileEditTool { work_dir: String }
+pub struct FileEditTool;
 
 impl FileEditTool {
-    pub fn new(work_dir: &str) -> Self { Self { work_dir: work_dir.to_string() } }
+    pub fn new() -> Self { Self }
 
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
@@ -206,7 +206,7 @@ fn resolve_match(content: &str, old_string: &str) -> Result<MatchOutcome, String
 impl Tool for FileEditTool {
     fn spec(&self) -> ToolSpec { Self::spec_value() }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let path = params["path"].as_str().unwrap_or("").trim_start_matches('/');
         let old_text = params["old_text"].as_str().unwrap_or("");
         let new_text = params["new_text"].as_str().unwrap_or("");
@@ -215,9 +215,10 @@ impl Tool for FileEditTool {
             return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing required parameters".to_string()), token_usage: None });
         }
 
-        let full_path = Path::new(&self.work_dir).join(path);
+        let base = work_dir.unwrap_or(".");
+        let full_path = Path::new(base).join(path);
         tracing::debug!(
-            work_dir = %self.work_dir,
+            work_dir = %base,
             input_path = %path,
             full_path = %full_path.display(),
             exists = full_path.exists(),
@@ -228,7 +229,7 @@ impl Tool for FileEditTool {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
-                    work_dir = %self.work_dir,
+                    work_dir = %base,
                     input_path = %path,
                     full_path = %full_path.display(),
                     error = %e,
@@ -284,7 +285,7 @@ impl Tool for FileEditTool {
             }),
             Err(e) => {
                 tracing::warn!(
-                    work_dir = %self.work_dir,
+                    work_dir = %base,
                     input_path = %path,
                     full_path = %full_path.display(),
                     error = %e,

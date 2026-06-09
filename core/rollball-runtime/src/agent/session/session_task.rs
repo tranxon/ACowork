@@ -44,26 +44,11 @@ pub enum SessionMessage {
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
-    /// Switch the LLM model at runtime (ADR-012: per-session, carries provider)
+    /// Switch the LLM model at runtime (ADR-012: per-session, carries provider).
+    /// When `provider` is set, the SessionTask rebuilds the LLM Provider
+    /// instance from `AgentCore.build_provider_for(provider_id)`, using
+    /// the global provider list + key vault populated at startup.
     ModelSwitch { model: String, provider: Option<String> },
-    /// Update the LLM provider at runtime (hot-push from Gateway)
-    UpdateProvider {
-        provider_name: String,
-        protocol_type: rollball_core::protocol::ProtocolType,
-        api_key: Option<String>,
-        base_url: Option<String>,
-        model: String,
-        /// Compact/distillation model for this provider (from Vault via LLMConfigDelivery).
-        compact_model: Option<String>,
-    },
-    /// Update gateway model capabilities at runtime
-    UpdateCapabilities {
-        /// Model identifier (e.g. "deepseek-v4-flash") — used as HashMap key
-        model: String,
-        caps: rollball_core::protocol::ModelCapabilitiesInfo,
-    },
-    /// Update max output tokens limit from Gateway config
-    UpdateMaxOutputTokens { limit: u64 },
     /// Apply runtime config overrides from Gateway
     UpdateRuntimeConfig {
         max_output_tokens: Option<u64>,
@@ -89,6 +74,9 @@ pub enum SessionMessage {
     UpdateSessionTitle { title: String },
     /// Persist the per-session workspace_id to the JSONL conversation file
     SetWorkspaceId { workspace_id: String },
+    /// Update the workspace directory path for tool execution.
+    /// Carries the fully-resolved absolute path from SessionManager.
+    SetWorkDir { path: String },
     /// Update identity context from Gateway UserProfileUpdate push
     UpdateIdentityContext { identity_context: Option<String> },
     /// Stop signal to stop the current agent loop iteration
@@ -126,23 +114,6 @@ impl std::fmt::Debug for SessionMessage {
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::ModelSwitch { model, provider } => f.debug_struct("ModelSwitch").field("model", model).field("provider", provider).finish(),
-            SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model, .. } => f
-                .debug_struct("UpdateProvider")
-                .field("provider_name", provider_name)
-                .field("protocol_type", protocol_type)
-                .field("has_api_key", &api_key.is_some())
-                .field("base_url", base_url)
-                .field("model", model)
-                .finish(),
-            SessionMessage::UpdateCapabilities { model, caps } => f
-                .debug_struct("UpdateCapabilities")
-                .field("model", model)
-                .field("caps", caps)
-                .finish(),
-            SessionMessage::UpdateMaxOutputTokens { limit } => f
-                .debug_struct("UpdateMaxOutputTokens")
-                .field("limit", limit)
-                .finish(),
             SessionMessage::UpdateRuntimeConfig { max_output_tokens, max_iterations, temperature, system_prompt_override, shell_approval_threshold } => f
                 .debug_struct("UpdateRuntimeConfig")
                 .field("max_output_tokens", max_output_tokens)
@@ -170,6 +141,10 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::SetWorkspaceId { workspace_id } => f
                 .debug_struct("SetWorkspaceId")
                 .field("workspace_id", workspace_id)
+                .finish(),
+            SessionMessage::SetWorkDir { path } => f
+                .debug_struct("SetWorkDir")
+                .field("path", path)
                 .finish(),
             SessionMessage::UpdateIdentityContext { identity_context } => f
                 .debug_struct("UpdateIdentityContext")
@@ -548,8 +523,13 @@ impl SessionTask {
                     // using the workspace read_file tool.
                     if let Some(ref att_ctx) = attached_context {
                         if !att_ctx.is_empty() {
-                            let work_dir = agent_loop.core.config().work_dir.clone();
-                            let workspace_root = std::path::Path::new(&work_dir).join("workspace");
+                            let workspace_root = agent_loop.core.current_work_dir
+                                .as_ref()
+                                .map(|s| std::path::PathBuf::from(s))
+                                .unwrap_or_else(|| {
+                                    // fallback: agent_home (no workspace configured)
+                                    std::path::PathBuf::from(&agent_loop.core.config().work_dir)
+                                });
                             tracing::info!(
                                 session_id = %session_id,
                                 count = att_ctx.len(),
@@ -805,45 +785,22 @@ impl SessionTask {
                     if let Some(ref conv) = agent_loop.session.conversation() {
                         conv.update_model_provider(&model, provider.as_deref());
                     }
+                    // If the provider also changed, rebuild the LLM Provider
+                    // instance from the shared global cache (set by
+                    // ProviderListUpdate / AgentHello). No per-session vault.
+                    if let Some(ref provider_id) = provider {
+                        if let Some(new_provider) = agent_loop.core.build_provider_for(provider_id) {
+                            agent_loop.update_provider(new_provider, model.clone(), Some(provider_id.clone()));
+                        } else {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                provider_id = %provider_id,
+                                "ModelSwitch: provider not found in global cache, keeping current Provider instance"
+                            );
+                        }
+                    }
                     // Update context builder for next iteration
                     context_builder.set_override_model(model);
-                }
-                Some(SessionMessage::UpdateProvider { provider_name, protocol_type, api_key, base_url, model, compact_model }) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        provider = %provider_name,
-                        model = %model,
-                        "SessionTask: updating provider"
-                    );
-                    // Update the in-memory compact_model cache for this provider
-                    // so distillation can pick it up without disk I/O.
-                    agent_loop.core.provider_compact_models.insert(provider_name.clone(), compact_model.clone());
-                    let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&agent_loop.core.config));
-                    let new_provider = crate::providers::router::create_provider(
-                        &provider_name,
-                        &protocol_type,
-                        api_key.as_deref(),
-                        base_url.as_deref(),
-                        timeouts,
-                    );
-                    agent_loop.update_provider(new_provider, model, Some(provider_name));
-                }
-                Some(SessionMessage::UpdateCapabilities { model, caps }) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        model = %model,
-                        caps_name = ?caps.name,
-                        "SessionTask: updating model capabilities"
-                    );
-                    agent_loop.update_gateway_model_capabilities(&model, caps);
-                }
-                Some(SessionMessage::UpdateMaxOutputTokens { limit }) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        limit = %limit,
-                        "SessionTask: updating max output tokens limit"
-                    );
-                    agent_loop.update_max_output_tokens_limit(limit);
                 }
                 Some(SessionMessage::UpdateRuntimeConfig {
                     max_output_tokens,
@@ -907,6 +864,14 @@ impl SessionTask {
                     );
                     agent_loop.update_session_workspace_id(&workspace_id);
                 }
+                Some(SessionMessage::SetWorkDir { path }) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        path = %path,
+                        "SessionTask: updating work_dir for tool execution"
+                    );
+                    agent_loop.core.current_work_dir = Some(path);
+                }
                 Some(SessionMessage::UpdateIdentityContext { identity_context }) => {
                     tracing::info!(
                         session_id = %session_id,
@@ -957,7 +922,7 @@ impl SessionTask {
                         "SessionTask: updating embedding provider"
                     );
                     // Build a new ONNX provider pointing at the updated embed service.
-                    // This follows the same pattern as UpdateProvider for LLM:
+                    // Same pattern as ModelSwitch for LLM provider rebuild:
                     // create a new provider instance and replace in AgentCore.
                     let new_onnx_provider = crate::embedding::remote::RemoteEmbeddingProvider::with_config(
                         &embed_endpoint,

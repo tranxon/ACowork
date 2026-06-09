@@ -184,7 +184,7 @@ export function WorkspaceExplorer() {
                 <div className="ml-auto flex items-center gap-0.5">
                     <button
                         onClick={handleNewFile}
-                        className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-blue-600 dark:hover:bg-zinc-800 dark:hover:text-blue-400"
+                        className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-[var(--color-accent)] dark:hover:bg-zinc-800"
                         title={t("workspace.explorer.newFile")}
                     >
                         <FilePlus className="h-3.5 w-3.5" />
@@ -208,8 +208,8 @@ export function WorkspaceExplorer() {
 
             {/* Inline name prompt for new file/directory */}
             {newItemPrompt && (
-                <div className="flex items-center gap-1.5 border-b border-blue-200 bg-blue-50 px-3 py-1.5 dark:border-blue-800 dark:bg-blue-950">
-                    <span className="text-[10px] font-medium text-blue-600 shrink-0 dark:text-blue-400">
+                <div className="flex items-center gap-1.5 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5">
+                    <span className="text-[10px] font-medium text-[var(--color-accent)] shrink-0">
                         {newItemPrompt.type === "file" ? "New file:" : "New folder:"}
                     </span>
                     <input

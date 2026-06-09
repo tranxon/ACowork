@@ -79,8 +79,6 @@ pub struct ShellTool {
     shell_path: String,
     /// CLI flag for passing a command string (e.g. "-c", "-Command")
     shell_arg: String,
-    /// Working directory for command execution
-    work_dir: String,
 }
 
 impl ShellTool {
@@ -94,7 +92,6 @@ impl ShellTool {
         shell_binary: &str,
         shell_path: &str,
         shell_arg: &str,
-        work_dir: &str,
     ) -> Self {
         Self {
             tool_name: tool_name.to_string(),
@@ -102,7 +99,6 @@ impl ShellTool {
             shell_binary: shell_binary.to_string(),
             shell_path: shell_path.to_string(),
             shell_arg: shell_arg.to_string(),
-            work_dir: work_dir.to_string(),
         }
     }
 
@@ -191,7 +187,7 @@ impl Tool for ShellTool {
         self.build_spec()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let command = params["command"].as_str().unwrap_or("");
 
         if command.is_empty() {
@@ -234,10 +230,11 @@ impl Tool for ShellTool {
             });
         }
 
+        let effective_work_dir = work_dir.unwrap_or(".");
         tracing::debug!(
             command = %command,
             shell = %self.shell_binary,
-            work_dir = %self.work_dir,
+            work_dir = %effective_work_dir,
             "shell: executing command"
         );
 
@@ -258,7 +255,7 @@ impl Tool for ShellTool {
         let shell_path = self.shell_path.clone();
         let shell_arg = self.shell_arg.clone();
         let command_owned = command.to_string();
-        let work_dir = self.work_dir.clone();
+        let work_dir_owned = effective_work_dir.to_string();
         let tool_name = self.tool_name.clone();
 
         let output = tokio::task::spawn_blocking(move || -> std::io::Result<std::process::Output> {
@@ -268,7 +265,7 @@ impl Tool for ShellTool {
             let mut cmd = std::process::Command::new(&shell_path);
             cmd.arg(&shell_arg)
                 .arg(&command_owned)
-                .current_dir(&work_dir)
+                .current_dir(&work_dir_owned)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
 
@@ -358,13 +355,13 @@ mod tests {
     use super::*;
 
     fn make_tool(name: &str, binary: &str) -> ShellTool {
-        ShellTool::new(name, name, binary, binary, "-c", "/tmp")
+        ShellTool::new(name, name, binary, binary, "-c")
     }
 
     #[tokio::test]
     async fn test_missing_command_parameter() {
         let tool = make_tool("bash", "bash");
-        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        let result = tool.execute(serde_json::json!({}), None).await.unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("Missing 'command'"));
     }
@@ -372,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_command_parameter() {
         let tool = make_tool("bash", "bash");
-        let result = tool.execute(serde_json::json!({"command": ""})).await.unwrap();
+        let result = tool.execute(serde_json::json!({"command": ""}), None).await.unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("Missing 'command'"));
     }
@@ -386,10 +383,9 @@ mod tests {
             "definitely_does_not_exist_shell_xyz",
             "/definitely/not/a/real/path/bash.exe",
             "-c",
-            "/tmp",
         );
         let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}))
+            .execute(serde_json::json!({"command": "echo hello"}), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -412,10 +408,9 @@ mod tests {
             &primary.binary,
             &primary.path,
             &primary.arg,
-            ".",
         );
         let result = tool
-            .execute(serde_json::json!({"command": "echo hello_rollball"}))
+            .execute(serde_json::json!({"command": "echo hello_rollball"}), Some("."))
             .await
             .unwrap();
         assert!(result.ok, "echo should succeed: {:?}", result.error);

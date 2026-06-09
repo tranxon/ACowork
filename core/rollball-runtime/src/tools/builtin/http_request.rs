@@ -196,7 +196,7 @@ impl Tool for HttpRequestTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let url = params["url"].as_str().unwrap_or("");
         if url.is_empty() {
             return Ok(ToolResult {
@@ -315,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_request_missing_url() {
         let tool = HttpRequestTool::new();
-        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        let result = tool.execute(serde_json::json!({}), None).await.unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("Missing 'url'"));
     }
@@ -324,7 +324,7 @@ mod tests {
     async fn test_http_request_invalid_scheme() {
         let tool = HttpRequestTool::new();
         let result = tool
-            .execute(serde_json::json!({ "url": "ftp://example.com" }))
+            .execute(serde_json::json!({ "url": "ftp://example.com" }), None)
             .await
             .unwrap();
         assert!(!result.ok);

@@ -42,7 +42,7 @@ impl Tool for GlobSearchTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let pattern = params["pattern"]
             .as_str()
             .unwrap_or("")
@@ -76,7 +76,7 @@ impl Tool for GlobSearchTool {
 
         // Search current workspace only (respecting workspace setting)
         let resolver_ref = self.resolver.read().unwrap();
-        let search_base = Path::new(resolver_ref.agent_home());
+        let search_base = Path::new(work_dir.unwrap_or(resolver_ref.agent_home()));
         if !search_base.exists() {
             return Ok(ToolResult {
                 ok: true,

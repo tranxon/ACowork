@@ -24,7 +24,8 @@ pub struct ContextBuilder {
     environment_override: Option<String>,
     /// Tool definitions as JSON
     tool_definitions: Option<Vec<serde_json::Value>>,
-    /// Model override from Gateway LLMConfigDelivery (takes precedence over session default)
+    /// Model override (set by `model_switch` or session initialization;
+    /// takes precedence over session default).
     override_model: Option<String>,
     /// Retrieved memory context (from Grafeo) for injection into system prompt.
     /// Set by AgentLoop before each build via `set_retrieved_memory()`.
@@ -79,7 +80,7 @@ impl ContextBuilder {
         self
     }
 
-    /// Set model override (from Gateway LLMConfigDelivery)
+    /// Set model override (from `model_switch` or session initialization)
     pub fn with_override_model(mut self, model: String) -> Self {
         self.override_model = Some(model);
         self
@@ -99,17 +100,6 @@ impl ContextBuilder {
             "ContextBuilder model override updated via model_switch"
         );
         self.override_model = Some(model);
-    }
-
-    /// Set gateway model capabilities (from Gateway LLMConfigDelivery)
-    /// DEPRECATED: Use the `gateway_capabilities` parameter in `build()` instead.
-    /// This setter is kept for backward compat but is a no-op; capabilities
-    /// are now passed at build time to avoid dual-holder sync issues.
-    pub fn set_gateway_model_capabilities(&mut self, _caps: ModelCapabilitiesInfo) {
-        // No-op: capabilities are passed via build() parameter instead
-        tracing::debug!(
-            "set_gateway_model_capabilities called on ContextBuilder (no-op, use build() parameter)"
-        );
     }
 
     /// Update workspace context in-place (from WorkspaceConfigUpdate push or self-formatting)
@@ -435,7 +425,7 @@ impl ContextBuilder {
         }
 
         // Determine the model to use.
-        // Model comes from override_model (set by Gateway LLMConfigDelivery or session init).
+        // Model comes from override_model (set by model_switch or session init).
         // When absent, model is empty — the LLM call will fail with a clear error.
         let model = self.override_model.clone().unwrap_or_default();
 

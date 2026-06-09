@@ -238,7 +238,7 @@ impl Tool for AskUserQuestionTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         // NOTE: The actual execution (waiting for user response) is handled
         // by the AgentLoop, not here. This tool's execute() is a placeholder
         // that validates params. The real flow:
@@ -390,7 +390,7 @@ mod tests {
             .execute(serde_json::json!({
                 "question": "Style?",
                 "options": [{ "label": "Rust" }, { "label": "Go" }]
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -400,7 +400,7 @@ mod tests {
     async fn test_execute_invalid_params() {
         let tool = AskUserQuestionTool::new();
         let result = tool
-            .execute(serde_json::json!({ "question": "" }))
+            .execute(serde_json::json!({ "question": "" }), None)
             .await
             .unwrap();
         assert!(!result.ok);

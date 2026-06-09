@@ -133,12 +133,28 @@ impl HistoryManager {
         self.current_tokens = prompt_tokens;
 
         // Feed the API ground truth back into TokenCounter so it can
-        // learn the actual chars/token ratio for this model. After a
-        // few turns the observed ratio becomes more accurate than any
-        // hardcoded sampling_ratios entry — no manual tuning needed.
+        // learn the actual chars/token ratio for this model.
+        //
+        // IMPORTANT: We must NOT use `prompt_tokens` as the numerator
+        // for ratio calculation because `prompt_tokens` includes tokens
+        // from the system prompt, tool definitions, and other context
+        // that are NOT stored in `history.messages`. Using it directly
+        // would produce a wildly inaccurate ratio when history is small
+        // (e.g. 4026 prompt_tokens vs 50 chars of history → ratio of
+        // 0.012 chars/token instead of the real ~3.5, causing token
+        // estimates to explode by ~300x on subsequent turns).
+        //
+        // Instead, we use the LOCAL estimate (`old`) as the numerator.
+        // The local estimate was computed by `count_message()` on the
+        // actual history content, so its ratio against `total_chars`
+        // reflects the true chars/token relationship. We only update
+        // the observed ratio when the local estimate is large enough
+        // (> 500 tokens) to reduce small-sample noise.
         let total_chars: usize = self.messages.iter().map(|m| m.content.len()).sum();
         if let Some(ref model) = self.model_name {
-            self.counter.update_observed_ratio(model, prompt_tokens, total_chars);
+            if old > 500 && total_chars > 500 {
+                self.counter.update_observed_ratio(model, old, total_chars);
+            }
         }
 
         tracing::debug!(old, new = prompt_tokens, "History token count calibrated from API usage");

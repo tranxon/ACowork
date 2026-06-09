@@ -138,7 +138,7 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _params: Value) -> rollball_core::error::Result<ToolResult> {
+        async fn execute(&self, _params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
 
             Ok(ToolResult {
                 ok: true,

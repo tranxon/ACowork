@@ -79,7 +79,7 @@ impl Tool for MemoryRecallTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let since = params.get("since").and_then(|v| v.as_str());
         let until = params.get("until").and_then(|v| v.as_str());
@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_recall_no_filters() {
         let tool = test_tool();
-        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        let result = tool.execute(serde_json::json!({}), None).await.unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("at least"));
     }
@@ -270,7 +270,7 @@ mod tests {
     async fn test_memory_recall_empty_query_no_store() {
         let tool = test_tool_no_store();
         let result = tool
-            .execute(serde_json::json!({ "query": "user preferences" }))
+            .execute(serde_json::json!({ "query": "user preferences" }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -281,7 +281,7 @@ mod tests {
     async fn test_memory_recall_empty_result() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({ "query": "nonexistent content" }))
+            .execute(serde_json::json!({ "query": "nonexistent content" }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -292,7 +292,7 @@ mod tests {
     async fn test_memory_recall_with_since() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({ "since": "2025-01-01T00:00:00Z" }))
+            .execute(serde_json::json!({ "since": "2025-01-01T00:00:00Z" }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -305,7 +305,7 @@ mod tests {
             .execute(serde_json::json!({
                 "since": "2025-01-01T00:00:00Z",
                 "until": "2025-12-31T23:59:59Z"
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -315,7 +315,7 @@ mod tests {
     async fn test_memory_recall_invalid_since() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({ "since": "not-a-date" }))
+            .execute(serde_json::json!({ "since": "not-a-date" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -329,7 +329,7 @@ mod tests {
             .execute(serde_json::json!({
                 "since": "2026-01-01T00:00:00Z",
                 "until": "2025-01-01T00:00:00Z"
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -343,7 +343,7 @@ mod tests {
             .execute(serde_json::json!({
                 "query": "test",
                 "search_mode": "invalid"
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(!result.ok);
@@ -358,7 +358,7 @@ mod tests {
                 .execute(serde_json::json!({
                     "query": "test",
                     "search_mode": mode
-                }))
+                }), None)
                 .await
                 .unwrap();
             assert!(result.ok, "search_mode '{}' should be valid", mode);
@@ -369,7 +369,7 @@ mod tests {
     async fn test_memory_recall_limit_capped() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({ "query": "test", "limit": 100 }))
+            .execute(serde_json::json!({ "query": "test", "limit": 100 }), None)
             .await
             .unwrap();
         assert!(result.ok);
@@ -385,7 +385,7 @@ mod tests {
                 "until": "2025-12-31T23:59:59Z",
                 "search_mode": "hybrid",
                 "limit": 10
-            }))
+            }), None)
             .await
             .unwrap();
         assert!(result.ok);

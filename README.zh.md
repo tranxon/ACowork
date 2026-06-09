@@ -1,4 +1,4 @@
-<h1 align="center">RollBall.AI — 和你的 AI 同事一起工作</h1>
+<h1 align="center">RollBall.AI — 和你的 robotic 同事一起工作</h1>
 
 <p align="center">
   <img src="./assets/logo.svg" alt="RollBall.AI Logo" width="160" height="160" />
@@ -6,9 +6,9 @@
 
 <p align="center">
   🏗️ <strong>声明式 Agent 平台 · 去中心化 · 高安全 · 可扩展</strong><br>
-  ⚡️ <strong>Easy to build an AI colleague.</strong><br>
-  ⚡️ <strong>Easy to share an AI colleague.</strong><br>
-  ⚡️ <strong>Easy to deploy AI colleagues.</strong>
+  ⚡️ <strong>Easy to build an robotic colleague.</strong><br>
+  ⚡️ <strong>Easy to share an robotic colleague.</strong><br>
+  ⚡️ <strong>Easy to deploy robotic colleagues.</strong>
 </p>
 
 <p align="center">

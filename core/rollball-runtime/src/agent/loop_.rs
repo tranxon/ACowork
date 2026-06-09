@@ -303,7 +303,7 @@ impl AgentLoop {
             .find(|t| t.spec().name == name)
             .ok_or_else(|| format!("Tool not found: {}", name))?;
 
-        match tool.execute(params).await {
+        match tool.execute(params, self.core.current_work_dir.as_deref()).await {
             Ok(result) if result.ok => Ok(result.content),
             Ok(result) => Err(result
                 .error
@@ -313,7 +313,7 @@ impl AgentLoop {
     }
 
     /// Look up model capabilities by exact model name (delegates to AgentCore).
-    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<&ModelCapabilitiesInfo> {
+    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<ModelCapabilitiesInfo> {
         self.core.get_model_capabilities(model_name)
     }
 
@@ -680,6 +680,26 @@ impl AgentLoop {
             },
         ).await;
 
+        // ── ②.7 Context depletion guard ──
+        // After aggressive trimming, the chat request may contain only a
+        // system message with no user/assistant messages. Anthropic-protocol
+        // providers extract the system message into a separate `system` field,
+        // leaving `messages` empty — causing a 400 "messages must not be empty"
+        // API error. Detect this early and return a clear error instead.
+        let has_non_system = chat_request.messages.iter()
+            .any(|m| !matches!(m.role, rollball_core::providers::traits::MessageRole::System));
+        if !has_non_system {
+            tracing::error!(
+                iteration,
+                history_tokens = self.session.history.token_count(),
+                "All non-system messages trimmed — context depleted, cannot call LLM"
+            );
+            return Err(RuntimeError::ContextOverflow(
+                "Context window exceeded: all conversation history was trimmed. \
+                 Please start a new conversation or reduce attached files.".to_string()
+            ));
+        }
+
         // ── ③ Call LLM + parse + usage ──
         let response = self.call_llm_streaming(&chat_request, context_builder).await?;
         self.core.debug_observer.on_phase_enter(
@@ -824,7 +844,7 @@ mod tests {
                 }),
             }
         }
-        async fn execute(&self, params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+        async fn execute(&self, params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
             let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("no message");
             Ok(rollball_core::tools::traits::ToolResult {
                 ok: true,
@@ -1205,7 +1225,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
@@ -1298,7 +1318,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: false,
                     content: String::new(),
@@ -1318,7 +1338,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Success!".to_string(),
@@ -1405,7 +1425,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 // Sleep for a long time — should be cut short by timeout.
                 // 5s is more than enough to verify timeout works (100ms threshold),
                 // while avoiding a 60s hang if timeout logic breaks.
@@ -1527,7 +1547,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
                     content: self.output.clone(),
@@ -1641,7 +1661,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Fast result".to_string(),
@@ -1663,7 +1683,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 // Sleep longer than the iteration timeout (200ms).
                 // 5s is plenty to verify timeout works without risking a 60s hang.
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1779,7 +1799,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 // Sleep longer than tool_timeout (100ms) but shorter than iteration_timeout (30s)
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 Ok(rollball_core::tools::traits::ToolResult {
@@ -1871,7 +1891,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
+            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> rollball_core::error::Result<rollball_core::tools::traits::ToolResult> {
                 Ok(rollball_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Echo result".to_string(),
@@ -1974,7 +1994,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&tools, &tc).await;
+        let result = execute_single_tool(&tools, &tc, None).await;
 
         // Must NOT contain "Echo:" — tool was never called
         assert!(!result.contains("Echo:"), "Tool should NOT be executed, got: {}", result);
@@ -2001,7 +2021,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&tools, &tc).await;
+        let result = execute_single_tool(&tools, &tc, None).await;
 
         // Must NOT execute the tool
         assert!(!result.contains("Echo:"), "Tool should NOT be executed on invalid JSON, got: {}", result);
@@ -2027,7 +2047,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&tools, &tc).await;
+        let result = execute_single_tool(&tools, &tc, None).await;
         assert_eq!(result, "Echo: hello world",
             "Valid tool call should execute normally, got: {}", result);
     }

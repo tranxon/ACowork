@@ -104,6 +104,7 @@ impl rollball_core::tools::Tool for McpToolWrapper {
     async fn execute(
         &self,
         params: serde_json::Value,
+        _work_dir: Option<&str>,
     ) -> rollball_core::error::Result<rollball_core::tools::ToolResult> {
         // Strip the `approved` field before forwarding to the MCP server.
         // RollBall's security model may inject `approved: bool` into tool calls
@@ -198,7 +199,7 @@ mod tests {
         let def = make_def("ghost", Some("Ghost tool"), json!({}));
         let wrapper = McpToolWrapper::new("mcp:nowhere__ghost".to_string(), def, registry);
         let result = wrapper
-            .execute(json!({}))
+            .execute(json!({}), None)
             .await
             .expect("execute should be non-fatal");
         assert!(!result.ok);
@@ -221,7 +222,7 @@ mod tests {
         let def = make_def("do_thing", Some("Do a thing"), json!({}));
         let wrapper = McpToolWrapper::new("mcp:srv__do_thing".to_string(), def, registry);
         let result = wrapper
-            .execute(json!({ "approved": true, "param": "value" }))
+            .execute(json!({ "approved": true, "param": "value" }), None)
             .await
             .expect("execute must be non-fatal even with approved field");
         assert!(!result.ok);
@@ -239,7 +240,7 @@ mod tests {
         let wrapper = McpToolWrapper::new("mcp:srv__noop".to_string(), def, registry);
         for non_obj in [json!(null), json!("a string"), json!([1, 2, 3])] {
             let result = wrapper
-                .execute(non_obj.clone())
+                .execute(non_obj.clone(), None)
                 .await
                 .expect("non-object args must not propagate Err");
             assert!(!result.ok, "expected non-fatal failure for {non_obj}");

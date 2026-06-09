@@ -294,9 +294,10 @@ export function SkillBrowser() {
               className={cn(
                 "mb-3 cursor-pointer rounded-lg border-2 border-dashed p-6 text-center transition-colors",
                 selectedFile
-                  ? "border-blue-300 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/20"
+                  ? "border-[var(--color-accent)]/40"
                   : "border-zinc-300 hover:border-zinc-400 dark:border-zinc-600 dark:hover:border-zinc-500",
               )}
+              style={selectedFile ? { backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)" } : undefined}
             >
               <input
                 ref={fileInputRef}
@@ -345,8 +346,11 @@ export function SkillBrowser() {
                   "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
                   !selectedFile || importing
                     ? "cursor-not-allowed bg-zinc-200 text-zinc-400 dark:bg-zinc-700 dark:text-zinc-500"
-                    : "bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500",
+                    : "text-white",
                 )}
+                style={selectedFile && !importing ? { backgroundColor: "var(--color-accent)" } : undefined}
+                onMouseEnter={(e) => { if (selectedFile && !importing) e.currentTarget.style.filter = "brightness(0.85)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
               >
                 {importing && <Loader2 className="h-3 w-3 animate-spin" />}
                 {importing ? "Importing..." : "Import"}

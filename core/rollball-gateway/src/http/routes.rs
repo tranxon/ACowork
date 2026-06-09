@@ -174,8 +174,6 @@ pub struct AppState {
     /// Bridge channel for forwarding Agent responses to HTTP clients
     /// The IPC server publishes events; HTTP WebSocket subscribes
     pub bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-    /// Cache for models.dev API responses
-    pub(crate) models_cache: crate::http::models_api::ModelsCache,
     /// Pending session requests for IPC response correlation (S1.14)
     pub session_pending: SessionPendingRequests,
     /// Tracing reload handle for dynamic log level changes
@@ -204,7 +202,6 @@ impl AppState {
             auth,
             session_mgr,
             bridge_tx,
-            models_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
@@ -216,13 +213,12 @@ impl AppState {
         }
     }
 
-    /// Create a new AppState sharing an existing models cache (e.g. from GatewayState)
-    pub(crate) fn with_models_cache(
+    /// Create a new AppState with explicit configuration
+    pub(crate) fn with_config(
         gateway_state: SharedHttpState,
         auth: Arc<HttpAuth>,
         session_mgr: Option<SharedSessionMgr>,
         bridge_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-        models_cache: crate::http::models_api::ModelsCache,
         session_pending: Option<SessionPendingRequests>,
         log_reload_handle: Option<crate::LogReloadHandle>,
     ) -> Self {
@@ -231,7 +227,6 @@ impl AppState {
             auth,
             session_mgr,
             bridge_tx,
-            models_cache,
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
@@ -289,7 +284,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
-        .merge(crate::http::models_api::reset_routes())
         .route("/lsp/{language}", get(crate::lsp::lsp_handler))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())

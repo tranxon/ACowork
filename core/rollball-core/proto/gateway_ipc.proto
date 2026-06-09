@@ -59,7 +59,8 @@ message ServerMessage {
     SessionDeleted          session_deleted        = 26;
     IntentReceived          intent_received       = 19;
     CapabilityUpdate        capability_update     = 20;
-    LLMConfigDelivery       llm_config_delivery   = 21;
+    // Field 21: reserved (was LLMConfigDelivery)
+    ProviderListUpdate      provider_list_update   = 41;
     // Field 22: reserved (was IdentityDelivery)
     // Field 23: reserved (was WorkspaceContextUpdate)
     IterationLimitPaused    iteration_limit_paused = 24;
@@ -209,7 +210,12 @@ message ConfigSnapshot {
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
 message CapabilityUpdate        { string agent_id = 1; repeated string actions = 2; bool removed = 3; }
-message LLMConfigDelivery       { string provider = 1; string model = 2; string api_key = 3; string base_url = 4; repeated string models = 5; ModelCapabilitiesInfo model_capabilities = 6; uint64 max_output_tokens_limit = 7; string protocol_type = 8; reserved 9; optional string compact_model = 10; uint64 provider_list_version = 11; }
+// ── Provider List Update (hot-push replacement for LLMConfigDelivery) ──
+message ProviderListUpdate {
+  string provider_list_json = 1;      // JSON-serialized Vec<ProviderListItem>
+  uint64 provider_list_version = 2;
+  string provider_key_vault_json = 3; // JSON-serialized Vec<ProviderKeyEntry>
+}
 message SearchConfigDelivery   { string search_list_json = 1; uint64 search_list_version = 2; string search_key_vault_json = 3; }
 message WorkspaceConfigUpdate   { string config_json = 1; }
 message SetSessionWorkspace     { string session_id = 1; string workspace_id = 2; }
@@ -243,9 +249,8 @@ message RuntimeConfigUpdate      {
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }
 
-message ModelCostInfo           { double input_per_million = 1; double output_per_million = 2; }
-message ModelModalities         { repeated string input = 1; repeated string output = 2; }
-message ModelCapabilitiesInfo   { uint64 context_window = 1; uint64 max_output_tokens = 2; uint64 max_input_tokens = 3; bool supports_tool_calling = 4; bool supports_reasoning = 5; bool supports_attachment = 6; bool supports_temperature = 7; ModelCostInfo cost = 8; ModelModalities modalities = 9; string name = 10; string family = 11; string knowledge_cutoff = 12; }
+// ModelCostInfo, ModelModalities, ModelCapabilitiesInfo removed from proto
+// (now transmitted as JSON inside ProviderListUpdate.provider_list_json)
 message ContextUsageInfo        { uint64 context_window = 1; uint64 input_tokens = 2; uint64 output_tokens = 3; uint64 total_tokens = 4; uint64 max_input_tokens = 5; uint64 usable_context = 6; uint32 usage_percent = 7; }
 message CronEntryInfo           { string id = 1; string agent_id = 2; string schedule = 3; string action = 4; string params_json = 5; }
 message SessionInfoDto          { string session_id = 1; string created_at = 2; uint32 message_count = 3; string title = 4; bool corrupted = 5; string status_json = 6; string workspace_id = 7; string model = 8; string provider = 9; }

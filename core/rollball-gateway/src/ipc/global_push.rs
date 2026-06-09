@@ -16,7 +16,6 @@
 use std::path::PathBuf;
 
 use crate::grpc::SharedGrpcSessionMgr;
-use crate::http::models_api::ModelsCache;
 use crate::http::routes::SharedHttpState;
 use rollball_core::protocol::GatewayResponse;
 
@@ -26,7 +25,6 @@ pub struct GlobalResourcePusher {
     grpc_session_mgr: Option<SharedGrpcSessionMgr>,
     gateway_state: SharedHttpState,
     data_dir: PathBuf,
-    models_cache: ModelsCache,
 }
 
 impl GlobalResourcePusher {
@@ -35,142 +33,82 @@ impl GlobalResourcePusher {
         grpc_session_mgr: Option<SharedGrpcSessionMgr>,
         gateway_state: SharedHttpState,
         data_dir: PathBuf,
-        models_cache: ModelsCache,
     ) -> Self {
-        Self { grpc_session_mgr, gateway_state, data_dir, models_cache }
+        Self { grpc_session_mgr, gateway_state, data_dir }
     }
 
-    // ── LLM config (provider/model change) ──────────────────────────
+    // ── Provider list (provider/model/key change) ───────────────────
 
-    /// Push LLM configuration to all running agents after a Vault change
-    /// (add/update/delete provider key).
+    /// Push the full provider list to all running agents after a Vault or
+    /// provider-cache change (add/update/delete provider, key rotation, etc.).
     ///
-    /// Pushes config for ALL vault providers (not just the default one)
-    /// so that per-provider fields like compact_model are updated for
-    /// every provider, not just the active one.
+    /// Sends a single `ProviderListUpdate` per agent — identical payload to
+    /// what `AgentHelloResult` delivers on handshake — so the Runtime can
+    /// rebuild its provider registry atomically without any per-provider
+    /// fan-out. The cache is the source of truth: HTTP handlers that mutate
+    /// the Vault must rebuild it (see `vault_api.rs`) before calling this.
     #[tracing::instrument(skip(self), name = "push_llm_config")]
     pub async fn push_llm_config(&self) {
-
         let grpc_session_mgr = match &self.grpc_session_mgr {
             Some(mgr) => mgr.clone(),
             None => {
-                tracing::warn!("No gRPC session manager, skipping LLM config push");
+                tracing::warn!("No gRPC session manager, skipping provider list push");
                 return;
             }
         };
 
-        let (agent_ids, provider_ids): (Vec<String>, Vec<String>) = {
+        // Snapshot agent list + provider list + key vault in a single read lock.
+        let (agent_ids, provider_list, provider_list_version, provider_key_vault) = {
             let gw = self.gateway_state.read().await;
-            (
-                gw.running_agents.keys().cloned().collect(),
-                gw.vault.list_providers(),
-            )
+            let agent_ids: Vec<String> = gw.running_agents.keys().cloned().collect();
+            let provider_list = gw.resource_cache.provider_list.providers.clone();
+            let provider_list_version = gw.resource_cache.provider_list.version;
+            let provider_key_vault: Vec<rollball_core::protocol::ProviderKeyEntry> = gw
+                .vault
+                .list_providers()
+                .iter()
+                .filter_map(|name| {
+                    gw.vault.get_provider(name).ok().map(|entry| {
+                        rollball_core::protocol::ProviderKeyEntry {
+                            provider_id: name.clone(),
+                            api_key: entry.api_key,
+                        }
+                    })
+                })
+                .collect();
+            (agent_ids, provider_list, provider_list_version, provider_key_vault)
         };
 
+        if agent_ids.is_empty() {
+            return;
+        }
+
         for agent_id in &agent_ids {
-            for provider_id in &provider_ids {
-                let cfg = match self
-                    .build_llm_config_for_provider(provider_id)
-                    .await
-                {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                let model_capabilities = if cfg.stored_capabilities.is_some() {
-                    cfg.stored_capabilities
-                } else if let Some(ref m) = cfg.model {
-                    crate::http::models_api::lookup_model_capabilities_with_cache(
-                        &self.models_cache, &cfg.provider, m,
-                    )
-                    .await
-                } else {
-                    None
-                };
-
-                let (protocol_type, api_override) =
-                    crate::http::models_api::lookup_protocol_info_with_cache(
-                        &self.models_cache, &cfg.provider, cfg.model.as_deref(),
-                    )
+            let mgr = grpc_session_mgr.lock().await;
+            if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
+                let ok = session
+                    .push_message(GatewayResponse::ProviderListUpdate {
+                        provider_list: provider_list.clone(),
+                        provider_list_version,
+                        provider_key_vault: provider_key_vault.clone(),
+                    })
                     .await;
 
-                let effective_base_url = api_override.or(cfg.base_url.clone());
-
-                let max_output_tokens_limit = self
-                    .gateway_state
-                    .read()
-                    .await
-                    .config
-                    .as_ref()
-                    .map(|c| c.max_output_tokens_limit)
-                    .unwrap_or(32_768);
-
-                let provider_list_version = self
-                    .gateway_state
-                    .read()
-                    .await
-                    .resource_cache
-                    .provider_list
-                    .version;
-
-                let mgr = grpc_session_mgr.lock().await;
-                if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
-                    let ok = session
-                        .push_message(GatewayResponse::LLMConfigDelivery {
-                            provider: cfg.provider.clone(),
-                            model: cfg.model.clone(),
-                            api_key: cfg.api_key.clone(),
-                            base_url: effective_base_url,
-                            models: cfg.models.clone(),
-                            model_capabilities,
-                            max_output_tokens_limit,
-                            protocol_type,
-                            compact_model: cfg.compact_model.clone(),
-                            provider_list_version,
-                        })
-                        .await;
-
-                    if ok {
-                        tracing::info!(
-                            agent = %agent_id,
-                            provider = %cfg.provider,
-                            "Pushed LLM config to agent"
-                        );
-                    } else {
-                        tracing::warn!(
-                            agent = %agent_id,
-                            "LLM config push failed (channel closed)"
-                        );
-                    }
+                if ok {
+                    tracing::info!(
+                        agent = %agent_id,
+                        providers = provider_list.len(),
+                        version = provider_list_version,
+                        "Pushed provider list to agent"
+                    );
+                } else {
+                    tracing::warn!(
+                        agent = %agent_id,
+                        "Provider list push failed (channel closed)"
+                    );
                 }
             }
         }
-    }
-
-    /// Build a ResolvedLlmConfig for a specific provider (not just the default).
-    async fn build_llm_config_for_provider(
-        &self,
-        provider_id: &str,
-    ) -> Option<crate::ipc::server::ResolvedLlmConfig> {
-        let gw = self.gateway_state.read().await;
-        let entry = match gw.vault.get_provider(provider_id) {
-            Ok(e) => e,
-            Err(_) => return None,
-        };
-
-        Some(crate::ipc::server::ResolvedLlmConfig {
-            provider: provider_id.to_string(),
-            model: entry.default_model.clone(),
-            api_key: entry.api_key.clone(),
-            base_url: entry.base_url.clone(),
-            models: entry.models.clone(),
-            stored_capabilities: entry
-                .default_model
-                .as_ref()
-                .and_then(|m| entry.model_capabilities.get(m))
-                .map(|c| rollball_core::protocol::ModelCapabilitiesInfo::from(c.clone())),
-            compact_model: entry.compact_model.clone(),
-        })
     }
 
     // ── MCP catalog ─────────────────────────────────────────────────

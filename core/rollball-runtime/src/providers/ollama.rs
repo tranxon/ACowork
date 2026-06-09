@@ -180,6 +180,7 @@ fn parse_response(msg: OllamaResponseMessage, resp: &OllamaChatResponse) -> Chat
         prompt_tokens: resp.prompt_eval_count.unwrap_or(0),
         completion_tokens: resp.eval_count.unwrap_or(0),
         total_tokens: resp.prompt_eval_count.unwrap_or(0) + resp.eval_count.unwrap_or(0),
+        ..Default::default()
     };
 
     ChatResponse {

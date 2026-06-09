@@ -31,7 +31,7 @@ export function AttachedContextChips() {
           {item.type === "directory" ? (
             <Folder className="h-3 w-3 shrink-0 text-amber-500" />
           ) : item.type === "selection" ? (
-            <Hash className="h-3 w-3 shrink-0 text-blue-500" />
+            <Hash className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
           ) : (
             <FileText className="h-3 w-3 shrink-0 text-zinc-400" />
           )}

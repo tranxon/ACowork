@@ -713,7 +713,9 @@ pub struct ResolvedLlmConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub models: Vec<String>,
-    pub stored_capabilities: Option<rollball_core::protocol::ModelCapabilitiesInfo>,
+    /// Capabilities for ALL models in this provider, so Runtime can
+    /// look them up when switching models without a Gateway roundtrip.
+    pub all_model_capabilities: Vec<rollball_core::protocol::ProviderModelEntry>,
     pub compact_model: Option<String>,
 }
 
@@ -824,9 +826,7 @@ pub async fn resolve_llm_config_for_agent(
                 api_key: effective_entry.api_key,
                 base_url: effective_entry.base_url,
                 models: effective_models,
-                stored_capabilities: model.as_ref()
-                    .and_then(|m| effective_entry.model_capabilities.get(m))
-                    .map(|c| rollball_core::protocol::ModelCapabilitiesInfo::from(c.clone())),
+                all_model_capabilities: vec![], // Filled by caller via lookup_model_capabilities
                 compact_model: effective_entry.compact_model.clone(),
             })
         }

@@ -5,10 +5,10 @@ use rollball_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 use std::path::Path;
 
-pub struct FileWriteTool { work_dir: String }
+pub struct FileWriteTool;
 
 impl FileWriteTool {
-    pub fn new(work_dir: &str) -> Self { Self { work_dir: work_dir.to_string() } }
+    pub fn new() -> Self { Self }
 
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
@@ -30,14 +30,15 @@ impl FileWriteTool {
 impl Tool for FileWriteTool {
     fn spec(&self) -> ToolSpec { Self::spec_value() }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let path = params["path"].as_str().unwrap_or("").trim_start_matches('/');
         let content = params["content"].as_str().unwrap_or("");
         if path.is_empty() { return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing 'path'".to_string()), token_usage: None }); }
 
-        let full_path = Path::new(&self.work_dir).join(path);
+        let base = work_dir.unwrap_or(".");
+        let full_path = Path::new(base).join(path);
         tracing::debug!(
-            work_dir = %self.work_dir,
+            work_dir = %base,
             input_path = %path,
             full_path = %full_path.display(),
             exists = full_path.exists(),
@@ -52,7 +53,7 @@ impl Tool for FileWriteTool {
             Ok(()) => Ok(ToolResult { ok: true, content: format!("Written {} bytes to {path}", content.len()), error: None, token_usage: None }),
             Err(e) => {
                 tracing::warn!(
-                    work_dir = %self.work_dir,
+                    work_dir = %base,
                     input_path = %path,
                     full_path = %full_path.display(),
                     error = %e,

@@ -69,7 +69,7 @@ impl Tool for RagQueryTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let query = params["query"].as_str().unwrap_or("").trim();
         if query.is_empty() {
             return Ok(ToolResult {
@@ -162,7 +162,7 @@ mod tests {
     async fn test_rag_query_tool_missing_query() {
         let client = test_rag_client();
         let tool = RagQueryTool::new(client);
-        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        let result = tool.execute(serde_json::json!({}), None).await.unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("Missing 'query'"));
     }
@@ -171,7 +171,7 @@ mod tests {
     async fn test_rag_query_tool_empty_query() {
         let client = test_rag_client();
         let tool = RagQueryTool::new(client);
-        let result = tool.execute(serde_json::json!({ "query": "" })).await.unwrap();
+        let result = tool.execute(serde_json::json!({ "query": "" }), None).await.unwrap();
         assert!(!result.ok);
     }
 
@@ -180,7 +180,7 @@ mod tests {
         let client = test_rag_client();
         let tool = RagQueryTool::new(client);
         let result = tool
-            .execute(serde_json::json!({ "query": "test query" }))
+            .execute(serde_json::json!({ "query": "test query" }), None)
             .await
             .unwrap();
         // RAG unavailable → graceful degradation, ok=true with "no results" message

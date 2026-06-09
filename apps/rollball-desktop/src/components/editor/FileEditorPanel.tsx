@@ -212,7 +212,7 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
                             href={hint.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="mt-2 inline-block text-blue-500 hover:underline text-[11px]"
+                            className="mt-2 inline-block text-[var(--color-accent)] hover:underline text-[11px]"
                         >
                             Documentation →
                         </a>
@@ -1024,8 +1024,17 @@ export function FileEditorPanel({ width }: { width: number }) {
                         {selectionRange && addToChatPos && selectedAgentId && (
                             <button
                                 onClick={handleAddSelectionToChat}
-                                className="absolute z-30 flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 shadow-sm hover:bg-blue-100 transition-colors dark:border-blue-800 dark:bg-blue-950 dark:text-blue-300 dark:hover:bg-blue-900"
-                                style={{ top: addToChatPos.top, left: addToChatPos.left }}
+                                className="absolute z-30 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-white shadow-md transition-colors"
+                                style={{
+                                    top: addToChatPos.top,
+                                    left: addToChatPos.left,
+                                    backgroundColor: "var(--color-accent)",
+                                    borderColor: "color-mix(in srgb, var(--color-accent) 70%, black)",
+                                    borderWidth: 1,
+                                    borderStyle: "solid",
+                                }}
+                                onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.88)"; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
                             >
                                 <MessageSquarePlus className="h-3.5 w-3.5" />
                                 Add to Chat

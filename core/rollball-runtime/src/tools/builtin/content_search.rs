@@ -82,8 +82,9 @@ impl Tool for ContentSearchTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value) -> rollball_core::error::Result<ToolResult> {
+    async fn execute(&self, params: Value, work_dir: Option<&str>) -> rollball_core::error::Result<ToolResult> {
         let resolver_ref = self.resolver.read().unwrap();
+        let effective_work_dir = work_dir.unwrap_or(resolver_ref.agent_home());
         let pattern = params["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
             return Ok(ToolResult {
@@ -173,8 +174,8 @@ impl Tool for ContentSearchTool {
         // - Otherwise, search current_dir only (respecting workspace setting)
         let user_path = params["path"].as_str();
         let search_roots: Vec<std::path::PathBuf> = if let Some(p) = user_path {
-            // User specified a subdirectory — resolve against current_dir
-            let resolved = Path::new(resolver_ref.agent_home()).join(p);
+            // User specified a subdirectory — resolve against work_dir
+            let resolved = Path::new(effective_work_dir).join(p);
             if resolved.exists() {
                 vec![resolved]
             } else {
@@ -187,7 +188,7 @@ impl Tool for ContentSearchTool {
             }
         } else {
             // No path specified — search current workspace only
-            vec![Path::new(resolver_ref.agent_home()).to_path_buf()]
+            vec![Path::new(effective_work_dir).to_path_buf()]
         };
 
         if search_roots.is_empty() {
@@ -206,7 +207,7 @@ impl Tool for ContentSearchTool {
         let mut truncated = false;
 
         tracing::info!(
-            current_dir = %resolver_ref.agent_home(),
+            current_dir = %effective_work_dir,
             user_path = ?user_path,
             search_roots = ?search_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             include = ?include_glob,
