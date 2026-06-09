@@ -1,4 +1,8 @@
-// MCP preset registry — curated list of popular MCP servers
+// MCP preset registry — curated list of practical MCP servers
+//
+// Selection principle: only include servers that fill capability gaps
+// NOT covered by RollBall built-in tools (file IO, shell, web_fetch,
+// http_request, memory/grafeo, doc_reader basic).
 //
 // These presets are frontend-only definitions that help users quickly
 // add common MCP servers to their catalog. Each preset defines the
@@ -7,172 +11,119 @@
 import type { McpPresetDef } from "./types";
 
 export const MCP_PRESETS: McpPresetDef[] = [
-  // ── File & System ──
+  // ── Browser Automation ────────────────────────────────────────────
   {
-    id: "filesystem",
-    name: "Filesystem",
-    description: "Read, write, and search files on the local filesystem",
-    category: "file",
+    id: "playwright",
+    name: "Playwright",
+    description:
+      "Browser automation — navigate pages, take screenshots, fill forms, extract structured content. Supports Chromium, Firefox, WebKit.",
+    category: "browser",
     transport: "stdio",
     command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
+    args: ["-y", "@playwright/mcp@latest"],
     requiredEnv: [],
     optionalEnv: {},
-    installHint: "npx auto-installs. Change /path/to/allowed/dir to your project directory.",
-    icon: "FolderOpen",
-  },
-  {
-    id: "desktop-commander",
-    name: "Desktop Commander",
-    description: "Execute system commands, manage processes, and file operations",
-    category: "utility",
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@anthropic/desktop-commander"],
-    requiredEnv: [],
-    optionalEnv: {},
-    installHint: "npx auto-installs. Provides shell execution and process management.",
-    icon: "Terminal",
+    installHint:
+      "npx auto-installs. First run downloads browser binaries (~300MB). No API key required.",
+    icon: "Monitor",
   },
 
-  // ── Search & Web ──
-  {
-    id: "fetch",
-    name: "Fetch",
-    description: "Fetch web content and make HTTP requests",
-    category: "search",
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-fetch"],
-    requiredEnv: [],
-    optionalEnv: {},
-    installHint: "npx auto-installs. No API key required.",
-    icon: "Globe",
-  },
+  // ── Web Search ─────────────────────────────────────────────────────
   {
     id: "brave-search",
     name: "Brave Search",
-    description: "Web search via Brave Search API",
+    description:
+      "Privacy-first web & local search via Brave Search API. Good for general knowledge, news, and factual lookups.",
     category: "search",
     transport: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-brave-search"],
     requiredEnv: ["BRAVE_API_KEY"],
     optionalEnv: {},
-    installHint: "Get API key at https://brave.com/search/api/",
+    installHint:
+      "Get free API key at https://brave.com/search/api/ — generous free tier (2K queries/month).",
     icon: "Search",
+  },
+  {
+    id: "exa-search",
+    name: "Exa Search",
+    description:
+      "AI-native semantic search engine. Returns clean, structured content optimized for LLM consumption. Supports neural search, auto-crawl, and content extraction.",
+    category: "search",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "exa-mcp-server"],
+    requiredEnv: ["EXA_API_KEY"],
+    optionalEnv: {},
+    installHint:
+      "Get API key at https://exa.ai — free tier includes 1000 searches/month. Superior to keyword search for complex queries.",
+    icon: "Globe",
   },
   {
     id: "context7",
     name: "Context7",
-    description: "Fetch up-to-date library documentation and code examples",
+    description:
+      "Fetch up-to-date library documentation and code examples. Prevents LLM hallucinations by grounding responses in real, version-specific docs.",
     category: "search",
     transport: "stdio",
     command: "npx",
     args: ["-y", "@upstash/context7-mcp@latest"],
     requiredEnv: [],
     optionalEnv: {},
-    installHint: "npx auto-installs. No API key required.",
+    installHint:
+      "npx auto-installs. No API key required. Covers 20K+ libraries (React, Next.js, Python, Rust crates, etc.).",
     icon: "BookOpen",
   },
 
-  // ── Version Control ──
+  // ── Document Processing ────────────────────────────────────────────
   {
-    id: "github",
-    name: "GitHub",
-    description: "Manage PRs, issues, repos, and code search on GitHub",
-    category: "vcs",
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-github"],
-    requiredEnv: ["GITHUB_PERSONAL_ACCESS_TOKEN"],
-    optionalEnv: {},
-    installHint: "Create token at https://github.com/settings/tokens",
-    icon: "Github",
-  },
-  {
-    id: "git",
-    name: "Git",
-    description: "Git operations — status, diff, log, commit, branch management",
-    category: "vcs",
+    id: "docling",
+    name: "Docling",
+    description:
+      "Advanced document understanding: OCR for image-based PDFs, layout analysis, table extraction, and legacy Office format support (.doc/.ppt/.xls). Fills RollBall doc_reader gaps.",
+    category: "document",
     transport: "stdio",
     command: "uvx",
-    args: ["mcp-server-git", "--repository", "."],
+    args: ["docling-mcp"],
     requiredEnv: [],
     optionalEnv: {},
-    installHint: "Requires uv/uvx (pip install uv). Change --repository to your project path.",
-    icon: "GitBranch",
+    installHint:
+      "Requires uv (Python package manager). Install: `pip install uv` or see https://docs.astral.sh/uv/. First run downloads ML models (~500MB). No API key required — fully local.",
+    icon: "FileText",
   },
 
-  // ── Database ──
+  // ── Knowledge & Collaboration ──────────────────────────────────────
   {
-    id: "postgres",
-    name: "PostgreSQL",
-    description: "Read-only SQL queries against PostgreSQL databases",
-    category: "database",
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://..."],
-    requiredEnv: [],
-    optionalEnv: {},
-    installHint: "Replace postgresql://... with your connection string. Read-only by default.",
-    icon: "Database",
-  },
-  {
-    id: "sqlite",
-    name: "SQLite",
-    description: "Read and query SQLite database files",
-    category: "database",
-    transport: "stdio",
-    command: "uvx",
-    args: ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
-    requiredEnv: [],
-    optionalEnv: {},
-    installHint: "Requires uv/uvx. Change --db-path to your database file.",
-    icon: "Database",
-  },
-
-  // ── Knowledge & Reasoning ──
-  {
-    id: "memory",
-    name: "Memory",
-    description: "Persistent knowledge graph for storing and recalling information",
+    id: "notion",
+    name: "Notion",
+    description:
+      "Read, write, and search Notion pages and databases. Agents can manage knowledge bases, create docs, query structured data.",
     category: "knowledge",
     transport: "stdio",
     command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-memory"],
-    requiredEnv: [],
+    args: ["-y", "@notionhq/notion-mcp-server"],
+    requiredEnv: ["NOTION_API_KEY"],
     optionalEnv: {},
-    installHint: "npx auto-installs. Stores memories in ~/.mcp-memory.json.",
-    icon: "Brain",
-  },
-  {
-    id: "sequential-thinking",
-    name: "Sequential Thinking",
-    description: "Dynamic and reflective problem-solving through structured thinking",
-    category: "utility",
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-    requiredEnv: [],
-    optionalEnv: {},
-    installHint: "npx auto-installs. No configuration needed.",
-    icon: "Lightbulb",
+    installHint:
+      "Create integration at https://www.notion.so/my-integrations — then share target pages with the integration.",
+    icon: "FileText",
   },
 
-  // ── Browser ──
+  // ── Design ─────────────────────────────────────────────────────────
   {
-    id: "playwright",
-    name: "Playwright",
-    description: "Browser automation — navigate, screenshot, extract content",
-    category: "browser",
+    id: "figma",
+    name: "Figma",
+    description:
+      "Read Figma designs — extract layouts, styles, components, and assets. Enables agents to understand UI designs and generate matching code.",
+    category: "design",
     transport: "stdio",
     command: "npx",
-    args: ["-y", "@playwright/mcp"],
-    requiredEnv: [],
+    args: ["-y", "figma-developer-mcp", "--figma-api-key=$FIGMA_API_KEY"],
+    requiredEnv: ["FIGMA_API_KEY"],
     optionalEnv: {},
-    installHint: "npx auto-installs. Launches headless browser.",
-    icon: "Monitor",
+    installHint:
+      "Generate personal access token at https://www.figma.com/developers/api#access-tokens — then share Figma files with the token owner.",
+    icon: "PenTool",
   },
 ];
 
@@ -196,7 +147,7 @@ export function getPresetById(id: string): McpPresetDef | undefined {
 /** Convert a preset to an McpServerConfigDef (for adding to catalog) */
 export function presetToServerConfig(
   preset: McpPresetDef,
-  envOverrides?: Record<string, string>
+  envOverrides?: Record<string, string>,
 ): import("./types").McpServerConfigDef {
   const env: Record<string, string> = { ...preset.optionalEnv, ...envOverrides };
   return {

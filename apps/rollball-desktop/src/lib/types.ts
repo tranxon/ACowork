@@ -721,6 +721,8 @@ export type McpPresetCategory =
   | "communication"
   | "knowledge"
   | "browser"
+  | "design"
+  | "document"
   | "utility";
 
 // ── Web Search Provider types ────────────────────────────────────────
