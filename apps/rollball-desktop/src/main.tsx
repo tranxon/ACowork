@@ -4,6 +4,58 @@ import App from "./App";
 import "./i18n"; // i18n initialization (must run before any useTranslation call)
 import "./styles/globals.css";
 
+// ═══ Monaco Editor bootstrap — MUST run before any component uses Monaco ═══
+//
+// 1. Tell @monaco-editor/react to use the locally-installed monaco-editor
+//    instead of loading scripts from CDN (which may fail in Tauri's WebView).
+// 2. Configure MonacoEnvironment.getWorker so that language-service workers
+//    (TypeScript, JSON, CSS, HTML, editor) are resolved through Vite's
+//    ?worker import pipeline rather than fetched as loose scripts.
+import { loader } from "@monaco-editor/react";
+import * as monaco from "monaco-editor";
+
+loader.config({ monaco });
+
+// Vite-compatible worker resolution: each language label maps to a
+// monaco-editor worker entry that Vite bundles as a separate chunk.
+(window as any).MonacoEnvironment = {
+	getWorker(_workerId: string, label: string) {
+		switch (label) {
+			case "json":
+				return new Worker(
+					new URL("monaco-editor/esm/vs/language/json/json.worker.js", import.meta.url),
+					{ type: "module" },
+				);
+			case "css":
+			case "scss":
+			case "less":
+				return new Worker(
+					new URL("monaco-editor/esm/vs/language/css/css.worker.js", import.meta.url),
+					{ type: "module" },
+				);
+			case "html":
+			case "handlebars":
+			case "razor":
+				return new Worker(
+					new URL("monaco-editor/esm/vs/language/html/html.worker.js", import.meta.url),
+					{ type: "module" },
+				);
+			case "typescript":
+			case "javascript":
+				return new Worker(
+					new URL("monaco-editor/esm/vs/language/typescript/ts.worker.js", import.meta.url),
+					{ type: "module" },
+				);
+			default:
+				return new Worker(
+					new URL("monaco-editor/esm/vs/editor/editor.worker.js", import.meta.url),
+					{ type: "module" },
+				);
+		}
+	},
+};
+// ═══ End Monaco bootstrap ═══
+
 // Import settingsStore early so theme is applied to DOM before first paint.
 // The store initializer calls applyTheme() which toggles the .dark class
 // based on the persisted preference from localStorage.
