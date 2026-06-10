@@ -318,7 +318,7 @@ impl SessionManager {
         // register it in self.debug_controllers so the DebugProtocolServer can
         // read this session's state via getState. The global runtime_debug_handles
         // carries a shared controller — we must NOT reuse it because each session
-        // needs its own independent iteration/phase/breakpoints.
+        // needs its own independent iteration/phase.
         // The notify handles (rewind/resume) also come from the per-session
         // controller so the debug server's notify_one() calls align with SessionTask.
         let per_session_debug = if let Some(ref handles) = self.runtime_debug_handles {
@@ -341,6 +341,30 @@ impl SessionManager {
             None
         };
 
+        // Resolve initial workspace directory for direct initialization.
+        // This avoids relying on the SetWorkDir message replay to set
+        // AgentCore.current_work_dir — it's applied during session creation.
+        let initial_workspace = persisted_workspace_id
+            .clone()
+            .unwrap_or_else(|| self.default_workspace_id.clone());
+        // Pre-register the workspace mapping so current_dir_for works.
+        self.session_workspaces
+            .insert(session_id.clone(), initial_workspace.clone());
+        self.pending_workspaces.remove(&session_id);
+        let initial_work_dir = if let Some(ref resolver) = self.resolver {
+            let guard = resolver.read().unwrap();
+            if initial_workspace == "__agent_home__" {
+                guard.agent_home().to_string()
+            } else {
+                guard
+                    .find_by_id(&initial_workspace)
+                    .map(|d| d.path.clone())
+                    .unwrap_or_else(|| guard.agent_home().to_string())
+            }
+        } else {
+            self.core.config.work_dir.clone()
+        };
+
         let (mut task, agent_inbound_tx) = SessionTask::new(
             self.core.clone(),
             session_state,
@@ -354,6 +378,8 @@ impl SessionManager {
             self.mcp_tools.clone(),
             per_session_debug,
             pending_debug_handles.clone(),
+            self.runtime_overrides.clone(),
+            Some(initial_work_dir),
         );
 
         // ADR-014: Create watch channel for session status
@@ -387,35 +413,10 @@ impl SessionManager {
         // Initialize per-session workspace.
         // For resumed sessions, restore the persisted workspace_id from JSONL metadata.
         // New sessions default to last_active workspace (or agent home fallback).
-        // Use set_session_workspace() to both update the in-memory map and persist
-        // the workspace_id to the session's JSONL conversation file.
-        let initial_workspace = persisted_workspace_id.unwrap_or_else(|| self.default_workspace_id.clone());
+        // Note: the workspace mapping was already pre-registered above for
+        // initial_work_dir resolution. This call persists workspace_id to JSONL
+        // and sends SetWorkDir (redundant with direct init, but harmless).
         self.set_session_workspace(&session_id, &initial_workspace);
-
-        // Re-apply any runtime config overrides accumulated from prior
-        // Gateway pushes. Without this, a new session would start from the
-        // immutable `Arc<AgentCore>` template (e.g. default `max_iterations`
-        // of 50) and ignore values the user has already applied in the UI.
-        if !self.runtime_overrides.is_empty() {
-            let ov = self.runtime_overrides.clone();
-            tracing::info!(
-                session_id = %session_id,
-                max_output_tokens = ?ov.max_output_tokens,
-                max_iterations = ?ov.max_iterations,
-                temperature = ?ov.temperature,
-                "SessionManager: replaying RuntimeConfigOverrides to new session"
-            );
-            // Safe: the handle was just inserted above.
-            if let Some(handle) = self.sessions.get(&session_id) {
-                let _ = handle.send(SessionMessage::UpdateRuntimeConfig {
-                    max_output_tokens: ov.max_output_tokens,
-                    max_iterations: ov.max_iterations,
-                    temperature: ov.temperature,
-                    system_prompt_override: ov.system_prompt_override,
-                    shell_approval_threshold: ov.shell_approval_threshold,
-                });
-            }
-        }
 
         // Re-apply the cached workspace context to the new session.
         // This is separate from `runtime_overrides` because workspace

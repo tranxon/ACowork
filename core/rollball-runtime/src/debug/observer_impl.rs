@@ -3,7 +3,7 @@
 //! [`DebugObserverImpl`] consolidates all debug logic that was previously
 //! scattered across `loop_.rs`, `agent_core.rs`, and `session_task.rs`:
 //!
-//! - Phase tracking + breakpoint checking (`update_debug_phase`)
+//! - Phase tracking (`update_debug_phase`)
 //! - Step event pushing (`push_debug_step`)
 //! - Auto-pause in stepping mode (`debug_auto_pause_if_stepping`)
 //! - Context snapshot capture (`capture_context_snapshot`)
@@ -247,28 +247,6 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             new_phase: phase,
             iteration: ctrl_guard.iteration,
         });
-
-        // Check breakpoints
-        let hit_ids = ctrl_guard.check_breakpoints(phase, None);
-        if !hit_ids.is_empty() {
-            for bp_id in &hit_ids {
-                tracing::info!(breakpoint_id = %bp_id, phase = ?phase, "Debug: breakpoint hit");
-                let _ = self.event_tx.send(DebugEvent::BreakpointHit {
-                    breakpoint_id: bp_id.clone(),
-                    iteration: ctrl_guard.iteration,
-                    phase,
-                });
-            }
-            ctrl_guard.state = DebugState::Paused;
-            let _ = self.event_tx.send(DebugEvent::ExecutionStateChanged {
-                new_state: DebugState::Paused,
-                iteration: ctrl_guard.iteration,
-            });
-            // NOTE: The caller is responsible for calling await_resume after
-            // we return true. We do NOT block here because await_resume
-            // needs &mut HistoryManager which the caller owns.
-            return true;
-        }
 
         false
     }

@@ -158,7 +158,7 @@ pub enum ChunkEvent {
 ///
 /// This is the shared building block used by both:
 /// - Production `run()`: loops automatically until TextResponse/Stopped
-/// - Debug `DebugSessionTask`: calls one iteration at a time with pause/breakpoint control
+/// - Debug `DebugSessionTask`: calls one iteration at a time with pause control
 #[derive(Debug)]
 pub(crate) enum IterationResult {
     /// Agent returned a text response — conversation round complete

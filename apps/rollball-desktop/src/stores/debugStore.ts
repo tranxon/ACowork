@@ -16,20 +16,6 @@ type Phase =
 /** Mirrors backend DebugState — the single source of truth for execution state. */
 type DebugState = "Running" | "Paused" | "Stepping" | "Stopped";
 
-interface BreakpointCondition {
-  type: "on_phase" | "on_tool_call" | "on_iteration" | "on_tool_result";
-  phase?: string;
-  tool_name_pattern?: string;
-  iteration?: number;
-  is_error?: boolean;
-}
-
-interface Breakpoint {
-  breakpoint_id: string;
-  condition: BreakpointCondition;
-  enabled: boolean;
-}
-
 interface SectionMeta {
   size_bytes: number;
   token_estimate: number;
@@ -70,7 +56,6 @@ interface PerSessionDebugState {
   paused: boolean;
   promptTokens: number;
   completionTokens: number;
-  breakpoints: Breakpoint[];
   snapshots: ContextSnapshotMeta[];
   sectionCache: Map<string, SectionContent>;
   hasPendingPatches: boolean;
@@ -84,7 +69,6 @@ function freshPerSessionState(): PerSessionDebugState {
     paused: false,
     promptTokens: 0,
     completionTokens: 0,
-    breakpoints: [],
     snapshots: [],
     sectionCache: new Map(),
     hasPendingPatches: false,
@@ -138,7 +122,6 @@ function topLevelFromSession(st: PerSessionDebugState) {
     paused: st.paused,
     promptTokens: st.promptTokens,
     completionTokens: st.completionTokens,
-    breakpoints: st.breakpoints,
     snapshots: st.snapshots,
     sectionCache: st.sectionCache,
     hasPendingPatches: st.hasPendingPatches,
@@ -166,7 +149,6 @@ interface DebugStore {
   paused: boolean;
   promptTokens: number;
   completionTokens: number;
-  breakpoints: Breakpoint[];
   snapshots: ContextSnapshotMeta[];
   sectionCache: Map<string, SectionContent>;
   hasPendingPatches: boolean;
@@ -399,14 +381,20 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     };
 
     switch (event.method) {
-      case "debugger.onStep":
+      case "debugger.onStep": {
+        const usage = (event.params as Record<string, unknown>).usage as
+          | { prompt_tokens: number; completion_tokens: number }
+          | undefined;
         patchSession({
           iteration: (event.params.iteration as number) ?? 0,
           phase: (event.params.phase as Phase) ?? "Idle",
           debugState: "Stepping",
           paused: true,
+          promptTokens: usage?.prompt_tokens ?? 0,
+          completionTokens: usage?.completion_tokens ?? 0,
         });
         break;
+      }
 
       case "debugger.onPaused":
         patchSession({ debugState: "Paused", paused: true });
@@ -447,10 +435,6 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         }
         break;
       }
-
-      case "debugger.onBreakpoint":
-        patchSession({ debugState: "Paused", paused: true });
-        break;
 
       case "debugger.onExecutionStateChange": {
         const newState = event.params.new_state as DebugState;
@@ -517,7 +501,6 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       iteration: number;
       phase: Phase;
       state: DebugState;
-      breakpoints: Breakpoint[];
       usage: { prompt_tokens: number; completion_tokens: number };
       paused?: boolean;
     };
@@ -527,7 +510,6 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         iteration: result.iteration ?? 0,
         phase: result.phase ?? "Idle",
         debugState,
-        breakpoints: result.breakpoints ?? [],
         promptTokens: result.usage?.prompt_tokens ?? 0,
         completionTokens: result.usage?.completion_tokens ?? 0,
         paused: debugState === "Paused",

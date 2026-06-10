@@ -78,7 +78,6 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
     step,
     stop,
     restart,
-    getState,
     getSection,
     rewind,
     reExecute,
@@ -127,15 +126,6 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
       disconnect();
     }
   }, [selectedAgent?.dev_mode, selectedAgent?.running, connected, disconnect]);
-
-  // Poll state when connected
-  useEffect(() => {
-    if (!connected) return;
-    const interval = setInterval(() => {
-      getState().catch(() => { });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [connected, getState]);
 
   const toggleSection = useCallback(
     async (iteration: number, section: string) => {

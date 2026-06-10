@@ -56,7 +56,7 @@ pub struct JsonRpcNotification {
 /// Parameters for `debugger.step`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepParams {
-    /// Breakpoint granularity
+    /// Step granularity (iteration or phase)
     #[serde(default = "default_granularity")]
     pub granularity: StepGranularity,
 }
@@ -70,61 +70,6 @@ fn default_granularity() -> StepGranularity {
 pub enum StepGranularity {
     Iteration,
     Phase,
-}
-
-// ── Breakpoint Types ──────────────────────────────────────────────────
-
-/// A debug breakpoint definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Breakpoint {
-    pub id: String,
-    #[serde(default)]
-    pub enabled: bool,
-    pub condition: BreakpointCondition,
-}
-
-/// Breakpoint condition (one of four types).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum BreakpointCondition {
-    #[serde(rename = "on_phase")]
-    OnPhase { phase: String },
-    #[serde(rename = "on_tool_call")]
-    OnToolCall {
-        #[serde(rename = "tool_name_pattern")]
-        tool_name_pattern: String,
-    },
-    #[serde(rename = "on_iteration")]
-    OnIteration { iteration: u32 },
-    #[serde(rename = "on_tool_result")]
-    OnToolResult {
-        #[serde(rename = "is_error")]
-        is_error: bool,
-    },
-}
-
-/// Parameters for `debugger.setBreakpoint`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetBreakpointParams {
-    pub condition: BreakpointCondition,
-}
-
-/// Result of `debugger.setBreakpoint`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetBreakpointResult {
-    pub breakpoint_id: String,
-}
-
-/// Parameters for `debugger.removeBreakpoint`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoveBreakpointParams {
-    pub breakpoint_id: String,
-}
-
-/// Result of `debugger.listBreakpoints`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListBreakpointsResult {
-    pub breakpoints: Vec<Breakpoint>,
 }
 
 // ── State Query Types ─────────────────────────────────────────────────
@@ -149,7 +94,6 @@ pub struct GetStateResult {
     pub phase: DebugPhase,
     pub messages: Vec<serde_json::Value>,
     pub snapshot_ids: Vec<String>,
-    pub breakpoints: Vec<Breakpoint>,
     pub usage: DebugUsage,
     /// Whether the debug controller is currently paused
     pub paused: bool,
@@ -318,14 +262,6 @@ pub struct OnStepParams {
     pub input: Option<serde_json::Value>,
     pub output: Option<serde_json::Value>,
     pub usage: Option<DebugUsage>,
-}
-
-/// Parameters for `debugger.onBreakpoint` event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OnBreakpointParams {
-    pub breakpoint_id: String,
-    pub iteration: u32,
-    pub phase: DebugPhase,
 }
 
 /// Parameters for `debugger.onStateChange` event.

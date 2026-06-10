@@ -16,6 +16,7 @@ use crate::agent::agent_core::AgentCore;
 use crate::agent::context::ContextBuilder;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_::{AgentLoop, ChunkEvent, SessionChunkEvent};
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session_state::SessionState;
 use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
@@ -266,6 +267,13 @@ impl SessionTask {
         mcp_tools: Option<Vec<Arc<dyn Tool>>>,
         runtime_debug: Option<DebugHandles>,
         pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>>,
+        // Accumulated runtime config overrides from Gateway pushes.
+        // Applied directly to AgentCore during session init so the session
+        // starts with correct values (not patched via message replay).
+        runtime_overrides: RuntimeConfigOverrides,
+        // Resolved workspace directory for tool execution.
+        // None = keep the default from AgentCore.config.work_dir.
+        initial_work_dir: Option<String>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         // Build the AgentLoop eagerly so its inbound sender can be exposed.
         // Heavy fields (provider, tools) are Arc-cloned (refcount only).
@@ -286,6 +294,38 @@ impl SessionTask {
             let observer = DebugObserverImpl::new(handles);
             core_for_session.set_debug_mode(observer);
         }
+
+        // ── Per-session field initialization ──
+        // All fields that are per-session (not globally shared) must be
+        // initialized from session creation context here, not patched later
+        // via message replay.
+
+        // ADR-012: Rebuild LLM Provider from SessionState.provider so the
+        // session always sends requests to the correct API endpoint.
+        // Without this, clone_for_session inherits the global startup provider.
+        if let Some(ref provider_id) = session.provider {
+            if let Some(new_provider) = core_for_session.build_provider_for(provider_id) {
+                let model = session.model.clone().unwrap_or_default();
+                core_for_session.update_provider(new_provider, model);
+            }
+        }
+
+        // Apply accumulated runtime config overrides from Gateway pushes.
+        // (temperature_override, system_prompt_override, shell_approval_threshold,
+        //  max_iterations, max_output_tokens)
+        core_for_session.apply_runtime_config(
+            runtime_overrides.max_output_tokens,
+            runtime_overrides.max_iterations,
+            runtime_overrides.temperature,
+            runtime_overrides.system_prompt_override,
+            runtime_overrides.shell_approval_threshold,
+        );
+
+        // Set initial workspace directory for tool execution.
+        if let Some(dir) = initial_work_dir {
+            core_for_session.current_work_dir = Some(dir);
+        }
+
         let (agent_loop, agent_inbound_tx) =
             AgentLoop::from_core_and_session(core_for_session, session);
 

@@ -93,7 +93,6 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
     step,
     stop,
     restart,
-    getState,
     getSection,
     rewind,
     reExecute,
@@ -149,15 +148,6 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
       disconnect();
     }
   }, [isDebugMode, selectedAgent?.dev_mode, selectedAgent?.running, connected, disconnect]);
-
-  // ── Debug poll state effect ──────────────────────────────────────
-  useEffect(() => {
-    if (!isDebugMode || !connected) return;
-    const interval = setInterval(() => {
-      getState().catch(() => { });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isDebugMode, connected, getState]);
 
   // ── Debug toggle section callback ────────────────────────────────
   const toggleSection = useCallback(

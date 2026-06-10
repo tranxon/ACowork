@@ -1,6 +1,6 @@
 //! DebugController — shared state for the Debug Protocol.
 //!
-//! Manages execution control state, breakpoints, conversation snapshots,
+//! Manages execution control state, conversation snapshots,
 //! and context snapshots. Wrapped in `Arc<tokio::sync::Mutex<>>` for
 //! safe sharing between the WebSocket server and AgentLoop.
 
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use super::protocol::{
-    Breakpoint, ContextSections, DebugPhase, DebugUsage, SectionMeta,
+    ContextSections, DebugPhase, DebugUsage, SectionMeta,
 };
 
 // ── Debug Execution State ─────────────────────────────────────────────
@@ -163,8 +163,6 @@ pub struct DebugController {
     pub phase: DebugPhase,
     /// Current iteration number
     pub iteration: u32,
-    /// Registered breakpoints
-    pub breakpoints: Vec<Breakpoint>,
     /// Conversation snapshots (indexed by iteration)
     pub conversation_snapshots: Vec<ConversationSnapshot>,
     /// Context snapshots (indexed by iteration)
@@ -196,8 +194,6 @@ pub struct DebugController {
     /// Set by [`AgentLoop::capture_context_snapshot`] so that context
     /// patches (via `patchContext`) can use model-aware token estimates.
     pub current_model: Option<String>,
-    /// Breakpoint ID counter for generating unique IDs
-    next_bp_id: u64,
 }
 
 impl DebugController {
@@ -207,7 +203,6 @@ impl DebugController {
             state: DebugState::Stepping,
             phase: DebugPhase::Idle,
             iteration: 0,
-            breakpoints: Vec::new(),
             conversation_snapshots: Vec::new(),
             context_snapshots: HashMap::new(),
             pending_patches: None,
@@ -216,72 +211,7 @@ impl DebugController {
             rewind_notify: Arc::new(Notify::const_new()),
             resume_notify: Arc::new(Notify::const_new()),
             current_model: None,
-            next_bp_id: 1,
         }
-    }
-
-    /// Generate a unique breakpoint ID.
-    pub fn next_breakpoint_id(&mut self) -> String {
-        let id = format!("bp-{:03}", self.next_bp_id);
-        self.next_bp_id += 1;
-        id
-    }
-
-    /// Add a breakpoint and return its assigned ID.
-    pub fn add_breakpoint(&mut self, condition: super::protocol::BreakpointCondition) -> String {
-        let id = self.next_breakpoint_id();
-        self.breakpoints.push(Breakpoint {
-            id: id.clone(),
-            enabled: true,
-            condition,
-        });
-        id
-    }
-
-    /// Remove a breakpoint by ID. Returns true if found and removed.
-    pub fn remove_breakpoint(&mut self, bp_id: &str) -> bool {
-        let len_before = self.breakpoints.len();
-        self.breakpoints.retain(|bp| bp.id != bp_id);
-        self.breakpoints.len() < len_before
-    }
-
-    /// Check if any breakpoint matches the current phase and iteration.
-    /// Returns the matching breakpoint IDs.
-    pub fn check_breakpoints(&self, phase: DebugPhase, tool_name: Option<&str>) -> Vec<String> {
-        self.breakpoints
-            .iter()
-            .filter(|bp| {
-                if !bp.enabled {
-                    return false;
-                }
-                match &bp.condition {
-                    super::protocol::BreakpointCondition::OnPhase { phase: bp_phase } => {
-                        let phase_str = format!("{:?}", phase);
-                        phase_str.eq_ignore_ascii_case(bp_phase)
-                    }
-                    super::protocol::BreakpointCondition::OnIteration { iteration } => {
-                        self.iteration == *iteration
-                    }
-                    super::protocol::BreakpointCondition::OnToolCall { tool_name_pattern } => {
-                        if let Some(name) = tool_name {
-                            // Simple glob: supports exact match and `*` suffix prefix
-                            if let Some(prefix) = tool_name_pattern.strip_suffix('*') {
-                                name.starts_with(prefix)
-                            } else {
-                                name == tool_name_pattern.as_str()
-                            }
-                        } else {
-                            false
-                        }
-                    }
-                    super::protocol::BreakpointCondition::OnToolResult { is_error: _ } => {
-                        // Tool result breakpoints are handled post-execution
-                        false
-                    }
-                }
-            })
-            .map(|bp| bp.id.clone())
-            .collect()
     }
 
     /// Create a conversation snapshot at the current state.
@@ -368,7 +298,6 @@ impl DebugController {
         self.state = DebugState::Stepping;
         self.phase = DebugPhase::Idle;
         self.iteration = 0;
-        self.breakpoints.clear();
         self.conversation_snapshots.clear();
         self.context_snapshots.clear();
         self.pending_patches = None;

@@ -266,6 +266,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         currentSessionId: newCurrentId,
       });
 
+      // Sync debugStore so the debug panel stops polling the closed session.
+      useDebugStore.getState().setCurrentSessionId(newCurrentId);
+
       // Close tab if the closed session was open
       const openIds = useChatStore.getState().getOpenSessionIds(agentId);
       if (openIds.includes(sessionId)) {
@@ -308,6 +311,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: remaining,
         currentSessionId: newCurrentId,
       });
+
+      // Sync debugStore so the debug panel stops polling the deleted session.
+      useDebugStore.getState().setCurrentSessionId(newCurrentId);
 
       // ADR-015: Close tab if the deleted session was open
       const openIds = useChatStore.getState().getOpenSessionIds(agentId);

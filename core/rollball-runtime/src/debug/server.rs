@@ -53,12 +53,6 @@ pub enum DebugEvent {
         output: Option<serde_json::Value>,
         usage: Option<protocol::DebugUsage>,
     },
-    /// A breakpoint was hit
-    BreakpointHit {
-        breakpoint_id: String,
-        iteration: u32,
-        phase: DebugPhase,
-    },
     /// Context was built for an iteration
     ContextBuilt {
         iteration: u32,
@@ -125,7 +119,7 @@ impl DebugEventSender {
 /// Debug Protocol WebSocket server state.
 ///
 /// Per-session debug isolation: each session has its own `DebugController`
-/// (iteration counter, breakpoints, state, snapshots). The frontend sends
+/// (iteration counter, state, snapshots). The frontend sends
 /// `session_id` in every request; the server routes to the correct
 /// controller without needing a server-side "current session".
 pub struct DebugProtocolServer {
@@ -570,7 +564,6 @@ impl DebugProtocolServer {
                         .iter()
                         .map(|s| s.id.clone())
                         .collect(),
-                    breakpoints: ctrl.breakpoints.clone(),
                     usage: protocol::DebugUsage {
                         prompt_tokens: 0,
                         completion_tokens: 0,
@@ -594,47 +587,6 @@ impl DebugProtocolServer {
                 Ok(JsonRpcResponse::success(
                     id.clone(),
                     result,
-                ))
-            }
-
-            // ── Breakpoints ──
-            "debugger.setBreakpoint" => {
-                let bp_params: protocol::SetBreakpointParams = serde_json::from_value(params.clone())
-                    .map_err(|e| MethodError::invalid_params(e.to_string()))?;
-                let bp_id = ctrl.add_breakpoint(bp_params.condition);
-                let result = serde_json::json!({ "breakpoint_id": bp_id });
-                tracing::info!(breakpoint_id = %bp_id, "Debug: breakpoint set");
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    result,
-                ))
-            }
-
-            "debugger.removeBreakpoint" => {
-                let rm_params: protocol::RemoveBreakpointParams = serde_json::from_value(params.clone())
-                    .map_err(|e| MethodError::invalid_params(e.to_string()))?;
-                let removed = ctrl.remove_breakpoint(&rm_params.breakpoint_id);
-                if removed {
-                    tracing::info!(
-                        breakpoint_id = %rm_params.breakpoint_id,
-                        "Debug: breakpoint removed"
-                    );
-                }
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    serde_json::json!({ "removed": removed }),
-                ))
-            }
-
-            "debugger.listBreakpoints" => {
-                let result = protocol::ListBreakpointsResult {
-                    breakpoints: ctrl.breakpoints.clone(),
-                };
-                let json = serde_json::to_value(result)
-                    .map_err(|e| MethodError::internal(e.to_string()))?;
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    json,
                 ))
             }
 
@@ -911,7 +863,6 @@ fn event_method_name(event: &DebugEvent) -> &'static str {
     match event {
         DebugEvent::StateChanged { .. } => "debugger.onStateChange",
         DebugEvent::Step { .. } => "debugger.onStep",
-        DebugEvent::BreakpointHit { .. } => "debugger.onBreakpoint",
         DebugEvent::ContextBuilt { .. } => "debugger.onContextBuilt",
         DebugEvent::ExecutionStateChanged { .. } => "debugger.onExecutionStateChange",
     }
@@ -952,19 +903,6 @@ fn event_to_notification(event: DebugEvent, session_id: &str) -> JsonRpcNotifica
                 "usage": usage,
             });
             JsonRpcNotification::new("debugger.onStep", params)
-        }
-        DebugEvent::BreakpointHit {
-            breakpoint_id,
-            iteration,
-            phase,
-        } => {
-            let params = serde_json::json!({
-                "session_id": session_id,
-                "breakpoint_id": breakpoint_id,
-                "iteration": iteration,
-                "phase": format!("{:?}", phase),
-            });
-            JsonRpcNotification::new("debugger.onBreakpoint", params)
         }
         DebugEvent::ContextBuilt {
             iteration,

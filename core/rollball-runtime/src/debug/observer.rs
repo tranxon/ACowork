@@ -84,8 +84,8 @@ pub trait DebugObserver: Send + Sync {
 
     /// Called when the agent loop enters a new phase.
     ///
-    /// Updates the controller's phase, pushes a StateChanged event,
-    /// checks breakpoints. Returns `true` if a breakpoint was hit.
+    /// Updates the controller's phase and pushes a StateChanged event.
+    /// Returns `true` if execution should be paused.
     async fn on_phase_enter(&self, _phase: DebugPhase) -> bool {
         false
     }
