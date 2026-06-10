@@ -816,6 +816,13 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
                         // Some providers (GLM, DeepSeek) send name and arguments
                         // together in a single SSE chunk; previously the early
                         // return discarded arguments, causing empty tool params.
+                        //
+                        // MiniMax sends name+arguments in the first delta, but
+                        // arguments is just the JSON opening brace (e.g. "{").
+                        // We must ALSO emit a ToolCallChunk for those partial
+                        // arguments so the loop_llm.rs buffer accumulates the
+                        // rest.  Only complete JSON (GLM/DeepSeek) should skip
+                        // the ToolCallChunk.
                         let initial_arguments = func.arguments.unwrap_or_default();
 
                         tracing::debug!(
@@ -833,9 +840,21 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
                             call_type: "function".to_string(),
                             function: FunctionCall {
                                 name,
-                                arguments: initial_arguments,
+                                arguments: String::new(), // arguments go through ToolCallChunk
                             },
                         }));
+                        // Emit ToolCallChunk for any arguments present in the
+                        // same delta.  This covers MiniMax partial-start
+                        // (initial_args="{") and GLM/DeepSeek same-chunk
+                        // (initial_args=complete JSON) alike.  The downstream
+                        // loop_llm.rs will validate and deduplicate.
+                        if !initial_arguments.is_empty() {
+                            let idx = tc_delta.index.unwrap_or(0);
+                            events.push(StreamEvent::ToolCallChunk {
+                                index: idx,
+                                arguments: initial_arguments,
+                            });
+                        }
                     } else {
                         // DeepSeek sends empty name string in subsequent tool_call
                         // chunks; fall through to process arguments instead of
