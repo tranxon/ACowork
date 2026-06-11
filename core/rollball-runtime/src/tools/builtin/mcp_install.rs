@@ -20,8 +20,20 @@ use crate::mcp_notify::McpNotifyRef;
 /// validates it via scratch test, rolls back on failure, and notifies
 /// the main loop via [`McpConfigNotifier`](crate::mcp_notify::McpConfigNotifier)
 /// on success.
+///
+/// Uses `agent_home` (not session `work_dir`) for config persistence.
+/// MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
+/// not per-project. When a workspace is open, `current_work_dir` points
+/// to the project root, but MCP install must always write to the agent home
+/// to ensure configs survive workspace switches and are correctly loaded
+/// on startup/reconnect.
 pub struct McpInstallTool {
     notifier: McpNotifyRef,
+    /// Agent home directory — the authoritative location for MCP config persistence.
+    /// Set at construction time from `config().work_dir`. Always required;
+    /// MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
+    /// never per-project.
+    agent_home: String,
 }
 
 impl McpInstallTool {
@@ -72,15 +84,13 @@ impl McpInstallTool {
     }
 }
 
-impl Default for McpInstallTool {
-    fn default() -> Self {
-        Self::new(None)
-    }
-}
-
 impl McpInstallTool {
-    pub fn new(notifier: McpNotifyRef) -> Self {
-        Self { notifier }
+    /// Create with the required agent home directory.
+    ///
+    /// MCP configs are per-agent — they must always be written to the
+    /// agent's home directory, not the session's project workspace.
+    pub fn new(notifier: McpNotifyRef, agent_home: String) -> Self {
+        Self { notifier, agent_home }
     }
 }
 
@@ -93,17 +103,12 @@ impl Tool for McpInstallTool {
     async fn execute(
         &self,
         params: Value,
-        work_dir: Option<&str>,
+        _work_dir: Option<&str>,
     ) -> rollball_core::error::Result<ToolResult> {
-        let work_dir = work_dir.unwrap_or("");
-        if work_dir.is_empty() {
-            return Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some("mcp_install requires a work_dir context".to_string()),
-                token_usage: None,
-            });
-        }
+        // MCP configs are per-agent, stored in {agent_home}/config/agent_mcp.json.
+        // Always use agent_home — never fall back to the trait-provided work_dir
+        // (which is the session's project workspace, not the agent home).
+        let work_dir = self.agent_home.as_str();
 
         // ── Step 1: Parse and validate parameters ──
         let name = params["name"].as_str().unwrap_or("").trim();

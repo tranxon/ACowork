@@ -66,6 +66,9 @@ use search_backends::WebSearchEngine;
 /// * `grafeo_store` - Optional GrafeoStore for memory_store backend wiring.
 /// * `memory_session` - Optional MemorySessionHandle for memory_recall session-aware retrieval.
 /// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
+/// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
+///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
+///   not per-project. No fallback: must always be set explicitly.
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
@@ -74,6 +77,7 @@ pub fn all_builtin_tools(
     grafeo_store: Option<Arc<GrafeoStore>>,
     memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
+    agent_home: String,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -103,8 +107,14 @@ pub fn all_builtin_tools(
         Arc::new(intent_send::IntentSendTool::new()),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
         Arc::new(todo_write::TodoWriteTool::new()),
-        Arc::new(mcp_install::McpInstallTool::new(mcp_notifier.clone())),
-        Arc::new(mcp_uninstall::McpUninstallTool::new(mcp_notifier.clone())),
+        Arc::new(mcp_install::McpInstallTool::new(
+            mcp_notifier.clone(),
+            agent_home.clone(),
+        )),
+        Arc::new(mcp_uninstall::McpUninstallTool::new(
+            mcp_notifier.clone(),
+            agent_home.clone(),
+        )),
     ];
 
     // Only register web_search when at least one search provider is configured.

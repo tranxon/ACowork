@@ -515,11 +515,20 @@ impl AgentLoop {
             };
             match iteration_result {
                 IterationResult::TextResponse(content) => {
+                    // Consume redundant channel-based Stop/StopLoop that
+                    // accompanies the urgent_stop Notify. When the user
+                    // clicks stop, both paths fire simultaneously — the
+                    // Notify aborts the LLM stream (causing this exit),
+                    // while the channel Stop waits in the queue. Without
+                    // consuming it here, the next run() call would abort
+                    // immediately on drain_inbound_queue().
+                    self.poll_stop();
                     // ADR-014: Streaming → Idle (normal completion)
                     self.transition_status(SessionStatus::Idle);
                     return Ok(content);
                 }
                 IterationResult::Stopped(content) => {
+                    self.poll_stop();
                     // ADR-014: Streaming → Idle (stopped)
                     self.transition_status(SessionStatus::Idle);
                     return Ok(content);

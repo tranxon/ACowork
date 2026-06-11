@@ -667,6 +667,7 @@ async fn async_main(
         None, // GrafeoStore not yet initialized — tool uses fallback path
         Some(memory_session.clone()), // Shared session handle for memory_recall
         Some(mcp_notifier.clone()),   // MCP config change notifier
+        config.work_dir.clone(), // Agent home for MCP config persistence
     ) {
         registry.register(tool);
     }
