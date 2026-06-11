@@ -55,8 +55,6 @@ const darkTheme = {
     description: "rgba(204,204,204,0.7)",
     countBg: "#4D4D4D",
     countFg: "#FFFFFF",
-    scrollbarThumb: "rgba(121,121,121,0.4)",
-    scrollbarThumbHover: "rgba(100,100,100,0.7)",
     shadow: "rgba(0,0,0,0.36) 0 0 8px 2px",
 };
 
@@ -74,8 +72,6 @@ const lightTheme = {
     description: "#616161",
     countBg: "#C4C4C4",
     countFg: "#616161",
-    scrollbarThumb: "rgba(100,100,100,0.4)",
-    scrollbarThumbHover: "rgba(100,100,100,0.7)",
     shadow: "rgba(0,0,0,0.16) 0 2px 8px",
 };
 
@@ -268,15 +264,16 @@ export function GlobalSearchPanel({ agentId, workspaceId, onClose }: GlobalSearc
 
     /* ── Scrollbar CSS ───────────────────────────────────────────────── */
 
+    /* ── Scrollbar CSS — inherits --ui-scrollbar-* tokens from globals.css */
     const scrollStyle = `
-        .gs-list::-webkit-scrollbar { width: 6px; }
+        .gs-list::-webkit-scrollbar { width: var(--ui-scrollbar-size); }
         .gs-list::-webkit-scrollbar-track { background: transparent; }
         .gs-list::-webkit-scrollbar-thumb {
-            background: ${colors.scrollbarThumb};
+            background: var(--ui-scrollbar-thumb);
             border-radius: 3px;
         }
         .gs-list::-webkit-scrollbar-thumb:hover {
-            background: ${colors.scrollbarThumbHover};
+            background: var(--ui-scrollbar-thumb-hover);
         }
     `;
 

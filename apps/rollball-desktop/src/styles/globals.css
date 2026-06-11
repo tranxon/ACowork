@@ -63,6 +63,14 @@
   --ui-radio-label-gap: 0.5rem;
   /* 8px — gap between radio circle and label text */
 
+  /* Scrollbar — light, low-contrast on both light and dark backgrounds */
+  --ui-scrollbar-thumb: #d4d4d8;
+  /* zinc-300 — light gray, blends into the surface */
+  --ui-scrollbar-thumb-hover: #a1a1aa;
+  /* zinc-400 — slightly deeper on hover */
+  --ui-scrollbar-size: 6px;
+  /* width & height of the scrollbar track */
+
   /* Font sizes */
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
@@ -116,6 +124,12 @@
   /* Radio group (dark) */
   --ui-radio-bg: #52525b;
   /* zinc-600 — unchecked radio fill in dark */
+
+  /* Scrollbar (dark) */
+  --ui-scrollbar-thumb: #3f3f46;
+  /* zinc-700 — gentle gray on dark surfaces */
+  --ui-scrollbar-thumb-hover: #52525b;
+  /* zinc-600 — slightly brighter on hover */
 }
 
 /* Base styles */
@@ -140,10 +154,10 @@ body {
   flex-direction: column;
 }
 
-/* Scrollbar */
+/* Scrollbar — themed via --ui-scrollbar-* tokens */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: var(--ui-scrollbar-size);
+  height: var(--ui-scrollbar-size);
 }
 
 ::-webkit-scrollbar-track {
@@ -151,18 +165,18 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(215.4 16.3% 70%);
+  background: var(--ui-scrollbar-thumb);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(215.4 16.3% 50%);
+  background: var(--ui-scrollbar-thumb-hover);
 }
 
 /* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: hsl(215.4 16.3% 70%) transparent;
+  scrollbar-color: var(--ui-scrollbar-thumb) transparent;
 }
 
 /* Reduced motion */

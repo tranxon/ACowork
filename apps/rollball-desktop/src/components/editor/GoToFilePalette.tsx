@@ -50,8 +50,6 @@ const darkTheme = {
     description: "rgba(204,204,204,0.7)",
     countBg: "#4D4D4D",
     countFg: "#FFFFFF",
-    scrollbarThumb: "rgba(121,121,121,0.4)",
-    scrollbarThumbHover: "rgba(100,100,100,0.7)",
     shadow: "rgba(0,0,0,0.36) 0 0 8px 2px",
 };
 
@@ -69,8 +67,6 @@ const lightTheme = {
     description: "#616161",
     countBg: "#C4C4C4",
     countFg: "#616161",
-    scrollbarThumb: "rgba(100,100,100,0.4)",
-    scrollbarThumbHover: "rgba(100,100,100,0.7)",
     shadow: "rgba(0,0,0,0.16) 0 2px 8px",
 };
 
@@ -300,14 +296,14 @@ export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePalet
 
     /* ── Scrollbar CSS ─────────────────────────────────────────────── */
     const scrollStyle = `
-        .g2f-list::-webkit-scrollbar { width: 6px; }
+        .g2f-list::-webkit-scrollbar { width: var(--ui-scrollbar-size); }
         .g2f-list::-webkit-scrollbar-track { background: transparent; }
         .g2f-list::-webkit-scrollbar-thumb {
-            background: ${colors.scrollbarThumb};
+            background: var(--ui-scrollbar-thumb);
             border-radius: 3px;
         }
         .g2f-list::-webkit-scrollbar-thumb:hover {
-            background: ${colors.scrollbarThumbHover};
+            background: var(--ui-scrollbar-thumb-hover);
         }
     `;
 
