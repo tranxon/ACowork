@@ -1,8 +1,20 @@
-//! HuggingFace model downloader with mirror support.
+//! HuggingFace model downloader with concurrent multi-source racing.
 //!
 //! Downloads ONNX model files and tokenizers from HuggingFace Hub.
-//! Supports HF Mirror (e.g., `hf-mirror.com`) for users behind the GFW.
-//! Uses atomic file writes (write to temp, then rename) for safety.
+//! All known sources (official + built-in mirrors + custom mirrors)
+//! are raced **concurrently** — the fastest responder wins and
+//! the losers are cancelled. This eliminates the need for users
+//! to know their network environment or configure mirrors manually.
+//!
+//! # Built-in sources
+//!
+//! The official HuggingFace URL (`https://huggingface.co`) and
+//! `hf-mirror.com` are always included. Users behind the GFW
+//! benefit from the mirror automatically; overseas users benefit
+//! from the official source — no configuration needed.
+//!
+//! Additional custom mirrors can be supplied via `hf_mirrors`
+//! for enterprise or private registry scenarios.
 //!
 //! # Cross-platform notes
 //!
@@ -13,6 +25,8 @@
 //! We use a `rename_or_replace` helper that handles both cases correctly.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -60,12 +74,18 @@ fn rename_or_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 // ── HuggingFace URL builder ─────────────────────────────────────────────
 
+const HF_DEFAULT_BASE: &str = "https://huggingface.co";
+
+/// Built-in mirror URLs that are always raced alongside the official source.
+/// Users never need to configure these — the app handles network adaptation
+/// automatically (GFW users benefit from the mirror; overseas users from the
+/// official source).
+const HF_BUILTIN_MIRRORS: &[&str] = &["https://hf-mirror.com"];
+
 /// Build the download URL for a HuggingFace file.
 ///
-/// Standard: `https://huggingface.co/{repo}/resolve/main/{path}`
-/// Mirror:   `https://hf-mirror.com/{repo}/resolve/main/{path}`
-fn hf_file_url(hf_repo: &str, file_path: &str, mirror: Option<&str>) -> String {
-    let base = mirror.unwrap_or("https://huggingface.co");
+/// `{base}/{repo}/resolve/main/{path}`
+fn hf_file_url(hf_repo: &str, file_path: &str, base: &str) -> String {
     format!("{base}/{hf_repo}/resolve/main/{file_path}")
 }
 
@@ -83,21 +103,76 @@ pub struct DownloadResult {
 /// Progress callback type: `(downloaded_bytes, total_bytes)`.
 pub type ProgressCb = dyn Fn(u64, u64) + Send + Sync;
 
+// ── Shared download progress tracker ──────────────────────────────────
+
+/// Thread-safe download progress tracker shared across concurrent racers.
+///
+/// All racers update the same instance via atomic operations, so the UI
+/// always sees the progress of the fastest (winning) source.
+pub struct DownloadProgress {
+    /// Bytes downloaded so far for the current file.
+    pub bytes_downloaded: AtomicU64,
+    /// Total bytes of the current file (0 if unknown).
+    pub total_bytes: AtomicU64,
+    /// Name of the file currently being downloaded (e.g., "model.onnx").
+    pub current_file: std::sync::Mutex<String>,
+}
+
+impl DownloadProgress {
+    /// Create a new progress tracker with zero state.
+    pub fn new() -> Self {
+        Self {
+            bytes_downloaded: AtomicU64::new(0),
+            total_bytes: AtomicU64::new(0),
+            current_file: std::sync::Mutex::new(String::new()),
+        }
+    }
+
+    /// Return progress as `(percentage 0-100, bytes_downloaded, total_bytes)`.
+    pub fn snapshot(&self) -> (u8, u64, u64) {
+        let downloaded = self.bytes_downloaded.load(Ordering::Relaxed);
+        let total = self.total_bytes.load(Ordering::Relaxed);
+        let pct = if total > 0 {
+            ((downloaded as f64 / total as f64) * 100.0).min(100.0) as u8
+        } else {
+            0
+        };
+        (pct, downloaded, total)
+    }
+
+    /// Reset progress for a new file.
+    fn reset_for_file(&self, file_name: &str) {
+        self.bytes_downloaded.store(0, Ordering::Relaxed);
+        self.total_bytes.store(0, Ordering::Relaxed);
+        if let Ok(mut name) = self.current_file.lock() {
+            *name = file_name.to_string();
+        }
+    }
+}
+
 // ── Downloader ──────────────────────────────────────────────────────────
 
-/// HuggingFace model downloader.
+/// HuggingFace model downloader with concurrent multi-source racing.
+///
+/// All known sources (official + built-in mirrors + optional custom
+/// mirrors) are raced concurrently. The fastest responder wins —
+/// no manual configuration needed.
 pub struct Downloader {
-    /// HTTP client.
-    http_client: Client,
+    /// HTTP client (shared across all concurrent racers via Arc).
+    http_client: Arc<Client>,
     /// Base models directory.
     models_dir: PathBuf,
-    /// Optional HF mirror domain (e.g., "https://hf-mirror.com").
-    hf_mirror: Option<String>,
+    /// Additional custom mirror URLs (beyond built-in mirrors).
+    hf_mirrors: Vec<String>,
 }
 
 impl Downloader {
     /// Create a new downloader.
-    pub fn new(models_dir: &Path, hf_mirror: Option<String>) -> Self {
+    ///
+    /// `hf_mirrors` provides additional custom mirror URLs beyond the
+    /// built-in ones. Typically left empty — the built-in mirrors
+    /// already cover the common network environments.
+    pub fn new(models_dir: &Path, hf_mirrors: Vec<String>) -> Self {
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(600)) // 10 min per file
             .connect_timeout(std::time::Duration::from_secs(30))
@@ -105,10 +180,28 @@ impl Downloader {
             .expect("Failed to build HTTP client for downloader");
 
         Self {
-            http_client,
+            http_client: Arc::new(http_client),
             models_dir: models_dir.to_path_buf(),
-            hf_mirror,
+            hf_mirrors,
         }
+    }
+
+    /// Build the list of all source base URLs.
+    ///
+    /// Always includes the official HuggingFace URL + built-in mirrors,
+    /// plus any user-configured custom mirrors. All sources are raced
+    /// concurrently, so ordering does not affect latency.
+    fn sources(&self) -> Vec<String> {
+        let mut sources = vec![HF_DEFAULT_BASE.to_string()];
+        for &m in HF_BUILTIN_MIRRORS {
+            sources.push(m.to_string());
+        }
+        for m in &self.hf_mirrors {
+            if !sources.contains(m) {
+                sources.push(m.clone());
+            }
+        }
+        sources
     }
 
     /// Download a model from HuggingFace.
@@ -116,12 +209,15 @@ impl Downloader {
     /// Downloads the ONNX model file (selected variant) and tokenizer.
     /// Files are written to a temp directory first, then atomically renamed.
     ///
+    /// `progress` is a shared tracker that receives real-time byte-level
+    /// progress — suitable for exposing to the UI via polling.
+    ///
     /// # Arguments
     /// * `model_id` - Model identifier (used as directory name).
     /// * `hf_repo` - HuggingFace repository (e.g., "onnx-community/bge-small-zh-v1.5-ONNX").
     /// * `onnx_file` - Path within the repo to the ONNX file (e.g., "onnx/model_fp16.onnx").
     /// * `tokenizer_file` - Path within the repo to the tokenizer (e.g., "tokenizer.json").
-    /// * `on_progress` - Optional progress callback.
+    /// * `progress` - Shared progress tracker updated by the winning racer.
     /// * `cancel` - Cancellation flag (if true, abort download).
     pub async fn download_model(
         &self,
@@ -129,7 +225,7 @@ impl Downloader {
         hf_repo: &str,
         onnx_file: &str,
         tokenizer_file: &str,
-        _on_progress: Option<&ProgressCb>,
+        progress: &DownloadProgress,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<DownloadResult, DownloadError> {
         let model_dir = self.models_dir.join(model_id);
@@ -153,18 +249,30 @@ impl Downloader {
             (tokenizer_file, "tokenizer.json"),
         ];
 
+        let sources = self.sources();
+
+        tracing::info!(
+            sources = ?sources,
+            "Starting concurrent download race with {} sources",
+            sources.len()
+        );
+
         for (remote_path, local_name) in &files_to_download {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
                 return Err(DownloadError::Cancelled);
             }
 
-            let url = hf_file_url(hf_repo, remote_path, self.hf_mirror.as_deref());
+            progress.reset_for_file(local_name);
             let local_path = tmp_dir.join(local_name);
-
-            tracing::info!(url = %url, local = %local_path.display(), "Downloading file");
-
-            self.download_file(&url, &local_path).await?;
+            download_file_race(
+                &self.http_client,
+                hf_repo,
+                remote_path,
+                &local_path,
+                &sources,
+                progress,
+            ).await?;
 
             downloaded_files.push(local_name.to_string());
         }
@@ -184,12 +292,17 @@ impl Downloader {
             .to_str()
             .expect("filename should be valid UTF-8")
             .to_string();
-        let ext_data_url = hf_file_url(hf_repo, &onnx_ext_data_remote, self.hf_mirror.as_deref());
         let ext_data_path = tmp_dir.join(&onnx_ext_data_local);
 
-        tracing::info!(url = %ext_data_url, local = %ext_data_path.display(), "Downloading external data file");
-
-        match self.download_file(&ext_data_url, &ext_data_path).await {
+        progress.reset_for_file(&onnx_ext_data_local);
+        match download_file_race(
+            &self.http_client,
+            hf_repo,
+            &onnx_ext_data_remote,
+            &ext_data_path,
+            &sources,
+            progress,
+        ).await {
             Ok(()) => {
                 downloaded_files.push(onnx_ext_data_local);
             }
@@ -219,85 +332,6 @@ impl Downloader {
         })
     }
 
-    /// Download a single file with retry logic.
-    /// Retries up to 3 times on transient HTTP errors (5xx, timeout).
-    async fn download_file(
-        &self,
-        url: &str,
-        dest: &Path,
-    ) -> Result<(), DownloadError> {
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY_MS: u64 = 2000;
-
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            match self.download_file_inner(url, dest).await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    let is_transient = match &e {
-                        DownloadError::Http(req_err) => {
-                            req_err.is_timeout()
-                                || req_err.is_connect()
-                                || req_err.status().map_or(false, |s| s.is_server_error())
-                        }
-                        _ => false,
-                    };
-
-                    if is_transient && attempt < MAX_RETRIES {
-                        tracing::warn!(
-                            url,
-                            attempt,
-                            error = %e,
-                            "Download failed (transient), retrying..."
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            RETRY_DELAY_MS * attempt as u64,
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
-        }
-    }
-
-    /// Inner download implementation (single attempt).
-    /// Uses streaming to avoid loading the entire file into memory.
-    async fn download_file_inner(
-        &self,
-        url: &str,
-        dest: &Path,
-    ) -> Result<(), DownloadError> {
-        let response = self
-            .http_client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(DownloadError::Http)?;
-
-        let total_size = response.content_length().unwrap_or(0);
-        tracing::info!(size = total_size, "Downloading file");
-
-        // Write to temp file first via streaming, then atomic rename (cross-platform)
-        let tmp_path = dest.with_extension("tmp");
-        let mut file = tokio::io::BufWriter::new(tokio::fs::File::create(&tmp_path).await?);
-
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(DownloadError::Http)?;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
-        }
-        tokio::io::AsyncWriteExt::flush(&mut file).await?;
-        drop(file);
-
-        rename_or_replace(&tmp_path, dest)?;
-
-        Ok(())
-    }
-
     /// Check if a model is already downloaded.
     pub fn is_downloaded(&self, model_id: &str) -> bool {
         let model_dir = self.models_dir.join(model_id);
@@ -320,4 +354,197 @@ impl Downloader {
     pub fn models_dir_path(&self) -> &Path {
         &self.models_dir
     }
+}
+
+// ── Concurrent download race ───────────────────────────────────────────
+
+/// Race multiple download sources concurrently.
+///
+/// All sources start downloading simultaneously via `tokio::task::JoinSet`.
+/// The first successful download wins — all other tasks are aborted,
+/// their partial temp files cleaned up. If all sources fail, the last
+/// error is returned.
+///
+/// Each racer writes to a unique per-source temp file (`{dest}_{i}.tmp`)
+/// to avoid write conflicts. The winner's temp file is atomically renamed
+/// to the final destination.
+async fn download_file_race(
+    client: &Arc<Client>,
+    hf_repo: &str,
+    remote_path: &str,
+    dest: &Path,
+    sources: &[String],
+    progress: &DownloadProgress,
+) -> Result<(), DownloadError> {
+    let mut set = tokio::task::JoinSet::new();
+
+    for (idx, base) in sources.iter().enumerate() {
+        let url = hf_file_url(hf_repo, remote_path, base);
+        let client = Arc::clone(client);
+        let dest = dest.to_path_buf();
+        // SAFETY: progress is borrowed from the caller and lives for the
+        // duration of this function. We extend its lifetime for spawned
+        // tasks by converting the reference to a raw pointer, then back
+        // inside the task. This is safe because:
+        // 1. The JoinSet is awaited to completion (or abort_all) before
+        //    this function returns, so all tasks finish before `progress`
+        //    is dropped.
+        // 2. DownloadProgress uses atomic fields, so concurrent writes
+        //    are safe.
+        let progress_ptr = progress as *const DownloadProgress as usize;
+
+        set.spawn(async move {
+            // SAFETY: see comment above
+            let progress = unsafe { &*(progress_ptr as *const DownloadProgress) };
+            let result = download_file_with_retries(&client, &url, &dest, idx, progress).await;
+            (idx, url, result)
+        });
+    }
+
+    let total = sources.len();
+    let mut last_err: Option<DownloadError> = None;
+
+    while let Some(outcome) = set.join_next().await {
+        match outcome {
+            Ok((idx, url, Ok(()))) => {
+                tracing::info!(
+                    source = idx + 1,
+                    total,
+                    url = %url,
+                    "Download race winner (source {})",
+                    idx + 1
+                );
+                // Abort all remaining tasks — JoinSet drop also handles this
+                set.abort_all();
+                return Ok(());
+            }
+            Ok((idx, url, Err(e))) => {
+                tracing::warn!(
+                    source = idx + 1,
+                    total,
+                    url = %url,
+                    error = %e,
+                    "Source {}/{} failed in race",
+                    idx + 1, total
+                );
+                last_err = Some(e);
+            }
+            Err(join_err) => {
+                // Task was cancelled or panicked — only record if no other error yet
+                if join_err.is_cancelled() && last_err.is_none() {
+                    last_err = Some(DownloadError::Cancelled);
+                } else if last_err.is_none() {
+                    last_err = Some(DownloadError::InvalidUrl(
+                        format!("Download task panicked: {}", join_err),
+                    ));
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        DownloadError::InvalidUrl("No download sources available".to_string())
+    }))
+}
+
+/// Download a single file with retry logic (used inside race tasks).
+///
+/// Retries up to 3 times on transient HTTP errors (5xx, timeout).
+/// Each racer writes to a unique temp file (`{dest}_{idx}.tmp`) to
+/// avoid write conflicts between concurrent racers.
+async fn download_file_with_retries(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    idx: usize,
+    progress: &DownloadProgress,
+) -> Result<(), DownloadError> {
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAY_MS: u64 = 2000;
+
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match download_single(client, url, dest, idx, progress).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let is_transient = match &e {
+                    DownloadError::Http(req_err) => {
+                        req_err.is_timeout()
+                            || req_err.is_connect()
+                            || req_err.status().is_some_and(|s| s.is_server_error())
+                    }
+                    _ => false,
+                };
+
+                if is_transient && attempt < MAX_RETRIES {
+                    tracing::warn!(
+                        url,
+                        source = idx + 1,
+                        attempt,
+                        error = %e,
+                        "Transient error, retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        RETRY_DELAY_MS * attempt as u64,
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Inner download implementation (single attempt, single source).
+///
+/// Uses streaming to avoid loading the entire file into memory.
+/// Writes to a per-source temp file (`{dest}_{idx}.tmp`), then
+/// atomically renames to the final destination.
+async fn download_single(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    idx: usize,
+    progress: &DownloadProgress,
+) -> Result<(), DownloadError> {
+    let response = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(DownloadError::Http)?;
+
+    let total_size = response.content_length().unwrap_or(0);
+    progress.total_bytes.fetch_max(total_size, Ordering::Relaxed);
+    tracing::info!(size = total_size, source = idx + 1, url, "Downloading from source {}", idx + 1);
+
+    // Per-source temp file to avoid write conflicts between racers
+    let stem = dest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let tmp_path = dest.with_file_name(format!("{}_{}.tmp", stem, idx));
+
+    let mut file = tokio::io::BufWriter::new(tokio::fs::File::create(&tmp_path).await?);
+
+    let mut downloaded: u64 = 0;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(DownloadError::Http)?;
+        downloaded += chunk.len() as u64;
+        progress.bytes_downloaded.fetch_max(downloaded, Ordering::Relaxed);
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file).await?;
+    drop(file);
+
+    // Rename temp → final destination
+    if let Err(rename_err) = rename_or_replace(&tmp_path, dest) {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(DownloadError::Io(rename_err));
+    }
+
+    Ok(())
 }

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::fs;
 
 use crate::error::GatewayError;
 
@@ -36,7 +37,7 @@ pub async fn spawn_embed_process(
     data_dir: &Path,
     models_dir: &Path,
     port: u16,
-    hf_mirror: Option<&str>,
+    hf_mirrors: &[String],
     onnx_variant: &str,
 ) -> Result<EmbedProcessState, GatewayError> {
     // Locate the rollball-embed binary (sibling of current executable)
@@ -67,6 +68,17 @@ pub async fn spawn_embed_process(
         )));
     }
 
+    // Create log directory and open log file (truncate on each start)
+    let log_dir = data_dir.join("logs");
+    fs::create_dir_all(&log_dir).map_err(|e| {
+        GatewayError::Lifecycle(format!("Failed to create log dir {:?}: {}", log_dir, e))
+    })?;
+    let log_path = log_dir.join("embed.log");
+    let log_file = fs::File::create(&log_path).map_err(|e| {
+        GatewayError::Lifecycle(format!("Failed to create embed log file {:?}: {}", log_path, e))
+    })?;
+    tracing::info!(path = %log_path.display(), "Embed process logging to file");
+
     let mut cmd = tokio::process::Command::new(&embed_bin);
     cmd.arg("--host")
         .arg("127.0.0.1")
@@ -85,10 +97,11 @@ pub async fn spawn_embed_process(
         // can be found as siblings of the executable.
         .current_dir(embed_bin.parent().unwrap_or(Path::new(".")))
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::from(log_file));
 
-    if let Some(mirror) = hf_mirror {
-        cmd.arg("--hf-mirror").arg(mirror);
+    if !hf_mirrors.is_empty() {
+        let mirrors_arg = hf_mirrors.join(",");
+        cmd.arg("--hf-mirrors").arg(&mirrors_arg);
     }
 
     // On Unix, create a new process group
@@ -200,6 +213,10 @@ pub async fn select_embed_model(
 }
 
 /// Trigger a model download via rollball-embed's download endpoint.
+///
+/// The embed server runs downloads in the background (fire-and-forget)
+/// and returns 202 Accepted immediately. Progress can be polled via
+/// `get_embed_model_status`.
 pub async fn download_embed_model(
     port: u16,
     model_id: &str,
@@ -207,7 +224,7 @@ pub async fn download_embed_model(
 ) -> Result<(), GatewayError> {
     let url = format!("http://127.0.0.1:{}/models/{}/download", port, model_id);
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600)) // downloads can take a while
+        .timeout(std::time::Duration::from_secs(30)) // quick handshake only
         .build()
         .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
 
@@ -219,7 +236,8 @@ pub async fn download_embed_model(
         GatewayError::Lifecycle(format!("Failed to call download endpoint for model '{}': {}", model_id, e))
     })?;
 
-    if !resp.status().is_success() {
+    // 202 Accepted (fire-and-forget) or 200 OK (already_downloaded)
+    if !resp.status().is_success() && resp.status() != reqwest::StatusCode::ACCEPTED {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(GatewayError::Lifecycle(format!(
@@ -252,4 +270,75 @@ pub async fn get_embed_model_status(
     })?;
 
     Ok(body)
+}
+
+/// Result of an embedding test.
+#[derive(Debug, Clone)]
+pub struct EmbedTestResult {
+    /// Whether the test succeeded.
+    pub success: bool,
+    /// Model ID that was tested.
+    pub model_id: Option<String>,
+    /// Embedding dimension returned.
+    pub dimension: Option<usize>,
+    /// Inference latency in milliseconds.
+    pub latency_ms: Option<u64>,
+    /// Error message if test failed.
+    pub error: Option<String>,
+}
+
+/// Test the currently loaded embedding model by sending a sample sentence.
+///
+/// Calls `POST /v1/embeddings` on the embed server with a short test input
+/// and verifies a valid embedding vector is returned.
+pub async fn test_embed_model(port: u16) -> Result<EmbedTestResult, GatewayError> {
+    let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
+
+    let body = serde_json::json!({
+        "input": "RollBall embedding test sentence."
+    });
+
+    let start = std::time::Instant::now();
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| {
+        GatewayError::Lifecycle(format!("Failed to call embeddings endpoint: {}", e))
+    })?;
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Ok(EmbedTestResult {
+            success: false,
+            model_id: None,
+            dimension: None,
+            latency_ms: Some(latency_ms),
+            error: Some(format!("HTTP {}: {}", status, body_text)),
+        });
+    }
+
+    let resp_body: serde_json::Value = resp.json().await.map_err(|e| {
+        GatewayError::Lifecycle(format!("Failed to parse embedding response: {}", e))
+    })?;
+
+    // Extract model name and embedding dimension from response
+    let model_id = resp_body.get("model").and_then(|m| m.as_str()).map(|s| s.to_string());
+    let dimension = resp_body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("embedding"))
+        .and_then(|emb| emb.as_array())
+        .map(|arr| arr.len());
+
+    Ok(EmbedTestResult {
+        success: true,
+        model_id,
+        dimension,
+        latency_ms: Some(latency_ms),
+        error: None,
+    })
 }

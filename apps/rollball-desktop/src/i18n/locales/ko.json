@@ -407,8 +407,13 @@
         "active": "사용 중",
         "download": "다운로드",
         "downloading": "다운로드 중...",
+        "connecting": "연결 중...",
         "switchTo": "전환",
         "switching": "전환 중...",
+        "test": "테스트",
+        "testing": "테스트 중...",
+        "testPassed": "성공",
+        "testFailed": "테스트 실패",
         "variants": "변형"
     },
     "memoryPanel": {

@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { EmbeddingModelWithStatus } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
-import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel } from "../../lib/gateway-api";
-import { Download, Check, Loader2, Cpu, Languages } from "lucide-react";
+import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel } from "../../lib/gateway-api";
+import type { EmbeddingTestResponse } from "../../lib/types";
+import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle } from "lucide-react";
 
 export function EmbeddingModelTab() {
     const { t } = useTranslation();
@@ -16,8 +17,11 @@ export function EmbeddingModelTab() {
     const [loading, setLoading] = useState(false);
     const [downloadingId, setDownloadingId] = useState<string | null>(null);
     const [selectingId, setSelectingId] = useState<string | null>(null);
+    const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
     const [error, setError] = useState<string | null>(null);
     const [dimensionConfirm, setDimensionConfirm] = useState<{ modelId: string; message: string } | null>(null);
+    const [testing, setTesting] = useState(false);
+    const [testResult, setTestResult] = useState<EmbeddingTestResponse | null>(null);
 
     const loadModels = useCallback(async () => {
         setLoading(true);
@@ -42,16 +46,63 @@ export function EmbeddingModelTab() {
 
     const handleDownload = useCallback(async (modelId: string, variant?: string) => {
         setDownloadingId(modelId);
+        setDownloadProgress((prev) => ({ ...prev, [modelId]: 0 }));
         setError(null);
         try {
             await downloadEmbeddingModel(modelId, variant);
-            await loadModels();
+            // Fire-and-forget: response is immediate, polling handles progress
         } catch (e) {
             setError(e instanceof Error ? e.message : "Download failed");
-        } finally {
             setDownloadingId(null);
         }
-    }, [loadModels]);
+    }, []);
+
+    // Poll download progress while a download is in flight
+    const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    useEffect(() => {
+        if (!downloadingId) {
+            if (pollingRef.current) clearInterval(pollingRef.current);
+            pollingRef.current = null;
+            return;
+        }
+
+        const poll = async () => {
+            try {
+                const resp = await fetchEmbeddingModelStatus(downloadingId);
+
+                if (resp.status === "downloading") {
+                    setDownloadProgress((prev) => ({ ...prev, [downloadingId]: resp.progress ?? 0 }));
+                } else if (resp.status === "downloaded" || resp.status === "loaded") {
+                    setDownloadingId(null);
+                    setDownloadProgress((prev) => {
+                        const next = { ...prev };
+                        delete next[downloadingId];
+                        return next;
+                    });
+                    await loadModels();
+                } else if (resp.status === "failed") {
+                    setError(`Download failed: ${resp.error ?? "unknown error"}`);
+                    setDownloadingId(null);
+                    setDownloadProgress((prev) => {
+                        const next = { ...prev };
+                        delete next[downloadingId];
+                        return next;
+                    });
+                    await loadModels();
+                }
+            } catch {
+                // Polling error — just retry on next interval
+            }
+        };
+
+        poll(); // immediate first poll
+        pollingRef.current = setInterval(poll, 2000);
+
+        return () => {
+            if (pollingRef.current) clearInterval(pollingRef.current);
+            pollingRef.current = null;
+        };
+    }, [downloadingId, loadModels]);
 
     const handleSelect = useCallback(async (modelId: string, force = false) => {
         setSelectingId(modelId);
@@ -75,6 +126,22 @@ export function EmbeddingModelTab() {
         setDimensionConfirm(null);
         await handleSelect(dimensionConfirm.modelId, true);
     }, [dimensionConfirm, handleSelect]);
+
+    const handleTest = useCallback(async () => {
+        setTesting(true);
+        setTestResult(null);
+        try {
+            const result = await testEmbeddingModel();
+            setTestResult(result);
+        } catch (e) {
+            setTestResult({
+                success: false,
+                error: e instanceof Error ? e.message : "Test failed",
+            });
+        } finally {
+            setTesting(false);
+        }
+    }, []);
 
     if (status !== "connected") {
         return (
@@ -107,6 +174,45 @@ export function EmbeddingModelTab() {
                     <div className="mt-2 flex items-center gap-2 text-xs">
                         <span className="text-zinc-500">{t("embedding.activeModel")}</span>
                         <span className="font-medium">{activeModelId}</span>
+                    </div>
+                )}
+                {/* Test button — only when service is running and has active model */}
+                {serviceRunning && activeModelId && (
+                    <div className="mt-3 flex items-center gap-2">
+                        <button
+                            onClick={handleTest}
+                            disabled={testing}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                        >
+                            {testing ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                                <Zap className="h-3 w-3" />
+                            )}
+                            {testing ? t("embedding.testing") : t("embedding.test")}
+                        </button>
+                        {/* Test result inline */}
+                        {testResult && (
+                            <span className="flex items-center gap-1 text-[11px]">
+                                {testResult.success ? (
+                                    <>
+                                        <CheckCircle2 className="h-3 w-3 text-green-500" />
+                                        <span className="text-green-600 dark:text-green-400">
+                                            {t("embedding.testPassed")}
+                                            {testResult.dimension && ` (${testResult.dimension}d)`}
+                                            {testResult.latency_ms != null && ` ${testResult.latency_ms}ms`}
+                                        </span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <XCircle className="h-3 w-3 text-red-500" />
+                                        <span className="text-red-600 dark:text-red-400">
+                                            {testResult.error ?? t("embedding.testFailed")}
+                                        </span>
+                                    </>
+                                )}
+                            </span>
+                        )}
                     </div>
                 )}
             </div>
@@ -144,6 +250,7 @@ export function EmbeddingModelTab() {
                                 isActive={model.id === activeModelId}
                                 isDownloading={downloadingId === model.id}
                                 isSelecting={selectingId === model.id}
+                                progress={downloadProgress[model.id]}
                                 onDownload={handleDownload}
                                 onSelect={() => handleSelect(model.id)}
                             />
@@ -183,6 +290,7 @@ function ModelCard({
     isActive,
     isDownloading,
     isSelecting,
+    progress,
     onDownload,
     onSelect,
 }: {
@@ -190,6 +298,7 @@ function ModelCard({
     isActive: boolean;
     isDownloading: boolean;
     isSelecting: boolean;
+    progress?: number;
     onDownload: (modelId: string, variant?: string) => void;
     onSelect: () => void;
 }) {
@@ -218,8 +327,8 @@ function ModelCard({
                         <span className="text-xs font-semibold">{model.name}</span>
                         {model.recommended && (
                             <span
-                              className="rounded px-1.5 py-0.5 text-[10px] font-medium"
-                              style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }}
+                                className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 15%, transparent)", color: "var(--color-accent)" }}
                             >
                                 {t("embedding.recommended")}
                             </span>
@@ -234,7 +343,7 @@ function ModelCard({
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                     {/* Variant selector — show when downloading and model has multiple variants */}
-                    {hasVariants && (model.status === "not_downloaded" || model.status === "service_not_running") && (
+                    {hasVariants && (model.status === "not_downloaded" || model.status === "service_not_running" || model.status === "unknown" || model.status === "downloading" || model.status.startsWith("failed")) && (
                         <select
                             value={selectedVariant}
                             onChange={(e) => setSelectedVariant(e.target.value)}
@@ -255,8 +364,8 @@ function ModelCard({
                             ))}
                         </select>
                     )}
-                    {/* Download button — show when not downloaded/loaded */}
-                    {(model.status === "not_downloaded" || model.status === "service_not_running") && (
+                    {/* Download button — show when not downloaded/loaded or unknown */}
+                    {(model.status === "not_downloaded" || model.status === "service_not_running" || model.status === "unknown" || model.status === "downloading" || model.status.startsWith("failed")) && (
                         <button
                             onClick={() => onDownload(model.id, hasVariants ? selectedVariant : undefined)}
                             disabled={isBusy || !model.id}
@@ -271,7 +380,7 @@ function ModelCard({
                         </button>
                     )}
                     {/* Select button — show when downloaded but not active */}
-                    {!isActive && model.status !== "not_downloaded" && model.status !== "service_not_running" && (
+                    {!isActive && (model.status === "downloaded" || model.status === "loaded") && (
                         <button
                             onClick={onSelect}
                             disabled={isBusy}
@@ -287,6 +396,24 @@ function ModelCard({
                     )}
                 </div>
             </div>
+
+            {/* Download progress bar */}
+            {isDownloading && typeof progress === "number" && (
+                <div className="mt-2 space-y-1">
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                        <div
+                            className="h-full rounded-full transition-all duration-300"
+                            style={{
+                                width: `${Math.max(progress, 2)}%`,
+                                backgroundColor: "var(--color-accent)",
+                            }}
+                        />
+                    </div>
+                    <p className="text-right text-[10px] text-zinc-500 dark:text-zinc-400">
+                        {progress > 0 ? `${progress}%` : t("embedding.connecting")}
+                    </p>
+                </div>
+            )}
 
             {/* Meta info */}
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-500 dark:text-zinc-400">

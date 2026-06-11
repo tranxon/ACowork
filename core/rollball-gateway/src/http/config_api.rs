@@ -47,6 +47,9 @@ pub struct ConfigResponse {
     pub default_model: Option<String>,
     /// Global max output tokens limit (default 32768)
     pub max_output_tokens_limit: u64,
+    /// HuggingFace mirror URLs for model downloads
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hf_mirrors: Vec<String>,
 }
 
 /// HTTP config subset
@@ -82,6 +85,9 @@ pub struct UpdateConfigRequest {
     /// Global max output tokens limit (caps max_output_tokens in API requests)
     #[serde(default)]
     pub max_output_tokens_limit: Option<u64>,
+    /// HuggingFace mirror URLs for model downloads (replaces existing list)
+    #[serde(default)]
+    pub hf_mirrors: Option<Vec<String>>,
 }
 
 /// Generic message response
@@ -121,6 +127,7 @@ pub async fn get_config(
         max_output_tokens_limit: config.max_output_tokens_limit,
         log_file_count: config.log_file_count,
         log_file_size_mb: config.log_file_size_mb,
+        hf_mirrors: config.hf_mirrors.clone(),
     }))
 }
 
@@ -164,6 +171,9 @@ pub async fn update_config(
     if let Some(count) = body.log_file_count {
         updates.push(format!("log_file_count={}", count));
     }
+    if let Some(ref mirrors) = body.hf_mirrors {
+        updates.push(format!("hf_mirrors=[{}]", mirrors.join(",")));
+    }
 
     if updates.is_empty() {
         return Err(ApiError::bad_request("No configuration fields to update"));
@@ -202,6 +212,9 @@ pub async fn update_config(
         }
         if let Some(count) = body.log_file_count {
             config.log_file_count = count;
+        }
+        if let Some(ref mirrors) = body.hf_mirrors {
+            config.hf_mirrors = mirrors.clone();
         }
     }
     let config_snapshot = gw.config.clone();
@@ -401,6 +414,7 @@ mod tests {
             max_output_tokens_limit: 32768,
             log_file_size_mb: 10,
             log_file_count: 20,
+            hf_mirrors: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("19876"));

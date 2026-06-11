@@ -407,8 +407,13 @@
         "active": "使用中",
         "download": "ダウンロード",
         "downloading": "ダウンロード中...",
+        "connecting": "接続中...",
         "switchTo": "切り替え",
         "switching": "切り替え中...",
+        "test": "テスト",
+        "testing": "テスト中...",
+        "testPassed": "成功",
+        "testFailed": "テスト失敗",
         "variants": "バリアント"
     },
     "memoryPanel": {

@@ -50,9 +50,11 @@ pub struct EmbeddingModelsFile {
     pub models: Vec<EmbeddingModelEntry>,
 }
 
-/// Model download/load status.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+/// Model download/load status (internal representation).
+///
+/// For API responses, use [`ModelStatusFlat`] or [`ModelStatus::to_api_parts`]
+/// to get a consistent flat format (always string `status` + optional fields).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelStatus {
     /// Model registry entry exists but not downloaded.
     NotDownloaded,
@@ -66,12 +68,65 @@ pub enum ModelStatus {
     Failed(String),
 }
 
+/// Flat API representation of [`ModelStatus`].
+///
+/// Always serializes as a JSON object with a string `status` field,
+/// plus optional `progress` / `error` fields. This avoids the
+/// inconsistent string-vs-object output that raw enum serialization
+/// would produce.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelStatusFlat {
+    /// One of: `"not_downloaded"`, `"downloading"`, `"downloaded"`,
+    /// `"loaded"`, `"failed"`.
+    pub status: &'static str,
+    /// Download progress percentage (0-100). Only present when downloading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    /// Error message. Only present on failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ModelStatus {
+    /// Convert to a flat API representation with consistent JSON shape.
+    pub fn to_api_parts(&self) -> ModelStatusFlat {
+        match self {
+            ModelStatus::NotDownloaded => ModelStatusFlat {
+                status: "not_downloaded",
+                progress: None,
+                error: None,
+            },
+            ModelStatus::Downloading(pct) => ModelStatusFlat {
+                status: "downloading",
+                progress: Some(*pct),
+                error: None,
+            },
+            ModelStatus::Downloaded => ModelStatusFlat {
+                status: "downloaded",
+                progress: None,
+                error: None,
+            },
+            ModelStatus::Loaded => ModelStatusFlat {
+                status: "loaded",
+                progress: None,
+                error: None,
+            },
+            ModelStatus::Failed(reason) => ModelStatusFlat {
+                status: "failed",
+                progress: None,
+                error: Some(reason.clone()),
+            },
+        }
+    }
+}
+
 /// Model info with status (for API responses).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModelInfo {
     #[serde(flatten)]
     pub entry: EmbeddingModelEntry,
-    pub status: ModelStatus,
+    #[serde(flatten)]
+    pub status: ModelStatusFlat,
 }
 
 /// The model registry, loaded from embedding_models.json.

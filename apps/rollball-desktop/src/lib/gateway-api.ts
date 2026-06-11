@@ -9,6 +9,8 @@ import type {
   UpdateUserRequest,
   EmbeddingModelsResponse,
   EmbeddingModelActionResponse,
+  EmbeddingModelStatusResponse,
+  EmbeddingTestResponse,
 } from "./types";
 import { getGatewayUrl } from "./config";
 
@@ -171,4 +173,25 @@ export async function selectEmbeddingModel(
     throw new Error(actionResp.message ?? `Select failed: ${resp.status}`);
   }
   return data as EmbeddingModelActionResponse;
+}
+
+/** Poll download progress for an embedding model */
+export async function fetchEmbeddingModelStatus(
+  modelId: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<EmbeddingModelStatusResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-models/${modelId}/status`);
+  if (!resp.ok) throw new Error(`Failed to fetch status: ${resp.status}`);
+  return resp.json();
+}
+
+/** Test the currently loaded embedding model */
+export async function testEmbeddingModel(
+  gatewayUrl = getGatewayUrl(),
+): Promise<EmbeddingTestResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-models/test`, {
+    method: "POST",
+  });
+  if (!resp.ok) throw new Error(`Test request failed: ${resp.status}`);
+  return resp.json();
 }

@@ -408,8 +408,13 @@
         "active": "使用中",
         "download": "下载",
         "downloading": "下载中...",
+        "connecting": "连接中...",
         "switchTo": "切换",
         "switching": "切换中...",
+        "test": "测试",
+        "testing": "测试中...",
+        "testPassed": "通过",
+        "testFailed": "测试失败",
         "variants": "变体"
     },
     "memoryPanel": {

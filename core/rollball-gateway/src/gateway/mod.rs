@@ -384,14 +384,14 @@ impl Gateway {
             let data_dir = std::path::PathBuf::from(&self.config.data_dir);
             let models_dir = data_dir.join("models");
             let embed_port = 18080; // Default port for embedding service
-            let hf_mirror = std::env::var("HF_MIRROR").ok();
+            let hf_mirrors = self.config.hf_mirrors.clone();
             let onnx_variant = "onnx"; // Default ONNX variant
 
             match crate::lifecycle::embed::spawn_embed_process(
                 &data_dir,
                 &models_dir,
                 embed_port,
-                hf_mirror.as_deref(),
+                &hf_mirrors,
                 onnx_variant,
             ).await {
                 Ok(embed_state) => {
@@ -778,6 +778,7 @@ mod tests {
             default_provider: None,
             default_model: None,
             max_output_tokens_limit: 32_768,
+            hf_mirrors: Vec::new(),
         }
     }
 

@@ -67,6 +67,11 @@ pub struct GatewayConfig {
     /// Default: 32768 (32K). Set to 0 to disable the limit.
     #[serde(default = "default_max_output_tokens_limit")]
     pub max_output_tokens_limit: u64,
+    /// HuggingFace mirror URLs for model downloads (tried in order before
+    /// the official `huggingface.co`). Empty list = official site only.
+    /// Example in TOML: `hf_mirrors = ["https://hf-mirror.com"]`
+    #[serde(default)]
+    pub hf_mirrors: Vec<String>,
 }
 
 /// HTTP API configuration
@@ -210,6 +215,8 @@ impl GatewayConfig {
             default_model: file_config.as_ref().and_then(|c| c.default_model.clone()),
             max_output_tokens_limit: file_config.as_ref().map(|c| c.max_output_tokens_limit)
                 .unwrap_or_else(default_max_output_tokens_limit),
+            hf_mirrors: file_config.as_ref().map(|c| c.hf_mirrors.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -290,6 +297,7 @@ impl Default for GatewayConfig {
             default_provider: None,
             default_model: None,
             max_output_tokens_limit: default_max_output_tokens_limit(),
+            hf_mirrors: Vec::new(),
         }
     }
 }

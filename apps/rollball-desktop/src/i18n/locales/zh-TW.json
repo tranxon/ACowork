@@ -407,8 +407,13 @@
         "active": "使用中",
         "download": "下載",
         "downloading": "下載中...",
+        "connecting": "連線中...",
         "switchTo": "切換",
         "switching": "切換中...",
+        "test": "測試",
+        "testing": "測試中...",
+        "testPassed": "通過",
+        "testFailed": "測試失敗",
         "variants": "變體"
     },
     "memoryPanel": {

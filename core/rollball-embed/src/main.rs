@@ -9,7 +9,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use rollball_embed::config::Cli;
-use rollball_embed::download::Downloader;
+use rollball_embed::download::{Downloader, DownloadProgress};
 use rollball_embed::model::EmbeddingModel;
 use rollball_embed::registry::ModelRegistry;
 use rollball_embed::server::AppState;
@@ -42,7 +42,7 @@ async fn main() {
     tracing::info!(count = registry.models().len(), "Loaded model registry");
 
     // Create downloader
-    let downloader = Downloader::new(&models_dir, cli.hf_mirror.clone());
+    let downloader = Downloader::new(&models_dir, cli.hf_mirrors.clone());
 
     // Determine which model to load (resolve to owned String before moving registry)
     let default_model_id = cli
@@ -65,7 +65,6 @@ async fn main() {
         &registry,
         &models_dir,
         &downloader,
-        cli.hf_mirror.as_deref(),
         &cli.onnx_variant,
     )
     .await;
@@ -92,13 +91,14 @@ async fn main() {
                     .unwrap_or(entry.onnx_file.clone());
 
                 let cancel_flag = std::sync::atomic::AtomicBool::new(false);
+                let progress = DownloadProgress::new();
                 match downloader
                     .download_model(
                         &default_model_id,
                         &entry.hf_repo,
                         &onnx_file,
                         &entry.tokenizer_file,
-                        None,
+                        &progress,
                         &cancel_flag,
                     )
                     .await
@@ -129,6 +129,7 @@ async fn main() {
         registry,
         downloader,
         download_status: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        download_progress: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         shutdown: shutdown.clone(),
         models_dir: models_dir.clone(),
         onnx_variant: cli.onnx_variant.clone(),
@@ -161,7 +162,6 @@ async fn load_model_if_available(
     registry: &ModelRegistry,
     models_dir: &std::path::Path,
     _downloader: &Downloader,
-    _hf_mirror: Option<&str>,
     _onnx_variant: &str,
 ) -> Option<EmbeddingModel> {
     try_load_model(model_id, registry, models_dir)

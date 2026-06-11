@@ -827,3 +827,25 @@ export interface EmbeddingModelActionResponse {
   status: string;
   message: string;
 }
+
+/** Response from GET /api/embedding-models/{id}/status */
+export interface EmbeddingModelStatusResponse {
+  model_id: string;
+  /** Always a string: "not_downloaded", "downloading", "downloaded", "loaded", "failed" */
+  status: string;
+  /** Download progress percentage (0-100). Only present when status is "downloading" */
+  progress?: number;
+  /** Error message. Only present when status is "failed" */
+  error?: string;
+  info?: { id: string; dimension: number; pooling: string } | null;
+}
+
+/** Response from POST /api/embedding-models/test */
+export interface EmbeddingTestResponse {
+  success: boolean;
+  model_id?: string | null;
+  dimension?: number | null;
+  latency_ms?: number | null;
+  error?: string | null;
+}
+

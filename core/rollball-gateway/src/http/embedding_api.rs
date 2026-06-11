@@ -14,6 +14,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::AppState;
@@ -107,42 +108,55 @@ pub async fn list_embedding_models(
         (sr, ami, ep, entries)
     };
 
-    // Build model list with status — now safe to query embed service without holding the lock.
-    let mut models = Vec::new();
-    for entry in &model_entries {
-        let loaded = active_model_id.as_deref() == Some(&entry.id);
-
-        let status = if loaded {
-            "loaded".to_string()
-        } else if let Some(port) = embed_port {
-            match embed::get_embed_model_status(port, &entry.id).await {
-                Ok(body) => {
-                    body.get("status")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
+    // Query all model statuses **concurrently** to avoid serial round-trips.
+    let status_futures: Vec<_> = model_entries
+        .iter()
+        .map(|entry| {
+            let id = entry.id.clone();
+            let loaded = active_model_id.as_deref() == Some(&id);
+            async move {
+                if loaded {
+                    return "loaded".to_string();
                 }
-                Err(_) => "unknown".to_string(),
+                if let Some(port) = embed_port {
+                    match embed::get_embed_model_status(port, &id).await {
+                        Ok(body) => body
+                            .get("status")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "not_downloaded".to_string()),
+                        Err(_) => "not_downloaded".to_string(),
+                    }
+                } else {
+                    "service_not_running".to_string()
+                }
             }
-        } else {
-            "service_not_running".to_string()
-        };
+        })
+        .collect();
 
-        models.push(EmbeddingModelWithStatus {
-            id: entry.id.clone(),
-            name: entry.name.clone(),
-            description: entry.description.clone(),
-            dimension: entry.dimension,
-            max_tokens: entry.max_tokens,
-            size_mb: entry.size_mb,
-            languages: entry.languages.clone(),
-            pooling_strategy: format!("{:?}", entry.pooling_strategy).to_lowercase(),
-            recommended: entry.recommended,
-            loaded,
-            status,
-            onnx_variants: entry.onnx_variants.clone(),
-        });
-    }
+    let statuses = join_all(status_futures).await;
+
+    let models: Vec<EmbeddingModelWithStatus> = model_entries
+        .iter()
+        .zip(statuses)
+        .map(|(entry, status)| {
+            let loaded = active_model_id.as_deref() == Some(&entry.id);
+            EmbeddingModelWithStatus {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                dimension: entry.dimension,
+                max_tokens: entry.max_tokens,
+                size_mb: entry.size_mb,
+                languages: entry.languages.clone(),
+                pooling_strategy: format!("{:?}", entry.pooling_strategy).to_lowercase(),
+                recommended: entry.recommended,
+                loaded,
+                status,
+                onnx_variants: entry.onnx_variants.clone(),
+            }
+        })
+        .collect();
 
     Json(EmbeddingModelsResponse {
         models,
@@ -191,12 +205,12 @@ pub async fn download_model(
 
     drop(gw);
 
-    // Trigger download via embed service
+    // Trigger download via embed service (fire-and-forget)
     match embed::download_embed_model(port, &model_id, req.variant.as_deref()).await {
         Ok(()) => Json(EmbeddingModelActionResponse {
             model_id,
-            status: "downloaded".to_string(),
-            message: "Model downloaded successfully".to_string(),
+            status: "downloading".to_string(),
+            message: "Download started".to_string(),
         })
         .into_response(),
         Err(e) => (
@@ -383,12 +397,83 @@ pub async fn get_model_status(
     }
 }
 
+/// Response for embedding model test.
+#[derive(Debug, Serialize)]
+pub struct EmbeddingTestResponse {
+    /// Whether the test passed.
+    pub success: bool,
+    /// Model ID tested.
+    pub model_id: Option<String>,
+    /// Embedding dimension returned.
+    pub dimension: Option<usize>,
+    /// Inference latency in milliseconds.
+    pub latency_ms: Option<u64>,
+    /// Error message if failed.
+    pub error: Option<String>,
+}
+
+/// POST /api/embedding-models/test — test the currently loaded embedding model.
+///
+/// Sends a sample sentence to the embed service and verifies a valid
+/// embedding vector is returned. Reports latency and dimension.
+pub async fn test_embedding_model(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let gw = state.gateway_state.read().await;
+
+    let port = match &gw.embed_process {
+        Some(eps) if eps.ready => eps.port,
+        Some(_) => {
+            return Json(EmbeddingTestResponse {
+                success: false,
+                model_id: None,
+                dimension: None,
+                latency_ms: None,
+                error: Some("Embedding service is starting up, not ready yet".to_string()),
+            })
+            .into_response();
+        }
+        None => {
+            return Json(EmbeddingTestResponse {
+                success: false,
+                model_id: None,
+                dimension: None,
+                latency_ms: None,
+                error: Some("Embedding service is not running".to_string()),
+            })
+            .into_response();
+        }
+    };
+
+    drop(gw);
+
+    match embed::test_embed_model(port).await {
+        Ok(result) => Json(EmbeddingTestResponse {
+            success: result.success,
+            model_id: result.model_id,
+            dimension: result.dimension,
+            latency_ms: result.latency_ms,
+            error: result.error,
+        })
+        .into_response(),
+        Err(e) => Json(EmbeddingTestResponse {
+            success: false,
+            model_id: None,
+            dimension: None,
+            latency_ms: None,
+            error: Some(format!("Test request failed: {}", e)),
+        })
+        .into_response(),
+    }
+}
+
 // ── Router ─────────────────────────────────────────────────────────────
 
 /// Build the embedding models API router.
 pub fn embedding_routes() -> Router<AppState> {
     Router::new()
         .route("/api/embedding-models", get(list_embedding_models))
+        .route("/api/embedding-models/test", post(test_embedding_model))
         .route("/api/embedding-models/{id}/download", post(download_model))
         .route("/api/embedding-models/{id}/select", post(select_model))
         .route("/api/embedding-models/{id}/status", get(get_model_status))

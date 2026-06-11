@@ -408,8 +408,13 @@
         "active": "Active",
         "download": "Download",
         "downloading": "Downloading...",
+        "connecting": "Connecting...",
         "switchTo": "Switch",
         "switching": "Switching...",
+        "test": "Test",
+        "testing": "Testing...",
+        "testPassed": "Passed",
+        "testFailed": "Test failed",
         "variants": "Variants"
     },
     "memoryPanel": {

@@ -30,10 +30,10 @@ pub struct Cli {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// HuggingFace mirror URL for users behind GFW.
-    /// Example: "https://hf-mirror.com"
-    #[arg(long)]
-    pub hf_mirror: Option<String>,
+    /// HuggingFace mirror URLs (comma-separated, tried in order before the official site).
+    /// Example: "https://hf-mirror.com,https://hf-mirror2.com"
+    #[arg(long, value_delimiter = ',', env = "HF_MIRRORS")]
+    pub hf_mirrors: Vec<String>,
 
     /// ONNX variant to download/load (fp32, fp16, int8).
     /// Defaults to "fp16" for smaller model size.

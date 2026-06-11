@@ -21,9 +21,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::download::Downloader;
+use crate::download::{Downloader, DownloadProgress};
 use crate::model::EmbeddingModel;
-use crate::registry::{ModelInfo, ModelRegistry, ModelStatus};
+use crate::registry::{ModelInfo, ModelRegistry, ModelStatus, ModelStatusFlat};
 use crate::shutdown::Shutdown;
 
 // ── App state ───────────────────────────────────────────────────────────
@@ -38,6 +38,8 @@ pub struct AppState {
     pub downloader: Downloader,
     /// Download status per model.
     pub download_status: RwLock<std::collections::HashMap<String, ModelStatus>>,
+    /// Live download progress per model (shared with spawned racer tasks).
+    pub download_progress: RwLock<std::collections::HashMap<String, Arc<DownloadProgress>>>,
     /// Shutdown signal.
     pub shutdown: Arc<Shutdown>,
     /// Models directory.
@@ -167,7 +169,8 @@ pub struct LoadResponse {
 #[derive(Debug, Serialize)]
 pub struct ModelStatusResponse {
     pub model_id: String,
-    pub status: ModelStatus,
+    #[serde(flatten)]
+    pub status: ModelStatusFlat,
     pub info: Option<ModelStatusInfo>,
 }
 
@@ -482,7 +485,10 @@ pub async fn load_model(
     .into_response()
 }
 
-/// POST /models/{id}/download — Trigger model download.
+/// POST /models/{id}/download — Trigger model download (fire-and-forget).
+///
+/// Spawns the download in a background task and returns 202 Accepted
+/// immediately. Progress can be polled via `GET /models/{id}/status`.
 pub async fn download_model(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
@@ -525,61 +531,68 @@ pub async fn download_model(
         .onnx_path(&model_id, &variant)
         .unwrap_or(entry.onnx_file.clone());
 
-    // Set download status
+    // Create shared progress tracker
+    let progress = Arc::new(DownloadProgress::new());
+    {
+        let mut pm = state.download_progress.write().await;
+        pm.insert(model_id.clone(), progress.clone());
+    }
+
+    // Set initial download status
     {
         let mut status = state.download_status.write().await;
         status.insert(model_id.clone(), ModelStatus::Downloading(0));
     }
 
-    // Perform download — clear cancel flag first so a fresh download is not cancelled
+    // Clear cancel flag for a fresh download
     state.download_cancel_flag.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    let result = state
-        .downloader
-        .download_model(
-            &model_id,
-            &entry.hf_repo,
-            &onnx_file,
-            &entry.tokenizer_file,
-            None,
-            &state.download_cancel_flag,
-        )
-        .await;
-
-    match result {
-        Ok(_res) => {
-            let mut status = state.download_status.write().await;
-            status.insert(model_id.clone(), ModelStatus::Downloaded);
-            tracing::info!(model_id = %model_id, "Model downloaded successfully");
-
-            Json(DownloadResponse {
-                model_id,
-                status: "downloaded".to_string(),
-                message: "Model downloaded successfully".to_string(),
-            })
-            .into_response()
-        }
-        Err(e) => {
-            let mut status = state.download_status.write().await;
-            status.insert(
-                model_id.clone(),
-                ModelStatus::Failed(format!("{e}")),
-            );
-            tracing::error!(model_id = %model_id, error = %e, "Model download failed");
-
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: ErrorDetail {
-                        message: format!("Download failed for '{model_id}': {e}"),
-                        error_type: "download_error".to_string(),
-                        code: None,
-                    },
-                }),
+    // Fire-and-forget: spawn download in background
+    let state2 = state.clone();
+    let mid = model_id.clone();
+    tokio::spawn(async move {
+        let cancel = &state2.download_cancel_flag;
+        let result = state2
+            .downloader
+            .download_model(
+                &mid,
+                &entry.hf_repo,
+                &onnx_file,
+                &entry.tokenizer_file,
+                &progress,
+                cancel,
             )
-                .into_response()
+            .await;
+
+        // Remove from active progress map
+        {
+            let mut pm = state2.download_progress.write().await;
+            pm.remove(&mid);
         }
-    }
+
+        match result {
+            Ok(_res) => {
+                let mut status = state2.download_status.write().await;
+                status.insert(mid.clone(), ModelStatus::Downloaded);
+                tracing::info!(model_id = %mid, "Model downloaded successfully");
+            }
+            Err(e) => {
+                let mut status = state2.download_status.write().await;
+                status.insert(mid.clone(), ModelStatus::Failed(format!("{e}")));
+                tracing::error!(model_id = %mid, error = %e, "Model download failed");
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(DownloadResponse {
+            model_id,
+            status: "downloading".to_string(),
+            message: "Download started".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 /// POST /models/{id}/cancel-download — Cancel an ongoing download.
@@ -670,16 +683,24 @@ pub async fn model_status(
     } else if state.downloader.is_downloaded(&model_id) {
         ModelStatus::Downloaded
     } else {
-        let dl_status = state.download_status.read().await;
-        dl_status
-            .get(&model_id)
-            .cloned()
-            .unwrap_or(ModelStatus::NotDownloaded)
+        // Check live progress first, then fall back to stored status
+        let pm = state.download_progress.read().await;
+        if let Some(progress) = pm.get(&model_id) {
+            let (pct, _, _) = progress.snapshot();
+            ModelStatus::Downloading(pct)
+        } else {
+            drop(pm);
+            let dl_status = state.download_status.read().await;
+            dl_status
+                .get(&model_id)
+                .cloned()
+                .unwrap_or(ModelStatus::NotDownloaded)
+        }
     };
 
     Json(ModelStatusResponse {
         model_id: model_id.clone(),
-        status,
+        status: status.to_api_parts(),
         info,
     })
     .into_response()
@@ -707,7 +728,7 @@ pub async fn list_models_detail(
 
             ModelInfo {
                 entry: entry.clone(),
-                status,
+                status: status.to_api_parts(),
             }
         })
         .collect();
