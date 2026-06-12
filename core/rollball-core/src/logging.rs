@@ -1,4 +1,4 @@
-//! Logging utilities: size-based rolling file appender.
+//! Logging utilities: size-based rolling file appender and shared tracing timer.
 //!
 //! Used by both Gateway and Agent Runtime for consistent log file naming
 //! (YYYYMMDD_HHMMSS.log) and auto-split behaviour.
@@ -6,6 +6,27 @@
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A `FormatTime` implementation that uses `chrono::Local` to produce
+/// RFC-3339 local-time timestamps (e.g. `2026-06-13T15:30:00.123+08:00`).
+///
+/// This avoids the `tracing-subscriber` `local-time` feature, which pulls
+/// in the `time` crate and triggers an E0119 coherence conflict with
+/// `EnvFilter`'s blanket `From<S: AsRef<str>>` impl.
+#[derive(Default, Clone, Copy)]
+pub struct ChronoLocalTimer;
+
+impl std::fmt::Display for ChronoLocalTimer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", chrono::Local::now().to_rfc3339())
+    }
+}
+
+impl tracing_subscriber::fmt::time::FormatTime for ChronoLocalTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+    }
+}
 
 /// A file appender that auto-splits when the current log file exceeds a size limit.
 /// Log files are named `YYYYMMDD_HHMMSS.log` using the creation timestamp.

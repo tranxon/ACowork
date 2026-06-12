@@ -234,7 +234,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CrlfStderr {
 fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Option<crate::LogReloadHandle> {
     use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::fmt::time::LocalTime;
+    use rollball_core::logging::ChronoLocalTimer;
     use crate::config::GatewayConfig;
 
     let env_filter = EnvFilter::try_from_default_env()
@@ -256,7 +256,7 @@ fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Opti
                 tracing_subscriber::fmt::layer()
                     .with_writer(CrlfStderr)
                     .with_target(false)
-                    .with_timer(LocalTime::rfc_3339())
+                    .with_timer(ChronoLocalTimer)
                     .compact()
             )
             .init();
@@ -281,7 +281,7 @@ fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Opti
         .with_thread_ids(false)
         .with_file(false)
         .with_ansi(false)
-        .with_timer(LocalTime::rfc_3339())
+        .with_timer(ChronoLocalTimer)
         .compact();
 
     // File layer (file_appender implements MakeWriter, writes \n line endings
@@ -292,7 +292,7 @@ fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Opti
         .with_thread_ids(true)
         .with_file(true)
         .with_ansi(false)
-        .with_timer(LocalTime::rfc_3339());
+        .with_timer(ChronoLocalTimer);
 
     tracing_subscriber::registry()
         .with(filter)
