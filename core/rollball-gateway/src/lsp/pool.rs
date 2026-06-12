@@ -40,6 +40,11 @@ pub struct LspProcessEntry {
     pub workspace_root: String,
     /// Process ID (for logging)
     pub pid: u32,
+    /// Cached InitializeResult JSON from the first successful handshake.
+    /// Used to synthesize responses for subsequent WebSocket clients
+    /// that connect to an already-initialized LSP process (LSP protocol
+    /// only allows `initialize` once per server lifetime).
+    pub init_result: Mutex<Option<String>>,
 }
 
 /// Shared LSP process pool.
@@ -321,6 +326,7 @@ impl LspPool {
             command: command.to_string(),
             workspace_root: workspace_root.to_string(),
             pid,
+            init_result: Mutex::new(None),
         });
 
         Ok(entry)

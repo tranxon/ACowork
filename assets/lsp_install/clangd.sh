@@ -10,11 +10,59 @@ BINARY="clangd"
 install() {
     echo "[1/3] Installing clangd..."
 
-    # Try multiple installation methods
+    # Already on PATH?
+    if command -v "$BINARY" &>/dev/null; then
+        echo "clangd already on PATH at $(command -v "$BINARY")"
+        return
+    fi
+
+    # Not on PATH — check common LLVM install locations
+    local llvm_paths=(
+        "/usr/bin/clangd"
+        "/usr/local/bin/clangd"
+        "/opt/homebrew/opt/llvm/bin/clangd"
+        "/usr/local/opt/llvm/bin/clangd"
+    )
+    for p in "${llvm_paths[@]}"; do
+        if [[ -x "$p" ]]; then
+            local dir
+            dir=$(dirname "$p")
+            echo "Found clangd at $p — adding $dir to PATH..."
+            # Add to current session
+            export PATH="$PATH:$dir"
+            # Add to shell profile for persistence
+            local profile_file
+            if [[ -f "$HOME/.bashrc" ]]; then
+                profile_file="$HOME/.bashrc"
+            elif [[ -f "$HOME/.zshrc" ]]; then
+                profile_file="$HOME/.zshrc"
+            elif [[ -f "$HOME/.profile" ]]; then
+                profile_file="$HOME/.profile"
+            fi
+            if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
+                echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
+                echo "Added to $profile_file for persistence."
+            fi
+            return
+        fi
+    done
+
+    # Not installed at all — try package managers
     if command -v apt-get &>/dev/null; then
         sudo apt-get update && sudo apt-get install -y clangd
     elif command -v brew &>/dev/null; then
         brew install llvm
+        # Homebrew's llvm is keg-only; add to PATH
+        local brew_llvm_bin
+        if [[ "$(uname -m)" == "arm64" ]]; then
+            brew_llvm_bin="/opt/homebrew/opt/llvm/bin"
+        else
+            brew_llvm_bin="/usr/local/opt/llvm/bin"
+        fi
+        if [[ -d "$brew_llvm_bin" ]]; then
+            export PATH="$PATH:$brew_llvm_bin"
+            echo "Added Homebrew LLVM bin to PATH: $brew_llvm_bin"
+        fi
     elif command -v dnf &>/dev/null; then
         sudo dnf install -y clang-tools-extra
     elif command -v pacman &>/dev/null; then
@@ -33,10 +81,42 @@ verify() {
         local path
         path=$(command -v "$BINARY")
         echo "OK: clangd found at $path"
-    else
-        echo "ERROR: clangd not found on PATH after install"
-        exit 1
+        return
     fi
+
+    # Still not found — search common LLVM install locations
+    local llvm_paths=(
+        "/usr/bin/clangd"
+        "/usr/local/bin/clangd"
+        "/opt/homebrew/opt/llvm/bin/clangd"
+        "/usr/local/opt/llvm/bin/clangd"
+    )
+    for p in "${llvm_paths[@]}"; do
+        if [[ -x "$p" ]]; then
+            local dir
+            dir=$(dirname "$p")
+            echo "Found clangd at $p — adding $dir to PATH..."
+            export PATH="$PATH:$dir"
+            local profile_file
+            if [[ -f "$HOME/.bashrc" ]]; then
+                profile_file="$HOME/.bashrc"
+            elif [[ -f "$HOME/.zshrc" ]]; then
+                profile_file="$HOME/.zshrc"
+            elif [[ -f "$HOME/.profile" ]]; then
+                profile_file="$HOME/.profile"
+            fi
+            if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
+                echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
+            fi
+            path=$(command -v "$BINARY")
+            echo "OK: clangd found at $path"
+            return
+        fi
+    done
+
+    echo "ERROR: clangd not found on PATH after install"
+    echo "Make sure LLVM bin directory is on your PATH"
+    exit 1
 }
 
 # ── Phase 3: Health Check ────────────────────────────────────────────

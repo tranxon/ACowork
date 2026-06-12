@@ -8,7 +8,8 @@ import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useLspClientPool, type LspStatus } from "../../hooks/useLspClientPool";
 import { cn } from "../../lib/utils";
-import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus } from "lucide-react";
+import { getGatewayUrl } from "../../lib/config";
+import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -80,6 +81,46 @@ const LSP_INSTALL_HINTS: Record<string, { name: string; command: string; url?: s
         command: "Included with Dart SDK / Flutter SDK: dart pub global activate dart_language_server",
         url: "https://dart.dev/get-dart",
     },
+    markdown: {
+        name: "marksman",
+        command: "Windows: winget install marksman | Linux: See https://github.com/artempyanykh/marksman | macOS: brew install marksman",
+        url: "https://github.com/artempyanykh/marksman",
+    },
+    md: {
+        name: "marksman",
+        command: "Windows: winget install marksman | Linux: See https://github.com/artempyanykh/marksman | macOS: brew install marksman",
+        url: "https://github.com/artempyanykh/marksman",
+    },
+    json: {
+        name: "vscode-json-languageserver",
+        command: "npm install -g vscode-json-languageserver",
+    },
+    yaml: {
+        name: "yaml-language-server",
+        command: "npm install -g yaml-language-server",
+        url: "https://github.com/redhat-developer/yaml-language-server",
+    },
+    yml: {
+        name: "yaml-language-server",
+        command: "npm install -g yaml-language-server",
+        url: "https://github.com/redhat-developer/yaml-language-server",
+    },
+    html: {
+        name: "vscode-html-languageserver",
+        command: "npm install -g vscode-html-languageserver",
+    },
+    css: {
+        name: "vscode-css-languageserver",
+        command: "npm install -g vscode-css-languageserver",
+    },
+    scss: {
+        name: "vscode-css-languageserver",
+        command: "npm install -g vscode-css-languageserver",
+    },
+    less: {
+        name: "vscode-css-languageserver",
+        command: "npm install -g vscode-css-languageserver",
+    },
 };
 
 // ── LSP Status Indicator ──────────────────────────────────────────────
@@ -88,6 +129,8 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
     const { t } = useTranslation();
     const [showPopover, setShowPopover] = useState(false);
     const [copied, setCopied] = useState(false);
+    const [installing, setInstalling] = useState(false);
+    const [installResult, setInstallResult] = useState<{ success: boolean; text: string } | null>(null);
     const popoverRef = useRef<HTMLDivElement>(null);
 
     const isUnavailable = status === "disconnected" || status === "error";
@@ -126,6 +169,39 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
         });
+    };
+
+    const runInstall = async () => {
+        if (!language || installing) return;
+        setInstalling(true);
+        setInstallResult(null);
+        try {
+            const gatewayUrl = getGatewayUrl();
+            const resp = await fetch(`${gatewayUrl}/api/lsp/install/${encodeURIComponent(language)}`, {
+                method: "POST",
+            });
+            const data = await resp.json();
+            if (data.success) {
+                setInstallResult({
+                    success: true,
+                    text: data.stdout || "Installation completed. Restart Gateway to apply.",
+                });
+            } else {
+                // Show stderr first, then stdout, then error field, then fallback
+                const detail = data.stderr || data.stdout || data.error || `Install failed (exit code: ${data.exit_code})`;
+                setInstallResult({
+                    success: false,
+                    text: detail,
+                });
+            }
+        } catch (err: any) {
+            setInstallResult({
+                success: false,
+                text: err?.message || "Failed to run install script",
+            });
+        } finally {
+            setInstalling(false);
+        }
     };
 
     // Render the status text
@@ -195,7 +271,7 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
 
             {/* Install hint popover */}
             {showPopover && hint && (
-                <div className="absolute bottom-full left-0 z-50 mb-1 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800 text-xs">
+                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800 text-xs">
                     <div className="font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                         Install {hint.name}
                     </div>
@@ -213,6 +289,53 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
                             </button>
                         </Tooltip>
                     </div>
+
+                    {/* Install button */}
+                    <button
+                        type="button"
+                        onClick={runInstall}
+                        disabled={installing}
+                        className={cn(
+                            "mt-2 flex w-full items-center justify-center gap-1.5 rounded px-3 py-1.5 text-[11px] font-medium transition-colors",
+                            installing
+                                ? "bg-zinc-200 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400 cursor-not-allowed"
+                                : "bg-[var(--color-accent)] text-white hover:opacity-90",
+                        )}
+                    >
+                        {installing ? (
+                            <>
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Installing...
+                            </>
+                        ) : (
+                            <>
+                                <Play className="h-3 w-3" />
+                                Run Install Script
+                            </>
+                        )}
+                    </button>
+
+                    {/* Install result */}
+                    {installResult && (
+                        <div
+                            className={cn(
+                                "mt-2 rounded px-2 py-1.5 text-[11px] leading-relaxed",
+                                installResult.success
+                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                    : "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+                            )}
+                        >
+                            <div className="flex items-start gap-1">
+                                {installResult.success ? (
+                                    <Check className="h-3 w-3 mt-0.5 shrink-0" />
+                                ) : (
+                                    <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
+                                )}
+                                <span className="whitespace-pre-wrap break-all">{installResult.text}</span>
+                            </div>
+                        </div>
+                    )}
+
                     {hint.url && (
                         <a
                             href={hint.url}
@@ -1220,12 +1343,14 @@ export function FileEditorPanel({ width }: { width: number }) {
 
             {/* Status bar */}
             {activeFile && !activeFile.loading && (
-                <div className="flex items-center justify-between border-t border-zinc-200 bg-zinc-100 px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-800 dark:text-zinc-400">
-                    <span className="uppercase">{activeFile.language || "plain text"}</span>
+                <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-100 px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-800 dark:text-zinc-400">
+                    <span className="uppercase truncate min-w-0">{activeFile.language || "plain text"}</span>
                     {lspEnabled && lspLanguage && (
-                        <LspIndicator status={lspStatus} statusMessage={lspStatusMessage} language={lspLanguage} />
+                        <div className="shrink-0">
+                            <LspIndicator status={lspStatus} statusMessage={lspStatusMessage} language={lspLanguage} />
+                        </div>
                     )}
-                    <span>Ln {cursor.line}, Col {cursor.column}{selectedCount > 0 ? ` (${selectedCount} selected)` : ""}</span>
+                    <span className="truncate min-w-0 text-right">Ln {cursor.line}, Col {cursor.column}{selectedCount > 0 ? ` (${selectedCount} selected)` : ""}</span>
                 </div>
             )}
 
@@ -1287,6 +1412,9 @@ export function FileEditorPanel({ width }: { width: number }) {
                 <GlobalSearchPanel
                     agentId={activeFile.agentId}
                     workspaceId={activeFile.workspaceId}
+                    lspClient={lspClient}
+                    lspStatus={lspStatus}
+                    workspaceRoot={workspaceRoot}
                     onClose={() => {
                         setShowGlobalSearch(false);
                         editorRef.current?.focus();

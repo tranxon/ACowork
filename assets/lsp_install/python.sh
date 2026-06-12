@@ -6,9 +6,57 @@ set -euo pipefail
 
 BINARY="pylsp"
 
+# ── Helpers ────────────────────────────────────────────────────────
+
+add_to_path() {
+    local dir="$1"
+    case ":$PATH:" in
+        *:"$dir":*) ;;
+        *) export PATH="$PATH:$dir" ;;
+    esac
+    local profile_file
+    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        [[ -f "$f" ]] && { profile_file="$f"; break; }
+    done
+    if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
+        echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
+        echo "Added $dir to $profile_file for persistence."
+    fi
+}
+
+find_pylsp() {
+    for d in "$HOME/.local/bin" "/usr/local/bin"; do
+        local candidate="$d/$BINARY"
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── Phase 1: Install ──────────────────────────────────────────────────
 install() {
     echo "[1/3] Installing python-lsp-server..."
+
+    # Already on PATH?
+    if command -v "$BINARY" &>/dev/null; then
+        echo "pylsp already on PATH at $(command -v "$BINARY")"
+        return 0
+    fi
+
+    # Not on PATH — search common locations
+    local found
+    found=$(find_pylsp) || true
+    if [[ -n "$found" ]]; then
+        local dir
+        dir=$(dirname "$found")
+        echo "Found pylsp at $found — adding $dir to PATH..."
+        add_to_path "$dir"
+        return 0
+    fi
+
+    # Not installed
     if command -v pip &>/dev/null; then
         pip install python-lsp-server
     elif command -v pip3 &>/dev/null; then
@@ -23,13 +71,26 @@ install() {
 verify() {
     echo "[2/3] Verifying pylsp is on PATH..."
     if command -v "$BINARY" &>/dev/null; then
-        local path
-        path=$(command -v "$BINARY")
-        echo "OK: pylsp found at $path"
-    else
-        echo "ERROR: pylsp not found on PATH after install"
-        exit 1
+        echo "OK: pylsp found at $(command -v "$BINARY")"
+        return 0
     fi
+
+    # Search common locations
+    local found
+    found=$(find_pylsp) || true
+    if [[ -n "$found" ]]; then
+        local dir
+        dir=$(dirname "$found")
+        echo "Found pylsp at $found — adding $dir to PATH..."
+        add_to_path "$dir"
+        if command -v "$BINARY" &>/dev/null; then
+            echo "OK: pylsp found at $(command -v "$BINARY")"
+            return 0
+        fi
+    fi
+
+    echo "ERROR: pylsp not found on PATH after install"
+    exit 1
 }
 
 # ── Phase 3: Health Check ────────────────────────────────────────────

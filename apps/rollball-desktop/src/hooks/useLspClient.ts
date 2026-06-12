@@ -381,6 +381,24 @@ export function useLspClient(
                 const clientOptions: LanguageClientOptions = {
                     documentSelector: [],
                     workspaceFolder: { uri: rootFolderUri, name: "workspace", index: 0 },
+                    // jdtls requires initializationOptions to import projects.
+                    // See useLspClientPool for detailed explanation.
+                    initializationOptions: {
+                        workspaceFolders: [wsRoot],
+                        settings: {
+                            java: {
+                                import: {
+                                    gradle: { enabled: true, wrapper: { enabled: true } },
+                                    maven: { enabled: true },
+                                },
+                            },
+                        },
+                        extendedClientCapabilities: {
+                            gradleBuildFileSupport: true,
+                            classFileContentsSupport: true,
+                            clientDocumentSymbolProvider: true,
+                        },
+                    },
                 };
 
                 console.log("[LSP] Creating MonacoLanguageClient — name:", `${language!} LSP`, "documentSelector: [] (manual doc sync)");
@@ -489,6 +507,25 @@ export function useLspClient(
                             }
                         }
                     }
+                }
+
+                // Send workspace/didChangeConfiguration after handshake.
+                // jdtls requires Java settings to trigger project import.
+                // See useLspClientPool for detailed explanation.
+                try {
+                    lspClient.sendNotification("workspace/didChangeConfiguration", {
+                        settings: {
+                            java: {
+                                import: {
+                                    gradle: { enabled: true, wrapper: { enabled: true } },
+                                    maven: { enabled: true },
+                                },
+                            },
+                        },
+                    });
+                    console.log("[LSP] sent workspace/didChangeConfiguration —", language);
+                } catch (err) {
+                    console.warn("[LSP] didChangeConfiguration failed —", language, err);
                 }
 
                 handshakeDoneRef.current = true;

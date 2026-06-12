@@ -2,74 +2,126 @@
   "version": 1,
   "servers": {
     "rust": {
-      "candidates": ["rust-analyzer"],
+      "candidates": [
+        "rust-analyzer"
+      ],
       "args": [],
       "install_hint": "rustup component add rust-analyzer",
       "install_script": "rust",
       "description": "Rust language server (defaults to stdio, no --stdio flag)"
     },
     "python": {
-      "candidates": ["pylsp", "pyright-langserver", "python-lsp-server"],
-      "args": ["--stdio"],
+      "candidates": [
+        "pyright-langserver",
+        "pylsp",
+        "python-lsp-server"
+      ],
+      "args": [
+        "--stdio"
+      ],
       "install_hint": "pip install python-lsp-server",
       "install_script": "python",
       "description": "Python language server"
     },
     "typescript": {
-      "candidates": ["typescript-language-server", "typescript-language-server.cmd"],
-      "args": ["--stdio"],
+      "candidates": [
+        "typescript-language-server",
+        "typescript-language-server.cmd"
+      ],
+      "args": [
+        "--stdio"
+      ],
       "install_hint": "npm install -g typescript-language-server typescript",
       "install_script": "typescript",
       "description": "TypeScript/JavaScript language server"
     },
     "go": {
-      "candidates": ["gopls"],
-      "args": ["serve"],
+      "candidates": [
+        "gopls"
+      ],
+      "args": [
+        "serve"
+      ],
       "install_hint": "go install golang.org/x/tools/gopls@latest",
       "install_script": "go",
       "description": "Go language server (uses 'serve' subcommand, not --stdio)"
     },
     "c": {
-      "candidates": ["clangd"],
+      "candidates": [
+        "clangd"
+      ],
       "args": [],
       "install_hint": "Install clangd: https://clangd.llvm.org/installation",
       "install_script": "clangd",
       "description": "C/C++ language server (defaults to stdio)"
     },
     "json": {
-      "candidates": ["vscode-json-languageserver", "json-languageserver"],
-      "args": ["--stdio"],
-      "install_hint": "npm install -g vscode-json-languageserver",
-      "install_script": null,
-      "description": "JSON language server"
+      "candidates": [
+        "vscode-json-language-server",
+        "vscode-json-languageserver",
+        "json-languageserver"
+      ],
+      "args": [
+        "--stdio"
+      ],
+      "install_hint": "npm install -g vscode-langservers-extracted",
+      "install_script": "json",
+      "description": "JSON language server (bundled in vscode-langservers-extracted)"
     },
     "yaml": {
-      "candidates": ["yaml-language-server"],
-      "args": ["--stdio"],
+      "candidates": [
+        "yaml-language-server"
+      ],
+      "args": [
+        "--stdio"
+      ],
       "install_hint": "npm install -g yaml-language-server",
-      "install_script": null,
+      "install_script": "yaml",
       "description": "YAML language server"
     },
     "html": {
-      "candidates": ["vscode-html-languageserver", "html-languageserver"],
-      "args": ["--stdio"],
-      "install_hint": "npm install -g vscode-html-languageserver",
-      "install_script": null,
-      "description": "HTML language server"
+      "candidates": [
+        "vscode-html-language-server",
+        "vscode-html-languageserver",
+        "html-languageserver"
+      ],
+      "args": [
+        "--stdio"
+      ],
+      "install_hint": "npm install -g vscode-langservers-extracted",
+      "install_script": "html",
+      "description": "HTML language server (bundled in vscode-langservers-extracted)"
     },
     "css": {
-      "candidates": ["vscode-css-languageserver", "css-languageserver"],
-      "args": ["--stdio"],
-      "install_hint": "npm install -g vscode-css-languageserver",
-      "install_script": null,
-      "description": "CSS/SCSS/Less language server"
+      "candidates": [
+        "vscode-css-language-server",
+        "vscode-css-languageserver",
+        "css-languageserver"
+      ],
+      "args": [
+        "--stdio"
+      ],
+      "install_hint": "npm install -g vscode-langservers-extracted",
+      "install_script": "css",
+      "description": "CSS/SCSS/Less language server (bundled in vscode-langservers-extracted)"
     },
     "markdown": {
-      "candidates": ["marksman"],
+      "candidates": [
+        "marksman"
+      ],
       "args": [],
       "install_hint": "Install marksman: https://github.com/artempyanykh/marksman",
-      "install_script": null,
+      "install_script": "markdown",
       "description": "Markdown language server (defaults to stdio)"
+    },
+    "java": {
+      "candidates": [
+        "jdtls"
+      ],
+      "args": [],
+      "install_hint": "Download Eclipse JDT Language Server: https://download.eclipse.org/jdtls/",
+      "install_script": "java",
+      "description": "Eclipse JDT Language Server for Java"
     }
   }
 }

@@ -1210,6 +1210,9 @@ pub struct SearchResponse {
 ///
 /// Uses the `ignore` crate (same as ripgrep) for .gitignore-aware file
 /// traversal and regex matching. Results are case-insensitive by default.
+///
+/// Heavy I/O (directory walk + file reading) is offloaded to
+/// `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 pub async fn search_files(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1237,13 +1240,35 @@ pub async fn search_files(
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let max_results = query.max_results.unwrap_or(200).min(1000);
-    let include_glob = query.include.as_deref();
+    let include_glob = query.include.map(|s| s.to_string());
 
+    // Offload the heavy I/O work to a blocking thread pool to prevent
+    // it from starving the async runtime (tokio).
+    let result = tokio::task::spawn_blocking(move || {
+        run_search(&workspace_root, &re, include_glob.as_deref(), max_results)
+    })
+    .await
+    .map_err(|_| ApiError::internal("Search task panicked"))?;
+
+    Ok(Json(result))
+}
+
+/// Synchronous search logic — runs on a blocking thread pool.
+///
+/// Walks the workspace tree via `ignore`, reads each text file, and
+/// collects regex matches. Binary files and files larger than 1 MiB are
+/// skipped to keep search fast.
+fn run_search(
+    workspace_root: &str,
+    re: &regex::Regex,
+    include_glob: Option<&str>,
+    max_results: usize,
+) -> SearchResponse {
     let mut results: Vec<SearchMatch> = Vec::with_capacity(max_results);
     let mut total_matches: usize = 0;
     let mut truncated = false;
 
-    let walker = ignore::WalkBuilder::new(&workspace_root)
+    let walker = ignore::WalkBuilder::new(workspace_root)
         .hidden(true)
         .git_ignore(true)
         .git_global(true)
@@ -1261,6 +1286,14 @@ pub async fn search_files(
         }
 
         let path = entry.path();
+
+        // Skip files larger than 1 MiB — they are unlikely to be
+        // human-readable source files and would slow down search.
+        if let Ok(meta) = entry.metadata() {
+            if meta.len() > 1_048_576 {
+                continue;
+            }
+        }
 
         // Apply file filter if specified (comma-separated globs like "*.rs,*.toml")
         if let Some(glob) = include_glob {
@@ -1281,9 +1314,14 @@ pub async fn search_files(
             }
         }
 
+        // Skip known binary file extensions
+        if is_binary_path(path) {
+            continue;
+        }
+
         // Compute relative path (normalize backslashes to forward slashes)
         let rel_path = path
-            .strip_prefix(&workspace_root)
+            .strip_prefix(workspace_root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
@@ -1311,11 +1349,37 @@ pub async fn search_files(
         }
     }
 
-    Ok(Json(SearchResponse {
+    SearchResponse {
         matches: results,
         total_matches,
         truncated,
-    }))
+    }
+}
+
+/// Check whether a file path has a known binary (non-text) extension.
+fn is_binary_path(path: &std::path::Path) -> bool {
+    const BINARY_EXTENSIONS: &[&str] = &[
+        // Images
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "tiff", "tif",
+        // Audio / Video
+        "mp3", "mp4", "avi", "mov", "wav", "flac", "ogg", "webm", "mkv",
+        // Archives
+        "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst",
+        // Object / Library / Binary
+        "o", "obj", "a", "so", "dylib", "dll", "exe", "pdb", "lib", "class",
+        "wasm", "bc", "ll",
+        // Compiled / Cache
+        "pyc", "pyo", "rlib", "rmeta",
+        // Documents
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+        // Other binary
+        "bin", "dat", "db", "sqlite", "sqlite3", "pack", "idx",
+    ];
+
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| BINARY_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────

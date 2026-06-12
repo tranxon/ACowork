@@ -1,6 +1,21 @@
 # RollBall LSP install script: gopls (Go)
 # Phases: Install -> Verify -> Health Check
 
+# ── Helpers ──────────────────────────────────────────────────────────
+
+# Add a directory to the persistent user PATH (and current session).
+function Add-ToPath {
+    param([string]$Dir)
+    $currentUserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    if ($currentUserPath -notlike "*$Dir*") {
+        [Environment]::SetEnvironmentVariable("PATH", "$currentUserPath;$Dir", "User")
+        Write-Host "Added $Dir to persistent user PATH." -ForegroundColor Green
+    }
+    if ($env:PATH -notlike "*$Dir*") {
+        $env:PATH = "$env:PATH;$Dir"
+    }
+}
+
 $ErrorActionPreference = "Stop"
 
 $Binary = "gopls"
@@ -8,6 +23,29 @@ $Binary = "gopls"
 # -- Phase 1: Install -------------------------------------------------
 function Install-Server {
     Write-Host "[1/3] Installing gopls..."
+
+    # Already on PATH?
+    $existing = Get-Command $Binary -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "gopls already on PATH at $($existing.Source)" -ForegroundColor Green
+        return
+    }
+
+    # Not on PATH — search GOPATH/bin (Go installs binaries there, may not be on PATH)
+    try {
+        $goPath = & go env GOPATH 2>$null
+        if ($goPath) {
+            $goBin = Join-Path $goPath "bin"
+            $candidate = Join-Path $goBin "gopls.exe"
+            if (Test-Path $candidate) {
+                Write-Host "Found gopls at $candidate — adding $goBin to PATH..." -ForegroundColor Yellow
+                Add-ToPath $goBin
+                return
+            }
+        }
+    } catch {}
+
+    # Not installed — run go install
     if (Get-Command go -ErrorAction SilentlyContinue) {
         go install golang.org/x/tools/gopls@latest
     } else {
@@ -22,11 +60,30 @@ function Verify-Server {
     $cmd = Get-Command $Binary -ErrorAction SilentlyContinue
     if ($cmd) {
         Write-Host "OK: gopls found at $($cmd.Source)" -ForegroundColor Green
-    } else {
-        Write-Host "ERROR: gopls not found on PATH (GOPATH/bin may not be on PATH)" -ForegroundColor Red
-        Write-Host "Try: `$env:PATH += `";`" + [System.IO.Path]::Combine((go env GOPATH), 'bin')"
-        exit 1
+        return
     }
+
+    # Still not found — search GOPATH/bin
+    try {
+        $goPath = & go env GOPATH 2>$null
+        if ($goPath) {
+            $goBin = Join-Path $goPath "bin"
+            $candidate = Join-Path $goBin "gopls.exe"
+            if (Test-Path $candidate) {
+                Write-Host "Found gopls at $candidate — adding $goBin to PATH..." -ForegroundColor Yellow
+                Add-ToPath $goBin
+                $cmd = Get-Command $Binary -ErrorAction SilentlyContinue
+                if ($cmd) {
+                    Write-Host "OK: gopls found at $($cmd.Source)" -ForegroundColor Green
+                    return
+                }
+            }
+        }
+    } catch {}
+
+    Write-Host "ERROR: gopls not found on PATH (GOPATH/bin may not be on PATH)" -ForegroundColor Red
+    Write-Host "Try: `$env:PATH += `";`" + [System.IO.Path]::Combine((go env GOPATH), 'bin')"
+    exit 1
 }
 
 # -- Phase 3: Health Check --------------------------------------------
@@ -38,8 +95,10 @@ function Health-Check {
     $input = $header + $initMsg
 
     try {
-        $proc = Start-Process -FilePath $Binary -ArgumentList "serve" -NoNewWindow -RedirectStandardInput "$env:TEMP\lsp_init.txt" -RedirectStandardOutput "$env:TEMP\lsp_out.txt" -RedirectStandardError "$env:TEMP\lsp_err.txt" -PassThru
+        # Write stdin input BEFORE starting the process to avoid a race
+        # where the process reads an empty file.
         Set-Content -Path "$env:TEMP\lsp_init.txt" -Value $input -NoNewline
+        $proc = Start-Process -FilePath $Binary -ArgumentList "serve" -NoNewWindow -RedirectStandardInput "$env:TEMP\lsp_init.txt" -RedirectStandardOutput "$env:TEMP\lsp_out.txt" -RedirectStandardError "$env:TEMP\lsp_err.txt" -PassThru
         $proc | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
         if (!$proc.HasExited) { $proc | Stop-Process -Force }
 

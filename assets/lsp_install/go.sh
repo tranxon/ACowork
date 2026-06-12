@@ -6,9 +6,59 @@ set -euo pipefail
 
 BINARY="gopls"
 
+# ── Helpers ────────────────────────────────────────────────────────
+
+add_to_path() {
+    local dir="$1"
+    case ":$PATH:" in
+        *:"$dir":*) ;;
+        *) export PATH="$PATH:$dir" ;;
+    esac
+    # Persist to shell profile
+    local profile_file
+    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        [[ -f "$f" ]] && { profile_file="$f"; break; }
+    done
+    if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
+        echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
+        echo "Added $dir to $profile_file for persistence."
+    fi
+}
+
+find_gopls() {
+    local gopath="${GOPATH:-$HOME/go}"
+    for d in "$gopath/bin" "$HOME/go/bin"; do
+        local candidate="$d/$BINARY"
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── Phase 1: Install ──────────────────────────────────────────────────
 install() {
     echo "[1/3] Installing gopls..."
+
+    # Already on PATH?
+    if command -v "$BINARY" &>/dev/null; then
+        echo "gopls already on PATH at $(command -v "$BINARY")"
+        return 0
+    fi
+
+    # Not on PATH — search GOPATH/bin
+    local found
+    found=$(find_gopls) || true
+    if [[ -n "$found" ]]; then
+        local dir
+        dir=$(dirname "$found")
+        echo "Found gopls at $found — adding $dir to PATH..."
+        add_to_path "$dir"
+        return 0
+    fi
+
+    # Not installed
     if command -v go &>/dev/null; then
         go install golang.org/x/tools/gopls@latest
     else
@@ -21,14 +71,27 @@ install() {
 verify() {
     echo "[2/3] Verifying gopls is on PATH..."
     if command -v "$BINARY" &>/dev/null; then
-        local path
-        path=$(command -v "$BINARY")
-        echo "OK: gopls found at $path"
-    else
-        echo "ERROR: gopls not found on PATH after install (GOPATH/bin may not be on PATH)"
-        echo "Try: export PATH=\$PATH:\$(go env GOPATH)/bin"
-        exit 1
+        echo "OK: gopls found at $(command -v "$BINARY")"
+        return 0
     fi
+
+    # Search GOPATH/bin
+    local found
+    found=$(find_gopls) || true
+    if [[ -n "$found" ]]; then
+        local dir
+        dir=$(dirname "$found")
+        echo "Found gopls at $found — adding $dir to PATH..."
+        add_to_path "$dir"
+        if command -v "$BINARY" &>/dev/null; then
+            echo "OK: gopls found at $(command -v "$BINARY")"
+            return 0
+        fi
+    fi
+
+    echo "ERROR: gopls not found on PATH after install (GOPATH/bin may not be on PATH)"
+    echo "Try: export PATH=\$PATH:\$(go env GOPATH)/bin"
+    exit 1
 }
 
 # ── Phase 3: Health Check ────────────────────────────────────────────

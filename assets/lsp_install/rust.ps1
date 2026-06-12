@@ -1,6 +1,20 @@
 # RollBall LSP install script: rust-analyzer
 # Phases: Install -> Verify -> Health Check
 
+# ── Helpers ──────────────────────────────────────────────────────────
+
+function Add-ToPath {
+    param([string]$Dir)
+    $currentUserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    if ($currentUserPath -notlike "*$Dir*") {
+        [Environment]::SetEnvironmentVariable("PATH", "$currentUserPath;$Dir", "User")
+        Write-Host "Added $Dir to persistent user PATH." -ForegroundColor Green
+    }
+    if ($env:PATH -notlike "*$Dir*") {
+        $env:PATH = "$env:PATH;$Dir"
+    }
+}
+
 $ErrorActionPreference = "Stop"
 
 $Binary = "rust-analyzer"
@@ -8,6 +22,24 @@ $Binary = "rust-analyzer"
 # -- Phase 1: Install -------------------------------------------------
 function Install-Server {
     Write-Host "[1/3] Installing rust-analyzer..."
+
+    # Already on PATH?
+    $existing = Get-Command $Binary -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "rust-analyzer already on PATH at $($existing.Source)" -ForegroundColor Green
+        return
+    }
+
+    # Not on PATH — search ~/.cargo/bin (rustup/rust default install location)
+    $cargoBin = "$env:USERPROFILE\.cargo\bin"
+    $candidate = Join-Path $cargoBin "$Binary.exe"
+    if (Test-Path $candidate) {
+        Write-Host "Found rust-analyzer at $candidate — adding $cargoBin to PATH..." -ForegroundColor Yellow
+        Add-ToPath $cargoBin
+        return
+    }
+
+    # Not installed — run rustup component add
     if (Get-Command rustup -ErrorAction SilentlyContinue) {
         rustup component add rust-analyzer
     } else {
@@ -22,10 +54,24 @@ function Verify-Server {
     $cmd = Get-Command $Binary -ErrorAction SilentlyContinue
     if ($cmd) {
         Write-Host "OK: rust-analyzer found at $($cmd.Source)" -ForegroundColor Green
-    } else {
-        Write-Host "ERROR: rust-analyzer not found on PATH after install" -ForegroundColor Red
-        exit 1
+        return
     }
+
+    # Still not found — search ~/.cargo/bin
+    $cargoBin = "$env:USERPROFILE\.cargo\bin"
+    $candidate = Join-Path $cargoBin "$Binary.exe"
+    if (Test-Path $candidate) {
+        Write-Host "Found rust-analyzer at $candidate — adding $cargoBin to PATH..." -ForegroundColor Yellow
+        Add-ToPath $cargoBin
+        $cmd = Get-Command $Binary -ErrorAction SilentlyContinue
+        if ($cmd) {
+            Write-Host "OK: rust-analyzer found at $($cmd.Source)" -ForegroundColor Green
+            return
+        }
+    }
+
+    Write-Host "ERROR: rust-analyzer not found on PATH after install" -ForegroundColor Red
+    exit 1
 }
 
 # -- Phase 3: Health Check --------------------------------------------
@@ -37,8 +83,9 @@ function Health-Check {
     $input = $header + $initMsg
 
     try {
-        $proc = Start-Process -FilePath $Binary -NoNewWindow -RedirectStandardInput "$env:TEMP\lsp_init.txt" -RedirectStandardOutput "$env:TEMP\lsp_out.txt" -RedirectStandardError "$env:TEMP\lsp_err.txt" -PassThru
+        # Write stdin input BEFORE starting the process to avoid a race
         Set-Content -Path "$env:TEMP\lsp_init.txt" -Value $input -NoNewline
+        $proc = Start-Process -FilePath $Binary -NoNewWindow -RedirectStandardInput "$env:TEMP\lsp_init.txt" -RedirectStandardOutput "$env:TEMP\lsp_out.txt" -RedirectStandardError "$env:TEMP\lsp_err.txt" -PassThru
         $proc | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
         if (!$proc.HasExited) { $proc | Stop-Process -Force }
 

@@ -356,6 +356,27 @@ export function useLspClientPool(
                 const clientOptions: LanguageClientOptions = {
                     documentSelector: [],
                     workspaceFolder: { uri: rootFolderUri, name: "workspace", index: 0 },
+                    // jdtls requires initializationOptions to import projects.
+                    // Without extendedClientCapabilities.gradleBuildFileSupport,
+                    // jdtls won't import Gradle/Maven projects, causing
+                    // workspace/symbol to hang indefinitely.
+                    // Ref: VS Code Java extension, nvim-jdtls setup.lua
+                    initializationOptions: {
+                        workspaceFolders: [wsRoot],
+                        settings: {
+                            java: {
+                                import: {
+                                    gradle: { enabled: true, wrapper: { enabled: true } },
+                                    maven: { enabled: true },
+                                },
+                            },
+                        },
+                        extendedClientCapabilities: {
+                            gradleBuildFileSupport: true,
+                            classFileContentsSupport: true,
+                            clientDocumentSymbolProvider: true,
+                        },
+                    },
                 };
 
                 const t3 = performance.now();
@@ -527,6 +548,27 @@ export function useLspClientPool(
                     } catch (err) {
                         console.warn("[LSP] pool monaco import failed —", language, err);
                     }
+                }
+
+                // Send workspace/didChangeConfiguration after handshake.
+                // jdtls (Eclipse JDT LS) requires this notification with Java
+                // settings to trigger project import (Gradle/Maven).
+                // Empty settings only cause per-file analysis (Validate + Publish
+                // Diagnostics); proper settings trigger full project import.
+                try {
+                    lspClient.sendNotification("workspace/didChangeConfiguration", {
+                        settings: {
+                            java: {
+                                import: {
+                                    gradle: { enabled: true, wrapper: { enabled: true } },
+                                    maven: { enabled: true },
+                                },
+                            },
+                        },
+                    });
+                    console.log("[LSP] pool sent workspace/didChangeConfiguration —", language);
+                } catch (err) {
+                    console.warn("[LSP] pool didChangeConfiguration failed —", language, err);
                 }
 
                 st.handshakeDone = true;
