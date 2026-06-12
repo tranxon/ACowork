@@ -40,29 +40,22 @@ pub fn install_signal_handlers(shutdown: Arc<Shutdown>) {
     #[cfg(unix)]
     {
         use signal_hook::consts::{SIGINT, SIGTERM};
-        use signal_hook::flag;
 
-        // Register SIGTERM handler
+        // Use Signals iterator in background threads for reliable cross-platform handling
         let shutdown_term = shutdown.clone();
-        flag::register(SIGTERM, flag::AtomicBool::new(false))
-            .expect("Failed to register SIGTERM handler");
-        // Use a background thread to watch for SIGTERM
         std::thread::spawn(move || {
             let mut sigs = signal_hook::iterator::Signals::new(&[SIGTERM])
-                .expect("Failed to create signal iterator");
+                .expect("Failed to create SIGTERM signal iterator");
             for _ in sigs.forever() {
                 shutdown_term.request();
                 break; // Only handle once
             }
         });
 
-        // Register SIGINT handler
         let shutdown_int = shutdown.clone();
-        flag::register(SIGINT, flag::AtomicBool::new(false))
-            .expect("Failed to register SIGINT handler");
         std::thread::spawn(move || {
             let mut sigs = signal_hook::iterator::Signals::new(&[SIGINT])
-                .expect("Failed to create signal iterator");
+                .expect("Failed to create SIGINT signal iterator");
             for _ in sigs.forever() {
                 shutdown_int.request();
                 break;
