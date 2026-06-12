@@ -485,7 +485,7 @@ function ProvidersTab() {
                         </Tooltip>
                         <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harness.active")}</span>
                         {isLocal ? (
-                          <Tooltip content="Local provider — no API key needed" variant="plain">
+                          <Tooltip content={t("harness.localProviderNoKey")} variant="plain">
                             <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
                               🏠 {t("harness.local")}
                             </span>
@@ -516,7 +516,7 @@ function ProvidersTab() {
                         <span className="text-xs text-zinc-400">—</span>
                       )}
                       {keyEntry.compact_model && (
-                        <Tooltip content="Compact model for summarization" variant="plain">
+                        <Tooltip content={t("harness.compactModelHint")} variant="plain">
                           <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
                             {t("harness.compact")}: {keyEntry.compact_model}
                           </span>

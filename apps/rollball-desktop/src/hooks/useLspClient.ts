@@ -56,6 +56,7 @@ export async function ensureVscodeApiInitialized(): Promise<void> {
     if (vscodeApiInitDone) return;
     if (!vscodeApiInitPromise) {
         console.log("[LSP] Initializing VS Code API services (first time)...");
+        const t0 = performance.now();
         vscodeApiInitPromise = (async () => {
             try {
                 const config: MonacoVscodeApiConfig = {
@@ -65,7 +66,7 @@ export async function ensureVscodeApiInitialized(): Promise<void> {
                 const wrapper = new MonacoVscodeApiWrapper(config);
                 await wrapper.start({ caller: "useLspClient" });
                 vscodeApiInitDone = true;
-                console.log("[LSP] VS Code API services initialized successfully");
+                console.log("[LSP] VS Code API services initialized successfully", `elapsed: ${Math.round(performance.now() - t0)}ms`);
             } catch (err) {
                 vscodeApiInitPromise = null; // allow retry
                 console.error("[LSP] VS Code API initialization failed:", err);

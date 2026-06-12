@@ -3,6 +3,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
+import { useTranslation } from "../../i18n/useTranslation";
 import {
   Play,
   Pause,
@@ -382,6 +383,7 @@ export function SnapshotNode({
   onRewind: (iteration: number) => void;
   getSection: (iteration: number, section: string) => Promise<SectionContentType | null>;
 }) {
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(true);
 
   return (
@@ -405,7 +407,7 @@ export function SnapshotNode({
         <span className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500">
           ~{snapshot.total_token_estimate} tok
         </span>
-        <Tooltip content={`Rewind to iteration ${snapshot.iteration}`} variant="plain">
+        <Tooltip content={t("debugPanel.rewindToIteration", { iteration: snapshot.iteration })} variant="plain">
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -450,7 +452,7 @@ export function SnapshotNode({
                     </span>
                   </button>
                   {/* Edit button — opens inline editor with the section's full content */}
-                  <Tooltip content="Edit section" variant="plain">
+                  <Tooltip content={t("debugPanel.editSection")} variant="plain">
                   <button
                     onClick={async () => {
                       const cacheKey = `${snapshot.iteration}:${sectionKey}`;
@@ -501,7 +503,7 @@ export function SnapshotNode({
                             <X className="h-2.5 w-2.5" />
                             Cancel
                           </button>
-                          <Tooltip content="Copy content" variant="plain">
+                          <Tooltip content={t("debugPanel.copyContent")} variant="plain">
                             <button
                               onClick={() => navigator.clipboard.writeText(editingSection.current)}
                               className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-zinc-500 transition-colors hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700"

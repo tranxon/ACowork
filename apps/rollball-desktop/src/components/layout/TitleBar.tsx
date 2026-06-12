@@ -2,6 +2,7 @@ import { Minus, Square, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { Tooltip } from "../common/Tooltip";
+import { useTranslation } from "../../i18n/useTranslation";
 
 // ── VS Code style panel toggle icon ──────────────────────────────────
 /** VS Code style panel toggle: a box divided by a vertical line into left/right halves.
@@ -29,6 +30,7 @@ interface TitleBarProps {
 }
 
 export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
+  const { t } = useTranslation();
   const { opacity, theme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   // Original gray: #E2E3E9 (light) / #292A2C (dark), modulated by opacity
@@ -89,12 +91,12 @@ export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
       {/* Right: Panel toggle + Window controls */}
       <div className="flex items-center gap-1">
         {/* Right panel toggle — VS Code style, left of window controls */}
-        <Tooltip content={panelExpanded ? "Collapse Right Panel" : "Expand Right Panel"} variant="plain">
+        <Tooltip content={panelExpanded ? t("titleBar.collapseRightPanel") : t("titleBar.expandRightPanel")} variant="plain">
           <button
             className="flex h-8 w-8 items-center justify-center rounded text-zinc-500 hover:text-zinc-700 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
             style={{ "-webkit-app-region": "no-drag" } as React.CSSProperties}
             onClick={onTogglePanel}
-            aria-label={panelExpanded ? "Collapse right panel" : "Expand right panel"}
+            aria-label={panelExpanded ? t("titleBar.collapseRightPanel") : t("titleBar.expandRightPanel")}
           >
             <PanelToggleIcon expanded={panelExpanded} />
           </button>

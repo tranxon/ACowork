@@ -153,6 +153,7 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
         label={currentWsName}
         collapseClass="tb-ws-text"
         tipClass="tb-ws-tip"
+        tooltip={t("workspace.selectWorkspace")}
         open={open}
         onToggle={() => setOpen(!open)}
         wrapperRef={ref}
@@ -256,7 +257,7 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
                               </button>
                             </div>
                           ) : (
-                            <Tooltip content="Remove workspace" variant="plain">
+                            <Tooltip content={t("workspace.removeWorkspace")} variant="plain">
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -272,7 +273,7 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
                           )}
 
                           {/* Access toggle button */}
-                          <Tooltip content={dir.access === "read-write" ? "Change to read-only" : "Change to read-write"} variant="plain">
+                          <Tooltip content={dir.access === "read-write" ? t("workspace.changeToReadOnly") : t("workspace.changeToReadWrite")} variant="plain">
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();

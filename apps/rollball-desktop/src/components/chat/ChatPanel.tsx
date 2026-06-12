@@ -848,7 +848,7 @@ export function ChatPanel() {
     return (
       <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
         <div className="text-center">
-          <Tooltip content="Start Agent" variant="plain">
+          <Tooltip content={t("chatPanel.startAgent")} variant="plain">
             <button
               onClick={async () => {
                 await startAgent(selectedAgent.agent_id);
@@ -2373,6 +2373,7 @@ function ModelMenu({
   currentProvider: string | null;
   onSelect: (model: string, provider: string) => void;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -2421,6 +2422,7 @@ function ModelMenu({
       label={modelDisplayName}
       collapseClass="tb-model-text"
       tipClass="tb-model-tip"
+      tooltip={t("chatPanel.selectModel")}
       open={open}
       onToggle={() => setOpen(!open)}
       wrapperRef={ref}

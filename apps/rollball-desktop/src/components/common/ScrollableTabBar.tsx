@@ -101,7 +101,7 @@ export const ScrollableTabBar = forwardRef<ScrollableTabBarHandle, ScrollableTab
                 {canScrollLeft && (
                     <button
                         onClick={() => scrollBy("left")}
-                        className="shrink-0 flex items-center justify-center w-5 h-full text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                        className="shrink-0 flex items-center justify-center rounded p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
                     >
                         <ChevronLeft className="h-3.5 w-3.5" />
                     </button>
@@ -117,7 +117,7 @@ export const ScrollableTabBar = forwardRef<ScrollableTabBarHandle, ScrollableTab
                 {canScrollRight && (
                     <button
                         onClick={() => scrollBy("right")}
-                        className="shrink-0 flex items-center justify-center w-5 h-full text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                        className="shrink-0 flex items-center justify-center rounded p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
                     >
                         <ChevronRight className="h-3.5 w-3.5" />
                     </button>

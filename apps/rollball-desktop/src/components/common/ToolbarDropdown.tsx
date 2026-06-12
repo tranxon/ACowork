@@ -21,6 +21,7 @@ export function ToolbarDropdownTrigger({
     wrapperRef,
     buttonClassName,
     children,
+    tooltip,
 }: {
     icon: ReactNode;
     label: string;
@@ -33,10 +34,12 @@ export function ToolbarDropdownTrigger({
     wrapperRef?: React.Ref<HTMLDivElement>;
     buttonClassName?: string;
     children: ReactNode;
+    /** Tooltip text (falls back to label if not provided) */
+    tooltip?: string;
 }) {
     return (
         <div ref={wrapperRef} className="relative inline-block">
-            <Tooltip content={label} tipClass={tipClass}>
+            <Tooltip content={tooltip ?? label} tipClass={tipClass}>
                 <button
                     type="button"
                     onClick={onToggle}

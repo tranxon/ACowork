@@ -183,7 +183,7 @@ export function WorkspaceExplorer() {
             <div className="flex items-center gap-0.5 border-b border-zinc-200 px-1.5 py-1.5 dark:border-zinc-800">
                 <WorkspaceSelector dropDirection="down" />
                 <div className="ml-auto flex items-center gap-0.5">
-                    <Tooltip content="New file" variant="plain">
+                    <Tooltip content={t("workspace.newFile")} variant="plain">
                         <button
                             onClick={handleNewFile}
                             className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-[var(--color-accent)] dark:hover:bg-zinc-800"
@@ -191,7 +191,7 @@ export function WorkspaceExplorer() {
                             <FilePlus className="h-3.5 w-3.5" />
                         </button>
                     </Tooltip>
-                    <Tooltip content="New folder" variant="plain">
+                    <Tooltip content={t("workspace.newFolder")} variant="plain">
                         <button
                             onClick={handleNewFolder}
                             className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-yellow-600 dark:hover:bg-zinc-800 dark:hover:text-yellow-400"

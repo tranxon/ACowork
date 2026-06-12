@@ -22,6 +22,7 @@ import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { isGatewayLocal } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 import { TabButton } from "../common/tab";
+import { ScrollableTabBar } from "../common/ScrollableTabBar";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
@@ -202,8 +203,8 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
       </div>
       {/* Header with tabs */}
       <div className="border-b border-zinc-200 pt-px dark:border-zinc-800">
-        <div className="flex items-center px-3 pt-1">
-          <div className="flex gap-0">
+        <div className="flex items-center px-1 pt-1">
+          <ScrollableTabBar>
             <TabButton
               className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
               active={activeTab === "workspace"}
@@ -259,7 +260,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
                 {t("resultsPanel.setup")}
               </TabButton>
             )}
-          </div>
+          </ScrollableTabBar>
         </div>
       </div>
 

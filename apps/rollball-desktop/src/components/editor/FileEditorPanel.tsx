@@ -85,6 +85,7 @@ const LSP_INSTALL_HINTS: Record<string, { name: string; command: string; url?: s
 // ── LSP Status Indicator ──────────────────────────────────────────────
 
 function LspIndicator({ status, statusMessage, language }: { status: LspStatus; statusMessage: string; language: string }) {
+    const { t } = useTranslation();
     const [showPopover, setShowPopover] = useState(false);
     const [copied, setCopied] = useState(false);
     const popoverRef = useRef<HTMLDivElement>(null);
@@ -202,7 +203,7 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
                         <span className="flex-1 select-all break-all text-zinc-700 dark:text-zinc-300">
                             {hint.command}
                         </span>
-                        <Tooltip content="Copy" variant="plain">
+                        <Tooltip content={t("fileEditor.copy")} variant="plain">
                             <button
                                 type="button"
                                 onClick={copyToClipboard}
@@ -1113,7 +1114,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         {file.fileName}
                                     </span>
                                     {/* Close button */}
-                                    <Tooltip content="Close" variant="plain">
+                                    <Tooltip content={t("fileEditor.close")} variant="plain">
                                         <button
                                             onClick={(e) => handleClose(e, file)}
                                             className={cn(
@@ -1134,7 +1135,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
                 {/* Save button */}
                 {activeFile && !activeFile.loading && (
-                    <Tooltip content="Save (Ctrl+S)" variant="plain">
+                    <Tooltip content={t("fileEditor.save")} variant="plain">
                         <button
                             onClick={() => activeFile.dirty && void saveFile(activeFile.id)}
                             disabled={!activeFile.dirty || activeFile.saving}

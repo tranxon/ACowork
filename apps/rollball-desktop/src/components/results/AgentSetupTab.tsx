@@ -449,7 +449,7 @@ export function AgentSetupTab() {
               const hasKey = !!sp.id; // Providers listed here already have vault keys
               const activeIdx = activeSearch.findIndex((p) => p.provider === sp.id);
               return (
-                <Tooltip key={sp.id} content={hasKey ? "" : "No API key configured. Add in Harness → Search."} variant="plain">
+                <Tooltip key={sp.id} content={hasKey ? "" : t("agentSetup.noApiKey")} variant="plain">
                   <div
                     className={`flex items-center gap-2 py-1 px-1.5 rounded ${hasKey
                       ? "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"

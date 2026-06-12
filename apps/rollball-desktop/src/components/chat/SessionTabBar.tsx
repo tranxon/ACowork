@@ -182,7 +182,7 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
                   </button>
                 </div>
               ) : (
-                <Tooltip content="Delete session" variant="plain">
+                <Tooltip content={t("sessionTabBar.deleteSession")} variant="plain">
                   <button
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
                     disabled={deletingId !== null}
@@ -319,12 +319,12 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
           const isProcessing = isSessionActive(status);
 
           return (
-            <Tooltip content={getTitle(sessionId)} variant="plain" key={sessionId}>
-              <TabItem
-                data-session-id={sessionId}
-                onClick={() => handleTabClick(sessionId)}
-                active={isActive}
-              >
+            <TabItem
+              data-session-id={sessionId}
+              key={sessionId}
+              onClick={() => handleTabClick(sessionId)}
+              active={isActive}
+            >
                 {/* Streaming indicator dot (only when processing and not active) */}
                 {isProcessing && !isActive && (
                   <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
@@ -337,7 +337,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                   {getTitle(sessionId)}
                 </span>
                 {/* Close button */}
-                <Tooltip content="Close tab" variant="plain">
+                <Tooltip content={t("sessionTabBar.closeTab")} variant="plain">
                   <button
                     onClick={(e) => handleClose(e, sessionId)}
                     className={cn(
@@ -349,7 +349,6 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                   </button>
                 </Tooltip>
               </TabItem>
-            </Tooltip>
           );
         })}
       </ScrollableTabBar>
@@ -357,7 +356,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
       {/* Action buttons */}
       <div className="flex items-center shrink-0 px-1 gap-0.5">
         {/* New session button */}
-        <Tooltip content="New conversation" variant="plain">
+        <Tooltip content={t("sessionTabBar.newConversation")} variant="plain">
           <button
             onClick={handleNew}
             className="flex items-center justify-center rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
@@ -368,7 +367,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
         {/* Session list dropdown */}
         <div className="relative">
-          <Tooltip content="Session history" variant="plain">
+          <Tooltip content={t("sessionTabBar.sessionHistory")} variant="plain">
             <button
               onClick={() => setListOpen(!listOpen)}
               className={cn(

@@ -1,4 +1,16 @@
 {
+    "titleBar": {
+        "collapseRightPanel": "折叠右侧面板",
+        "expandRightPanel": "展开右侧面板"
+    },
+    "navBar": {
+        "editProfile": "编辑资料",
+        "chat": "聊天",
+        "projects": "项目",
+        "docs": "文档",
+        "harness": "Harness",
+        "settings": "设置"
+    },
     "common": {
         "me": "我",
         "cancel": "取消",
@@ -39,13 +51,19 @@
         "imageUnsupportedTitle": "当前模型不支持图片输入",
         "imageUnsupportedDesc": "请切换到以下支持图片输入的模型：",
         "inputParams": "输入参数... (Enter to send, Shift+Enter for new line)",
-        "inputParamsConnecting": "输入参数... (Connecting to agent...)"
+        "inputParamsConnecting": "输入参数... (Connecting to agent...)",
+        "selectModel": "选择模型",
+        "startAgent": "启动 Agent"
     },
     "sessionTabBar": {
         "llmReasoning": "LLM 推理进行中",
         "closeWarning": "关闭此会话将中断正在进行的 LLM 推理。已生成的部分内容将会保留。",
         "cancel": "取消",
-        "confirmClose": "确认关闭"
+        "confirmClose": "确认关闭",
+        "closeTab": "关闭标签",
+        "newConversation": "新建会话",
+        "sessionHistory": "会话历史",
+        "deleteSession": "删除会话"
     },
     "contextUsage": {
         "ariaLabel": "上下文用量",
@@ -152,6 +170,7 @@
         "resetOnboardingConfirm": "确定要重置引导流程吗？这将会清除所有引导进度，需要重新配置 Gateway 连接和 API Key。页面将自动刷新以重新开始。"
     },
     "agentSetup": {
+        "noApiKey": "未配置 API 密钥。请在 Harness → 搜索中添加。",
         "resetConfirm": "确定要重置 Agent 设置为默认值吗？包括名称、描述、提示词角色、头像图标、Shell 审批阈值和工具配置。",
         "noAgentSelected": "未选择 Agent",
         "chooseIcon": "选择图标",
@@ -258,7 +277,11 @@
         "enterNewApiKey": "输入新的 API 密钥...",
         "contextWindowMaxOutputPositive": "上下文窗口和最大输出 Token 数必须为正数",
         "searchProviders": "搜索服务商...",
-        "noProvidersMatch": "无匹配的服务商"
+        "noProvidersMatch": "无匹配的服务商",
+        "removeKey": "移除密钥",
+        "enterCustomModelName": "输入自定义模型名称",
+        "localProviderNoKey": "本地服务商 — 无需 API 密钥",
+        "compactModelHint": "用于摘要的精简模型"
     },
     "harnessSearch": {
         "searchProviderManagement": "搜索服务商管理",
@@ -353,6 +376,12 @@
     "workspace": {
         "delete": "删除",
         "cancel": "取消",
+        "selectWorkspace": "选择工作区",
+        "removeWorkspace": "移除工作区",
+        "changeToReadOnly": "改为只读",
+        "changeToReadWrite": "改为读写",
+        "newFile": "新建文件",
+        "newFolder": "新建文件夹",
         "explorer": {
             "agentNotRunning": "启动 Agent 以浏览工作区",
             "loading": "加载中...",
@@ -370,7 +399,9 @@
         "closeOthers": "关闭其他",
         "closeAll": "全部关闭",
         "batchCloseOthersConfirm": "其他 {{count}} 个标签页有未保存的更改。放弃并关闭？",
-        "batchCloseAllConfirm": "{{count}} 个标签页有未保存的更改。放弃并全部关闭？"
+        "batchCloseAllConfirm": "{{count}} 个标签页有未保存的更改。放弃并全部关闭？",
+        "save": "保存 (Ctrl+S)",
+        "copy": "复制"
     },
     "sessionPanel": {
         "loadingSessions": "加载会话中...",
@@ -432,5 +463,13 @@
         "active": "活跃",
         "dormant": "休眠",
         "health": "健康度"
+    },
+    "skillsPanel": {
+        "selectSkill": "选择技能"
+    },
+    "debugPanel": {
+        "editSection": "编辑区域",
+        "copyContent": "复制内容",
+        "rewindToIteration": "回退到第 {{iteration}} 轮迭代"
     }
 }

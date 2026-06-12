@@ -295,6 +295,7 @@ export function useLspClientPool(
             }
             st.handshakeDone = false;
 
+            const t0 = performance.now();
             const wsUrl = buildLspWsUrl(language, agentId, workspaceId);
             console.log("[LSP] pool connecting —", language, "url:", wsUrl);
 
@@ -334,9 +335,13 @@ export function useLspClientPool(
             try {
                 await openPromise;
                 if (st.cancelled) return;
+                const t1 = performance.now();
+                console.log("[LSP] pool ws opened —", language, `elapsed: ${Math.round(t1 - t0)}ms`);
 
                 await ensureVscodeApiInitialized();
                 if (st.cancelled) return;
+                const t2 = performance.now();
+                console.log("[LSP] pool vscode api ready —", language, `elapsed: ${Math.round(t2 - t1)}ms`);
 
                 const socket = adaptWebSocket(ws);
                 const reader = new WebSocketMessageReader(socket);
@@ -353,11 +358,16 @@ export function useLspClientPool(
                     workspaceFolder: { uri: rootFolderUri, name: "workspace", index: 0 },
                 };
 
+                const t3 = performance.now();
+                console.log("[LSP] pool transports ready —", language, `elapsed: ${Math.round(t3 - t2)}ms`);
+
                 const lspClient = new MonacoLanguageClient({
                     name: `${language} LSP`,
                     clientOptions,
                     messageTransports,
                 });
+                const t4 = performance.now();
+                console.log("[LSP] pool MonacoLanguageClient created —", language, `elapsed: ${Math.round(t4 - t3)}ms`);
 
                 lspClient.onDidChangeState((e) => {
                     console.log(
@@ -418,6 +428,8 @@ export function useLspClientPool(
                     }
                 };
 
+                console.log("[LSP] pool calling lspClient.start() —", language);
+
                 // Start the LSP handshake with a timeout and retry for
                 // "Shutdown already requested" races (see evict comment).
                 let attempt = 0;
@@ -463,7 +475,7 @@ export function useLspClientPool(
                 if (st.cancelled) return;
 
                 if (startResult === "timeout") {
-                    console.error("[LSP] pool start timeout —", language);
+                    console.error("[LSP] pool start timeout —", language, `total elapsed: ${Math.round(performance.now() - t0)}ms`);
                     st.connecting = false;
                     st.client = null;
                     st.status = "error";
@@ -480,7 +492,8 @@ export function useLspClientPool(
                     return;
                 }
 
-                console.log("[LSP] pool client started —", language);
+                const t5 = performance.now();
+                console.log("[LSP] pool client started —", language, `start() elapsed: ${Math.round(t5 - t4)}ms`, `total elapsed: ${Math.round(t5 - t0)}ms`);
 
                 // Manually send didOpen for all currently-open models of this
                 // language using their absolute filesystem URI.
@@ -522,6 +535,8 @@ export function useLspClientPool(
                 st.status = "connected";
                 st.statusMessage = language;
                 publish(language);
+                const t6 = performance.now();
+                console.log("[LSP] pool handshake complete —", language, `didOpen+publish elapsed: ${Math.round(t6 - t5)}ms`, `total elapsed: ${Math.round(t6 - t0)}ms`);
 
                 // Fallback for servers that never emit workDoneProgress:
                 // if still "connected" after 5s with no indexing, assume ready.

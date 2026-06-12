@@ -46,7 +46,7 @@ export function TabButton({ active, className, children, ...rest }: TabButtonPro
     return (
         <button
             className={cn(
-                "relative px-3 py-2 text-sm transition-colors",
+                "relative px-3 py-2 text-sm transition-colors whitespace-nowrap shrink-0",
                 active
                     ? "font-semibold text-zinc-700 dark:text-zinc-200"
                     : "font-normal text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300",

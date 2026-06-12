@@ -1,4 +1,16 @@
 {
+    "titleBar": {
+        "collapseRightPanel": "Collapse Right Panel",
+        "expandRightPanel": "Expand Right Panel"
+    },
+    "navBar": {
+        "editProfile": "Edit Profile",
+        "chat": "Chat",
+        "projects": "Projects",
+        "docs": "Docs",
+        "harness": "Harness",
+        "settings": "Settings"
+    },
     "common": {
         "me": "我",
         "cancel": "取消",
@@ -45,7 +57,11 @@
         "llmReasoning": "LLM 推理進行中",
         "closeWarning": "關閉此工作階段將中斷正在進行的 LLM 推理。已產生的部分內容將會保留。",
         "cancel": "取消",
-        "confirmClose": "確認關閉"
+        "confirmClose": "確認關閉",
+        "closeTab": "Close tab",
+        "newConversation": "New conversation",
+        "sessionHistory": "Session history",
+        "deleteSession": "Delete session"
     },
     "contextUsage": {
         "ariaLabel": "上下文用量",
@@ -152,6 +168,7 @@
         "resetOnboardingConfirm": "確定要重設引導流程嗎？這將會清除所有引導進度，需要重新設定閘道連線和 API 金鑰。頁面將自動重新整理以重新開始。"
     },
     "agentSetup": {
+        "noApiKey": "No API key configured. Add in Harness → Search.",
         "resetConfirm": "確定要重設 Agent 設定為預設值嗎？包括名稱、說明、提示詞角色、頭像圖示、Shell 審批閾值和工具設定。",
         "noAgentSelected": "未選取 Agent",
         "chooseIcon": "選擇圖示",
@@ -258,7 +275,11 @@
         "enterNewApiKey": "輸入新的 API 金鑰...",
         "contextWindowMaxOutputPositive": "上下文視窗和最大輸出 Token 數必須為正數",
         "searchProviders": "搜尋服務提供者...",
-        "noProvidersMatch": "無符合的服務提供者"
+        "noProvidersMatch": "無符合的服務提供者",
+        "removeKey": "Remove key",
+        "enterCustomModelName": "Enter custom model name",
+        "localProviderNoKey": "Local provider — no API key needed",
+        "compactModelHint": "Compact model for summarization"
     },
     "harnessSearch": {
         "searchProviderManagement": "搜尋服務提供者管理",
@@ -352,6 +373,12 @@
     "workspace": {
         "delete": "刪除",
         "cancel": "取消",
+        "selectWorkspace": "Select workspace",
+        "removeWorkspace": "Remove workspace",
+        "changeToReadOnly": "Change to read-only",
+        "changeToReadWrite": "Change to read-write",
+        "newFile": "New file",
+        "newFolder": "New folder",
         "explorer": {
             "agentNotRunning": "啟動 Agent 以瀏覽工作區",
             "loading": "載入中...",
@@ -369,7 +396,9 @@
         "closeOthers": "關閉其他",
         "closeAll": "全部關閉",
         "batchCloseOthersConfirm": "其他 {{count}} 個分頁有未儲存的變更。放棄並關閉？",
-        "batchCloseAllConfirm": "{{count}} 個分頁有未儲存的變更。放棄並全部關閉？"
+        "batchCloseAllConfirm": "{{count}} 個分頁有未儲存的變更。放棄並全部關閉？",
+        "save": "Save (Ctrl+S)",
+        "copy": "Copy"
     },
     "sessionPanel": {
         "loadingSessions": "載入工作階段中...",
@@ -431,5 +460,13 @@
         "active": "活躍",
         "dormant": "休眠",
         "health": "健康度"
+    },
+    "skillsPanel": {
+        "selectSkill": "Select skill"
+    },
+    "debugPanel": {
+        "editSection": "Edit section",
+        "copyContent": "Copy content",
+        "rewindToIteration": "Rewind to iteration {{iteration}}"
     }
 }

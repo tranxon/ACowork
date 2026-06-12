@@ -1,4 +1,16 @@
 {
+    "titleBar": {
+        "collapseRightPanel": "Collapse Right Panel",
+        "expandRightPanel": "Expand Right Panel"
+    },
+    "navBar": {
+        "editProfile": "Edit Profile",
+        "chat": "Chat",
+        "projects": "Projects",
+        "docs": "Docs",
+        "harness": "Harness",
+        "settings": "Settings"
+    },
     "common": {
         "me": "Me",
         "cancel": "Cancel",
@@ -39,13 +51,19 @@
         "imageUnsupportedTitle": "Current model does not support images",
         "imageUnsupportedDesc": "Please switch to one of these image-capable models:",
         "inputParams": "Enter params... (Enter to send, Shift+Enter for new line)",
-        "inputParamsConnecting": "Enter params... (Connecting to agent...)"
+        "inputParamsConnecting": "Enter params... (Connecting to agent...)",
+        "selectModel": "Select model",
+        "startAgent": "Start Agent"
     },
     "sessionTabBar": {
         "llmReasoning": "LLM is reasoning",
         "closeWarning": "Closing will interrupt the ongoing LLM reasoning. Partial content will be preserved.",
         "cancel": "Cancel",
-        "confirmClose": "Confirm close"
+        "confirmClose": "Confirm close",
+        "closeTab": "Close tab",
+        "newConversation": "New conversation",
+        "sessionHistory": "Session history",
+        "deleteSession": "Delete session"
     },
     "contextUsage": {
         "ariaLabel": "Context usage",
@@ -152,6 +170,7 @@
         "resetOnboardingConfirm": "Reset onboarding? This will clear all progress and require reconfiguration of Gateway connection and API keys. Page will reload to restart."
     },
     "agentSetup": {
+        "noApiKey": "No API key configured. Add in Harness → Search.",
         "resetConfirm": "Reset agent settings to defaults? Includes name, description, prompt role, avatar, shell approval threshold, and tool config.",
         "noAgentSelected": "No agent selected",
         "chooseIcon": "Choose icon",
@@ -258,7 +277,11 @@
         "enterNewApiKey": "Enter new API key...",
         "contextWindowMaxOutputPositive": "Context Window and Max Output Tokens must be positive numbers",
         "searchProviders": "Search providers...",
-        "noProvidersMatch": "No matching providers"
+        "noProvidersMatch": "No matching providers",
+        "removeKey": "Remove key",
+        "enterCustomModelName": "Enter custom model name",
+        "localProviderNoKey": "Local provider — no API key needed",
+        "compactModelHint": "Compact model for summarization"
     },
     "harnessSearch": {
         "searchProviderManagement": "Search Provider Management",
@@ -353,6 +376,12 @@
     "workspace": {
         "delete": "Delete",
         "cancel": "Cancel",
+        "selectWorkspace": "Select workspace",
+        "removeWorkspace": "Remove workspace",
+        "changeToReadOnly": "Change to read-only",
+        "changeToReadWrite": "Change to read-write",
+        "newFile": "New file",
+        "newFolder": "New folder",
         "explorer": {
             "agentNotRunning": "Start an agent to browse workspace",
             "loading": "Loading...",
@@ -370,7 +399,9 @@
         "closeOthers": "Close Others",
         "closeAll": "Close All",
         "batchCloseOthersConfirm": "{{count}} other tab(s) have unsaved changes. Discard and close?",
-        "batchCloseAllConfirm": "{{count}} tab(s) have unsaved changes. Discard and close all?"
+        "batchCloseAllConfirm": "{{count}} tab(s) have unsaved changes. Discard and close all?",
+        "save": "Save (Ctrl+S)",
+        "copy": "Copy"
     },
     "sessionPanel": {
         "loadingSessions": "Loading sessions...",
@@ -432,5 +463,13 @@
         "active": "Active",
         "dormant": "Dormant",
         "health": "Health"
+    },
+    "skillsPanel": {
+        "selectSkill": "Select skill"
+    },
+    "debugPanel": {
+        "editSection": "Edit section",
+        "copyContent": "Copy content",
+        "rewindToIteration": "Rewind to iteration {{iteration}}"
     }
 }

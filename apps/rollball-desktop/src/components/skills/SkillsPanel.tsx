@@ -4,8 +4,10 @@ import { cn } from "../../lib/utils";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useTranslation } from "../../i18n/useTranslation";
 
 export function SkillsPanel() {
+  const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   const {
     skills,
@@ -118,6 +120,7 @@ export function SkillsPanel() {
         label={skillsLabel}
         collapseClass="tb-sk-text"
         tipClass="tb-sk-tip"
+        tooltip={t("skillsPanel.selectSkill")}
         open={open}
         onToggle={() => setOpen(!open)}
         wrapperRef={ref}

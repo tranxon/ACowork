@@ -5,6 +5,7 @@ import { UserAvatar } from "../common/UserAvatar";
 import { Tooltip } from "../common/Tooltip";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useTranslation } from "../../i18n/useTranslation";
 
 interface NavBarProps {
   currentView: NavView;
@@ -13,15 +14,15 @@ interface NavBarProps {
   onAvatarClick: () => void;
 }
 
-const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; label: string }[] = [
-  { view: "chat", icon: OutlineChatIcon, label: "Chat" },
-  { view: "projects", icon: OutlineProjectsIcon, label: "Projects" },
-  { view: "docs", icon: OutlineDocsIcon, label: "Docs" },
-  { view: "harness", icon: OutlineHarnessIcon, label: "Harness" },
+const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
+  { view: "chat", icon: OutlineChatIcon, i18nKey: "navBar.chat" },
+  { view: "projects", icon: OutlineProjectsIcon, i18nKey: "navBar.projects" },
+  { view: "docs", icon: OutlineDocsIcon, i18nKey: "navBar.docs" },
+  { view: "harness", icon: OutlineHarnessIcon, i18nKey: "navBar.harness" },
 ];
 
-const bottomNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; label: string }[] = [
-  { view: "settings", icon: OutlineSettingsIcon, label: "Settings" },
+const bottomNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
+  { view: "settings", icon: OutlineSettingsIcon, i18nKey: "navBar.settings" },
 ];
 
 /** Filled chat bubble SVG — oval/pill style */
@@ -166,6 +167,7 @@ function FilledProjectsIcon({ className }: { className?: string }) {
 }
 
 export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps) {
+  const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const { opacity, theme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -182,11 +184,11 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       } as React.CSSProperties}
     >
       {/* User avatar — click to edit profile (WeChat-style top placement) */}
-      <Tooltip content="Edit Profile" variant="plain" position="right">
+      <Tooltip content={t("navBar.editProfile")} variant="plain" position="right">
         <button
           onClick={onAvatarClick}
           className="mb-3 flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-zinc-400 dark:hover:ring-zinc-500"
-          aria-label="Edit Profile"
+          aria-label={t("navBar.editProfile")}
         >
           <UserAvatar
             displayName={profile.displayName}
@@ -197,8 +199,8 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       </Tooltip>
 
       {/* Top navigation items */}
-      {topNavItems.map(({ view, icon: Icon, label }) => (
-        <Tooltip key={view} content={label} variant="plain" position="right">
+      {topNavItems.map(({ view, icon: Icon, i18nKey }) => (
+        <Tooltip key={view} content={t(i18nKey)} variant="plain" position="right">
           <button
             onClick={() => onViewChange(view)}
             className={cn(
@@ -208,7 +210,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
                 : "text-zinc-500 hover:text-zinc-600 hover:bg-[#D8D9DC] dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-[#3D3D3F]",
             )}
             style={currentView === view ? { color: "var(--color-accent)" } : undefined}
-            aria-label={label}
+            aria-label={t(i18nKey)}
             aria-current={currentView === view ? "page" : undefined}
           >
             {currentView === view ? (
@@ -238,8 +240,8 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       <div className="flex-1" />
 
       {/* Bottom navigation items */}
-      {bottomNavItems.map(({ view, icon: Icon, label }) => (
-        <Tooltip key={view} content={label} variant="plain" position="right">
+      {bottomNavItems.map(({ view, icon: Icon, i18nKey }) => (
+        <Tooltip key={view} content={t(i18nKey)} variant="plain" position="right">
           <button
             onClick={() => onViewChange(view)}
             className={cn(
@@ -249,7 +251,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
                 : "text-zinc-500 hover:text-zinc-600 hover:bg-[#D8D9DC] dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-[#3D3D3F]",
             )}
             style={currentView === view ? { color: "var(--color-accent)" } : undefined}
-            aria-label={label}
+            aria-label={t(i18nKey)}
             aria-current={currentView === view ? "page" : undefined}
           >
             {currentView === view ? (

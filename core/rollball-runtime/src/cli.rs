@@ -1136,6 +1136,21 @@ async fn async_main(
         // Model is initialized per-session and persisted in JSONL SessionMetadata.
         }
 
+        // ── DevMode: start Debug Protocol server at startup when --dev-mode ──
+        // When the Gateway spawns the Runtime with --dev-mode --debug-port,
+        // the debug WebSocket server must be started here so the frontend can
+        // connect immediately.  This is the "start in debug" path (agent was
+        // stopped).  The "restart in debug" path (agent already running) uses
+        // EnableDebugMode gRPC push handled in process_gateway_recv instead.
+        if config.dev_mode {
+            let debug_port = config.debug_port as u32;
+            tracing::info!(
+                debug_port = debug_port,
+                "DevMode enabled at startup — starting Debug Protocol server"
+            );
+            session_manager.enable_debug_mode(debug_port).await;
+        }
+
         // ── MCP server auto-connect at startup (background, non-blocking) ──
         // Spawn MCP connect in a background task. Results are sent through an
         // mpsc channel and applied asynchronously inside run_gateway_loop's

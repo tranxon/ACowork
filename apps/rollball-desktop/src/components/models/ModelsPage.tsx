@@ -6,6 +6,7 @@ import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
 import { Tooltip } from "../common/Tooltip";
+import { useTranslation } from "../../i18n/useTranslation";
 
 type ProviderWithStatus = {
   id: string;
@@ -17,6 +18,7 @@ type ProviderWithStatus = {
 };
 
 export function ModelsPage() {
+  const { t } = useTranslation();
   const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
   const [config, setConfig] = useState<GatewayConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -230,7 +232,7 @@ export function ModelsPage() {
                     <div className="flex items-center gap-1">
                       {keyEntry && (
                         <>
-                          <Tooltip content={config?.default_provider === provider.id ? "Default provider" : "Set as default provider"} variant="plain">
+                          <Tooltip content={config?.default_provider === provider.id ? t("harness.defaultProvider") : t("harness.setDefaultProvider")} variant="plain">
                             <button
                               onClick={() => handleSetDefaultProvider(provider.id)}
                               className={`rounded p-1.5 ${config?.default_provider === provider.id ? "text-amber-500" : "text-zinc-400 hover:bg-zinc-100 hover:text-amber-500 dark:hover:bg-zinc-800"}`}
@@ -238,7 +240,7 @@ export function ModelsPage() {
                               <Star className="h-4 w-4" />
                             </button>
                           </Tooltip>
-                          <Tooltip content="Remove key" variant="plain">
+                          <Tooltip content={t("harness.removeKey")} variant="plain">
                             <button
                               onClick={() => handleRemove(provider.id)}
                               className="rounded p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-red-500 dark:hover:bg-zinc-800"
@@ -318,7 +320,7 @@ export function ModelsPage() {
                         </option>
                       ))}
                     </select>
-                    <Tooltip content="Enter custom model name" variant="plain">
+                    <Tooltip content={t("harness.enterCustomModelName")} variant="plain">
                       <button
                         type="button"
                         onClick={() => setCustomModelInput(true)}

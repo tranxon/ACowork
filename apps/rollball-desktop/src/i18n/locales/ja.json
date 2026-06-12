@@ -1,4 +1,16 @@
 {
+    "titleBar": {
+        "collapseRightPanel": "Collapse Right Panel",
+        "expandRightPanel": "Expand Right Panel"
+    },
+    "navBar": {
+        "editProfile": "Edit Profile",
+        "chat": "Chat",
+        "projects": "Projects",
+        "docs": "Docs",
+        "harness": "Harness",
+        "settings": "Settings"
+    },
     "common": {
         "me": "自分",
         "cancel": "キャンセル",
@@ -39,13 +51,19 @@
         "imageUnsupportedTitle": "現在のモデルは画像入力に対応していません",
         "imageUnsupportedDesc": "以下の画像対応モデルに切り替えてください：",
         "inputParams": "パラメータを入力...（Enterで送信、Shift+Enterで改行）",
-        "inputParamsConnecting": "パラメータを入力...（Agentに接続中...）"
+        "inputParamsConnecting": "パラメータを入力...（Agentに接続中...）",
+        "selectModel": "Select model",
+        "startAgent": "Start Agent"
     },
     "sessionTabBar": {
         "llmReasoning": "LLM推論中",
         "closeWarning": "このセッションを閉じると進行中のLLM推論が中断されます。生成済みの部分的な内容は保持されます。",
         "cancel": "キャンセル",
-        "confirmClose": "閉じる"
+        "confirmClose": "閉じる",
+        "closeTab": "Close tab",
+        "newConversation": "New conversation",
+        "sessionHistory": "Session history",
+        "deleteSession": "Delete session"
     },
     "contextUsage": {
         "ariaLabel": "コンテキスト使用量",
@@ -152,6 +170,7 @@
         "resetOnboardingConfirm": "オンボーディングをリセットしますか？すべての進捗がクリアされ、ゲートウェイ接続とAPIキーの再設定が必要になります。ページがリロードされて再起動します。"
     },
     "agentSetup": {
+        "noApiKey": "No API key configured. Add in Harness → Search.",
         "resetConfirm": "Agent設定をデフォルト値にリセットしますか？名前、説明、プロンプトロール、アバターアイコン、シェル承認しきい値、ツール設定が含まれます。",
         "noAgentSelected": "Agentが選択されていません",
         "chooseIcon": "アイコンを選択",
@@ -258,7 +277,11 @@
         "enterNewApiKey": "新しいAPIキーを入力...",
         "contextWindowMaxOutputPositive": "コンテキストウィンドウと最大出力トークン数は正の数である必要があります",
         "searchProviders": "プロバイダーを検索...",
-        "noProvidersMatch": "一致するプロバイダーがありません"
+        "noProvidersMatch": "一致するプロバイダーがありません",
+        "removeKey": "Remove key",
+        "enterCustomModelName": "Enter custom model name",
+        "localProviderNoKey": "Local provider — no API key needed",
+        "compactModelHint": "Compact model for summarization"
     },
     "harnessSearch": {
         "searchProviderManagement": "検索プロバイダー管理",
@@ -352,6 +375,12 @@
     "workspace": {
         "delete": "削除",
         "cancel": "キャンセル",
+        "selectWorkspace": "Select workspace",
+        "removeWorkspace": "Remove workspace",
+        "changeToReadOnly": "Change to read-only",
+        "changeToReadWrite": "Change to read-write",
+        "newFile": "New file",
+        "newFolder": "New folder",
         "explorer": {
             "agentNotRunning": "Agentを起動してワークスペースを閲覧",
             "loading": "読み込み中...",
@@ -369,7 +398,9 @@
         "closeOthers": "その他を閉じる",
         "closeAll": "すべて閉じる",
         "batchCloseOthersConfirm": "他の {{count}} 個のタブに未保存の変更があります。破棄して閉じますか？",
-        "batchCloseAllConfirm": "{{count}} 個のタブに未保存の変更があります。すべて破棄して閉じますか？"
+        "batchCloseAllConfirm": "{{count}} 個のタブに未保存の変更があります。すべて破棄して閉じますか？",
+        "save": "Save (Ctrl+S)",
+        "copy": "Copy"
     },
     "sessionPanel": {
         "loadingSessions": "セッションを読み込み中...",
@@ -431,5 +462,13 @@
         "active": "アクティブ",
         "dormant": "休眠",
         "health": "健全性"
+    },
+    "skillsPanel": {
+        "selectSkill": "Select skill"
+    },
+    "debugPanel": {
+        "editSection": "Edit section",
+        "copyContent": "Copy content",
+        "rewindToIteration": "Rewind to iteration {{iteration}}"
     }
 }
