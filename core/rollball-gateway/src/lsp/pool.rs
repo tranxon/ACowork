@@ -21,7 +21,7 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Default reaper tick interval (60 seconds).
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Key for pool lookup: "{command}:{workspace_root}"
+/// Key for pool lookup: "{command}:{args_joined}:{workspace_root}"
 type PoolKey = String;
 
 /// A pooled LSP process entry shared across WebSocket clients.
@@ -55,9 +55,10 @@ impl LspPool {
         }
     }
 
-    /// Build the pool key from command and workspace root.
-    fn make_key(command: &str, workspace_root: &str) -> PoolKey {
-        format!("{}:{}", command, workspace_root)
+    /// Build the pool key from command, args, and workspace root.
+    fn make_key(command: &str, args: &[String], workspace_root: &str) -> PoolKey {
+        let args_joined = args.join(" ");
+        format!("{}:{}:{}", command, args_joined, workspace_root)
     }
 
     /// Get an existing LSP process or spawn a new one.
@@ -66,9 +67,10 @@ impl LspPool {
     pub async fn get_or_spawn(
         &self,
         command: &str,
+        args: &[String],
         workspace_root: &str,
     ) -> anyhow::Result<Arc<LspProcessEntry>> {
-        let key = Self::make_key(command, workspace_root);
+        let key = Self::make_key(command, args, workspace_root);
         let mut entries = self.entries.lock().await;
 
         // Check if existing entry is still alive
@@ -95,14 +97,14 @@ impl LspPool {
         }
 
         // Spawn new process
-        let entry = Self::spawn_pooled(command, workspace_root).await?;
+        let entry = Self::spawn_pooled(command, args, workspace_root).await?;
         entries.insert(key, Arc::clone(&entry));
         Ok(entry)
     }
 
     /// Mark a client as disconnected from the given pool entry.
-    pub async fn client_disconnected(&self, command: &str, workspace_root: &str) {
-        let key = Self::make_key(command, workspace_root);
+    pub async fn client_disconnected(&self, command: &str, args: &[String], workspace_root: &str) {
+        let key = Self::make_key(command, args, workspace_root);
         let entries = self.entries.lock().await;
         if let Some(entry) = entries.get(&key) {
             let prev = entry.active_clients.fetch_sub(1, Ordering::Relaxed);
@@ -149,23 +151,31 @@ impl LspPool {
     /// Spawn a new LSP process and set up stdin/stdout relay tasks.
     async fn spawn_pooled(
         command: &str,
+        args: &[String],
         workspace_root: &str,
     ) -> anyhow::Result<Arc<LspProcessEntry>> {
-        let mut child = Command::new(command)
-            .arg("--stdio")
+        // Build Command with the per-server args from lsp_servers.json.
+        // Different LSP servers require different args:
+        // - Some need `--stdio` (pylsp, typescript-language-server)
+        // - Some need `serve` subcommand (gopls)
+        // - Some default to stdio with no args (rust-analyzer, clangd, marksman)
+        let mut cmd = Command::new(command);
+        cmd.args(args);
+        let mut child = cmd
             .current_dir(workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Do NOT use kill_on_drop — pool manages lifecycle
             .spawn()?;
-
+    
         let pid = child.id().unwrap_or(0);
         tracing::info!(
-            "[LSP Pool] Spawned '{}' (PID {}) in workspace '{}'",
+            "[LSP Pool] Spawned '{}' (PID {}) in workspace '{}', args={:?}",
             command,
             pid,
-            workspace_root
+            workspace_root,
+            args
         );
 
         let stdin = child

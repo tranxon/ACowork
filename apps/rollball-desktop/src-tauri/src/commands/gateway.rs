@@ -55,10 +55,21 @@ pub async fn spawn_gateway(
 
     tracing::info!("[BOOT] Starting local Gateway: {}", gateway_bin.display());
 
+    // Get Tauri resource directory — where bundled assets (lsp_servers.json,
+    // lsp_install/, offline_providers.json, etc.) are extracted.
+    // Pass it to Gateway via ROLLBALL_LSP_CONFIG_DIR so Gateway can find
+    // LSP config files in local mode.
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+    tracing::info!("[BOOT] Tauri resource_dir: {}", resource_dir.display());
+
     // Spawn the gateway process
     let child = Command::new(&gateway_bin)
         .env("ROLLBALL_GATEWAY_DAEMON", "true")
         .env("ROLLBALL_GATEWAY_LOG_LEVEL", "info")
+        .env("ROLLBALL_LSP_CONFIG_DIR", resource_dir.to_string_lossy().to_string())
         .spawn()
         .map_err(|e| format!("Failed to spawn Gateway process: {}", e))?;
 

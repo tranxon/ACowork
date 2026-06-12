@@ -285,6 +285,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .route("/lsp/{language}", get(crate::lsp::lsp_handler))
+        .route("/api/lsp/servers", get(crate::lsp::lsp_servers_list))
+        .route("/api/lsp/install/{language}", get(crate::lsp::lsp_install_script))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)

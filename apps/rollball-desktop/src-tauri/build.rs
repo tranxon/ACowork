@@ -97,9 +97,34 @@ fn main() {
         let _ = std::fs::copy(&embed_json, &dst);
     }
 
-    // 6. Re-run if the profile changes (so switching between debug/release re-copies).
+    // 6. Copy LSP config and install scripts to bin/ for Gateway LSP support.
+    //    These files are also bundled by Tauri resources, but in dev mode
+    //    Gateway reads them from exe_dir (the bin/ staging directory).
+    let lsp_config = workspace_root.join("assets").join("lsp_servers.json");
+    if lsp_config.exists() {
+        let dst = bin_dir.join("lsp_servers.json");
+        let _ = std::fs::copy(&lsp_config, &dst);
+    }
+
+    let lsp_install_src = workspace_root.join("assets").join("lsp_install");
+    let lsp_install_dst = bin_dir.join("lsp_install");
+    if lsp_install_src.exists() {
+        let _ = std::fs::create_dir_all(&lsp_install_dst);
+        if let Ok(entries) = std::fs::read_dir(&lsp_install_src) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if src.is_file() {
+                    let file_name = src.file_name().expect("path has no file name");
+                    let dst = lsp_install_dst.join(file_name);
+                    let _ = std::fs::copy(&src, &dst);
+                }
+            }
+        }
+    }
+
+    // 7. Re-run if the profile changes (so switching between debug/release re-copies).
     println!("cargo:rerun-if-env-changed=PROFILE");
 
-    // 7. Invoke Tauri build (processes tauri.conf.json).
+    // 8. Invoke Tauri build (processes tauri.conf.json).
     tauri_build::build()
 }

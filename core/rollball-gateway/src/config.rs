@@ -72,6 +72,13 @@ pub struct GatewayConfig {
     /// Example in TOML: `hf_mirrors = ["https://hf-mirror.com"]`
     #[serde(default)]
     pub hf_mirrors: Vec<String>,
+    /// LSP config directory (contains lsp_servers.json and lsp_install/).
+    ///
+    /// In local mode (Desktop App), this is the Tauri resource_dir where
+    /// LSP config files are bundled. In remote mode (standalone Gateway),
+    /// this is unset and Gateway falls back to scanning exe_dir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsp_config_dir: Option<String>,
 }
 
 /// HTTP API configuration
@@ -217,6 +224,8 @@ impl GatewayConfig {
                 .unwrap_or_else(default_max_output_tokens_limit),
             hf_mirrors: file_config.as_ref().map(|c| c.hf_mirrors.clone())
                 .unwrap_or_default(),
+            lsp_config_dir: cli.lsp_config_dir.clone()
+                .or_else(|| file_config.as_ref().and_then(|c| c.lsp_config_dir.clone())),
         })
     }
 
@@ -298,6 +307,7 @@ impl Default for GatewayConfig {
             default_model: None,
             max_output_tokens_limit: default_max_output_tokens_limit(),
             hf_mirrors: Vec::new(),
+            lsp_config_dir: None,
         }
     }
 }

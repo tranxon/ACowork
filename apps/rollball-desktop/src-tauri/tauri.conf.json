@@ -43,6 +43,8 @@
     "resources": {
       "../../../examples/system-agent": "system-agent",
       "../../../assets/offline_providers.json": "offline_providers.json",
+      "../../../assets/lsp_servers.json": "lsp_servers.json",
+      "../../../assets/lsp_install": "lsp_install",
       "bin/*": "./"
     }
   }

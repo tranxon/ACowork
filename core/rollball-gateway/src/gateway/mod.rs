@@ -779,6 +779,7 @@ mod tests {
             default_model: None,
             max_output_tokens_limit: 32_768,
             hf_mirrors: Vec::new(),
+            lsp_config_dir: None,
         }
     }
 

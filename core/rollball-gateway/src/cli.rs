@@ -66,6 +66,15 @@ pub struct Cli {
     #[arg(long, env = "ROLLBALL_GATEWAY_CONFIG")]
     pub config_path: Option<String>,
 
+    /// LSP config directory (contains lsp_servers.json and lsp_install/)
+    ///
+    /// In local mode (Desktop App), Desktop App passes its Tauri resource_dir
+    /// so Gateway can find LSP config files bundled by Tauri.
+    /// In remote mode (standalone Gateway), this is left unset and Gateway
+    /// falls back to scanning its own installation directory (exe_dir).
+    #[arg(long, env = "ROLLBALL_LSP_CONFIG_DIR")]
+    pub lsp_config_dir: Option<String>,
+
     /// Log level (trace/debug/info/warn/error)
     #[arg(long, env = "ROLLBALL_GATEWAY_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
