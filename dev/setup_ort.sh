@@ -239,34 +239,44 @@ else
     # Race: try all mirrors concurrently, first successful download wins
     if [ "${#ORT_URLS[@]}" -gt 1 ]; then
         echo -e "  Trying ${#ORT_URLS[@]} sources concurrently..."
+
+        # Disable errexit for background process management
+        # (kill/wait return non-zero when processes fail)
+        set +e
+
         PIDS=()
         URLS_TRIED=()
         for url in "${ORT_URLS[@]}"; do
             local_tmp="${TMP_FILE}.$$.$RANDOM"
             URLS_TRIED+=("$local_tmp")
             if command -v curl &>/dev/null; then
-                ( curl -fSL --connect-timeout 10 --max-time 600 --progress-bar -o "$local_tmp" "$url" 2>/dev/null && echo "OK:$local_tmp" > "${local_tmp}.status" || echo "FAIL" > "${local_tmp}.status" ) &
+                ( curl -fSL --connect-timeout 10 --max-time 600 -o "$local_tmp" "$url" 2>/dev/null && echo "OK" > "${local_tmp}.status" || echo "FAIL" > "${local_tmp}.status" ) &
             else
-                ( wget -q --timeout=10 --show-progress -O "$local_tmp" "$url" 2>/dev/null && echo "OK:$local_tmp" > "${local_tmp}.status" || echo "FAIL" > "${local_tmp}.status" ) &
+                ( wget -q --timeout=10 -O "$local_tmp" "$url" 2>/dev/null && echo "OK" > "${local_tmp}.status" || echo "FAIL" > "${local_tmp}.status" ) &
             fi
             PIDS+=($!)
         done
 
-        # Wait for first success or all to finish
+        # Poll: wait for first success or all to finish
         WINNER=""
+        CHECKED=()
+        for _ in "${PIDS[@]}"; do CHECKED+=("0"); done
+
         while true; do
             ALL_DONE=true
             for i in "${!PIDS[@]}"; do
-                if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
-                    # Process finished, check result
+                [ "${CHECKED[$i]}" = "1" ] && continue
+                # Check if process has finished
+                kill -0 "${PIDS[$i]}" 2>/dev/null
+                if [ $? -ne 0 ]; then
+                    CHECKED[$i]="1"
+                    wait "${PIDS[$i]}" 2>/dev/null
                     STATUS_FILE="${URLS_TRIED[$i]}.status"
-                    if [ -f "$STATUS_FILE" ] && grep -q "^OK:" "$STATUS_FILE"; then
+                    if [ -f "$STATUS_FILE" ] && grep -q "^OK$" "$STATUS_FILE" 2>/dev/null; then
                         WINNER="${URLS_TRIED[$i]}"
                         # Kill remaining downloads
                         for j in "${!PIDS[@]}"; do
-                            if [ "$j" != "$i" ]; then
-                                kill "${PIDS[$j]}" 2>/dev/null || true
-                            fi
+                            [ "$j" != "$i" ] && kill "${PIDS[$j]}" 2>/dev/null
                         done
                         break 2
                     fi
@@ -277,24 +287,24 @@ else
             if $ALL_DONE; then
                 break
             fi
-            sleep 0.3
+            sleep 0.5
         done
 
-        # Collect: wait all remaining and check
-        for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null; done
-
-        if [ -z "$WINNER" ]; then
-            # All failed — check status files for any OK
-            for tmp in "${URLS_TRIED[@]}"; do
-                STATUS_FILE="${tmp}.status"
-                if [ -f "$STATUS_FILE" ] && grep -q "^OK:" "$STATUS_FILE"; then
-                    WINNER="$tmp"
-                    break
+        # Collect any remaining processes
+        for i in "${!PIDS[@]}"; do
+            wait "${PIDS[$i]}" 2>/dev/null
+            if [ -z "$WINNER" ]; then
+                STATUS_FILE="${URLS_TRIED[$i]}.status"
+                if [ -f "$STATUS_FILE" ] && grep -q "^OK$" "$STATUS_FILE" 2>/dev/null; then
+                    WINNER="${URLS_TRIED[$i]}"
                 fi
-            done
-        fi
+            fi
+        done
 
-        if [ -n "$WINNER" ]; then
+        # Re-enable errexit
+        set -e
+
+        if [ -n "$WINNER" ] && [ -f "$WINNER" ]; then
             mv "$WINNER" "$TMP_FILE"
             DOWNLOAD_OK=true
         fi
