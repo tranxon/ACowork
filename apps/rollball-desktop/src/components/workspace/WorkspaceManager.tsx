@@ -5,6 +5,8 @@ import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { open } from "@tauri-apps/plugin-dialog";
 import { StyledInput } from "../common/StyledInput";
+import { RemoteFolderPicker } from "./RemoteFolderPicker";
+import { useTranslation } from "../../i18n/useTranslation";
 
 interface WorkspaceDir {
   id: string;
@@ -175,11 +177,10 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                     <select
                       value={dir.access}
                       onChange={(e) => handleAccessChange(dir, e.target.value as "read-only" | "read-write")}
-                      className={`rounded-md border px-2 py-1.5 text-xs font-medium ${
-                        dir.access === "read-write"
-                          ? "border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-                          : "border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                      }`}
+                      className={`rounded-md border px-2 py-1.5 text-xs font-medium ${dir.access === "read-write"
+                        ? "border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+                        : "border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                        }`}
                     >
                       <option value="read-only">🔒 Read-only</option>
                       <option value="read-write">✏️ Read-write</option>
@@ -189,7 +190,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                     <button
                       onClick={() => setDeleteConfirm({ open: true, id: dir.id, name: dir.alias || dir.path.split(/[\/\\]/).filter(Boolean).pop() || dir.path })}
                       className="rounded-md p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
-                      
+
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -260,11 +261,18 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
 // ─── Add Workspace Dialog ──────────────────────────────────────────────────
 
 function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onClose: () => void; onAdd: (path: string, alias: string, access: "read-only" | "read-write") => void; recentPaths: string[] }) {
+  const { t } = useTranslation();
+  const { gatewayMode } = useSettingsStore();
   const [path, setPath] = useState("");
   const [alias, setAlias] = useState("");
   const [access, setAccess] = useState<"read-only" | "read-write">("read-only");
+  const [showRemotePicker, setShowRemotePicker] = useState(false);
 
   const handleBrowse = async () => {
+    if (gatewayMode === "remote") {
+      setShowRemotePicker(true);
+      return;
+    }
     try {
       const selected = await open({ directory: true });
       if (selected) {
@@ -310,7 +318,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
                 onClick={handleBrowse}
                 className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-50 dark:border-zinc-600 dark:hover:bg-zinc-700"
               >
-                Browse
+                {gatewayMode === "remote" ? t("workspace.remoteBrowseBtn") : "Browse"}
               </button>
             </div>
           </div>
@@ -334,11 +342,10 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
             </label>
             <div className="space-y-2">
               <label
-                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${
-                  access === "read-only"
-                    ? "border-[var(--color-accent)]/50"
-                    : "border-zinc-300 dark:border-zinc-600"
-                }`}
+                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${access === "read-only"
+                  ? "border-[var(--color-accent)]/50"
+                  : "border-zinc-300 dark:border-zinc-600"
+                  }`}
                 style={access === "read-only" ? { backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)" } : undefined}
               >
                 <input
@@ -360,11 +367,10 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
               </label>
 
               <label
-                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${
-                  access === "read-write"
-                    ? "border-orange-500 bg-orange-50 dark:border-orange-600 dark:bg-orange-900/20"
-                    : "border-zinc-300 dark:border-zinc-600"
-                }`}
+                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${access === "read-write"
+                  ? "border-orange-500 bg-orange-50 dark:border-orange-600 dark:bg-orange-900/20"
+                  : "border-zinc-300 dark:border-zinc-600"
+                  }`}
               >
                 <input
                   type="radio"
@@ -407,6 +413,20 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
           </button>
         </div>
       </div>
+
+      {/* Remote folder picker (only shown in remote mode) */}
+      {showRemotePicker && (
+        <RemoteFolderPicker
+          onSelect={(selectedPath: string) => {
+            setShowRemotePicker(false);
+            setPath(selectedPath);
+            if (!alias) {
+              setAlias(selectedPath.split("/").filter(Boolean).pop() || "");
+            }
+          }}
+          onCancel={() => setShowRemotePicker(false)}
+        />
+      )}
     </div>
   );
 }

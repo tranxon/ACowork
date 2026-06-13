@@ -380,6 +380,12 @@
         "changeToReadWrite": "Change to read-write",
         "newFile": "New file",
         "newFolder": "New folder",
+        "addWorkspace": "워크스페이스 추가",
+        "remoteBrowseTitle": "원격 서버 탐색",
+        "remoteBrowseBtn": "서버 탐색",
+        "remoteBrowseEmpty": "디렉토리 없음",
+        "remoteBrowseSelected": "선택됨",
+        "remoteBrowseSelect": "이 폴더 선택",
         "explorer": {
             "agentNotRunning": "Agent를 시작하여 워크스페이스 탐색",
             "loading": "로딩 중...",

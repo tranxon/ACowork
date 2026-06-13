@@ -380,6 +380,12 @@
         "changeToReadWrite": "Change to read-write",
         "newFile": "New file",
         "newFolder": "New folder",
+        "addWorkspace": "新增工作區",
+        "remoteBrowseTitle": "瀏覽遠端伺服器",
+        "remoteBrowseBtn": "瀏覽伺服器",
+        "remoteBrowseEmpty": "未找到目錄",
+        "remoteBrowseSelected": "已選擇",
+        "remoteBrowseSelect": "選擇此資料夾",
         "explorer": {
             "agentNotRunning": "啟動 Agent 以瀏覽工作區",
             "loading": "載入中...",

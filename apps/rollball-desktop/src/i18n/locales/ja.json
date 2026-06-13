@@ -382,6 +382,12 @@
         "changeToReadWrite": "Change to read-write",
         "newFile": "New file",
         "newFolder": "New folder",
+        "addWorkspace": "ワークスペースを追加",
+        "remoteBrowseTitle": "リモートサーバーを閲覧",
+        "remoteBrowseBtn": "サーバーを閲覧",
+        "remoteBrowseEmpty": "ディレクトリが見つかりません",
+        "remoteBrowseSelected": "選択済み",
+        "remoteBrowseSelect": "このフォルダを選択",
         "explorer": {
             "agentNotRunning": "Agentを起動してワークスペースを閲覧",
             "loading": "読み込み中...",

@@ -284,6 +284,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
+        .merge(crate::http::fs_browse::fs_routes())
         .route("/lsp/{language}", get(crate::lsp::lsp_handler))
         .route("/api/lsp/servers", get(crate::lsp::lsp_servers_list))
         .route("/api/lsp/install/{language}", get(crate::lsp::lsp_install_script))

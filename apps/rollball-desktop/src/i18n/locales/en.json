@@ -383,6 +383,12 @@
         "changeToReadWrite": "Change to read-write",
         "newFile": "New file",
         "newFolder": "New folder",
+        "addWorkspace": "Add Workspace",
+        "remoteBrowseTitle": "Browse Remote Server",
+        "remoteBrowseBtn": "Browse Server",
+        "remoteBrowseEmpty": "No directories found",
+        "remoteBrowseSelected": "Selected",
+        "remoteBrowseSelect": "Select This Folder",
         "explorer": {
             "agentNotRunning": "Start an agent to browse workspace",
             "loading": "Loading...",

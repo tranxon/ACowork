@@ -383,6 +383,12 @@
         "changeToReadWrite": "改为读写",
         "newFile": "新建文件",
         "newFolder": "新建文件夹",
+        "addWorkspace": "添加工作区",
+        "remoteBrowseTitle": "浏览远程服务器",
+        "remoteBrowseBtn": "浏览服务器",
+        "remoteBrowseEmpty": "未找到目录",
+        "remoteBrowseSelected": "已选择",
+        "remoteBrowseSelect": "选择此文件夹",
         "explorer": {
             "agentNotRunning": "启动 Agent 以浏览工作区",
             "loading": "加载中...",

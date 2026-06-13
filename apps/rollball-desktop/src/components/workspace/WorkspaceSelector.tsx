@@ -11,11 +11,12 @@ import * as dialog from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
+import { RemoteFolderPicker } from "./RemoteFolderPicker";
 
 export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "up" | "down" }) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
-  const { gatewayUrl } = useSettingsStore();
+  const { gatewayUrl, gatewayMode } = useSettingsStore();
   const { addToast } = useToast();
   const { workspaces, sessionWorkspaceMap, loading, fetchWorkspaces, setSessionWorkspace } =
     useWorkspaceStore();
@@ -27,6 +28,7 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
   const [searchQuery, _setSearchQuery] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [showRemotePicker, setShowRemotePicker] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Current workspace ID for the active session (defaults to agent home)
@@ -62,6 +64,12 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
   };
 
   const handleBrowse = async () => {
+    // Remote mode: use RemoteFolderPicker to browse server filesystem
+    if (gatewayMode === "remote") {
+      setShowRemotePicker(true);
+      return;
+    }
+    // Local mode: use Tauri native directory dialog
     try {
       const selected = await dialog.open({ directory: true });
       if (selected && selectedAgentId) {
@@ -70,7 +78,7 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             path: selected,
-            alias: selected.split(/[\\/]/).filter(Boolean).pop() || undefined,
+            alias: selected.split(/[\/]/).filter(Boolean).pop() || undefined,
             access: "read-only",
           }),
         });
@@ -311,11 +319,41 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
               className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
             >
               <FolderPlus className="h-3.5 w-3.5" />
-              Add Workspace
+              {t("workspace.addWorkspace")}
             </button>
           </div>
         )}
       </ToolbarDropdownTrigger>
+
+      {/* Remote folder picker (only shown in remote mode) */}
+      {showRemotePicker && selectedAgentId && (
+        <RemoteFolderPicker
+          onSelect={async (path: string) => {
+            setShowRemotePicker(false);
+            try {
+              const response = await fetch(`${gatewayUrl}/api/agents/${selectedAgentId}/workspaces`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  path,
+                  alias: path.split("/").filter(Boolean).pop() || undefined,
+                  access: "read-only",
+                }),
+              });
+              if (response.ok) {
+                addToast({ type: "success", message: "Workspace added" });
+                void fetchWorkspaces(selectedAgentId);
+              } else {
+                const err = await response.json().catch(() => null);
+                addToast({ type: "error", message: err?.error || "Failed to add workspace" });
+              }
+            } catch (error) {
+              addToast({ type: "error", message: `Failed to add workspace: ${String(error)}` });
+            }
+          }}
+          onCancel={() => setShowRemotePicker(false)}
+        />
+      )}
     </>
   );
 }
