@@ -6,6 +6,7 @@
 #   ./dev/setup_ort.sh                # Detect, install, generate env file only
 #   ./dev/setup_ort.sh --reinstall    # Force re-download even if already installed
 #   ./dev/setup_ort.sh --version 1.21.0  # Override ORT version
+#   ./dev/setup_ort.sh --no-mirror    # Skip China mirrors, use GitHub directly
 #
 # After running, either:
 #   source .ort_env                    # Load env vars into current shell
@@ -40,6 +41,7 @@ ORT_VERSION_LEGACY="1.19.2"      # glibc 2.31  (Ubuntu 20.04)
 ORT_VERSION=""                   # Will be auto-detected
 FORCE_REINSTALL=false
 CUSTOM_VERSION=""
+NO_MIRROR=false
 
 # ── Parse arguments ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --version=*)
             CUSTOM_VERSION="${1#*=}"
+            shift
+            ;;
+        --no-mirror)
+            NO_MIRROR=true
             shift
             ;;
         -h|--help)
@@ -185,7 +191,26 @@ elif [ "$OS" = "macos" ]; then
 fi
 
 ORT_ARCHIVE="onnxruntime-${ORT_PLATFORM}-${ARCH}-${ORT_VERSION}"
-ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_ARCHIVE}.${ORT_ARCHIVE_EXT}"
+ORT_GITHUB_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_ARCHIVE}.${ORT_ARCHIVE_EXT}"
+
+# ── GitHub mirror proxies (China mainland acceleration) ──────────────────────
+# Tries multiple mirrors concurrently and uses the fastest one.
+# Set ORT_NO_MIRROR=1 to skip mirrors and use GitHub directly.
+ORT_MIRROR_PREFIXES=(
+    "https://ghfast.top/"
+    "https://gh-proxy.com/"
+    "https://mirror.ghproxy.com/"
+    "https://ghproxy.net/"
+)
+
+# Build ordered URL list: mirrors first (unless disabled), then direct GitHub
+ORT_URLS=()
+if [ "${ORT_NO_MIRROR:-0}" != "1" ] && [ "$NO_MIRROR" = "false" ] && [ "$OS" = "linux" ]; then
+    for prefix in "${ORT_MIRROR_PREFIXES[@]}"; do
+        ORT_URLS+=("${prefix}${ORT_GITHUB_URL}")
+    done
+fi
+ORT_URLS+=("$ORT_GITHUB_URL")
 
 # ── Install directory ───────────────────────────────────────────────────────
 ORT_INSTALL_DIR="$WORKSPACE_ROOT/.ort"
@@ -200,18 +225,103 @@ if [ -f "$ORT_EXTRACTED_DIR/lib/$ORT_LIB_NAME" ] && [ "$FORCE_REINSTALL" = "fals
     export ORT_LIB_LOCATION="$ORT_EXTRACTED_DIR/lib"
     export ORT_DYLIB_PATH="$ORT_EXTRACTED_DIR/lib/$ORT_LIB_NAME"
 else
-    # ── Download ─────────────────────────────────────────────────────────────
+    # ── Download (with mirror fallback) ──────────────────────────────────────
     echo -e "${YELLOW}[1/4] Downloading ONNX Runtime $ORT_VERSION...${NC}"
-    echo -e "  URL: ${GRAY}$ORT_URL${NC}"
 
-    if command -v curl &>/dev/null; then
-        curl -fSL --progress-bar -o "/tmp/${ORT_ARCHIVE}.${ORT_ARCHIVE_EXT}" "$ORT_URL"
-    elif command -v wget &>/dev/null; then
-        wget -q --show-progress -O "/tmp/${ORT_ARCHIVE}.${ORT_ARCHIVE_EXT}" "$ORT_URL"
-    else
+    DOWNLOAD_OK=false
+    TMP_FILE="/tmp/${ORT_ARCHIVE}.${ORT_ARCHIVE_EXT}"
+
+    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
         echo -e "${RED}Neither curl nor wget found. Please install one of them.${NC}"
         exit 1
     fi
+
+    # Race: try all mirrors concurrently, first successful download wins
+    if [ "${#ORT_URLS[@]}" -gt 1 ]; then
+        echo -e "  Trying ${#ORT_URLS[@]} sources concurrently..."
+        PIDS=()
+        URLS_TRIED=()
+        for url in "${ORT_URLS[@]}"; do
+            local_tmp="${TMP_FILE}.$$.$RANDOM"
+            URLS_TRIED+=("$local_tmp")
+            if command -v curl &>/dev/null; then
+                ( curl -fSL --connect-timeout 10 --max-time 600 --progress-bar -o "$local_tmp" "$url" 2>/dev/null && echo "OK:$local_tmp" > "${local_tmp}.status" || echo "FAIL" > "${local_tmp}.status" ) &
+            else
+                ( wget -q --timeout=10 --show-progress -O "$local_tmp" "$url" 2>/dev/null && echo "OK:$local_tmp" > "${local_tmp}.status" || echo "FAIL" > "${local_tmp}.status" ) &
+            fi
+            PIDS+=($!)
+        done
+
+        # Wait for first success or all to finish
+        WINNER=""
+        while true; do
+            ALL_DONE=true
+            for i in "${!PIDS[@]}"; do
+                if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+                    # Process finished, check result
+                    STATUS_FILE="${URLS_TRIED[$i]}.status"
+                    if [ -f "$STATUS_FILE" ] && grep -q "^OK:" "$STATUS_FILE"; then
+                        WINNER="${URLS_TRIED[$i]}"
+                        # Kill remaining downloads
+                        for j in "${!PIDS[@]}"; do
+                            if [ "$j" != "$i" ]; then
+                                kill "${PIDS[$j]}" 2>/dev/null || true
+                            fi
+                        done
+                        break 2
+                    fi
+                else
+                    ALL_DONE=false
+                fi
+            done
+            if $ALL_DONE; then
+                break
+            fi
+            sleep 0.3
+        done
+
+        # Collect: wait all remaining and check
+        for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null; done
+
+        if [ -z "$WINNER" ]; then
+            # All failed — check status files for any OK
+            for tmp in "${URLS_TRIED[@]}"; do
+                STATUS_FILE="${tmp}.status"
+                if [ -f "$STATUS_FILE" ] && grep -q "^OK:" "$STATUS_FILE"; then
+                    WINNER="$tmp"
+                    break
+                fi
+            done
+        fi
+
+        if [ -n "$WINNER" ]; then
+            mv "$WINNER" "$TMP_FILE"
+            DOWNLOAD_OK=true
+        fi
+
+        # Cleanup temp files
+        for tmp in "${URLS_TRIED[@]}"; do
+            rm -f "$tmp" "${tmp}.status"
+        done
+    else
+        # Single URL (direct GitHub or mirror disabled)
+        echo -e "  URL: ${GRAY}${ORT_URLS[0]}${NC}"
+        if command -v curl &>/dev/null; then
+            curl -fSL --progress-bar -o "$TMP_FILE" "${ORT_URLS[0]}" && DOWNLOAD_OK=true
+        else
+            wget -q --show-progress -O "$TMP_FILE" "${ORT_URLS[0]}" && DOWNLOAD_OK=true
+        fi
+    fi
+
+    if [ "$DOWNLOAD_OK" = "false" ]; then
+        echo -e "${RED}  All download sources failed.${NC}"
+        echo -e "${RED}  Direct URL: $ORT_GITHUB_URL${NC}"
+        echo -e "${YELLOW}  Try downloading manually and placing the archive in:${NC}"
+        echo -e "    /tmp/${ORT_ARCHIVE}.${ORT_ARCHIVE_EXT}"
+        echo -e "${YELLOW}  Then re-run this script.${NC}"
+        exit 1
+    fi
+
     echo -e "${GREEN}  Download complete.${NC}"
     echo ""
 
