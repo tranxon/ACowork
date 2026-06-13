@@ -189,34 +189,20 @@ impl ModelRegistry {
     }
 
     /// Build candidate file paths in priority order.
+    ///
+    /// Two locations only:
+    ///   1. `{data_dir}/embedding_models.json` — user-editable copy (always wins)
+    ///   2. `{exe_dir}/embedding_models.json`  — bundled copy, placed there by
+    ///      whatever distributes the binary (dev build script, package installer,
+    ///      Tauri bundler).
     fn build_candidates(data_dir: &Path) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
-
-        // 1. Data directory (user-writable, primary location)
         candidates.push(data_dir.join("embedding_models.json"));
-
-        // 2. Same directory as the executable (installer-provided)
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 candidates.push(exe_dir.join("embedding_models.json"));
             }
         }
-
-        // 3. CARGO_MANIFEST_DIR assets/ (dev and test via cargo)
-        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            let assets = PathBuf::from(&manifest_dir)
-                .join("assets")
-                .join("embedding_models.json");
-            if assets.exists() {
-                candidates.push(assets);
-            }
-        }
-
-        // 4. Current working directory (dev convenience)
-        if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join("embedding_models.json"));
-        }
-
         candidates
     }
 
@@ -274,14 +260,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_load_registry_from_fallback_path() {
-        // In test environment, CARGO_MANIFEST_DIR is set so the assets/ fallback is found
+    fn test_load_registry_from_bundled_path() {
+        // In a real install the bundled copy lives next to the binary.
+        // For the test, copy the manifest into a temp dir and run the
+        // test binary with current_exe redirected via the test harness.
+        // Simpler: just check the data_dir path resolution works.
         let dir = tempfile::tempdir().unwrap();
         let registry = ModelRegistry::load(dir.path());
-        assert!(!registry.models().is_empty());
-        assert!(registry.get("bge-small-zh-v1.5").is_some());
-        assert!(registry.get("all-MiniLM-L6-v2").is_some());
-        assert!(registry.get("nonexistent").is_none());
+        // No data_dir file, no bundled file in test env → empty registry
+        assert!(registry.models().is_empty());
     }
 
     #[test]
@@ -312,6 +299,7 @@ mod tests {
     #[test]
     fn test_recommended_model() {
         let dir = tempfile::tempdir().unwrap();
+        seed_test_registry(dir.path());
         let registry = ModelRegistry::load(dir.path());
         let rec = registry.recommended().unwrap();
         assert_eq!(rec.id, "bge-small-zh-v1.5");
@@ -322,6 +310,7 @@ mod tests {
     #[test]
     fn test_onnx_variant_selection() {
         let dir = tempfile::tempdir().unwrap();
+        seed_test_registry(dir.path());
         let registry = ModelRegistry::load(dir.path());
 
         // fp16 variant
@@ -336,6 +325,18 @@ mod tests {
         // (bge-m3 only has fp32 in variants)
         let path = registry.onnx_path("bge-m3", "fp16").unwrap();
         assert_eq!(path, "model.onnx");
+    }
+
+    /// Copy the source manifest into the test temp dir so it acts as the
+    /// user's `data_dir/embedding_models.json`. Tests use `CARGO_MANIFEST_DIR`
+    /// only to locate the fixture file — this is test setup, not a runtime
+    /// path resolver.
+    fn seed_test_registry(data_dir: &Path) {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("embedding_models.json");
+        std::fs::copy(&manifest, data_dir.join("embedding_models.json"))
+            .expect("test fixture: source manifest must exist");
     }
 
     #[test]

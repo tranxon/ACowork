@@ -18,7 +18,7 @@
 
 #[cfg(test)]
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rollball_core::protocol::{
     McpKeyEntry, McpListItem, ProviderListItem, ProviderModelEntry,
@@ -233,8 +233,10 @@ fn load_user_profile_list(data_dir: &Path) -> UserProfileListFile {
 
 fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
     let path = embedding_models_path(data_dir);
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => match serde_json::from_str(&raw) {
+
+    // 1. data_dir is the user-editable copy (always wins when present).
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        return match serde_json::from_str(&raw) {
             Ok(list) => list,
             Err(e) => {
                 tracing::warn!(
@@ -244,99 +246,63 @@ fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
                 );
                 EmbeddingModelsFile { version: 0, models: Vec::new() }
             }
-        },
-        Err(_) => {
-            // File not in data_dir — search fallback paths (like offline_providers.json)
-            match find_embedding_models_fallback() {
-                Some((content, source_path)) => match serde_json::from_str::<EmbeddingModelsFile>(&content) {
-                    Ok(list) => {
-                        tracing::info!(
-                            source = %source_path.display(),
-                            count = list.models.len(),
-                            "Loaded embedding_models.json from fallback path"
+        };
+    }
+
+    // 2. Bundled copy lives next to the gateway binary. Whoever
+    //    distributes the binary (dev build script, package installer,
+    //    Tauri bundler) is responsible for placing it there.
+    let bundled = bundled_embedding_models_path();
+    if let Some(ref bundled_path) = bundled {
+        if let Ok(raw) = std::fs::read_to_string(&bundled_path) {
+            match serde_json::from_str::<EmbeddingModelsFile>(&raw) {
+                Ok(list) => {
+                    tracing::info!(
+                        source = %bundled_path.display(),
+                        count = list.models.len(),
+                        "Loaded embedding_models.json from bundled location"
+                    );
+                    // Auto-seed to data_dir so the user gets a writable copy.
+                    if let Err(e) = std::fs::write(&path, &raw) {
+                        tracing::warn!(
+                            dest = %path.display(),
+                            error = %e,
+                            "Failed to seed embedding_models.json into data_dir"
                         );
-                        // Auto-seed: copy to data_dir so the user gets a writable copy
-                        // they can edit to add/update models without upgrading the program.
-                        if let Err(e) = std::fs::write(&path, &content) {
-                            tracing::warn!(
-                                dest = %path.display(),
-                                error = %e,
-                                "Failed to seed embedding_models.json into data_dir"
-                            );
-                        } else {
-                            tracing::info!(
-                                dest = %path.display(),
-                                "Auto-seeded embedding_models.json into data_dir (editable)"
-                            );
-                        }
-                        list
+                    } else {
+                        tracing::info!(
+                            dest = %path.display(),
+                            "Auto-seeded embedding_models.json into data_dir (editable)"
+                        );
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to parse fallback embedding_models.json, using empty list");
-                        EmbeddingModelsFile { version: 0, models: Vec::new() }
-                    }
-                },
-                None => {
-                    tracing::info!("embedding_models.json not found, initializing empty");
-                    EmbeddingModelsFile { version: 0, models: Vec::new() }
-                }
-            }
-        }
-    }
-}
-
-/// Search fallback paths for `embedding_models.json` when not in data_dir.
-///
-/// Search order (matches the `offline_providers.json` pattern):
-///   1. `{exe_dir}/embedding_models.json`   (installer-provided)
-///   2. `$CARGO_MANIFEST_DIR/../../assets/` (dev / test via cargo)
-///   3. `{cwd}/embedding_models.json`        (dev convenience)
-///
-/// Returns the file content and the path it was found at.
-fn find_embedding_models_fallback() -> Option<(String, std::path::PathBuf)> {
-    let mut candidates = Vec::new();
-
-    // 1. Same directory as the executable (installer-provided)
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("embedding_models.json"));
-        }
-    }
-
-    // 2. CARGO_MANIFEST_DIR ../../assets/ (dev and test via cargo)
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let assets = std::path::PathBuf::from(&manifest_dir)
-            .join("..").join("..").join("assets")
-            .join("embedding_models.json");
-        if assets.exists() {
-            candidates.push(assets);
-        }
-    }
-
-    // 3. Current working directory (dev convenience)
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("embedding_models.json"));
-    }
-
-    for path in &candidates {
-        if path.exists() {
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    tracing::info!("Found embedding_models.json at fallback: {}", path.display());
-                    return Some((content, path.clone()));
+                    return list;
                 }
                 Err(e) => {
                     tracing::warn!(
-                        path = %path.display(),
+                        path = %bundled_path.display(),
                         error = %e,
-                        "Failed to read embedding_models.json"
+                        "Failed to parse bundled embedding_models.json, using empty list"
                     );
+                    return EmbeddingModelsFile { version: 0, models: Vec::new() };
                 }
             }
         }
     }
 
-    None
+    tracing::error!(
+        data_dir = %path.display(),
+        bundled = %bundled.map(|p| p.display().to_string()).unwrap_or_else(|| "<unresolved>".to_string()),
+        "embedding_models.json not found. Dev: run dev/build_core.sh after building. Release: reinstall the package."
+    );
+    EmbeddingModelsFile { version: 0, models: Vec::new() }
+}
+
+/// Path to the bundled `embedding_models.json` next to the running gateway binary.
+fn bundled_embedding_models_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .map(|d| d.join("embedding_models.json"))
 }
 
 // ── Saving ─────────────────────────────────────────────────────────────

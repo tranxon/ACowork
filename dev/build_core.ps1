@@ -113,19 +113,34 @@ try {
 
 Write-Host ""
 
-# Step: Copy offline_providers.json from assets to target dirs
+# Step: Copy offline_providers.json + embedding_models.json from assets to target dirs
+#
+# The gateway (and embed) read embedding_models.json from `{exe_dir}/`. Whoever
+# distributes the binary (this script for dev, the package installer for
+# release, the Tauri bundler for desktop) is responsible for placing it there.
 $step++
-Write-Host "[$step/$totalSteps] Copying offline_providers.json to target directories..." -ForegroundColor Yellow
+Write-Host "[$step/$totalSteps] Copying runtime resource files to target directories..." -ForegroundColor Yellow
 $offlineSrc = Join-Path $WorkspaceRoot "assets\offline_providers.json"
+$embedModelsSrc = Join-Path $WorkspaceRoot "core\rollball-embed\assets\embedding_models.json"
 $releaseDir = Join-Path $WorkspaceRoot "target\release"
 $debugDir = Join-Path $WorkspaceRoot "target\debug"
+
 if (Test-Path $offlineSrc) {
     Copy-Item -Path $offlineSrc -Destination $releaseDir -Force
-    Write-Host "  Copied to $releaseDir" -ForegroundColor Green
+    Write-Host "  offline_providers.json -> $releaseDir" -ForegroundColor Green
     Copy-Item -Path $offlineSrc -Destination $debugDir -Force
-    Write-Host "  Copied to $debugDir" -ForegroundColor Green
+    Write-Host "  offline_providers.json -> $debugDir" -ForegroundColor Green
 } else {
     Write-Host "  WARNING: offline_providers.json not found at $offlineSrc" -ForegroundColor Red
+}
+
+if (Test-Path $embedModelsSrc) {
+    Copy-Item -Path $embedModelsSrc -Destination (Join-Path $releaseDir "embedding_models.json") -Force
+    Write-Host "  embedding_models.json -> $releaseDir" -ForegroundColor Green
+    Copy-Item -Path $embedModelsSrc -Destination (Join-Path $debugDir "embedding_models.json") -Force
+    Write-Host "  embedding_models.json -> $debugDir" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: embedding_models.json not found at $embedModelsSrc" -ForegroundColor Red
 }
 
 Write-Host ""

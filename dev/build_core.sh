@@ -246,6 +246,25 @@ else
     echo -e "${RED}  WARNING: offline_providers.json not found at $OFFLINE_SRC${NC}"
 fi
 
+# Step 4.5: Copy embedding_models.json next to the gateway + embed binaries
+#
+# The gateway (and embed) read this from `{exe_dir}/embedding_models.json`.
+# Whoever distributes the binary (this script for dev, the package installer
+# for release, the Tauri bundler for desktop) is responsible for placing it
+# there. Source of truth is core/rollball-embed/assets/embedding_models.json.
+echo -e "${YELLOW}[4.5/5] Copying embedding_models.json next to binaries...${NC}"
+EMBED_MODELS_SRC="$WORKSPACE_ROOT/core/rollball-embed/assets/embedding_models.json"
+if [ -f "$EMBED_MODELS_SRC" ]; then
+    for DIR in "$RELEASE_DIR" "$DEBUG_DIR"; do
+        if [ -d "$DIR" ]; then
+            cp "$EMBED_MODELS_SRC" "$DIR/embedding_models.json"
+            echo -e "${GREEN}  Copied to $DIR${NC}"
+        fi
+    done
+else
+    echo -e "${RED}  WARNING: embedding_models.json not found at $EMBED_MODELS_SRC${NC}"
+fi
+
 echo ""
 
 # Step 5: Start Gateway

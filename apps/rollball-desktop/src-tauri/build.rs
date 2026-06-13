@@ -86,18 +86,16 @@ fn main() {
         }
     }
 
-    // 5. Also copy embedding_models.json to bin/ for Gateway auto-seeding.
-    let embed_json = workspace_root
-        .join("core")
-        .join("rollball-embed")
-        .join("assets")
-        .join("embedding_models.json");
-    if embed_json.exists() {
-        let dst = bin_dir.join("embedding_models.json");
-        let _ = std::fs::copy(&embed_json, &dst);
-    }
-
-    // 6. Copy LSP config and install scripts to bin/ for Gateway LSP support.
+    // 5. Copy LSP config and install scripts to bin/ for Gateway LSP support.
+    //
+    // NOTE: We do NOT copy embedding_models.json here. The Tauri build.rs is
+    // not the right place — the Desktop App may link to a remote Gateway and
+    // a local copy would be dead weight. Instead, the source file is listed
+    // directly in tauri.conf.json under `bundle.resources`, so the Tauri
+    // bundler ships it next to the spawned gateway binary in resource_dir.
+    // The Gateway reads from `{exe_dir}/embedding_models.json` regardless
+    // of how it got there (dev build script, package installer, or Tauri
+    // bundler).
     //    These files are also bundled by Tauri resources, but in dev mode
     //    Gateway reads them from exe_dir (the bin/ staging directory).
     let lsp_config = workspace_root.join("assets").join("lsp_servers.json");
@@ -122,9 +120,9 @@ fn main() {
         }
     }
 
-    // 7. Re-run if the profile changes (so switching between debug/release re-copies).
+    // 6. Re-run if the profile changes (so switching between debug/release re-copies).
     println!("cargo:rerun-if-env-changed=PROFILE");
 
-    // 8. Invoke Tauri build (processes tauri.conf.json).
+    // 7. Invoke Tauri build (processes tauri.conf.json).
     tauri_build::build()
 }

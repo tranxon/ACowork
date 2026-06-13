@@ -45,6 +45,7 @@
       "../../../assets/offline_providers.json": "offline_providers.json",
       "../../../assets/lsp_servers.json": "lsp_servers.json",
       "../../../assets/lsp_install": "lsp_install",
+      "../../../core/rollball-embed/assets/embedding_models.json": "embedding_models.json",
       "bin/*": "./"
     }
   }
