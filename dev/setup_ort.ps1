@@ -1,23 +1,19 @@
 #!/usr/bin/env pwsh
 # setup_ort.ps1 - Download and configure ONNX Runtime for Windows
 #
-# On Windows, `download-ort` feature usually works out of the box.
-# This script is for users who want to:
-#   - Use a specific ORT version
-#   - Avoid re-downloading on every clean build
-#   - Use a custom ORT build
-#
 # Usage:
 #   .\dev\setup_ort.ps1                       # Auto-detect and install
 #   .\dev\setup_ort.ps1 -Version "1.22.0"     # Specific version
 #   .\dev\setup_ort.ps1 -Reinstall            # Force re-download
+#   .\dev\setup_ort.ps1 -NoMirror             # Skip China mirrors, use GitHub directly
 #
 # After running, the env file is generated and can be loaded:
 #   . .\.ort_env.ps1
 
 param(
     [string] $Version = "",
-    [switch] $Reinstall
+    [switch] $Reinstall,
+    [switch] $NoMirror
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,22 +23,6 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  ONNX Runtime Setup for RollBall.AI (Win)" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
-
-# ── Check if download-ort is sufficient ─────────────────────────────────────
-if ([string]::IsNullOrEmpty($Version) -and -not $Reinstall) {
-    Write-Host "  On Windows, the download-ort feature usually works out of the box." -ForegroundColor Gray
-    Write-Host "  You can simply run:" -ForegroundColor Gray
-    Write-Host "    cargo build --release -p rollball-embed --features download-ort" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  This script is for custom ORT installations." -ForegroundColor Gray
-    Write-Host ""
-    $proceed = Read-Host "  Continue with manual setup? [y/N]"
-    if ($proceed -ne "y" -and $proceed -ne "Y") {
-        Write-Host "  Aborted." -ForegroundColor Yellow
-        exit 0
-    }
-    Write-Host ""
-}
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 $OrtVersion = if ([string]::IsNullOrEmpty($Version)) { "1.22.0" } else { $Version }
@@ -55,11 +35,30 @@ $OrtLibStatic = "onnxruntime.lib"
 $OrtInstallDir = Join-Path $WorkspaceRoot ".ort"
 $OrtArchiveName = "onnxruntime-${OrtPlatform}-${OrtArch}-${OrtVersion}"
 $OrtExtractedDir = Join-Path $OrtInstallDir $OrtArchiveName
-$OrtUrl = "https://github.com/microsoft/onnxruntime/releases/download/v${OrtVersion}/${OrtArchiveName}.zip"
+$OrtGitHubUrl = "https://github.com/microsoft/onnxruntime/releases/download/v${OrtVersion}/${OrtArchiveName}.zip"
+
+# ── GitHub mirror proxies (China mainland acceleration) ─────────────────────
+# Tries multiple mirrors in order; first successful download wins.
+# Use -NoMirror to skip mirrors and use GitHub directly.
+$MirrorPrefixes = @(
+    "https://ghfast.top/"
+    "https://gh-proxy.com/"
+    "https://mirror.ghproxy.com/"
+    "https://ghproxy.net/"
+)
+
+$OrtUrls = @()
+if (-not $NoMirror) {
+    foreach ($prefix in $MirrorPrefixes) {
+        $OrtUrls += "${prefix}${OrtGitHubUrl}"
+    }
+}
+$OrtUrls += $OrtGitHubUrl
 
 Write-Host "  ORT Version : $OrtVersion" -ForegroundColor Cyan
 Write-Host "  Platform    : $OrtPlatform ($OrtArch)" -ForegroundColor Cyan
 Write-Host "  Install Dir : $OrtExtractedDir" -ForegroundColor Cyan
+Write-Host "  Sources     : $($OrtUrls.Count) (mirrors + GitHub)" -ForegroundColor Cyan
 Write-Host ""
 
 # ── Check if already installed ──────────────────────────────────────────────
@@ -68,18 +67,41 @@ if ((Test-Path $OrtLibPath) -and -not $Reinstall) {
     Write-Host "  ORT $OrtVersion already installed." -ForegroundColor Green
     Write-Host "  Use -Reinstall to force re-download." -ForegroundColor Gray
 } else {
-    # ── Download ─────────────────────────────────────────────────────────────
+    # ── Download (with mirror fallback) ─────────────────────────────────────
     Write-Host "[1/4] Downloading ONNX Runtime $OrtVersion..." -ForegroundColor Yellow
-    Write-Host "  URL: $OrtUrl" -ForegroundColor Gray
+    Write-Host "  Trying $($OrtUrls.Count) sources..." -ForegroundColor Gray
 
     $tempZip = Join-Path $env:TEMP "${OrtArchiveName}.zip"
-    try {
-        Invoke-WebRequest -Uri $OrtUrl -OutFile $tempZip -UseBasicParsing
-    } catch {
-        Write-Host "  Download failed: $_" -ForegroundColor Red
+    $downloadOk = $false
+
+    foreach ($url in $OrtUrls) {
+        Write-Host "  Trying: $($url.Substring(0, [Math]::Min(60, $url.Length)))..." -ForegroundColor Gray
+        try {
+            $progressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $url -OutFile $tempZip -UseBasicParsing -TimeoutSec 30
+            $progressPreference = 'Continue'
+            if (Test-Path $tempZip) {
+                $fileSize = (Get-Item $tempZip).Length
+                if ($fileSize -gt 1MB) {
+                    Write-Host "  Download OK ($([Math]::Round($fileSize / 1MB)) MB)" -ForegroundColor Green
+                    $downloadOk = $true
+                    break
+                } else {
+                    Write-Host "  File too small ($fileSize bytes), trying next..." -ForegroundColor Yellow
+                    Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } catch {
+            Write-Host "  Failed: $($_.Exception.Message)" -ForegroundColor Red
+            Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (-not $downloadOk) {
+        Write-Host "  All download sources failed." -ForegroundColor Red
+        Write-Host "  Direct URL: $OrtGitHubUrl" -ForegroundColor Red
         exit 1
     }
-    Write-Host "  Download complete." -ForegroundColor Green
     Write-Host ""
 
     # ── Extract ──────────────────────────────────────────────────────────────

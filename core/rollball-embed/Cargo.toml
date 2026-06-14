@@ -20,7 +20,7 @@ default = []
 # Download and statically link prebuilt ONNX Runtime binaries.
 # Requires glibc 2.38+ on Linux (Ubuntu 23.10+, Fedora 39+).
 # On older Linux, omit this feature and set ORT_LIB_LOCATION / ORT_DYLIB_PATH instead.
-download-ort = ["ort/download-binaries"]
+download-ort = ["ort/download-binaries", "ort/tls-rustls"]
 
 # GPU acceleration features (mutually exclusive, platform-specific).
 # Only enable ONE at a time. CPU inference is used when none is enabled.

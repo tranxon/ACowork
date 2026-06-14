@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.rollball.desktop",
   "build": {
-    "beforeDevCommand": "cargo build --manifest-path ../../core/Cargo.toml -p rollball-gateway -p rollball-runtime -p rollball-embed && npm run dev",
+    "beforeDevCommand": "node ../../dev/ort_env.js cargo build --manifest-path ../../core/Cargo.toml -p rollball-gateway -p rollball-runtime -p rollball-embed && npm run dev",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "cargo build --release --manifest-path ../../core/Cargo.toml -p rollball-gateway -p rollball-runtime -p rollball-embed && npm run build",
     "frontendDist": "../dist"
