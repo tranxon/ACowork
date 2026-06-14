@@ -1379,7 +1379,7 @@ function McpTab() {
           <h2 className="text-xs font-medium">{t("harnessMcp.mcpServerCatalog")}</h2>
           <button
             onClick={() => setShowAddForm(true)}
-            className="rounded-md bg-zinc-800 px-3 py-1 text-xs font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="inline-flex items-center gap-1 rounded-md btn-solid px-2 py-1 text-[11px] font-medium"
           >
             {t("harnessMcp.addServer")}
           </button>
@@ -1424,7 +1424,7 @@ function McpTab() {
                   </div>
                   <button
                     onClick={() => removeServer(server.name)}
-                    className="shrink-0 text-xs text-zinc-400 hover:text-red-500"
+                    className="group/remove shrink-0 text-xs text-zinc-400 transition-colors hover:text-[var(--color-accent)] dark:text-zinc-500"
                   >
                     {t("harnessMcp.remove")}
                   </button>
@@ -1469,7 +1469,7 @@ function McpTab() {
                   ) : (
                     <button
                       onClick={() => handleAddFromPreset(preset)}
-                      className="rounded-md bg-zinc-800 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                      className="inline-flex items-center gap-1 rounded-md btn-solid px-2 py-0.5 text-[10px] font-medium"
                     >
                       {t("harnessMcp.add")}
                     </button>
@@ -1561,14 +1561,14 @@ function McpTab() {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => { setShowAddForm(false); }}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
               >
                 {t("common.cancel")}
               </button>
               <button
                 onClick={handleAddManual}
                 disabled={!newName.trim()}
-                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="inline-flex items-center gap-1 rounded-md btn-accent px-3 py-1.5 text-xs font-medium disabled:opacity-50"
               >
                 {t("harnessMcp.addServer")}
               </button>
@@ -1600,13 +1600,13 @@ function McpTab() {
             <div className="flex gap-2">
               <button
                 onClick={handlePresetEnvSubmit}
-                className="rounded px-3 py-1 text-xs bg-accent text-white hover:opacity-90"
+                className="inline-flex items-center gap-1 rounded-md btn-accent px-3 py-1 text-xs font-medium"
               >
                 {t("harnessMcp.addServer")}
               </button>
               <button
                 onClick={() => { setActivePreset(null); setPresetEnvForm({}); }}
-                className="rounded px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
               >
                 {t("common.cancel")}
               </button>
