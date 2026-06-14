@@ -209,6 +209,11 @@ impl Downloader {
     /// Downloads the ONNX model file (selected variant) and tokenizer.
     /// Files are written to a temp directory first, then atomically renamed.
     ///
+    /// If a previous download attempt left partial files in the temp
+    /// directory, this function will resume from the partial data using
+    /// HTTP Range requests, so large models (400MB+) don't restart from
+    /// zero on every retry.
+    ///
     /// `progress` is a shared tracker that receives real-time byte-level
     /// progress — suitable for exposing to the UI via polling.
     ///
@@ -231,13 +236,20 @@ impl Downloader {
         let model_dir = self.models_dir.join(model_id);
         let tmp_dir = self.models_dir.join(format!("{model_id}.downloading"));
 
-        // Clean up any previous incomplete download
-        if tmp_dir.exists() {
-            std::fs::remove_dir_all(&tmp_dir)?;
+        // If a previous download completed (files were renamed to model_dir),
+        // we're done.
+        if self.is_downloaded(model_id) {
+            tracing::info!(model_id, "Model already downloaded, skipping");
+            return Ok(DownloadResult {
+                model_dir,
+                downloaded_files: vec!["model.onnx".to_string(), "tokenizer.json".to_string()],
+            });
         }
 
-        // Create temp directory
-        std::fs::create_dir_all(&tmp_dir)?;
+        // Create temp directory (preserve partial files from prior attempts).
+        if !tmp_dir.exists() {
+            std::fs::create_dir_all(&tmp_dir)?;
+        }
 
         let mut downloaded_files = Vec::new();
 
@@ -502,6 +514,10 @@ async fn download_file_with_retries(
 /// Uses streaming to avoid loading the entire file into memory.
 /// Writes to a per-source temp file (`{dest}_{idx}.tmp`), then
 /// atomically renames to the final destination.
+///
+/// If a partial temp file already exists from a previous attempt, it
+/// sends an HTTP Range header to resume the download rather than
+/// starting from zero.
 async fn download_single(
     client: &Client,
     url: &str,
@@ -509,40 +525,84 @@ async fn download_single(
     idx: usize,
     progress: &DownloadProgress,
 ) -> Result<(), DownloadError> {
-    let response = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(DownloadError::Http)?;
-
-    let total_size = response.content_length().unwrap_or(0);
-    progress.total_bytes.fetch_max(total_size, Ordering::Relaxed);
-    tracing::info!(size = total_size, source = idx + 1, url, "Downloading from source {}", idx + 1);
-
-    // Per-source temp file to avoid write conflicts between racers
     let stem = dest
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("download");
     let tmp_path = dest.with_file_name(format!("{}_{}.tmp", stem, idx));
 
-    let mut file = tokio::io::BufWriter::new(tokio::fs::File::create(&tmp_path).await?);
+    // Check for a partial file from a previous attempt. We only resume
+    // if at least 4 KB are present — less than that is probably a
+    // corrupted or server-error response that should be replaced.
+    let resume_offset: u64 = std::fs::metadata(&tmp_path)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        .max(0);
+    let resume = resume_offset > 4096;
 
-    let mut downloaded: u64 = 0;
+    // Build the request. Include a Range header if resuming.
+    let mut req = client.get(url);
+    if resume {
+        req = req.header("Range", format!("bytes={resume_offset}-"));
+        tracing::info!(url, source = idx + 1, resume_offset, "Resuming download");
+    }
+
+    let response = req.send().await?.error_for_status()?;
+    let status = response.status().as_u16();
+
+    let mut downloaded: u64 = if resume && status == 206 {
+        // Server accepted the Range request — append to the partial.
+        let content_range = response
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let total_from_range = content_range
+            .split('/')
+            .last()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        progress.total_bytes.fetch_max(resume_offset + total_from_range, Ordering::Relaxed);
+        progress.bytes_downloaded.fetch_max(resume_offset, Ordering::Relaxed);
+        tracing::info!(source = idx + 1, resumed = resume_offset, total = total_from_range, "Resume accepted");
+        resume_offset
+    } else {
+        // Full download — either no resume needed, or server ignored
+        // the Range request. Remove any stale partial first.
+        if resume {
+            tracing::info!(url, status, "Range request not honored; downloading full file");
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        let total = response.content_length().unwrap_or(0);
+        progress.total_bytes.fetch_max(total, Ordering::Relaxed);
+        tracing::info!(total, source = idx + 1, url, "Downloading");
+        0u64
+    };
+
+    // Open the file: append if resuming, create if fresh.
+    let file = if downloaded > 0 {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&tmp_path)
+            .await?
+    } else {
+        tokio::fs::File::create(&tmp_path).await?
+    };
+    let mut writer = tokio::io::BufWriter::new(file);
+
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(DownloadError::Http)?;
         downloaded += chunk.len() as u64;
         progress.bytes_downloaded.fetch_max(downloaded, Ordering::Relaxed);
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk).await?;
     }
-    tokio::io::AsyncWriteExt::flush(&mut file).await?;
-    drop(file);
+    tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+    drop(writer);
 
-    // Rename temp → final destination
+    // Rename temp file → final destination
     if let Err(rename_err) = rename_or_replace(&tmp_path, dest) {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+        let _ = std::fs::remove_file(&tmp_path);
         return Err(DownloadError::Io(rename_err));
     }
 

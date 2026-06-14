@@ -705,24 +705,27 @@ pub async fn model_status(
     };
     drop(model_guard);
 
-    // Determine status
+    // Determine status: active download takes priority over
+    // "is_downloaded" so the frontend sees download progress
+    // instead of a misleading "downloaded" badge.
     let status = if is_loaded {
         ModelStatus::Loaded
-    } else if state.downloader.is_downloaded(&model_id) {
-        ModelStatus::Downloaded
     } else {
-        // Check live progress first, then fall back to stored status
         let pm = state.download_progress.read().await;
         if let Some(progress) = pm.get(&model_id) {
             let (pct, _, _) = progress.snapshot();
             ModelStatus::Downloading(pct)
         } else {
             drop(pm);
-            let dl_status = state.download_status.read().await;
-            dl_status
-                .get(&model_id)
-                .cloned()
-                .unwrap_or(ModelStatus::NotDownloaded)
+            if state.downloader.is_downloaded(&model_id) {
+                ModelStatus::Downloaded
+            } else {
+                let dl_status = state.download_status.read().await;
+                dl_status
+                    .get(&model_id)
+                    .cloned()
+                    .unwrap_or(ModelStatus::NotDownloaded)
+            }
         }
     };
 
