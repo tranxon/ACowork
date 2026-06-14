@@ -1,0 +1,734 @@
+@import "tailwindcss";
+
+@theme {
+  --color-accent: #3B82F6;
+  --color-text-secondary: hsl(240 3.7% 46.9%);
+  /* ~zinc-500: secondary labels & icons */
+}
+
+/* Enable class-based dark mode for Tailwind v4 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Enable typography plugin for Markdown rendering */
+@plugin "@tailwindcss/typography";
+
+/* Design Tokens — prd-ui-ux.md §2.1 */
+:root {
+  /* Colors */
+  --color-primary: hsl(222.2 47.4% 11.2%);
+  --color-primary-foreground: hsl(210 40% 96.1%);
+  --color-accent: hsl(210 40% 96.1%);
+  --color-accent-foreground: hsl(222.2 47.4% 11.2%);
+  --color-destructive: hsl(0 84.2% 60.2%);
+  --color-muted: hsl(210 40% 96.1%);
+  --color-muted-foreground: hsl(215.4 16.3% 46.9%);
+
+  /* Background & text tokens for body */
+  --color-bg: white;
+  --color-text: hsl(240 10% 3.9%);
+
+  /* Accent highlight (user-configurable color) */
+  --color-accent: #3B82F6;
+
+  /* Semantic colors */
+  --color-agent-running: hsl(142 76% 36%);
+  --color-agent-stopped: hsl(215.4 16.3% 46.9%);
+  --color-agent-error: hsl(0 84.2% 60.2%);
+  --color-agent-starting: hsl(45 93% 47%);
+  --color-gateway-ok: hsl(142 76% 36%);
+  --color-gateway-off: hsl(215.4 16.3% 46.9%);
+  --color-gateway-error: hsl(0 84.2% 60.2%);
+
+  /* Spacing */
+  --spacing-nav: 52px;
+  --spacing-agent-list: 240px;
+  --spacing-results: 320px;
+  --spacing-chat-min: 360px;
+
+  /* UI element sizing tokens */
+  --ui-input-py: 0.375rem;
+  /* 6px — inputs, selects vertical padding */
+  --ui-btn-py: 0.375rem;
+  /* 6px — standard button vertical padding */
+  --ui-btn-compact-py: 0.25rem;
+  /* 4px — compact toolbar button vertical padding */
+
+  /* Radio group tokens */
+  --ui-radio-size: 1rem;
+  /* 16px — radio circle diameter */
+  --ui-radio-bg: #d4d4d8;
+  /* zinc-300 — unchecked radio fill */
+  --ui-radio-gap: 1.6rem;
+  /* 25.6px — radio option group item spacing */
+  --ui-radio-label-gap: 0.5rem;
+  /* 8px — gap between radio circle and label text */
+
+  /* Scrollbar — light, low-contrast on both light and dark backgrounds */
+  --ui-scrollbar-thumb: #d4d4d8;
+  /* zinc-300 — light gray, blends into the surface */
+  --ui-scrollbar-thumb-hover: #a1a1aa;
+  /* zinc-400 — slightly deeper on hover */
+  --ui-scrollbar-size: 6px;
+  /* width & height of the scrollbar track */
+
+  /* Font sizes */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+
+  /* Border radius */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* Animation */
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+
+  /* Shimmer gradient stops */
+  --shimmer-from: hsl(240 5% 64%);
+  --shimmer-mid: hsl(240 5% 80%);
+  --shimmer-to: hsl(240 5% 26%);
+
+  /* Tab bar layout — unified across SessionTabBar & ResultsPanel tabs */
+  --tab-font-size: 0.75rem;
+  --tab-line-height: 1rem;
+  --tab-py: 0.375rem;
+  /* py-1.5 = 6px */
+  --tab-px: 0.75rem;
+  /* px-3 = 12px */
+}
+
+/* Dark mode overrides */
+.dark {
+  --color-primary: hsl(210 40% 96.1%);
+  --color-primary-foreground: hsl(222.2 47.4% 11.2%);
+  --color-accent: hsl(222.2 47.4% 11.2%);
+  --color-accent-foreground: hsl(210 40% 96.1%);
+  --color-muted: hsl(222.2 47.4% 15%);
+  --color-muted-foreground: hsl(215.4 16.3% 65%);
+
+  --color-bg: hsl(240 10% 3.9%);
+  --color-text: hsl(0 0% 98%);
+  --color-text-secondary: hsl(240 5% 64.9%);
+  /* ~zinc-400 for dark mode */
+
+  /* Shimmer gradient stops (dark) */
+  --shimmer-from: hsl(240 5% 40%);
+  --shimmer-mid: hsl(240 5% 52%);
+  --shimmer-to: hsl(240 5% 82%);
+
+  /* Radio group (dark) */
+  --ui-radio-bg: #52525b;
+  /* zinc-600 — unchecked radio fill in dark */
+
+  /* Scrollbar (dark) */
+  --ui-scrollbar-thumb: #3f3f46;
+  /* zinc-700 — gentle gray on dark surfaces */
+  --ui-scrollbar-thumb-hover: #52525b;
+  /* zinc-600 — slightly brighter on hover */
+}
+
+/* Base styles */
+html {
+  background-color: transparent !important;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: var(--text-base);
+  color: var(--color-text);
+  background-color: transparent !important;
+  overflow: hidden;
+  user-select: none;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollbar — themed via --ui-scrollbar-* tokens */
+::-webkit-scrollbar {
+  width: var(--ui-scrollbar-size);
+  height: var(--ui-scrollbar-size);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--ui-scrollbar-thumb);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ui-scrollbar-thumb-hover);
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ui-scrollbar-thumb) transparent;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    transition-duration: 0ms !important;
+  }
+}
+
+/* Chat panel grid gradient background — crisp at top, fading toward bottom */
+.chat-grid-bg {
+  position: relative;
+  isolation: isolate;
+}
+
+.chat-grid-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-image:
+    radial-gradient(circle at 0 0, rgba(0, 0, 0, 0.18) 1px, transparent 2px);
+  background-size: 1em 1em;
+  background-position: 0 0;
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0) 100%);
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0) 100%);
+}
+
+.dark .chat-grid-bg::before {
+  background-image:
+    radial-gradient(circle at 0 0, rgba(255, 255, 255, 0.22) 1px, transparent 2px);
+}
+
+/* ── Markdown rendering (prose) — elegant & subtle ── */
+/* Override Tailwind typography for a softer, more refined look */
+.prose {
+  --tw-prose-body: hsl(240 5% 15%);
+  --tw-prose-headings: hsl(240 5% 12%);
+  --tw-prose-lead: hsl(240 5% 25%);
+  --tw-prose-links: hsl(240 50% 40%);
+  --tw-prose-bold: hsl(240 5% 12%);
+  --tw-prose-counters: hsl(240 5% 40%);
+  --tw-prose-bullets: hsl(240 5% 70%);
+  --tw-prose-hr: hsl(240 5% 85%);
+  --tw-prose-quotes: hsl(240 5% 20%);
+  --tw-prose-quote-borders: hsl(240 5% 80%);
+  --tw-prose-captions: hsl(240 5% 35%);
+  --tw-prose-code: hsl(240 5% 18%);
+  --tw-prose-pre-code: hsl(240 5% 20%);
+  --tw-prose-pre-bg: hsl(240 5% 92%);
+  --tw-prose-th-borders: hsl(240 5% 80%);
+  --tw-prose-td-borders: hsl(240 5% 90%);
+}
+
+/* Dark mode — muted & comfortable */
+.dark .prose {
+  --tw-prose-body: hsl(240 5% 85%);
+  --tw-prose-headings: hsl(240 5% 90%);
+  --tw-prose-lead: hsl(240 5% 75%);
+  --tw-prose-links: hsl(240 50% 70%);
+  --tw-prose-bold: hsl(240 5% 90%);
+  --tw-prose-counters: hsl(240 5% 60%);
+  --tw-prose-bullets: hsl(240 5% 45%);
+  --tw-prose-hr: hsl(240 5% 25%);
+  --tw-prose-quotes: hsl(240 5% 80%);
+  --tw-prose-quote-borders: hsl(240 5% 30%);
+  --tw-prose-captions: hsl(240 5% 60%);
+  --tw-prose-code: hsl(240 5% 80%);
+  --tw-prose-pre-code: hsl(240 5% 80%);
+  --tw-prose-pre-bg: hsl(240 5% 18%);
+  --tw-prose-th-borders: hsl(240 5% 30%);
+  --tw-prose-td-borders: hsl(240 5% 25%);
+}
+
+/* Code blocks — softer background, proper padding & scrolling */
+.prose pre {
+  background-color: hsl(240 5% 88%);
+  border: 1px solid hsl(240 5% 80%);
+  border-radius: 6px;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  font-size: 1em;
+  line-height: 1.6;
+}
+
+.dark .prose pre {
+  background-color: hsl(240 5% 22%);
+  border: 1px solid hsl(240 5% 28%);
+}
+
+/* Inline code — visible background pill */
+.prose :where(code):not(:where(pre code)) {
+  background-color: hsl(240 5% 92%);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-weight: 500;
+}
+
+.dark .prose :where(code):not(:where(pre code)) {
+  background-color: hsl(240 5% 20%);
+}
+
+/* Links — subtle, not harsh blue */
+.prose a {
+  color: hsl(240 50% 45%);
+  text-decoration: underline;
+  text-decoration-color: hsl(240 50% 80%);
+  text-underline-offset: 2px;
+}
+
+.prose a:hover {
+  text-decoration-color: hsl(240 50% 45%);
+}
+
+.dark .prose a {
+  color: hsl(240 50% 65%);
+  text-decoration-color: hsl(240 5% 30%);
+}
+
+.dark .prose a:hover {
+  text-decoration-color: hsl(240 50% 70%);
+}
+
+/* Headings — balanced weight and color */
+.prose h1 {
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: hsl(240 5% 20%);
+}
+
+.prose h2 {
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: hsl(240 5% 22%);
+}
+
+.prose h3 {
+  font-weight: 500;
+  color: hsl(240 5% 26%);
+}
+
+.prose h4 {
+  font-weight: 500;
+  color: hsl(240 5% 30%);
+}
+
+.dark .prose h1 {
+  color: hsl(240 5% 88%);
+}
+
+.dark .prose h2 {
+  color: hsl(240 5% 82%);
+}
+
+.dark .prose h3 {
+  color: hsl(240 5% 78%);
+}
+
+.dark .prose h4 {
+  color: hsl(240 5% 72%);
+}
+
+/* Lists — softer bullets */
+.prose ul>li::marker {
+  color: hsl(240 5% 65%);
+}
+
+.prose ol>li::marker {
+  color: hsl(240 5% 55%);
+}
+
+.dark .prose ul>li::marker {
+  color: hsl(240 5% 45%);
+}
+
+.dark .prose ol>li::marker {
+  color: hsl(240 5% 40%);
+}
+
+/* Blockquotes — elegant borders */
+.prose blockquote {
+  border-left: 3px solid hsl(240 5% 75%);
+  padding-left: 1em;
+  color: hsl(240 5% 25%);
+  font-style: italic;
+}
+
+.dark .prose blockquote {
+  border-left-color: hsl(240 5% 35%);
+  color: hsl(240 5% 75%);
+}
+
+/* Tables — clear borders and cell dividers */
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  border: 1px solid var(--tw-prose-td-borders);
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--tw-prose-td-borders);
+  padding: 0.5em 0.75em;
+}
+
+.prose th {
+  background-color: hsl(240 5% 88%);
+  border-color: var(--tw-prose-th-borders);
+  font-weight: 600;
+  color: hsl(240 5% 12%);
+}
+
+.dark .prose th {
+  background-color: hsl(240 5% 24%);
+  color: hsl(240 5% 90%);
+}
+
+/* Table body — subtle zebra striping for readability */
+.prose tbody tr:nth-child(even) {
+  background-color: hsl(240 5% 97%);
+}
+
+.dark .prose tbody tr:nth-child(even) {
+  background-color: hsl(240 5% 12%);
+}
+
+/* Horizontal rules — refined */
+.prose hr {
+  border-color: hsl(240 5% 88%);
+  opacity: 0.6;
+  margin-top: 1.15em;
+  margin-bottom: 1.15em;
+}
+
+.dark .prose hr {
+  border-color: hsl(240 5% 25%);
+}
+
+/* ── Chat-context spacing — half of prose-sm defaults ── */
+/* Paragraphs */
+.prose p {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+}
+
+.prose p:first-child {
+  margin-top: 0;
+}
+
+.prose p:last-child {
+  margin-bottom: 0;
+}
+
+/* Lists */
+.prose ul,
+.prose ol {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+  padding-left: 1.5em;
+}
+
+.prose li {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
+}
+
+/* Nested lists */
+.prose li>ul,
+.prose li>ol {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
+}
+
+/* Images — rounded with max constraint */
+.prose img {
+  border-radius: 6px;
+  max-width: 100%;
+  height: auto;
+}
+
+/* Pre + code blocks spacing */
+.prose pre {
+  margin-top: 0.85em;
+  margin-bottom: 0.85em;
+}
+
+/* Headings spacing */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  margin-top: 1em;
+  margin-bottom: 0.4em;
+}
+
+.prose h1:first-child,
+.prose h2:first-child,
+.prose h3:first-child,
+.prose h4:first-child {
+  margin-top: 0;
+}
+
+/* Table spacing */
+.prose table {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+  font-size: 0.88em;
+}
+
+/* Blockquote spacing */
+.prose blockquote {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+}
+
+.prose blockquote>p {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
+}
+
+/* ── Number input spinner — hide native spinners for clean look ── */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* ── Range input — fully custom track & thumb ── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* Track */
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
+  border-radius: 2px;
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
+  border-radius: 2px;
+}
+
+/* Thumb */
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 14px;
+  width: 14px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  margin-top: -5px;
+}
+
+input[type="range"]::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: none;
+}
+
+/* Dark mode */
+.dark input[type="range"]::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #52525b var(--progress, 0%));
+}
+
+.dark input[type="range"]::-moz-range-track {
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #52525b var(--progress, 0%));
+}
+
+/* ── Radio — fully custom, no browser dark-outline artifact ── */
+input[type="radio"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 2px solid #a1a1aa;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+  background-color: transparent;
+}
+
+input[type="radio"]:checked {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent);
+}
+
+/* ── Button surface variants — replaces raw bg-zinc-200 / border-zinc-300 patterns ── */
+.btn-solid {
+  background: #e4e4e7;
+  color: #27272a;
+}
+
+.btn-solid:hover {
+  background: #d4d4d8;
+}
+
+.dark .btn-solid {
+  background: #3f3f46;
+  color: #e4e4e7;
+}
+
+.dark .btn-solid:hover {
+  background: #52525b;
+}
+
+.btn-outline {
+  border: 1px solid #d4d4d8;
+  color: #71717a;
+  background: transparent;
+}
+
+.btn-outline:hover {
+  background: #fafafa;
+}
+
+.dark .btn-outline {
+  border-color: #52525b;
+  color: #a1a1aa;
+}
+
+.dark .btn-outline:hover {
+  background: #27272a;
+}
+
+/* ── Segmented/option button — e.g. Font Size / Content Width / Avatar Type ── */
+.btn-option {
+  border-radius: 0.375rem;
+  border: 1px solid #d4d4d8;
+  padding: var(--ui-btn-py) 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #71717a;
+  background: transparent;
+  transition: all 0.15s ease;
+}
+
+.btn-option:hover {
+  background: #fafafa;
+}
+
+.dark .btn-option {
+  border-color: #3f3f46;
+  color: #a1a1aa;
+}
+
+.dark .btn-option:hover {
+  background: #27272a;
+}
+
+.btn-option-active {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent);
+}
+
+.dark .btn-option-active {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  color: var(--color-accent);
+}
+
+/* ── Solid accent-colored button — for confirm/primary actions in dialogs ── */
+.btn-accent {
+  background-color: var(--color-accent);
+  color: white;
+}
+
+.btn-accent:hover {
+  filter: brightness(0.9);
+}
+
+.dark .btn-accent {
+  background-color: var(--color-accent);
+  color: white;
+}
+
+.dark .btn-accent:hover {
+  filter: brightness(0.85);
+}
+
+/* ── Thinking shimmer animation ── */
+@keyframes shimmer {
+  from {
+    background-position: 200% center;
+  }
+
+  to {
+    background-position: -200% center;
+  }
+}
+
+.thinking-shimmer {
+  background: linear-gradient(90deg,
+      var(--shimmer-from) 0%,
+      var(--shimmer-mid) 35%,
+      var(--shimmer-to) 50%,
+      var(--shimmer-mid) 65%,
+      var(--shimmer-from) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 3.5s ease-in-out infinite;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}
+
+/* ── Chat toolbar responsive collapse (container queries) ──
+   Left-to-right order: Model → Workspace → Skills.
+   Each button's text + chevron hides when the toolbar narrows past its threshold. */
+
+/* Model: collapse below 420px */
+@container tb (max-width: 420px) {
+
+  .tb-model-text,
+  .tb-model-tip {
+    display: none !important;
+  }
+}
+
+/* Workspace: collapse below 360px */
+@container tb (max-width: 360px) {
+
+  .tb-ws-text,
+  .tb-ws-tip {
+    display: none !important;
+  }
+}
+
+/* Skills: collapse below 300px */
+@container tb (max-width: 300px) {
+
+  .tb-sk-text,
+  .tb-sk-tip {
+    display: none !important;
+  }
+}
