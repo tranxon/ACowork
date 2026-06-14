@@ -101,6 +101,10 @@ pub struct AgentDetailResponse {
     pub started_at: Option<String>,
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
     pub debug_port: Option<u16>,
+    /// Embedding service config (endpoint, active model id, dimension).
+    /// None when the embed service is not running or no model is loaded.
+    /// Updated reactively by the embed supervisor's SSE monitor.
+    pub embed_config_json: Option<String>,
 }
 
 /// Install request (kept for reference; actual install uses Multipart)
@@ -206,6 +210,7 @@ pub async fn get_agent_detail(
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
         debug_port: running_info.and_then(|r| r.debug_port),
+        embed_config_json: build_embed_config_json(&state).await,
     };
     Ok(Json(resp))
 }

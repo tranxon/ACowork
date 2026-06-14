@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod download;
+pub mod event_bus;
 pub mod model;
 pub mod pool;
 pub mod registry;

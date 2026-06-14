@@ -83,6 +83,17 @@ pub async fn spawn_embed_process(
     })?;
     tracing::info!(path = %log_path.display(), "Embed process logging to file");
 
+    // Probe for a local ONNX Runtime install so we can propagate the
+    // library directory to the embed child process. The embed binary
+    // is dynamically linked against libonnxruntime and the dynamic
+    // linker (Linux/macOS) or PATH-based DLL search (Windows) needs
+    // to know where to find it. Honor ORT_LIB_LOCATION first, then
+    // fall back to scanning .ort/onnxruntime-*/lib/ relative to cwd.
+    let ort_lib_dir = locate_ort_lib_dir();
+    if let Some(ref dir) = ort_lib_dir {
+        tracing::info!(ort_lib_dir = %dir, "Propagating ORT lib dir to embed child process");
+    }
+
     let mut cmd = tokio::process::Command::new(&embed_bin);
     cmd.arg("--host")
         .arg("127.0.0.1")
@@ -96,12 +107,31 @@ pub async fn spawn_embed_process(
         .arg(onnx_variant)
         .arg("--log-level")
         .arg("info")
-        // Set working directory to the binary's own directory so that
-        // onnxruntime.dll / libonnxruntime.so / libonnxruntime.dylib
-        // can be found as siblings of the executable.
-        .current_dir(embed_bin.parent().unwrap_or(Path::new(".")))
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
+
+    // Inject the ORT lib directory into the dynamic linker's search
+    // path for the embed child. Platform-specific env var:
+    //   Linux   → LD_LIBRARY_PATH
+    //   macOS   → DYLD_LIBRARY_PATH
+    //   Windows → PATH (prepended; Windows DLL search includes PATH)
+    if let Some(ref dir) = ort_lib_dir {
+        #[cfg(target_os = "linux")]
+        {
+            let prev = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+            cmd.env("LD_LIBRARY_PATH", format!("{}:{}", dir, prev));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let prev = std::env::var("DYLD_LIBRARY_PATH").unwrap_or_default();
+            cmd.env("DYLD_LIBRARY_PATH", format!("{}:{}", dir, prev));
+        }
+        #[cfg(windows)]
+        {
+            let prev = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{};{}", dir, prev));
+        }
+    }
 
     if !hf_mirrors.is_empty() {
         let mirrors_arg = hf_mirrors.join(",");
@@ -368,4 +398,35 @@ pub async fn test_embed_model(port: u16) -> Result<EmbedTestResult, GatewayError
         latency_ms: Some(latency_ms),
         error: None,
     })
+}
+
+/// Locate the local ONNX Runtime install directory.
+///
+/// Resolution order:
+///   1. `ORT_LIB_LOCATION` environment variable (explicit override).
+///   2. First matching `.ort/onnxruntime-<platform>-<arch>-<ver>/lib/`
+///      directory under the current working directory.
+///
+/// Returns `None` if neither yields a valid path. The caller decides
+/// what to do with the result (typically: inject into the embed
+/// child's dynamic-linker search path).
+fn locate_ort_lib_dir() -> Option<String> {
+    if let Ok(dir) = std::env::var("ORT_LIB_LOCATION") {
+        if !dir.is_empty() {
+            return Some(dir);
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let ort_base = cwd.join(".ort");
+    let entries = std::fs::read_dir(&ort_base).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("onnxruntime-") {
+            let lib_dir = entry.path().join("lib");
+            if lib_dir.is_dir() {
+                return lib_dir.to_str().map(String::from);
+            }
+        }
+    }
+    None
 }

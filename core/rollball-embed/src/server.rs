@@ -15,13 +15,15 @@ use axum::{
     Router,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, sse::Event, Sse},
     routing::{delete, get, post},
 };
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::download::{Downloader, DownloadProgress};
+use crate::event_bus::{Event as BusEvent, EventBus, State as BusState};
 use crate::model::EmbeddingModel;
 use crate::registry::{ModelInfo, ModelRegistry, ModelStatus, ModelStatusFlat};
 use crate::shutdown::Shutdown;
@@ -51,6 +53,10 @@ pub struct AppState {
     /// Per-model cancel flags for ongoing downloads. Each download gets its
     /// own AtomicBool so cancelling one model does not affect others.
     pub download_cancel_flags: RwLock<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    /// Event bus for the /events SSE endpoint. Publishes heartbeats and
+    /// state transitions; the gateway subscribes to learn which model
+    /// is loaded and to detect a stuck embed process.
+    pub event_bus: EventBus,
 }
 
 // ── OpenAI API types ────────────────────────────────────────────────────
@@ -474,8 +480,18 @@ pub async fn load_model(
     };
 
     let dim = model.dimension();
+    let model_id_for_state = model_id.clone();
     let mut model_guard = state.model.write().await;
     *model_guard = Some(Arc::new(model));
+    drop(model_guard);
+
+    // Publish Ready state so the gateway learns the model is now active.
+    state
+        .event_bus
+        .publish_state(BusState::Ready {
+            model_id: model_id_for_state.clone(),
+            dimension: dim,
+        });
 
     Json(LoadResponse {
         model_id: model_id.clone(),
@@ -852,6 +868,80 @@ pub async fn delete_model(
     .into_response()
 }
 
+/// GET /events — Server-Sent Events stream for the gateway.
+///
+/// Two event kinds are emitted:
+///   - `event: state` — high-level state transitions (Starting, Loading,
+///     Ready, Error). Payload is a JSON object with `status`, `model_id`,
+///     `dimension` fields.
+///   - `event: heartbeat` — periodic liveness signal every 2s. Payload
+///     includes `seq` and `ts_ms`. The gateway uses missed heartbeats
+///     (>10s) to detect a stuck embed process.
+///
+/// The connection stays open until the client disconnects. The first
+/// event the gateway sees is always a `state` event with the current
+/// embed state — so the gateway learns the loaded model without polling.
+pub async fn events(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, axum::Error>>> {
+    let mut rx = state.event_bus.subscribe();
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let sse_event = match &*event {
+                        BusEvent::Heartbeat { seq, ts_ms } => {
+                            Event::default()
+                                .event("heartbeat")
+                                .data(format!(r#"{{"seq":{seq},"ts_ms":{ts_ms}}}"#))
+                        }
+                        BusEvent::State { seq, state } => {
+                            let payload = match state {
+                                BusState::Starting => {
+                                    r#"{"status":"starting","model_id":null,"dimension":0}"#.to_string()
+                                }
+                                BusState::DownloadingRecommended { model_id, progress } => {
+                                    format!(
+                                        r#"{{"status":"downloading_recommended","model_id":"{model_id}","dimension":0,"progress":{progress}}}"#
+                                    )
+                                }
+                                BusState::Loading { model_id } => {
+                                    format!(
+                                        r#"{{"status":"loading","model_id":"{model_id}","dimension":0}}"#
+                                    )
+                                }
+                                BusState::Ready { model_id, dimension } => {
+                                    format!(
+                                        r#"{{"status":"ready","model_id":"{model_id}","dimension":{dimension}}}"#
+                                    )
+                                }
+                                BusState::Error { message } => {
+                                    format!(
+                                        r#"{{"status":"error","model_id":null,"dimension":0,"message":{}}}"#,
+                                        serde_json::json!(message)
+                                    )
+                                }
+                            };
+                            Event::default().event("state").data(format!(r#"{{"seq":{seq},"state":{payload}}}"#))
+                        }
+                    };
+                    yield Ok(sse_event);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Client is too slow. Emit a comment so the client knows
+                    // events were dropped, and continue.
+                    yield Ok(Event::default().comment(format!("lagged:{n}")));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Bus is gone — embed is shutting down. End the stream.
+                    break;
+                }
+            }
+        }
+    };
+    Sse::new(stream)
+}
+
 /// Build the Axum router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -860,6 +950,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(list_models))
         // Health check
         .route("/health", get(health_check))
+        // Server-Sent Events for the gateway monitor
+        .route("/events", get(events))
         // Management endpoints
         .route("/models", get(list_models_detail))
         .route("/models/{id}/load", post(load_model))

@@ -51,6 +51,7 @@ signal-hook.workspace = true
 parking_lot.workspace = true
 ndarray.workspace = true
 futures-util.workspace = true
+async-stream = "0.3"
 
 [dev-dependencies]
 tempfile.workspace = true

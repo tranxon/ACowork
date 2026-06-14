@@ -10,6 +10,7 @@ use clap::Parser;
 
 use rollball_embed::config::Cli;
 use rollball_embed::download::{Downloader, DownloadProgress};
+use rollball_embed::event_bus::{EventBus, State as BusState};
 use rollball_embed::model::EmbeddingModel;
 use rollball_embed::registry::ModelRegistry;
 use rollball_embed::server::AppState;
@@ -41,6 +42,12 @@ async fn main() {
     let registry = ModelRegistry::load(&data_dir);
     tracing::info!(count = registry.models().len(), "Loaded model registry");
 
+    // Create event bus for SSE — heartbeats run on a 2s cadence so the
+    // gateway can detect a stuck embed process within ~10s.
+    let event_bus = EventBus::new(64);
+    event_bus.spawn_heartbeat(2000);
+    event_bus.publish_state(BusState::Starting);
+
     // Create downloader
     let downloader = Downloader::new(&models_dir, cli.hf_mirrors.clone());
 
@@ -71,6 +78,11 @@ async fn main() {
 
     if initial_model.is_some() {
         tracing::info!(model_id = %default_model_id, "Model loaded at startup");
+        let dim = initial_model.as_ref().unwrap().dimension();
+        event_bus.publish_state(BusState::Ready {
+            model_id: default_model_id.clone(),
+            dimension: dim,
+        });
     } else {
         tracing::warn!(
             model_id = %default_model_id,
@@ -83,6 +95,10 @@ async fn main() {
                 model_id = %default_model_id,
                 "Auto-downloading recommended model..."
             );
+            event_bus.publish_state(BusState::DownloadingRecommended {
+                model_id: default_model_id.clone(),
+                progress: 0,
+            });
 
             let entry = registry.get(&default_model_id);
             if let Some(entry) = entry {
@@ -105,10 +121,24 @@ async fn main() {
                 {
                     Ok(_) => {
                         tracing::info!(model_id = %default_model_id, "Auto-download complete, loading model...");
+                        event_bus.publish_state(BusState::Loading {
+                            model_id: default_model_id.clone(),
+                        });
                         if let Some(model) = try_load_model(&default_model_id, &registry, &models_dir)
                         {
                             tracing::info!(model_id = %default_model_id, "Model loaded after auto-download");
+                            let dim = model.dimension();
+                            event_bus.publish_state(BusState::Ready {
+                                model_id: default_model_id.clone(),
+                                dimension: dim,
+                            });
                             initial_model = Some(model);
+                        } else {
+                            event_bus.publish_state(BusState::Error {
+                                message: format!(
+                                    "Model '{default_model_id}' downloaded but failed to load"
+                                ),
+                            });
                         }
                     }
                     Err(e) => {
@@ -117,6 +147,9 @@ async fn main() {
                             error = %e,
                             "Auto-download failed. Server will start without a loaded model."
                         );
+                        event_bus.publish_state(BusState::Error {
+                            message: format!("Auto-download of '{default_model_id}' failed: {e}"),
+                        });
                     }
                 }
             }
@@ -135,6 +168,7 @@ async fn main() {
         onnx_variant: cli.onnx_variant.clone(),
         default_model: Some(default_model_id),
         download_cancel_flags: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        event_bus: event_bus.clone(),
     });
 
     // Build router

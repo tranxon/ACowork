@@ -381,6 +381,7 @@ impl Gateway {
         // The embed process state is stored in GatewayState for the
         // HTTP embedding API to reference.
         let mut embed_child = None;
+        let mut embed_supervisor_cfg: Option<crate::lifecycle::embed_supervisor::EmbedSupervisorConfig> = None;
         {
             let data_dir = std::path::PathBuf::from(&self.config.data_dir);
             let models_dir = data_dir.join("models");
@@ -403,6 +404,17 @@ impl Gateway {
                     );
                     self.state.embed_process = Some(embed_state);
                     embed_child = Some(child);
+                    // Capture the same args so the supervisor can re-spawn
+                    // with identical settings on detected failure.
+                    embed_supervisor_cfg = Some(
+                        crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
+                            data_dir,
+                            models_dir,
+                            port: embed_port,
+                            hf_mirrors,
+                            onnx_variant: onnx_variant.to_string(),
+                        },
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -430,16 +442,41 @@ impl Gateway {
         // when the child process exits (normally or by crash), the shared
         // state is updated atomically. HTTP handlers see embed_process=None
         // on the very next request, with no defensive PID polling needed.
+        //
+        // The reaper is PID-aware: if the supervisor has already replaced
+        // this child with a new embed (different PID), we leave the new
+        // state alone.
         if let Some(mut child) = embed_child {
+            // Capture the PID before moving child into the async block.
+            // `child.id()` returns Option<u32>; if the child has already
+            // been reaped (None) we skip the reaper entirely.
+            let child_pid = child.id();
             let state_for_reaper = shared_state.clone();
             tokio::spawn(async move {
+                let Some(target_pid) = child_pid else {
+                    return;
+                };
                 let exit_status = child.wait().await;
                 tracing::warn!(
+                    pid = target_pid,
                     exit_status = ?exit_status,
-                    "Embedding service process exited, clearing state"
+                    "Embedding service process exited"
                 );
                 let mut gw = state_for_reaper.write().await;
-                gw.embed_process = None;
+                let still_ours = gw
+                    .embed_process
+                    .as_ref()
+                    .map(|eps| eps.pid == target_pid)
+                    .unwrap_or(false);
+                if still_ours {
+                    gw.embed_process = None;
+                } else {
+                    tracing::debug!(
+                        old_pid = target_pid,
+                        current_pid = ?gw.embed_process.as_ref().map(|e| e.pid),
+                        "Embed reaper: state already replaced by supervisor; leaving alone"
+                    );
+                }
             });
         }
 
@@ -580,7 +617,26 @@ impl Gateway {
                 data_dir_path.clone(),
             ),
         ));
-        
+
+        // Start the embed supervisor. It watches the embed's SSE event
+        // stream, updates `shared_state.embed_process.{active_model_id,
+        // active_dimension, ready}` from the embed's state events, and
+        // restarts the embed process on heartbeat timeout or connection
+        // loss (with exponential backoff and a 5-attempts/5-min cap).
+        // The HTTP API and IPC pushers read the same `shared_state` via
+        // a separate Arc clone, so updates are visible immediately.
+        if let (Some(sup_cfg), Some(shared_arc)) = (
+            embed_supervisor_cfg.take(),
+            Some(shared_state.clone()),
+        ) {
+            let supervisor_pusher = pusher.clone();
+            crate::lifecycle::embed_supervisor::start_embed_supervisor(
+                sup_cfg,
+                shared_arc,
+                supervisor_pusher,
+            );
+        }
+
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,

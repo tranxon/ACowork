@@ -1,0 +1,633 @@
+//! Embed process supervisor — monitors the embed child process via SSE,
+//! detects failures, and restarts with exponential backoff.
+//!
+//! ## Why SSE instead of polling
+//!
+//! Earlier the gateway polled `GET /health` for the embed's loaded model.
+//! That had two problems: a 2-second poll lag for state changes, and
+//! nothing distinguished "process alive but no model yet" from "process
+//! stuck". With the embed's `/events` SSE stream we get push-style state
+//! transitions AND a 2-second heartbeat in one connection.
+//!
+//! ## Failure detection
+//!
+//! Two layers:
+//!   1. `child.wait()` returning — process crashed or was killed.
+//!   2. No heartbeat received for `HEARTBEAT_TIMEOUT` (10s) — process
+//!      alive but stuck in a deadlock / GC pause / ONNX hang.
+//!
+//! Both trigger the same restart path.
+//!
+//! ## Restart policy
+//!
+//! Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 60s. After
+//! `MAX_RESTART_ATTEMPTS` consecutive failures within
+//! `RESTART_WINDOW` (5 minutes) the supervisor gives up and surfaces
+//! the failure to the gateway, which falls back to remote embedding
+//! providers.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures_util::StreamExt;
+use serde::Deserialize;
+use tokio::sync::RwLock;
+use tokio::time::sleep;
+
+use crate::gateway::state::GatewayState;
+use crate::ipc::global_push::GlobalResourcePusher;
+
+use super::embed::spawn_embed_process;
+
+/// Shared gateway state handle. Same as `ipc::server::SharedState`
+/// but re-declared here to avoid a cycle (lifecycle shouldn't import
+/// from ipc::server, and ipc::server shouldn't import lifecycle).
+pub type SharedState = Arc<RwLock<GatewayState>>;
+
+/// Heartbeat cadence from embed (must match `event_bus::spawn_heartbeat`).
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+/// Process declared dead if no heartbeat for this long. 5× the interval
+/// — generous enough to absorb transient hiccups (GC pause, CPU contention)
+/// without taking minutes to notice a real hang.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connect / reconnect backoff bounds.
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// Restart backoff bounds (separate from reconnect — this is for the
+/// process itself after a confirmed failure).
+const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// Window over which `MAX_RESTART_ATTEMPTS` is counted.
+const RESTART_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Give up after this many restarts within `RESTART_WINDOW`.
+const MAX_RESTART_ATTEMPTS: u32 = 5;
+
+/// Configuration passed in from the gateway when starting the supervisor.
+/// Holds the same args used to spawn the initial embed instance so we
+/// can re-spawn on failure with identical settings.
+#[derive(Clone)]
+pub struct EmbedSupervisorConfig {
+    pub data_dir: std::path::PathBuf,
+    pub models_dir: std::path::PathBuf,
+    pub port: u16,
+    pub hf_mirrors: Vec<String>,
+    pub onnx_variant: String,
+}
+
+/// Parsed `state` event payload from the embed SSE stream.
+///
+/// We only care about the active model ID and dimension. The gateway
+/// stores these in `EmbedProcessState` and pushes them to running
+/// agents via `RuntimeConfigUpdate.embed_config_json`.
+#[derive(Debug, Deserialize)]
+struct StateEvent {
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    dimension: Option<u64>,
+}
+
+/// Parsed wrapper of the SSE `state` event line:
+/// `{"seq": N, "state": {...}}`
+#[derive(Debug, Deserialize)]
+struct StateEventEnvelope {
+    state: StateEvent,
+}
+
+/// Parsed `heartbeat` event payload: `{"seq": N, "ts_ms": N}`.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct HeartbeatEvent {
+    #[serde(default)]
+    seq: Option<u64>,
+    #[serde(default)]
+    ts_ms: Option<u64>,
+}
+
+/// Tracks consecutive restart attempts to enforce `MAX_RESTART_ATTEMPTS`.
+struct RestartHistory {
+    /// Timestamps of recent restarts within the last `RESTART_WINDOW`.
+    attempts: Vec<Instant>,
+}
+
+impl RestartHistory {
+    fn new() -> Self {
+        Self { attempts: Vec::new() }
+    }
+
+    /// Record a restart attempt, pruning anything older than the window.
+    /// Returns the number of attempts now in the window (after pruning).
+    fn record(&mut self) -> usize {
+        let now = Instant::now();
+        self.attempts.retain(|t| now.duration_since(*t) < RESTART_WINDOW);
+        self.attempts.push(now);
+        self.attempts.len()
+    }
+
+    #[allow(dead_code)]
+    fn clear(&mut self) {
+        self.attempts.clear();
+    }
+}
+
+/// Compute exponential backoff with jitter, clamped to `[min, max]`.
+fn backoff_with_jitter(attempt: u32, min: Duration, max: Duration) -> Duration {
+    let exp = 1u64 << attempt.min(6); // cap shift to avoid overflow
+    let base_ms = (min.as_millis() as u64).saturating_mul(exp);
+    let capped_ms = base_ms.min(max.as_millis() as u64);
+    // ±20% jitter
+    let jitter = (capped_ms as f64 * 0.2) as u64;
+    let low = capped_ms.saturating_sub(jitter);
+    let high = capped_ms.saturating_add(jitter);
+    let chosen = if high > low {
+        low + (Instant::now().elapsed().subsec_nanos() as u64) % (high - low + 1)
+    } else {
+        capped_ms
+    };
+    Duration::from_millis(chosen)
+}
+
+/// Shared state handle for the supervisor and the HTTP layer. Re-exports
+/// the same `SharedState` type used elsewhere in the gateway.
+pub type SharedEmbedState = SharedState;
+
+/// Spawn the supervisor task. Must be called from an async context,
+/// AFTER the embed child has been spawned. The supervisor connects to
+/// `http://127.0.0.1:{port}/events` and:
+///   - updates shared state on every `state` event
+///   - watches heartbeats (2s cadence, 10s timeout = stuck)
+///   - restarts the embed process on confirmed failure, with
+///     exponential backoff and a 5-attempts/5-min cap
+///
+/// On reaching the restart cap, the supervisor clears the shared state
+/// and returns — the gateway's HTTP API will then fall back to remote
+/// embedding providers.
+pub fn start_embed_supervisor(
+    cfg: EmbedSupervisorConfig,
+    state: SharedEmbedState,
+    pusher: Option<Arc<GlobalResourcePusher>>,
+) {
+    let port = cfg.port;
+    tokio::spawn(async move {
+        run_supervisor(cfg, state, pusher, port).await;
+    });
+}
+
+/// Long-running supervisor. Monitors the embed child via SSE; on
+/// heartbeat timeout or connection failure, restarts the embed with
+/// exponential backoff. Gives up after `MAX_RESTART_ATTEMPTS` recent
+/// failures.
+async fn run_supervisor(
+    cfg: EmbedSupervisorConfig,
+    state: SharedEmbedState,
+    pusher: Option<Arc<GlobalResourcePusher>>,
+    port: u16,
+) {
+    let mut history = RestartHistory::new();
+    // We start in a "startup grace" window during which connection
+    // failures do NOT count as restart attempts. The freshly spawned
+    // embed may take a few seconds to bind port 18080, load the ORT
+    // library, and load the recommended model — all of which can exceed
+    // the naive "first reconnect is immediate" policy. Once the
+    // supervisor successfully connects once, it transitions to the
+    // normal mode where any disconnection IS a restart trigger.
+    let mut in_startup_grace = true;
+    const STARTUP_GRACE: Duration = Duration::from_secs(10);
+    const STARTUP_POLL: Duration = Duration::from_secs(2);
+
+    // Wait for the initial embed to bind and start serving /events.
+    // Don't count failures during this period against the restart budget.
+    {
+        let deadline = Instant::now() + STARTUP_GRACE;
+        loop {
+            if try_connect_events(port).await {
+                tracing::info!("Initial embed is serving /events");
+                break;
+            }
+            // If the reaper cleared state, the process died during boot —
+            // fall through to the normal restart path immediately.
+            if state.read().await.embed_process.is_none() {
+                tracing::warn!("Initial embed died during startup grace; entering restart loop");
+                in_startup_grace = false;
+                break;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    "Initial embed did not respond within {:?}; entering normal monitor mode anyway",
+                    STARTUP_GRACE
+                );
+                in_startup_grace = false;
+                break;
+            }
+            sleep(STARTUP_POLL).await;
+        }
+    }
+
+    loop {
+        match run_monitor_session(&cfg, &state, &pusher, port, &mut in_startup_grace).await {
+            MonitorExit::Clean => {
+                // Process exited normally (e.g., user-triggered stop). Bail out.
+                tracing::info!("Embed monitor session ended cleanly");
+                return;
+            }
+            MonitorExit::HeartbeatTimeout => {
+                tracing::warn!("Embed heartbeat timeout — process considered stuck");
+            }
+            MonitorExit::ConnectionLost => {
+                tracing::warn!("Lost connection to embed /events");
+            }
+        }
+
+        // Decide whether to restart. During startup grace, don't count
+        // failures against the budget — the embed was probably just
+        // slow to boot. Once a successful monitor session has run
+        // (in_startup_grace is false), any further disconnection is
+        // a real restart trigger.
+        if in_startup_grace {
+            tracing::warn!(
+                "Embed monitor session ended during startup grace — sleeping briefly then retrying"
+            );
+            sleep(STARTUP_POLL).await;
+            continue;
+        }
+
+        let attempts = history.record();
+        if attempts as u32 > MAX_RESTART_ATTEMPTS {
+            tracing::error!(
+                attempts,
+                "Embed restart limit exceeded; giving up and clearing gateway embed state"
+            );
+            {
+                let mut gw = state.write().await;
+                gw.embed_process = None;
+            }
+            return;
+        }
+
+        let backoff = backoff_with_jitter(attempts as u32, RESTART_BACKOFF_MIN, RESTART_BACKOFF_MAX);
+        tracing::info!(
+            attempt = attempts,
+            ?backoff,
+            "Restarting embed process"
+        );
+        sleep(backoff).await;
+
+        match spawn_embed_process(
+            &cfg.data_dir,
+            &cfg.models_dir,
+            port,
+            &cfg.hf_mirrors,
+            &cfg.onnx_variant,
+        )
+        .await
+        {
+            Ok((new_state, child)) => {
+                tracing::info!(
+                    pid = new_state.pid,
+                    port = new_state.port,
+                    attempt = attempts,
+                    "Embed restarted"
+                );
+                // Update shared state with the new child. The reaper in
+                // gateway::mod.rs is PID-aware so the old child's exit
+                // won't clobber this. (Same reaper is also installed for
+                // the new child via the one in the `if let Some(child)`
+                // block above — but that's only the initial spawn path;
+                // subsequent respawns get their own reaper here.)
+                {
+                    let mut gw = state.write().await;
+                    gw.embed_process = Some(new_state.clone());
+                }
+
+                // Spawn a PID-aware reaper for the new child. The reaper
+                // clears `embed_process` only if its own PID still owns
+                // the slot, so a previous child's late exit won't clobber
+                // the new state.
+                let new_child_pid = new_state.pid;
+                let state_for_reaper = state.clone();
+                tokio::spawn(async move {
+                    let mut child = child;
+                    let _ = child.wait().await;
+                    tracing::warn!(pid = new_child_pid, "Embed (respawned) exited");
+                    let mut gw = state_for_reaper.write().await;
+                    let still_ours = gw
+                        .embed_process
+                        .as_ref()
+                        .map(|eps| eps.pid == new_child_pid)
+                        .unwrap_or(false);
+                    if still_ours {
+                        gw.embed_process = None;
+                    }
+                });
+                // Push the (now-empty or new-model) embed config to
+                // agents so they can refresh local embedding caches.
+                if let Some(p) = &pusher {
+                    p.push_embedding_config().await;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to restart embed process");
+                // Loop will retry per backoff policy.
+            }
+        }
+    }
+}
+
+enum MonitorExit {
+    /// Process ended naturally (monitor session saw process go away).
+    Clean,
+    /// Heartbeat stream went silent for > HEARTBEAT_TIMEOUT.
+    HeartbeatTimeout,
+    /// SSE connection lost for non-timeout reasons (network, restart, etc.).
+    ConnectionLost,
+}
+
+/// Run one SSE session: connect to /events, parse events, update shared
+/// state. Returns when the connection ends or heartbeat times out.
+/// `in_startup_grace` is set to false once a connection is established,
+/// signaling to the caller that any subsequent disconnection is a real
+/// restart trigger (not part of the initial boot window).
+async fn run_monitor_session(
+    _cfg: &EmbedSupervisorConfig,
+    state: &SharedEmbedState,
+    pusher: &Option<Arc<GlobalResourcePusher>>,
+    port: u16,
+    in_startup_grace: &mut bool,
+) -> MonitorExit {
+    let url = format!("http://127.0.0.1:{port}/events");
+    tracing::info!(%url, "Connecting to embed SSE event stream");
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(30)) // per-chunk read timeout
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to build HTTP client for SSE");
+            // No point retrying immediately — this is a config-level error.
+            sleep(RECONNECT_MAX).await;
+            return MonitorExit::ConnectionLost;
+        }
+    };
+
+    let resp = match client.get(&url).header("Accept", "text/event-stream").send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to connect to embed /events");
+            return MonitorExit::ConnectionLost;
+        }
+    };
+
+    if !resp.status().is_success() {
+        tracing::warn!(status = %resp.status(), "Embed /events returned non-2xx");
+        return MonitorExit::ConnectionLost;
+    }
+
+    // We've established a connection. From here on, the supervisor
+    // is in normal (non-grace) mode — any disconnection is a real
+    // restart trigger. The caller is expected to clear this flag.
+    *in_startup_grace = false;
+
+    // Bootstrap the loaded-model state from the embed's /health
+    // endpoint. This catches the case where the embed was already
+    // serving before we connected (e.g. the supervisor's monitor
+    // session was restarted but the embed was fine the whole time).
+    // We only do this on session start; later state transitions
+    // arrive via the SSE stream.
+    if let Err(e) = bootstrap_state_from_health(port, state, pusher).await {
+        tracing::warn!(error = %e, "Initial /health bootstrap failed; continuing with SSE only");
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = String::new();
+    let mut last_heartbeat = Instant::now();
+
+    // Heartbeat watchdog — fires when no heartbeat for too long.
+    let mut watchdog = tokio::time::interval(Duration::from_secs(2));
+    watchdog.tick().await; // discard the immediate first tick
+
+    loop {
+        tokio::select! {
+            // Periodic check: did the heartbeat go stale?
+            _ = watchdog.tick() => {
+                if last_heartbeat.elapsed() > HEARTBEAT_TIMEOUT {
+                    tracing::warn!(
+                        elapsed_secs = last_heartbeat.elapsed().as_secs(),
+                        "Embed heartbeat timeout"
+                    );
+                    return MonitorExit::HeartbeatTimeout;
+                }
+                // Also check whether the shared state was cleared by
+                // the reaper (process died). If so, end the session
+                // cleanly.
+                let gw = state.read().await;
+                if gw.embed_process.is_none() {
+                    return MonitorExit::Clean;
+                }
+            }
+
+            // Read next chunk from the SSE stream.
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        // Parse complete SSE frames (terminated by \n\n).
+                        while let Some(idx) = buffer.find("\n\n") {
+                            let frame: String = buffer.drain(..idx + 2).collect();
+                            match parse_sse_frame(&frame) {
+                                Some(SseFrame::Heartbeat(hb)) => {
+                                    let _ = hb; // ack via timestamp
+                                    last_heartbeat = Instant::now();
+                                }
+                                Some(SseFrame::State(s)) => {
+                                    last_heartbeat = Instant::now();
+                                    apply_state_event(state, pusher, s).await;
+                                }
+                                Some(SseFrame::Comment(_)) | None => {
+                                    // SSE comment (e.g., "lagged:3") or
+                                    // unparseable frame — ignore.
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "SSE stream read error");
+                        return MonitorExit::ConnectionLost;
+                    }
+                    None => {
+                        tracing::info!("SSE stream closed by peer");
+                        return MonitorExit::ConnectionLost;
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum SseFrame {
+    Heartbeat(HeartbeatEvent),
+    State(StateEvent),
+    /// SSE comment line (e.g. `:lagged:3`). Field unused; preserved for
+    /// variant stability in case the caller wants to log it.
+    #[allow(dead_code)]
+    Comment(String),
+}
+
+/// Minimal SSE frame parser. Handles the subset that axum's `Sse`
+/// produces: `event: <name>`, `data: <payload>`, blank line, and
+/// `:comment` lines.
+fn parse_sse_frame(frame: &str) -> Option<SseFrame> {
+    let mut event_name: Option<String> = None;
+    let mut data_lines: Vec<String> = Vec::new();
+
+    for line in frame.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_name = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.trim_start().to_string());
+        } else if let Some(rest) = line.strip_prefix(':') {
+            // SSE comment. If no event was collected, this is a no-op;
+            // surface it so the caller can log lagged lines, etc.
+            if event_name.is_none() && data_lines.is_empty() {
+                return Some(SseFrame::Comment(rest.trim().to_string()));
+            }
+        }
+        // Other fields (id:, retry:) are ignored.
+    }
+
+    let payload = data_lines.join("\n");
+    match event_name.as_deref() {
+        Some("heartbeat") => serde_json::from_str(&payload)
+            .map(SseFrame::Heartbeat)
+            .ok(),
+        Some("state") => serde_json::from_str::<StateEventEnvelope>(&payload)
+            .map(|env| SseFrame::State(env.state))
+            .ok(),
+        _ => None,
+    }
+}
+
+/// Bootstrap the gateway's view of the loaded model from the embed's
+/// `/health` endpoint. Used once at the start of each monitor session
+/// to recover state when the supervisor's connection lagged behind the
+/// embed's startup (e.g. the embed was already ready when the
+/// supervisor's SSE connect finally went through, so the `Ready` SSE
+/// state event was already published and lost).
+async fn bootstrap_state_from_health(
+    port: u16,
+    state: &SharedEmbedState,
+    pusher: &Option<Arc<GlobalResourcePusher>>,
+) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{port}/health");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = body.get("status").and_then(|s| s.as_str()).unwrap_or("");
+    let (model_id, dimension) = if status == "ready" {
+        let id = body
+            .get("model")
+            .and_then(|m| m.get("id"))
+            .and_then(|s| s.as_str())
+            .map(String::from);
+        let dim = body
+            .get("model")
+            .and_then(|m| m.get("dimension"))
+            .and_then(|d| d.as_u64())
+            .map(|d| d as usize);
+        (id, dim)
+    } else {
+        (None, None)
+    };
+
+    let (changed, applied) = {
+        let mut gw = state.write().await;
+        let Some(eps) = gw.embed_process.as_mut() else {
+            return Err("no embed state".to_string());
+        };
+        let changed = eps.active_model_id != model_id || eps.active_dimension != dimension;
+        eps.active_model_id = model_id;
+        eps.active_dimension = dimension;
+        if eps.active_model_id.is_some() {
+            eps.ready = true;
+        }
+        (changed, (eps.active_model_id.clone(), eps.active_dimension))
+    };
+
+    if changed {
+        tracing::info!(
+            model_id = ?applied.0,
+            dimension = ?applied.1,
+            "Embed state bootstrapped from /health"
+        );
+        if let Some(p) = pusher {
+            p.push_embedding_config().await;
+        }
+    }
+    Ok(())
+}
+
+/// Try once to connect to `http://127.0.0.1:{port}/events` and confirm
+/// it returns a 2xx status. Used during the startup grace window to
+/// wait for the freshly-spawned embed to begin serving without
+/// consuming the restart budget.
+async fn try_connect_events(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/events");
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match client.get(&url).header("Accept", "text/event-stream").send().await {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+/// Apply a parsed `state` event to the shared gateway state and push
+/// the change to running agents so they pick up the new model.
+async fn apply_state_event(
+    state: &SharedEmbedState,
+    pusher: &Option<Arc<GlobalResourcePusher>>,
+    event: StateEvent,
+) {
+    // Snapshot the new values for the lock, plus the old values for change
+    // detection, in a single short-lived critical section.
+    let (new_model_id, new_dimension, changed) = {
+        let mut gw = state.write().await;
+        let Some(eps) = gw.embed_process.as_mut() else {
+            return;
+        };
+        let new_model_id = event.model_id.filter(|s| !s.is_empty());
+        let new_dimension = event.dimension.map(|d| d as usize);
+        let changed = eps.active_model_id != new_model_id || eps.active_dimension != new_dimension;
+        eps.active_model_id = new_model_id.clone();
+        eps.active_dimension = new_dimension;
+        if eps.active_model_id.is_some() {
+            eps.ready = true;
+        }
+        (new_model_id, new_dimension, changed)
+    };
+
+    if changed {
+        tracing::info!(
+            model_id = ?new_model_id,
+            dimension = ?new_dimension,
+            "Embed state updated from SSE"
+        );
+        if let Some(p) = pusher {
+            p.push_embedding_config().await;
+        }
+    }
+}
