@@ -313,9 +313,9 @@ export function AgentList({ width }: AgentListProps) {
             <div
               key={agent.agent_id}
               className={cn(
-                "flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors duration-150",
+                "relative flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors duration-150",
                 selectedAgentId === agent.agent_id
-                  ? "bg-[#D8D9DC] dark:bg-[#3D3D3F]"
+                  ? "bg-[var(--color-accent)]/75 text-white"
                   : "hover:bg-[#E2E3E6] dark:hover:bg-[#38383A]",
                 index < filteredAgents.length - 1 && "border-b border-[#C8C8C8]/40 dark:border-zinc-600/40"
               )}
@@ -338,13 +338,13 @@ export function AgentList({ width }: AgentListProps) {
                 {/* Top row: name */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0 flex items-center gap-1.5">
-                    <span className={cn("truncate font-medium", agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name}</span>
+                    <span className={cn("truncate font-medium", selectedAgentId === agent.agent_id ? "text-white" : agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name}</span>
 
                   </div>
                 </div>
                 {/* Bottom row: current session title */}
                 <div className="mt-0.5 truncate" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
-                  <span className="text-zinc-500 dark:text-zinc-400">
+                  <span className={cn(selectedAgentId === agent.agent_id ? "text-white/70" : "text-zinc-500 dark:text-zinc-400")}>
                     {sessionTitle === undefined ? "" : (sessionTitle === null ? "No session" : (sessionTitle || "Untitled session"))}
                   </span>
                 </div>

@@ -1545,7 +1545,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
               </div>
             )}
             {message.content && (
-              <div className="mt-[6px] max-w-[85%] rounded-lg rounded-br-sm bg-[var(--color-accent)]/15 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
+              <div className="mt-[6px] max-w-[85%] rounded-lg rounded-br-sm bg-[var(--color-accent)]/50 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
                 {message.content}
               </div>
             )}

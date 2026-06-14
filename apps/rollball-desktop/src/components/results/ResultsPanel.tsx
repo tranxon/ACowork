@@ -193,7 +193,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
   }, [selectedAgent?.running, activeTab]);
 
   return (
-    <div className="relative flex flex-col border-l border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
+    <div className="relative flex flex-col border-l border-zinc-200 bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
       {/* Resize handle overlay — invisible, sits on the border-l */}
       <div
         className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize z-10 group"
