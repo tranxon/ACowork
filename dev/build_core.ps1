@@ -54,6 +54,30 @@ if ($Start) {
         Write-Host "  No Embed process running." -ForegroundColor Gray
     }
 
+    # Ensure embed port 18080 is released before starting a new gateway.
+    # Stop-Process may not have released the port yet; the new gateway
+    # spawns its own embed immediately and if the old one is still
+    # binding, the new embed panics with AddrInUse.
+    $portLine = netstat -ano 2>$null | Select-String ":18080\s" | Select-Object -First 1
+    if ($portLine) {
+        $pidFromPort = ($portLine.Line -split '\s+')[-1]
+        if ($pidFromPort -match '^\d+$') {
+            Write-Host "  Port 18080 held by PID $pidFromPort — force-killing" -ForegroundColor Gray
+            Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
+        }
+    }
+    # Wait up to 3s for the port to actually be released.
+    $portWaited = 0
+    while ($portWaited -lt 6) {
+        $stillUp = netstat -ano 2>$null | Select-String ":18080\s"
+        if (-not $stillUp) { break }
+        Start-Sleep -Milliseconds 500
+        $portWaited++
+    }
+    if ($portWaited -ge 6) {
+        Write-Host "  WARNING: Port 18080 still in use after 3s" -ForegroundColor Red
+    }
+
     Write-Host ""
 }
 
