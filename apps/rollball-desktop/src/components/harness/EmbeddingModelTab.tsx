@@ -4,9 +4,9 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { EmbeddingModelWithStatus } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
-import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel } from "../../lib/gateway-api";
+import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
-import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle } from "lucide-react";
+import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2 } from "lucide-react";
 
 export function EmbeddingModelTab() {
     const { t } = useTranslation();
@@ -15,8 +15,10 @@ export function EmbeddingModelTab() {
     const [activeModelId, setActiveModelId] = useState<string | null>(null);
     const [serviceRunning, setServiceRunning] = useState(false);
     const [loading, setLoading] = useState(false);
-    const [downloadingId, setDownloadingId] = useState<string | null>(null);
+    const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
     const [selectingId, setSelectingId] = useState<string | null>(null);
+    const [deletingId, setDeletingId] = useState<string | null>(null);
+    const [deleteConfirm, setDeleteConfirm] = useState<{ modelId: string; modelName: string } | null>(null);
     const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
     const [error, setError] = useState<string | null>(null);
     const [dimensionConfirm, setDimensionConfirm] = useState<{ modelId: string; message: string } | null>(null);
@@ -45,7 +47,7 @@ export function EmbeddingModelTab() {
     }, [status, loadModels]);
 
     const handleDownload = useCallback(async (modelId: string, variant?: string) => {
-        setDownloadingId(modelId);
+        setDownloadingIds((prev) => new Set(prev).add(modelId));
         setDownloadProgress((prev) => ({ ...prev, [modelId]: 0 }));
         setError(null);
         try {
@@ -53,45 +55,61 @@ export function EmbeddingModelTab() {
             // Fire-and-forget: response is immediate, polling handles progress
         } catch (e) {
             setError(e instanceof Error ? e.message : "Download failed");
-            setDownloadingId(null);
+            setDownloadingIds((prev) => {
+                const next = new Set(prev);
+                next.delete(modelId);
+                return next;
+            });
         }
     }, []);
 
-    // Poll download progress while a download is in flight
+    // Poll download progress for all in-flight downloads
     const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
     useEffect(() => {
-        if (!downloadingId) {
+        if (downloadingIds.size === 0) {
             if (pollingRef.current) clearInterval(pollingRef.current);
             pollingRef.current = null;
             return;
         }
 
         const poll = async () => {
-            try {
-                const resp = await fetchEmbeddingModelStatus(downloadingId);
+            // Snapshot current downloading ids to avoid stale closure
+            const ids = Array.from(downloadingIds);
+            for (const id of ids) {
+                try {
+                    const resp = await fetchEmbeddingModelStatus(id);
 
-                if (resp.status === "downloading") {
-                    setDownloadProgress((prev) => ({ ...prev, [downloadingId]: resp.progress ?? 0 }));
-                } else if (resp.status === "downloaded" || resp.status === "loaded") {
-                    setDownloadingId(null);
-                    setDownloadProgress((prev) => {
-                        const next = { ...prev };
-                        delete next[downloadingId];
-                        return next;
-                    });
-                    await loadModels();
-                } else if (resp.status === "failed") {
-                    setError(`Download failed: ${resp.error ?? "unknown error"}`);
-                    setDownloadingId(null);
-                    setDownloadProgress((prev) => {
-                        const next = { ...prev };
-                        delete next[downloadingId];
-                        return next;
-                    });
-                    await loadModels();
+                    if (resp.status === "downloading") {
+                        setDownloadProgress((prev) => ({ ...prev, [id]: resp.progress ?? 0 }));
+                    } else if (resp.status === "downloaded" || resp.status === "loaded") {
+                        setDownloadingIds((prev) => {
+                            const next = new Set(prev);
+                            next.delete(id);
+                            return next;
+                        });
+                        setDownloadProgress((prev) => {
+                            const next = { ...prev };
+                            delete next[id];
+                            return next;
+                        });
+                        await loadModels();
+                    } else if (resp.status === "failed") {
+                        setError(`Download failed: ${resp.error ?? "unknown error"}`);
+                        setDownloadingIds((prev) => {
+                            const next = new Set(prev);
+                            next.delete(id);
+                            return next;
+                        });
+                        setDownloadProgress((prev) => {
+                            const next = { ...prev };
+                            delete next[id];
+                            return next;
+                        });
+                        await loadModels();
+                    }
+                } catch {
+                    // Polling error — just retry on next interval
                 }
-            } catch {
-                // Polling error — just retry on next interval
             }
         };
 
@@ -102,7 +120,7 @@ export function EmbeddingModelTab() {
             if (pollingRef.current) clearInterval(pollingRef.current);
             pollingRef.current = null;
         };
-    }, [downloadingId, loadModels]);
+    }, [downloadingIds, loadModels]);
 
     const handleSelect = useCallback(async (modelId: string, force = false) => {
         setSelectingId(modelId);
@@ -142,6 +160,26 @@ export function EmbeddingModelTab() {
             setTesting(false);
         }
     }, []);
+
+    const handleDelete = useCallback(async (modelId: string) => {
+        setDeletingId(modelId);
+        setError(null);
+        try {
+            await deleteEmbeddingModel(modelId);
+            await loadModels();
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "Delete failed");
+        } finally {
+            setDeletingId(null);
+        }
+    }, [loadModels]);
+
+    const handleDeleteConfirm = useCallback(async () => {
+        if (!deleteConfirm) return;
+        const id = deleteConfirm.modelId;
+        setDeleteConfirm(null);
+        await handleDelete(id);
+    }, [deleteConfirm, handleDelete]);
 
     if (status !== "connected") {
         return (
@@ -248,11 +286,13 @@ export function EmbeddingModelTab() {
                                 key={model.id}
                                 model={model}
                                 isActive={model.id === activeModelId}
-                                isDownloading={downloadingId === model.id}
+                                isDownloading={downloadingIds.has(model.id)}
                                 isSelecting={selectingId === model.id}
+                                isDeleting={deletingId === model.id}
                                 progress={downloadProgress[model.id]}
                                 onDownload={handleDownload}
                                 onSelect={() => handleSelect(model.id)}
+                                onDelete={() => setDeleteConfirm({ modelId: model.id, modelName: model.name })}
                             />
                         ))}
                     </div>
@@ -274,6 +314,19 @@ export function EmbeddingModelTab() {
                     }}
                 />
             )}
+
+            {/* Delete model confirmation dialog */}
+            {deleteConfirm && (
+                <ConfirmDialog
+                    open={true}
+                    title={t("embedding.deleteConfirmTitle")}
+                    message={t("embedding.deleteConfirmMessage", { name: deleteConfirm.modelName })}
+                    confirmLabel={t("embedding.deleteConfirm")}
+                    destructive
+                    onConfirm={handleDeleteConfirm}
+                    onCancel={() => setDeleteConfirm(null)}
+                />
+            )}
         </div>
     );
 }
@@ -290,17 +343,21 @@ function ModelCard({
     isActive,
     isDownloading,
     isSelecting,
+    isDeleting,
     progress,
     onDownload,
     onSelect,
+    onDelete,
 }: {
     model: EmbeddingModelWithStatus;
     isActive: boolean;
     isDownloading: boolean;
     isSelecting: boolean;
+    isDeleting: boolean;
     progress?: number;
     onDownload: (modelId: string, variant?: string) => void;
     onSelect: () => void;
+    onDelete: () => void;
 }) {
     const { t } = useTranslation();
     const variants = model.onnx_variants ? Object.keys(model.onnx_variants) : [];
@@ -309,7 +366,7 @@ function ModelCard({
         variants.includes("fp16") ? "fp16" : (variants[0] ?? "fp32"),
     );
 
-    const isBusy = isDownloading || isSelecting;
+    const isBusy = isDownloading || isSelecting || isDeleting;
 
     return (
         <div
@@ -392,6 +449,20 @@ function ModelCard({
                                 <Check className="h-3 w-3" />
                             )}
                             {isSelecting ? t("embedding.switching") : t("embedding.switchTo")}
+                        </button>
+                    )}
+                    {/* Delete button — show when downloaded and not active */}
+                    {!isActive && (model.status === "downloaded" || model.status === "loaded") && (
+                        <button
+                            onClick={onDelete}
+                            disabled={isBusy}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-500 hover:border-red-300 hover:text-red-600 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-red-700 dark:hover:text-red-400"
+                        >
+                            {isDeleting ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                                <Trash2 className="h-3 w-3" />
+                            )}
                         </button>
                     )}
                 </div>

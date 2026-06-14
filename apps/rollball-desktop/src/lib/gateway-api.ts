@@ -199,6 +199,21 @@ export async function fetchEmbeddingModelStatus(
   return resp.json();
 }
 
+/** Delete a downloaded embedding model's files */
+export async function deleteEmbeddingModel(
+  modelId: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<EmbeddingModelActionResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-models/${modelId}`, {
+    method: "DELETE",
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error((data as EmbeddingModelActionResponse).message ?? `Delete failed: ${resp.status}`);
+  }
+  return data as EmbeddingModelActionResponse;
+}
+
 /** Test the currently loaded embedding model */
 export async function testEmbeddingModel(
   gatewayUrl = getGatewayUrl(),

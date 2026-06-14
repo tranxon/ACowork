@@ -450,7 +450,13 @@
         "testing": "測試中...",
         "testPassed": "通過",
         "testFailed": "測試失敗",
-        "variants": "變體"
+        "variants": "變體",
+        "delete": "刪除",
+        "deleting": "刪除中...",
+        "deleteConfirmTitle": "刪除模型檔案",
+        "deleteConfirmMessage": "確定要刪除「{{name}}」的已下載檔案嗎？您可以稍後重新下載。",
+        "deleteConfirm": "刪除",
+        "deleteActiveError": "無法刪除目前使用的模型，請先切換到其他模型。"
     },
     "memoryPanel": {
         "consolidate": "合併節點",

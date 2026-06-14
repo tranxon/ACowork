@@ -16,7 +16,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -736,6 +736,110 @@ pub async fn list_models_detail(
     Json(ModelsDetailResponse { models: infos }).into_response()
 }
 
+/// DELETE /models/{id} — Delete downloaded model files from disk.
+///
+/// Refuses to delete if the model is currently loaded in memory.
+/// After deletion, the model status reverts to "not_downloaded".
+pub async fn delete_model(
+    State(state): State<Arc<AppState>>,
+    Path(model_id): Path<String>,
+) -> impl IntoResponse {
+    // Verify model exists in registry
+    if state.registry.get(&model_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: ErrorDetail {
+                    message: format!("Model '{model_id}' not found in registry"),
+                    error_type: "not_found".to_string(),
+                    code: None,
+                },
+            }),
+        )
+            .into_response();
+    }
+
+    // Refuse to delete if the model is currently loaded
+    {
+        let model_guard = state.model.read().await;
+        let is_loaded = model_guard
+            .as_ref()
+            .map(|m| m.model_id() == model_id)
+            .unwrap_or(false);
+        if is_loaded {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        message: format!(
+                            "Model '{model_id}' is currently loaded. Switch to another model first."
+                        ),
+                        error_type: "conflict".to_string(),
+                        code: None,
+                    },
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    // Check if a download is in progress for this model
+    {
+        let pm = state.download_progress.read().await;
+        if pm.contains_key(&model_id) {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        message: format!(
+                            "Model '{model_id}' is currently being downloaded. Cancel the download first."
+                        ),
+                        error_type: "conflict".to_string(),
+                        code: None,
+                    },
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    // Delete model files from disk
+    if let Err(e) = state.downloader.delete_model(&model_id) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: ErrorDetail {
+                    message: format!("Failed to delete model files: {e}"),
+                    error_type: "io_error".to_string(),
+                    code: None,
+                },
+            }),
+        )
+            .into_response();
+    }
+
+    // Clean up temp downloading directory if present
+    let tmp_dir = state.models_dir.join(format!("{model_id}.downloading"));
+    if tmp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    // Clear download status
+    {
+        let mut status = state.download_status.write().await;
+        status.remove(&model_id);
+    }
+
+    tracing::info!(model_id = %model_id, "Model files deleted");
+
+    Json(serde_json::json!({
+        "model_id": model_id,
+        "status": "deleted",
+        "message": "Model files deleted successfully"
+    }))
+    .into_response()
+}
+
 /// Build the Axum router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -750,5 +854,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/models/{id}/download", post(download_model))
         .route("/models/{id}/cancel-download", post(cancel_download))
         .route("/models/{id}/status", get(model_status))
+        .route("/models/{id}", delete(delete_model))
         .with_state(state)
 }

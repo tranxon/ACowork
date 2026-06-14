@@ -452,7 +452,13 @@
         "testing": "テスト中...",
         "testPassed": "成功",
         "testFailed": "テスト失敗",
-        "variants": "バリアント"
+        "variants": "バリアント",
+        "delete": "削除",
+        "deleting": "削除中...",
+        "deleteConfirmTitle": "モデルファイルを削除",
+        "deleteConfirmMessage": "「{{name}}」のダウンロード済みファイルを削除しますか？後で再ダウンロードできます。",
+        "deleteConfirm": "削除",
+        "deleteActiveError": "現在使用中のモデルは削除できません。先に別のモデルに切り替えてください。"
     },
     "memoryPanel": {
         "consolidate": "ノードを統合",

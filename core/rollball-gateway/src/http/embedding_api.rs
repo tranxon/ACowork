@@ -5,6 +5,7 @@
 //! - POST /api/embedding-models/{id}/download — trigger model download
 //! - POST /api/embedding-models/{id}/select — switch active model
 //! - GET /api/embedding-models/{id}/status — get model download/load status
+//! - DELETE /api/embedding-models/{id} — delete downloaded model files
 
 use axum::{
     extract::{Path, State},
@@ -12,7 +13,7 @@ use axum::{
     response::IntoResponse,
     Json,
     Router,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -467,6 +468,100 @@ pub async fn test_embedding_model(
     }
 }
 
+/// DELETE /api/embedding-models/{id} — delete downloaded model files.
+///
+/// Forwards the delete request to the embed service which removes
+/// model files from disk. Refuses if the model is currently loaded.
+pub async fn delete_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> impl IntoResponse {
+    let gw = state.gateway_state.read().await;
+
+    // Check if embed service is running
+    let port = match &gw.embed_process {
+        Some(eps) => eps.port,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(EmbeddingModelActionResponse {
+                    model_id,
+                    status: "error".to_string(),
+                    message: "Embedding service is not running".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Check model exists in registry
+    if !gw.resource_cache.embedding_models.models.iter().any(|m| m.id == model_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(EmbeddingModelActionResponse {
+                model_id: model_id.clone(),
+                status: "error".to_string(),
+                message: format!("Model '{}' not found in registry", model_id),
+            }),
+        )
+            .into_response();
+    }
+
+    // Check if this is the active model
+    let is_active = gw.embed_process.as_ref().and_then(|eps| eps.active_model_id.as_deref()) == Some(&model_id);
+    if is_active {
+        return (
+            StatusCode::CONFLICT,
+            Json(EmbeddingModelActionResponse {
+                model_id,
+                status: "error".to_string(),
+                message: "Cannot delete the currently active model. Switch to another model first.".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    drop(gw);
+
+    match embed::delete_embed_model(port, &model_id).await {
+        Ok(body) => {
+            // Check if the embed service returned an error
+            if let Some(err_msg) = body.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+                let status_code = if err_msg.contains("currently loaded") || err_msg.contains("being downloaded") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                return (
+                    status_code,
+                    Json(EmbeddingModelActionResponse {
+                        model_id,
+                        status: "error".to_string(),
+                        message: err_msg.to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+
+            Json(EmbeddingModelActionResponse {
+                model_id,
+                status: "deleted".to_string(),
+                message: "Model files deleted successfully".to_string(),
+            })
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(EmbeddingModelActionResponse {
+                model_id,
+                status: "error".to_string(),
+                message: format!("Failed to delete model: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 // ── Router ─────────────────────────────────────────────────────────────
 
 /// Build the embedding models API router.
@@ -477,4 +572,5 @@ pub fn embedding_routes() -> Router<AppState> {
         .route("/api/embedding-models/{id}/download", post(download_model))
         .route("/api/embedding-models/{id}/select", post(select_model))
         .route("/api/embedding-models/{id}/status", get(get_model_status))
+        .route("/api/embedding-models/{id}", delete(delete_model))
 }

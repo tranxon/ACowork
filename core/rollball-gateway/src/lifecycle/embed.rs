@@ -274,9 +274,34 @@ pub async fn get_embed_model_status(
     Ok(body)
 }
 
+/// Delete a downloaded model via rollball-embed.
+///
+/// Calls `DELETE /models/{id}` on the embed service.
+pub async fn delete_embed_model(
+    port: u16,
+    model_id: &str,
+) -> Result<serde_json::Value, GatewayError> {
+    let url = format!("http://127.0.0.1:{}/models/{}", port, model_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
+
+    let resp = client.delete(&url).send().await.map_err(|e| {
+        GatewayError::Lifecycle(format!("Failed to call delete endpoint for model '{}': {}", model_id, e))
+    })?;
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| {
+        GatewayError::Lifecycle(format!("Failed to parse delete response: {}", e))
+    })?;
+
+    Ok(body)
+}
+
 /// Result of an embedding test.
 #[derive(Debug, Clone)]
 pub struct EmbedTestResult {
+
     /// Whether the test succeeded.
     pub success: bool,
     /// Model ID that was tested.

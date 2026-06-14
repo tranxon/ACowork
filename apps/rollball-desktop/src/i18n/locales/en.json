@@ -453,7 +453,13 @@
         "testing": "Testing...",
         "testPassed": "Passed",
         "testFailed": "Test failed",
-        "variants": "Variants"
+        "variants": "Variants",
+        "delete": "Delete",
+        "deleting": "Deleting...",
+        "deleteConfirmTitle": "Delete Model Files",
+        "deleteConfirmMessage": "Delete downloaded files for '{{name}}'? You can re-download it later.",
+        "deleteConfirm": "Delete",
+        "deleteActiveError": "Cannot delete the active model. Switch to another model first."
     },
     "memoryPanel": {
         "consolidate": "Consolidate",
