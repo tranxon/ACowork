@@ -24,10 +24,11 @@ $step = 0
 if ($Start) {
     # Step: Stop running processes
     $step++
-    Write-Host "[$step/$totalSteps] Stopping running Gateway and Runtime processes..." -ForegroundColor Yellow
+    Write-Host "[$step/$totalSteps] Stopping running Gateway, Runtime, and Embed processes..." -ForegroundColor Yellow
 
     $gatewayProcs = Get-Process -Name "rollball-gateway" -ErrorAction SilentlyContinue
     $runtimeProcs = Get-Process -Name "rollball-runtime" -ErrorAction SilentlyContinue
+    $embedProcs   = Get-Process -Name "rollball-embed"   -ErrorAction SilentlyContinue
 
     if ($gatewayProcs) {
         Write-Host "  Found Gateway processes: $($gatewayProcs.Id -join ', ')" -ForegroundColor Gray
@@ -43,6 +44,14 @@ if ($Start) {
         Write-Host "  Runtime stopped." -ForegroundColor Green
     } else {
         Write-Host "  No Runtime process running." -ForegroundColor Gray
+    }
+
+    if ($embedProcs) {
+        Write-Host "  Found Embed processes: $($embedProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "rollball-embed" -Force -ErrorAction SilentlyContinue
+        Write-Host "  Embed stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No Embed process running." -ForegroundColor Gray
     }
 
     Write-Host ""

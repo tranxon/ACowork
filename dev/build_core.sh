@@ -66,9 +66,10 @@ stop_process() {
 }
 
 # Step 1: Stop running processes
-echo -e "${YELLOW}[1/5] Stopping running Gateway and Runtime processes...${NC}"
+echo -e "${YELLOW}[1/5] Stopping running Gateway, Runtime, and Embed processes...${NC}"
 stop_process "rollball-gateway" "Gateway"
 stop_process "rollball-runtime" "Runtime"
+stop_process "rollball-embed"  "Embed"
 echo ""
 
 # Step 2: Build Gateway

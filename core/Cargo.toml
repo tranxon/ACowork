@@ -156,7 +156,7 @@ protoc-bin-vendored = "3"
 #
 # GPU acceleration (opt-in per platform):
 #   --features directml (Windows) | cuda (Linux) | coreml (macOS)
-ort = { version = "2.0.0-rc.10", default-features = false, features = ["api-21"] }
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "api-21"] }
 
 # Tokenizer (HuggingFace)
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
