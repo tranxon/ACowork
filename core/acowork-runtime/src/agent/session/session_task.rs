@@ -1129,15 +1129,12 @@ impl SessionTask {
                         );
                     // Wrap as FallbackEmbeddingProvider with ONNX as primary,
                     // keeping the existing provider chain as fallback (if available).
-                    let new_emb: Arc<dyn crate::embedding::EmbeddingProvider> = if let Some(
-                        ref old_provider,
-                    ) =
-                        agent_loop.core.embedding_provider
-                    {
-                        // Insert ONNX as primary, old provider chain as fallback.
-                        // ArcDelegateEmbeddingProvider wraps Arc<dyn> → Box<dyn>.
-                        Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
-                            vec![
+                    let new_emb: Arc<dyn crate::embedding::EmbeddingProvider> =
+                        if let Some(ref old_provider) = agent_loop.core.embedding_provider {
+                            // Insert ONNX as primary, old provider chain as fallback.
+                            // ArcDelegateEmbeddingProvider wraps Arc<dyn> → Box<dyn>.
+                            Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
+                                vec![
                                 (Box::new(new_onnx_provider), 500),
                                 (
                                     Box::new(
@@ -1148,15 +1145,15 @@ impl SessionTask {
                                     5000,
                                 ),
                             ],
-                            crate::embedding::EmbeddingConfig::default(),
-                        ))
-                    } else {
-                        // No previous provider — ONNX becomes the sole provider
-                        Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
-                            vec![(Box::new(new_onnx_provider), 500)],
-                            crate::embedding::EmbeddingConfig::default(),
-                        ))
-                    };
+                                crate::embedding::EmbeddingConfig::default(),
+                            ))
+                        } else {
+                            // No previous provider — ONNX becomes the sole provider
+                            Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
+                                vec![(Box::new(new_onnx_provider), 500)],
+                                crate::embedding::EmbeddingConfig::default(),
+                            ))
+                        };
                     agent_loop.core.update_embedding_provider(new_emb);
                 }
                 Some(SessionMessage::SystemNotification { content }) => {

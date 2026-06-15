@@ -47,6 +47,12 @@ export function EmbeddingModelTab() {
     }, [status, loadModels]);
 
     useEffect(() => {
+        if (status !== "connected" || !serviceRunning || activeModelId) return;
+        const timer = setInterval(loadModels, 2000);
+        return () => clearInterval(timer);
+    }, [status, serviceRunning, activeModelId, loadModels]);
+
+    useEffect(() => {
         const downloading = models.filter((model) => model.status === "downloading");
         const downloadingSet = new Set(downloading.map((model) => model.id));
 
