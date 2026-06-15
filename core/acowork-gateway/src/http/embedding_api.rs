@@ -327,6 +327,12 @@ pub async fn select_model(
                 eps.active_dimension = Some(new_dim);
                 eps.ready = true;
             }
+            if let Some(cfg) = gw.config.as_mut() {
+                cfg.embedding_model = Some(model_id.clone());
+                if let Err(e) = cfg.save() {
+                    tracing::warn!(error = %e, "Failed to persist embedding model selection");
+                }
+            }
 
             drop(gw);
 

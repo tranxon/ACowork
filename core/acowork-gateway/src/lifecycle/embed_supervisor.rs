@@ -67,6 +67,7 @@ pub struct EmbedSupervisorConfig {
     pub port: u16,
     pub hf_mirrors: Vec<String>,
     pub onnx_variant: String,
+    pub model_id: Option<String>,
 }
 
 /// Parsed `state` event payload from the embed SSE stream.
@@ -302,6 +303,7 @@ async fn run_supervisor(
             port,
             &cfg.hf_mirrors,
             &cfg.onnx_variant,
+            cfg.model_id.as_deref(),
         )
         .await
         {

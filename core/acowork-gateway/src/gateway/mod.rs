@@ -410,8 +410,8 @@ impl Gateway {
             let models_dir = data_dir.join("models");
             let embed_port = 18080; // Default port for embedding service
             let hf_mirrors = self.config.hf_mirrors.clone();
-            let onnx_variant = "onnx"; // Default ONNX variant
-
+            let embedding_model = self.config.embedding_model.clone();
+            let onnx_variant = "onnx";
             let existing_health = crate::lifecycle::embed::check_embed_health(embed_port).await;
             if existing_health.is_some() {
                 let embed_state = crate::lifecycle::embed::attach_existing_embed_process(
@@ -431,6 +431,7 @@ impl Gateway {
                         port: embed_port,
                         hf_mirrors,
                         onnx_variant: onnx_variant.to_string(),
+                        model_id: embedding_model.clone(),
                     });
             } else {
                 match crate::lifecycle::embed::spawn_embed_process(
@@ -439,6 +440,7 @@ impl Gateway {
                     embed_port,
                     &hf_mirrors,
                     onnx_variant,
+                    embedding_model.as_deref(),
                 )
                 .await
                 {
@@ -457,6 +459,7 @@ impl Gateway {
                                 port: embed_port,
                                 hf_mirrors,
                                 onnx_variant: onnx_variant.to_string(),
+                                model_id: embedding_model.clone(),
                             });
                     }
                     Err(e) => {

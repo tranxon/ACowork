@@ -109,6 +109,8 @@ pub struct GatewayConfig {
     /// Example in TOML: `hf_mirrors = ["https://hf-mirror.com"]`
     #[serde(default)]
     pub hf_mirrors: Vec<String>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
     /// LSP config directory (contains lsp_servers.json and lsp_install/).
     ///
     /// In local mode (Desktop App), this is the Tauri resource_dir where
@@ -382,6 +384,7 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.hf_mirrors.clone())
                 .unwrap_or_default(),
+            embedding_model: file_config.as_ref().and_then(|c| c.embedding_model.clone()),
             lsp_config_dir: cli
                 .lsp_config_dir
                 .clone()
@@ -474,6 +477,7 @@ impl Default for GatewayConfig {
             default_model: None,
             max_output_tokens_limit: default_max_output_tokens_limit(),
             hf_mirrors: Vec::new(),
+            embedding_model: None,
             lsp_config_dir: None,
         }
     }

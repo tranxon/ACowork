@@ -61,6 +61,7 @@ pub async fn spawn_embed_process(
     port: u16,
     hf_mirrors: &[String],
     onnx_variant: &str,
+    model_id: Option<&str>,
 ) -> Result<(EmbedProcessState, tokio::process::Child), GatewayError> {
     // Locate the acowork-embed binary (sibling of current executable)
     let embed_bin = std::env::current_exe()
@@ -157,6 +158,10 @@ pub async fn spawn_embed_process(
     if !hf_mirrors.is_empty() {
         let mirrors_arg = hf_mirrors.join(",");
         cmd.arg("--hf-mirrors").arg(&mirrors_arg);
+    }
+
+    if let Some(model_id) = model_id {
+        cmd.arg("--model").arg(model_id);
     }
 
     // On Unix, create a new process group
