@@ -241,11 +241,11 @@ export function AgentList({ width }: AgentListProps) {
 
   return (
     <div
-      className="flex flex-col bg-[#EEEEF0] dark:bg-[#2F2F30]"
+      className="flex flex-col bg-[#EEEEF0] dark:bg-[#2F2F30] rounded-xl"
       style={{ width: width ?? 240 }}
     >
       {/* Header */}
-      <div className="bg-[#EEEEF0] px-3 py-2 dark:bg-[#2F2F30]">
+      <div className="px-3 py-2">
         <div className="flex items-center gap-2">
           {/* Search input */}
           <div className="relative flex-1">
@@ -297,7 +297,8 @@ export function AgentList({ width }: AgentListProps) {
       </div>
 
       {/* Agent list */}
-      <div className="flex-1 overflow-y-auto bg-[#EEEEF0] dark:bg-[#2F2F30]" role="list" aria-label="Agent list">
+      <div className="flex-1 overflow-y-auto" role="list" aria-label="Agent list">
+
         <div className="border-t border-[#C8C8C8]/40 dark:border-zinc-600/40" />
 
         {loading && agents.length === 0 && (

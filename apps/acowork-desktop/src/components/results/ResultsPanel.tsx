@@ -5,7 +5,6 @@ import { useDebugStore } from "../../stores/debugStore";
 import type { ChatMessage, SessionStatus } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import {
-  Bug,
   WifiOff,
   Loader,
   Play,
@@ -21,21 +20,19 @@ import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { isGatewayLocal } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
-import { TabButton } from "../common/tab";
-import { ScrollableTabBar } from "../common/ScrollableTabBar";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
   isDebugMode?: boolean;
   onResizeStart?: (e: React.MouseEvent) => void;
+  activeTab: "debug" | "status" | "setup" | "memory" | "workspace";
+  onTabChange: (tab: "debug" | "status" | "setup" | "memory" | "workspace") => void;
 }
-
-type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
 
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: ResultsPanelProps & { width: number }) {
+export function ResultsPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: ResultsPanelProps & { width: number }) {
   const { agents, selectedAgentId } = useAgentStore();
   const tokenUsage = useChatStore((s) => {
     if (!selectedAgentId) return null;
@@ -72,7 +69,6 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
     if (!agent?.activeSessionId) return EMPTY_MESSAGES;
     return agent.sessionStates[agent.activeSessionId]?.messages ?? EMPTY_MESSAGES;
   });
-  const [activeTab, setActiveTab] = useState<PanelTab>(isDebugMode ? "debug" : "workspace");
 
   // ── Debug store (always called, conditionally used) ──────────────
   const {
@@ -175,7 +171,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
   const prevIsDebugMode = useRef(isDebugMode);
   useEffect(() => {
     if (isDebugMode && !prevIsDebugMode.current) {
-      setActiveTab("debug");
+      onTabChange("debug");
     }
     prevIsDebugMode.current = isDebugMode;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -187,81 +183,23 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
     const isRunning = selectedAgent?.running ?? false;
     const wasRunning = prevRunning.current;
     if (!isRunning && wasRunning !== false && (activeTab === "memory" || activeTab === "setup")) {
-      setActiveTab("status");
+      onTabChange("status");
     }
     prevRunning.current = isRunning;
   }, [selectedAgent?.running, activeTab]);
 
   return (
-    <div className="relative flex flex-col border-l border-zinc-200 bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900" style={{ width }}>
-      {/* Resize handle overlay — invisible, sits on the border-l */}
+    <div className="relative flex flex-col bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900 rounded-xl ml-1" style={{ width }}>
+      {/* Resize handle overlay — sits at the left edge */}
       <div
-        className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize z-10 group"
+        className="absolute -left-1 top-0 bottom-0 w-1 cursor-col-resize z-10 group"
         onMouseDown={onResizeStart}
       >
-        <div className="absolute inset-y-0 left-0 w-2 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
+        <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
       </div>
-      {/* Header with tabs */}
-      <div className="border-b border-zinc-200 pt-px dark:border-zinc-800">
-        <div className="flex items-center px-1 pt-1">
-          <ScrollableTabBar>
-            <TabButton
-              className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
-              active={activeTab === "workspace"}
-              onClick={() => setActiveTab("workspace")}
-            >
-              {t("resultsPanel.workspace")}
-            </TabButton>
-            {isDebugMode && (
-              <TabButton
-                className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
-                active={activeTab === "debug"}
-                onClick={() => setActiveTab("debug")}
-              >
-                {connected ? (
-                  <span className="flex items-center gap-1.5">
-                    <Bug className="h-3.5 w-3.5 text-amber-600" />
-                    {t("resultsPanel.debug")}
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1.5">
-                    {connecting ? (
-                      <Loader className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <WifiOff className="h-3.5 w-3.5" />
-                    )}
-                    {t("resultsPanel.debug")}
-                  </span>
-                )}
-              </TabButton>
-            )}
-            <TabButton
-              className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
-              active={activeTab === "status"}
-              onClick={() => setActiveTab("status")}
-            >
-              {t("resultsPanel.status")}
-            </TabButton>
-            {selectedAgent?.running && (
-              <TabButton
-                className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
-                active={activeTab === "memory"}
-                onClick={() => setActiveTab("memory")}
-              >
-                {t("resultsPanel.memory")}
-              </TabButton>
-            )}
-            {selectedAgent?.running && (
-              <TabButton
-                className="px-[var(--tab-px)] py-[var(--tab-py)] text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]"
-                active={activeTab === "setup"}
-                onClick={() => setActiveTab("setup")}
-              >
-                {t("resultsPanel.setup")}
-              </TabButton>
-            )}
-          </ScrollableTabBar>
-        </div>
+      {/* Tab title header */}
+      <div className="border-b border-zinc-200 px-3 pt-[11px] pb-1.5 text-xs font-medium text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        {t(`resultsPanel.${activeTab}`)}
       </div>
 
       {/* ── Debug tab content ─────────────────────────────────────── */}
@@ -523,6 +461,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart }: Resu
       {/* ── Workspace tab content ─────────────────────────────────── */}
       {activeTab === "workspace" && <WorkspaceExplorer />}
     </div>
+
   );
 }
 

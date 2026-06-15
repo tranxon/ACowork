@@ -5,11 +5,15 @@ import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { ChatPanel } from "../chat/ChatPanel";
 import { ResultsPanel } from "../results/ResultsPanel";
+import { RightNavBar } from "./RightNavBar";
 import { FileEditorPanel } from "../editor/FileEditorPanel";
 import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
+import { useStatusBarStore } from "../../stores/statusBarStore";
+import { cn } from "../../lib/utils";
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { useChatStore } from "../../stores/chatStore";
@@ -17,6 +21,7 @@ import { getGatewayUrl } from "../../lib/config";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
+type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
 
 const MIN_SIDEBAR_WIDTH = 160;
 const MAX_SIDEBAR_WIDTH = 400;
@@ -37,6 +42,7 @@ export function AppLayout() {
   const [currentView, setCurrentView] = useState<NavView>("chat");
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>("gateway");
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
+  const [activeTab, setActiveTab] = useState<PanelTab>("workspace");
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     return stored ? Math.min(Math.max(parseInt(stored, 10), MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH) : DEFAULT_SIDEBAR_WIDTH;
@@ -82,11 +88,42 @@ export function AppLayout() {
 
   const gatewayStatus = useGatewayStore((s) => s.status);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
+  const setStatus = useStatusBarStore((s) => s.setStatus);
+  const statusMsg = useStatusBarStore((s) => s.message);
+  const statusType = useStatusBarStore((s) => s.type);
+  const statusVisible = useStatusBarStore((s) => s.visible);
+  const clearStatus = useStatusBarStore((s) => s.clearStatus);
   // Determine if selected agent is in debug mode
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
   const isDebugMode = selectedAgent?.dev_mode && selectedAgent?.running;
+
+  // ── Glass background color ───────────────────────────────────────
+  const { opacity, theme } = useSettingsStore();
+  const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const glassBg = isDark ? `rgba(41,42,44,${opacity})` : `rgba(226,227,233,${opacity})`;
+
+  // ── Switch to debug tab when entering debug mode ─────────────────
+  const prevIsDebugMode = useRef(isDebugMode);
+  useEffect(() => {
+    if (isDebugMode && !prevIsDebugMode.current) {
+      setActiveTab("debug");
+    }
+    prevIsDebugMode.current = isDebugMode;
+  }, [isDebugMode]);
+
+  // ── Switch to status tab when agent stops ────────────────────────
+  const prevRunning = useRef(selectedAgent?.running);
+  useEffect(() => {
+    const isRunning = selectedAgent?.running ?? false;
+    const wasRunning = prevRunning.current;
+    if (!isRunning && wasRunning !== false && (activeTab === "memory" || activeTab === "setup")) {
+      setActiveTab("status");
+    }
+    prevRunning.current = isRunning;
+  }, [selectedAgent?.running, activeTab]);
+
   const isResizing = useRef(false);
   const startX = useRef(0);
   const startWidth = useRef(DEFAULT_SIDEBAR_WIDTH);
@@ -111,6 +148,17 @@ export function AppLayout() {
     }, 5000);
     return () => clearInterval(interval);
   }, [checkHealth]);
+
+  // Update status bar on gateway status changes
+  useEffect(() => {
+    if (gatewayStatus === "connected") {
+      clearStatus();
+    } else if (gatewayStatus === "error") {
+      setStatus("Gateway connection failed", "error");
+    } else {
+      setStatus("Connecting to Gateway...", "warning");
+    }
+  }, [gatewayStatus, setStatus, clearStatus]);
 
   // Detect wake from sleep via visibility change and reconnect
   useEffect(() => {
@@ -276,9 +324,9 @@ export function AppLayout() {
   }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightWidth, resultsCollapsed]);
 
   return (
-    <div className="flex h-full w-full flex-col">
+    <div className="flex h-full w-full flex-col backdrop-blur-sm" style={{ backgroundColor: glassBg } as React.CSSProperties}>
       {/* Custom title bar */}
-      <TitleBar panelExpanded={!resultsCollapsed} onTogglePanel={toggleResults} />
+      <TitleBar />
 
       {/* Gateway disconnected banner */}
       {gatewayStatus !== "connected" && <GatewayBanner />}
@@ -290,21 +338,19 @@ export function AppLayout() {
 
         {/* Content area based on current view */}
         {currentView === "chat" && (
-          <div className="flex flex-1 overflow-hidden">
+          <div className="flex flex-1 overflow-hidden" style={{ backgroundColor: glassBg } as React.CSSProperties}>
             {/* Agent list — resizable */}
             <AgentList width={sidebarWidth} />
 
             {/* Resize handle */}
             <div
-              className="group relative w-px shrink-0 cursor-col-resize select-none"
+              className="group relative w-1 shrink-0 cursor-col-resize select-none"
               onMouseDown={handleMouseDown}
               role="separator"
               aria-label="Resize sidebar"
             >
-              {/* Visible divider line */}
-              <div className="absolute inset-y-0 left-0 w-px bg-zinc-200 dark:bg-zinc-800" />
-              {/* Hover/active area for resize */}
-              <div className="absolute inset-y-0 -left-2 w-[7px] group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
+              {/* Visible divider line — removed, use glass bg as separator */}
+              <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
             </div>
 
             {/* Chat panel — elastic */}
@@ -315,23 +361,40 @@ export function AppLayout() {
               <>
                 {/* Resize handle between chat and file editor */}
                 <div
-                  className="group relative w-px shrink-0 cursor-col-resize select-none"
+                  className="group relative w-1 shrink-0 cursor-col-resize select-none"
                   onMouseDown={handleMouseDownFile}
                   role="separator"
                   aria-label="Resize file editor"
                 >
-                  <div className="absolute inset-y-0 left-0 w-px bg-zinc-200 dark:bg-zinc-800" />
-                  <div className="absolute inset-y-0 -left-2 w-[7px] group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
+                  <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
                 </div>
                 <FileEditorPanel width={fileWidth} />
               </>
             )}
 
-            {/* Results panel / Debug panel — unified tabs, collapsible, resizable */}
+            {/* Results panel — unified tabs, collapsible, resizable */}
             {!resultsCollapsed && (
-              <ResultsPanel width={rightWidth} onCollapse={toggleResults} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} />
+              <ResultsPanel width={rightWidth} onCollapse={toggleResults} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
             )}
           </div>
+        )}
+
+        {/* Right Nav Bar — always rendered, clicking expands panel */}
+        {currentView === "chat" && (
+          <RightNavBar
+            activeTab={activeTab}
+            onTabChange={(tab) => {
+              if (!resultsCollapsed && tab === activeTab) {
+                setResultsCollapsed(true);
+              } else {
+                setResultsCollapsed(false);
+                setActiveTab(tab);
+              }
+            }}
+            isDebugMode={!!isDebugMode}
+            agentRunning={selectedAgent?.running ?? false}
+            collapsed={resultsCollapsed}
+          />
         )}
 
         {currentView === "settings" && <SettingsPage initialTab={settingsInitialTab} />}
@@ -344,6 +407,20 @@ export function AppLayout() {
               <p className="text-sm text-zinc-400 dark:text-zinc-500">TODO</p>
             </div>
           </div>
+        )}
+      </div>
+
+      {/* Bottom status bar */}
+      <div className="flex h-5 shrink-0 items-center gap-3 px-3 text-[11px] select-none dark:text-zinc-400" style={{ backgroundColor: glassBg } as React.CSSProperties}>
+        {statusVisible && (
+          <span className={cn(
+            "truncate",
+            statusType === "error" && "text-red-500",
+            statusType === "warning" && "text-amber-600",
+            statusType === "info" && "text-zinc-500",
+          )}>
+            {statusMsg}
+          </span>
         )}
       </div>
 

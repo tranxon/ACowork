@@ -307,7 +307,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   if (!agent) return null;
 
   return (
-    <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 pt-[5px] border-b border-zinc-200 dark:border-zinc-800">
+    <div className="flex items-center select-none px-0.5 gap-0.5 pt-[5px] border-b border-zinc-200 dark:border-zinc-800">
       <ScrollableTabBar
         ref={scrollableRef}
         activeItemSelector={activeSessionId ? `[data-session-id="${activeSessionId}"]` : undefined}

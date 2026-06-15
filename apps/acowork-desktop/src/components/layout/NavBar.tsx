@@ -1,8 +1,8 @@
 import { useId, type ComponentType } from "react";
 import type { NavView } from "../../lib/types";
-import { cn } from "../../lib/utils";
 import { UserAvatar } from "../common/UserAvatar";
 import { Tooltip } from "../common/Tooltip";
+import { NavButton } from "../common/NavButton";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -200,40 +200,33 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
 
       {/* Top navigation items */}
       {topNavItems.map(({ view, icon: Icon, i18nKey }) => (
-        <Tooltip key={view} content={t(i18nKey)} variant="plain" position="right">
-          <button
-            onClick={() => onViewChange(view)}
-            className={cn(
-              "flex h-10 w-10 items-center justify-center rounded-lg transition-colors duration-150",
-              currentView === view
-                ? "hover:bg-[#D8D9DC] dark:hover:bg-[#3D3D3F]"
-                : "text-zinc-500 hover:text-zinc-600 hover:bg-[#D8D9DC] dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-[#3D3D3F]",
-            )}
-            style={currentView === view ? { color: "var(--color-accent)" } : undefined}
-            aria-label={t(i18nKey)}
-            aria-current={currentView === view ? "page" : undefined}
-          >
-            {currentView === view ? (
-              view === "chat" ? (
-                <FilledChatIcon className="h-6 w-6" />
-              ) : view === "harness" ? (
-                <FilledHarnessIcon className="h-6 w-6" />
-              ) : view === "docs" ? (
-                <FilledDocsIcon className="h-6 w-6" />
-              ) : view === "projects" ? (
-                <FilledProjectsIcon className="h-6 w-6" />
-              ) : (
-                <FilledSettingsIcon className="h-6 w-6" />
-              )
+        <NavButton
+          key={view}
+          active={currentView === view}
+          onClick={() => onViewChange(view)}
+          tooltip={t(i18nKey)}
+          tooltipPosition="right"
+        >
+          {currentView === view ? (
+            view === "chat" ? (
+              <FilledChatIcon className="h-6 w-6" />
+            ) : view === "harness" ? (
+              <FilledHarnessIcon className="h-6 w-6" />
+            ) : view === "docs" ? (
+              <FilledDocsIcon className="h-6 w-6" />
+            ) : view === "projects" ? (
+              <FilledProjectsIcon className="h-6 w-6" />
             ) : (
-              view === "projects" ? (
-                <OutlineProjectsIcon className="h-6 w-6" isDark={isDark} />
-              ) : (
-                <Icon className="h-6 w-6" />
-              )
-            )}
-          </button>
-        </Tooltip>
+              <FilledSettingsIcon className="h-6 w-6" />
+            )
+          ) : (
+            view === "projects" ? (
+              <OutlineProjectsIcon className="h-6 w-6" isDark={isDark} />
+            ) : (
+              <Icon className="h-6 w-6" />
+            )
+          )}
+        </NavButton>
       ))}
 
       {/* Spacer */}
@@ -241,26 +234,19 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
 
       {/* Bottom navigation items */}
       {bottomNavItems.map(({ view, icon: Icon, i18nKey }) => (
-        <Tooltip key={view} content={t(i18nKey)} variant="plain" position="right">
-          <button
-            onClick={() => onViewChange(view)}
-            className={cn(
-              "flex h-10 w-10 items-center justify-center rounded-lg transition-colors duration-150",
-              currentView === view
-                ? "hover:bg-[#D8D9DC] dark:hover:bg-[#3D3D3F]"
-                : "text-zinc-500 hover:text-zinc-600 hover:bg-[#D8D9DC] dark:text-zinc-400 dark:hover:text-zinc-300 dark:hover:bg-[#3D3D3F]",
-            )}
-            style={currentView === view ? { color: "var(--color-accent)" } : undefined}
-            aria-label={t(i18nKey)}
-            aria-current={currentView === view ? "page" : undefined}
-          >
-            {currentView === view ? (
-              <FilledSettingsIcon className="h-6 w-6" />
-            ) : (
-              <Icon className="h-6 w-6" />
-            )}
-          </button>
-        </Tooltip>
+        <NavButton
+          key={view}
+          active={currentView === view}
+          onClick={() => onViewChange(view)}
+          tooltip={t(i18nKey)}
+          tooltipPosition="right"
+        >
+          {currentView === view ? (
+            <FilledSettingsIcon className="h-6 w-6" />
+          ) : (
+            <Icon className="h-6 w-6" />
+          )}
+        </NavButton>
       ))}
     </nav>
   );

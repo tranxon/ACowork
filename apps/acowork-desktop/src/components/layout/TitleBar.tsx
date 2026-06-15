@@ -1,36 +1,8 @@
 import { Minus, Square, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { Tooltip } from "../common/Tooltip";
-import { useTranslation } from "../../i18n/useTranslation";
 
-// ── VS Code style panel toggle icon ──────────────────────────────────
-/** VS Code style panel toggle: a box divided by a vertical line into left/right halves.
- *  Right half highlights (filled) when panel is expanded. */
-function PanelToggleIcon({ expanded }: { expanded: boolean }) {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-      {/* Outer rectangle */}
-      <rect x="1.5" y="1.5" width="11" height="11" rx="1.2" />
-      {/* Vertical divider line */}
-      <line x1="7" y1="1.5" x2="7" y2="12.5" />
-      {/* Right half fill — accent when expanded */}
-      <rect x="7" y="1.5" width="5.5" height="11" rx="0"
-        fill={expanded ? "var(--color-accent)" : "none"}
-      />
-    </svg>
-  );
-}
-
-interface TitleBarProps {
-  /** Whether the right panel is currently expanded */
-  panelExpanded: boolean;
-  /** Toggle the right panel */
-  onTogglePanel: () => void;
-}
-
-export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
-  const { t } = useTranslation();
+export function TitleBar() {
   const { opacity, theme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   // Original gray: #E2E3E9 (light) / #292A2C (dark), modulated by opacity
@@ -88,20 +60,8 @@ export function TitleBar({ panelExpanded, onTogglePanel }: TitleBarProps) {
         </span>
       </div>
 
-      {/* Right: Panel toggle + Window controls */}
+      {/* Right: Window controls */}
       <div className="flex items-center gap-1">
-        {/* Right panel toggle — VS Code style, left of window controls */}
-        <Tooltip content={panelExpanded ? t("titleBar.collapseRightPanel") : t("titleBar.expandRightPanel")} variant="plain">
-          <button
-            className="flex h-8 w-8 items-center justify-center rounded text-zinc-500 hover:text-zinc-700 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
-            style={{ "-webkit-app-region": "no-drag" } as React.CSSProperties}
-            onClick={onTogglePanel}
-            aria-label={panelExpanded ? t("titleBar.collapseRightPanel") : t("titleBar.expandRightPanel")}
-          >
-            <PanelToggleIcon expanded={panelExpanded} />
-          </button>
-        </Tooltip>
-
         {/* Minimize */}
         <button
           className="flex h-8 w-8 items-center justify-center rounded text-zinc-600 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-700"
