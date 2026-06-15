@@ -15,6 +15,24 @@ use std::collections::HashMap;
 /// Default Gateway base URL (from shared core constants)
 const DEFAULT_BASE_URL: &str = defaults::GATEWAY_HTTP_URL;
 
+/// Minimal RFC 3986 percent-encoder for query string values. Used to embed
+/// user-supplied file paths in the upload endpoint URL without pulling in
+/// the `urlencoding` crate just for this single use case.
+fn urlencoded(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    out
+}
+
 /// Gateway error response format (matches Gateway's `ApiError` struct)
 #[derive(Deserialize)]
 struct GatewayErrorResponse {
@@ -117,6 +135,71 @@ impl GatewayClient {
         let resp = self
             .client
             .post(format!("{}/api/agents/install", self.base_url))
+            .multipart(form)
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `POST /api/agents/:id/manifest/avatar` — write avatar / builtin_avatar
+    /// fields into the agent's installed manifest.toml.
+    ///
+    /// Pass `Some("...")` to set, `Some("")` or `None` to clear (omit to leave
+    /// unchanged). Used by the Publish wizard to bake the user's avatar
+    /// selection into the package before build.
+    pub async fn update_agent_manifest_avatar(
+        &self,
+        agent_id: &str,
+        avatar: Option<&str>,
+        builtin_avatar: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::Map::new();
+        if let Some(v) = avatar {
+            body.insert("avatar".to_string(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = builtin_avatar {
+            body.insert(
+                "builtin_avatar".to_string(),
+                serde_json::Value::String(v.to_string()),
+            );
+        }
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/agents/{}/manifest/avatar",
+                self.base_url, agent_id
+            ))
+            .json(&body)
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `POST /api/agents/:id/manifest/file?path=<relative>` — write a single
+    /// file into the agent's install directory. Used by the Publish wizard to
+    /// upload a custom avatar image. The path is restricted to image
+    /// extensions server-side.
+    pub async fn upload_agent_file(
+        &self,
+        agent_id: &str,
+        relative_path: &str,
+        bytes: &[u8],
+    ) -> Result<serde_json::Value> {
+        let form = reqwest::multipart::Form::new().part(
+            "file",
+            reqwest::multipart::Part::bytes(bytes.to_vec())
+                .file_name("upload")
+                .mime_str("application/octet-stream")
+                .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
+        );
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/agents/{}/manifest/file?path={}",
+                self.base_url,
+                agent_id,
+                urlencoded(relative_path)
+            ))
             .multipart(form)
             .send()
             .await?;
@@ -557,6 +640,8 @@ pub struct AgentListEntry {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub avatar: Option<String>,
+    /// Builtin avatar index declared in the manifest (e.g. "icon-05").
+    pub builtin_avatar: Option<String>,
     pub version: String,
     pub running: bool,
     pub connected: bool,
@@ -573,6 +658,8 @@ pub struct AgentDetailResponse {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub avatar: Option<String>,
+    /// Builtin avatar index declared in the manifest (e.g. "icon-05").
+    pub builtin_avatar: Option<String>,
     pub version: String,
     pub description: String,
     pub author: String,

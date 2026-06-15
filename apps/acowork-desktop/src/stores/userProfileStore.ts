@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { AvatarType, BoringAvatarVariant, ColorPalette, UserProfile } from "../lib/types";
 import { COLOR_PALETTES } from "../lib/types";
+import { pickRandomBuiltinIconId } from "../lib/avatar";
 import i18n from "../i18n";
 
 const STORAGE_KEY = "acowork-user-profile";
@@ -37,7 +38,12 @@ function loadProfile(): UserProfile {
   } catch {
     // localStorage unavailable or corrupted; use defaults
   }
-  return { ...DEFAULT_PROFILE };
+  // No saved profile — pick a random builtin icon so the user shows a
+  // real avatar from the very first session, even if onboarding is skipped.
+  return {
+    ...DEFAULT_PROFILE,
+    avatarIcon: pickRandomBuiltinIconId(),
+  };
 }
 
 function saveProfile(profile: UserProfile) {
@@ -75,6 +81,13 @@ interface UserProfileState {
   getColors: () => string[];
   /** Reset to defaults */
   resetProfile: () => void;
+  /**
+   * Idempotently assign a random builtin avatar to the user profile if it
+   * doesn't already have one. Called from the onboarding completion hook so
+   * the freshly-onboarded user gets a builtin icon instead of the legacy
+   * letter/gradient fallback. Skips if `avatarIcon` is already set.
+   */
+  assignRandomAvatarIfMissing: () => void;
 }
 
 export const useUserProfileStore = create<UserProfileState>((set, get) => ({
@@ -94,6 +107,16 @@ export const useUserProfileStore = create<UserProfileState>((set, get) => ({
 
   resetProfile: () => {
     const next = { ...DEFAULT_PROFILE };
+    saveProfile(next);
+    set({ profile: next });
+  },
+
+  assignRandomAvatarIfMissing: () => {
+    const current = get().profile;
+    if (current.avatarIcon) return;
+    const iconId = pickRandomBuiltinIconId();
+    if (!iconId) return;
+    const next: UserProfile = { ...current, avatarIcon: iconId };
     saveProfile(next);
     set({ profile: next });
   },

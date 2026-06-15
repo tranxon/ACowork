@@ -253,6 +253,11 @@ runtime_version = "0.1.0"
 system = false
 dev = false
 
+# 头像: 优先使用包内图片(assets/avatar.png), 否则用内置图标("icon-05" / "5")
+# 都不设置则首次安装时随机一个内置图标
+# avatar = "assets/avatar.png"
+# builtin_avatar = "icon-05"
+
 # permissions 使用数组表语法
 [[permissions]]
 type = "Network"
@@ -347,7 +352,8 @@ progressive = false
 - `system`：是否为系统 Agent。`true` 时具有最高权限，通常用于 `com.acowork.system`。
 - `dev`：是否为开发者模式。用于本地开发测试。
 - `display_name` / `role`：UI 展示用的短名称和角色标题。`display_name` 默认为 `name`。
-- `avatar`：可选，包内头像图片路径（如 `"assets/avatar.png"`）。
+- `avatar`：可选，包内头像图片路径（如 `"assets/avatar.png"`）。优先级最高。
+- `builtin_avatar`：可选，内置头像索引（如 `"icon-05"` 或裸数字 `"5"`），用于在没有 `avatar` 时给首次安装的客户端一个确定的默认图标。客户端按字母数字顺序归一化为 `"icon-XX"`，并对照自身捆绑的图标集校验；无法识别时回退到随机。
 - `permissions`：使用 TOML 数组表语法，每条包含 `type` 和可选的 `value`。支持 `Network`、`FilesystemRead`、`FilesystemWrite`、`MemoryRead`、`MemoryWrite`、`IntentSend` 等类型。
 - `triggers`：激活触发器数组。支持 `cron`、`event`、`manual` 类型。`cron` 使用标准 5 段表达式（UTC 时区），不支持秒级精度和特殊宏。
 - `llm.providers`：支持配置多个 LLM Provider，每个引用 Vault 中的密钥。

@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useUserProfileStore } from "../../stores/userProfileStore";
+import { pickDeterministicBuiltinIconId, pickRandomBuiltinIconId } from "../../lib/avatar";
 import type { BoringAvatarVariant } from "../../lib/types";
 import { Tooltip } from "./Tooltip";
 
@@ -25,118 +26,22 @@ const BUILTIN_ICONS: Record<string, string> = Object.fromEntries(
 /** Extract built-in icon IDs for selection UI */
 export const BUILTIN_ICON_IDS = Object.keys(BUILTIN_ICONS);
 
-// ── Hash-based color from string ────────────────────────────────────────
-
-function hashString(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-function pickColor(name: string, palette: string[]): string {
-  if (palette.length === 0) return "#6366F1";
-  return palette[hashString(name) % palette.length];
-}
-
 export const AGENT_DEFAULT_PALETTE = ["#6366F1", "#8B5CF6", "#EC4899", "#F59E0B", "#10B981", "#06B6D4", "#F97316", "#EF4444"];
-
-// ── LetterAvatar fallback ───────────────────────────────────────────────
-
-function LetterAvatar({ name, size, palette }: { name: string; size: number; palette: string[] }) {
-  const initial = (name || "?")[0].toUpperCase();
-  const bgColor = pickColor(name, palette);
-  const textColor = "#ffffff";
-  return (
-    <Tooltip content={name} variant="plain">
-      <div
-        className="rounded-full ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 flex items-center justify-center font-bold select-none"
-        style={{
-          width: size,
-          height: size,
-          backgroundColor: bgColor,
-          color: textColor,
-          fontSize: size * 0.42,
-          lineHeight: 1,
-        }}
-      >
-        {initial}
-      </div>
-    </Tooltip>
-  );
-}
 
 // ── Built-in icon wrapper ────────────────────────────────────────────────
 
 function BuiltinIconAvatar({ iconId, size, className }: { iconId: string; size: number; className?: string }) {
   const src = BUILTIN_ICONS[iconId] ?? BUILTIN_ICONS["icon-01"];
   return (
-    <img
-      src={src}
-      alt={iconId}
-      draggable={false}
-      className={`rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
-      style={{ width: size, height: size }}
-    />
-  );
-}
-
-// ── Boring Avatars lazy component ───────────────────────────────────────
-
-// Use function wrapper to avoid issues with named exports
-function BoringAvatarBlock({ name, variant, colors, size }: { name: string; variant: BoringAvatarVariant; colors: string[]; size: number }) {
-  // NOTE: boring-avatars v1.x exports default Avatar component
-  // We inline a simple SVG-based geometric avatar as fallback for type safety.
-  // When types are resolved, use: <Avatar name={name} variant={variant} colors={colors} size={size} square={false} />
-  const seed = useMemo(() => hashString(name), [name]);
-  const c1 = colors[seed % colors.length] ?? "#6366F1";
-  const c2 = colors[(seed + 1) % colors.length] ?? "#10B981";
-
-  // Simple geometric avatar (will be replaced by actual boring-avatars once typing is set up)
-  if (variant === "beam") {
-    return (
-      <svg width={size} height={size} viewBox="0 0 36 36" className="rounded-full ring-1 ring-zinc-300/60 dark:ring-zinc-600/60">
-        <rect width="36" height="36" rx="18" fill={c1} />
-        <rect x="10" y="10" width="16" height="16" rx="8" fill={c2} opacity="0.7" />
-        <circle cx="18" cy="18" r="5" fill={c1} />
-      </svg>
-    );
-  }
-  if (variant === "ring") {
-    return (
-      <svg width={size} height={size} viewBox="0 0 36 36" className="rounded-full ring-1 ring-zinc-300/60 dark:ring-zinc-600/60">
-        <rect width="36" height="36" rx="18" fill={c1} />
-        <circle cx="18" cy="18" r="10" fill="none" stroke={c2} strokeWidth="4" />
-        <circle cx="18" cy="18" r="4" fill={c2} />
-      </svg>
-    );
-  }
-  if (variant === "pixel") {
-    const rows = [];
-    for (let y = 0; y < 6; y++) {
-      for (let x = 0; x < 6; x++) {
-        const v = (seed + x * 7 + y * 13) % 2;
-        if (v === 0) continue;
-        rows.push(<rect key={`${x}-${y}`} x={4 + x * 5} y={4 + y * 5} width="4" height="4" rx="1" fill={c2} />);
-      }
-    }
-    return (
-      <svg width={size} height={size} viewBox="0 0 36 36" className="rounded-full ring-1 ring-zinc-300/60 dark:ring-zinc-600/60">
-        <rect width="36" height="36" rx="18" fill={c1} />
-        {rows}
-      </svg>
-    );
-  }
-
-  // marble / sunset / bauhaus fallback
-  return (
-    <svg width={size} height={size} viewBox="0 0 36 36" className="rounded-full ring-1 ring-zinc-300/60 dark:ring-zinc-600/60">
-      <rect width="36" height="36" rx="18" fill={c1} />
-      <circle cx={16 + (seed % 5)} cy={16 + ((seed * 3) % 5)} r="8" fill={c2} opacity="0.6" />
-      <circle cx={20 - (seed % 4)} cy={20 - ((seed * 2) % 4)} r="5" fill={c1} opacity="0.8" />
-    </svg>
+    <Tooltip content={iconId} variant="plain">
+      <img
+        src={src}
+        alt={iconId}
+        draggable={false}
+        className={`rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
+        style={{ width: size, height: size }}
+      />
+    </Tooltip>
   );
 }
 
@@ -153,34 +58,42 @@ export interface UserAvatarProps {
   className?: string;
 }
 
+/**
+ * User avatar. Always renders a builtin icon — letter/gradient generation
+ * has been removed in favour of the bundled icon set. If the profile has
+ * no `avatarIcon` set (legacy state, or before onboarding completed), a
+ * deterministic random builtin icon is shown and persisted in the background.
+ */
 export function UserAvatar({
   displayName,
-  avatarType: _type,
-  avatarVariant: _variant,
   avatarIcon: _icon,
-  avatarColors: _colors,
   size = 32,
   className,
 }: UserAvatarProps) {
-  const profile = useUserProfileStore((s) => s.profile);
-  const storeColors = useUserProfileStore((s) => s.getColors)();
+  const profileIconId = useUserProfileStore((s) => s.profile.avatarIcon);
+  const setProfile = useUserProfileStore((s) => s.setProfile);
 
-  const name = displayName ?? profile.displayName;
-  const type = _type ?? profile.avatarType;
-  const variant = _variant ?? profile.avatarVariant;
-  const iconId = _icon ?? profile.avatarIcon;
-  const colors = _colors && _colors.length > 0 ? _colors : storeColors;
+  const fallbackIconId = useMemo(
+    () => pickDeterministicBuiltinIconId(displayName ?? "user"),
+    [displayName],
+  );
 
-  if (type === "icon" && iconId && BUILTIN_ICONS[iconId]) {
-    return <BuiltinIconAvatar iconId={iconId} size={size} className={className} />;
-  }
+  // Self-heal: if no profile icon is set (legacy data, pre-onboarding),
+  // persist a random one in the background so the next render reads it
+  // from the store. Idempotent.
+  useEffect(() => {
+    if (profileIconId) return;
+    const iconId = pickRandomBuiltinIconId();
+    if (iconId) setProfile({ avatarIcon: iconId });
+  }, [profileIconId, setProfile]);
 
-  if (type === "boring") {
-    return <BoringAvatarBlock name={name || "user"} variant={variant} colors={colors} size={size} />;
-  }
+  const iconId =
+    (_icon && BUILTIN_ICONS[_icon] ? _icon : null) ??
+    (profileIconId && BUILTIN_ICONS[profileIconId] ? profileIconId : null) ??
+    fallbackIconId ??
+    "icon-01";
 
-  // type === "letter" (fallback)
-  return <LetterAvatar name={name || "?"} size={size} palette={colors} />;
+  return <BuiltinIconAvatar iconId={iconId} size={size} className={className} />;
 }
 
 export { BUILTIN_ICONS };

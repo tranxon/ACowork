@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
+import { normalizeBuiltinAvatarId, pickRandomBuiltinIconId } from "../lib/avatar";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -57,6 +58,38 @@ interface AgentProfileStore {
   getProfile: (agentId: string) => AgentProfileSettings;
   setProfile: (agentId: string, settings: Partial<AgentProfileSettings>) => void;
   resetProfile: (agentId: string) => void;
+  /**
+   * Idempotently assign a builtin avatar to the agent if it doesn't already
+   * have one. Called from the install hook so freshly installed agents show
+   * a builtin icon instead of the legacy gradient fallback.
+   *
+   * Pick order:
+   * 1. The manifest's `builtin_avatar` field (if present and valid) — gives
+   *    the agent author control over the default icon at packaging time.
+   * 2. A random builtin icon — last-resort fallback.
+   *
+   * Skipped when:
+   * - the agent already has a profile iconId set (user has chosen one)
+   * - `hasPackagedAvatar` is true (the agent ships its own icon.png/jpg)
+   */
+  assignRandomAvatarIfMissing: (
+    agentId: string,
+    hasPackagedAvatar?: boolean,
+    builtinAvatarHint?: string | null,
+  ) => void;
+  /**
+   * Bulk variant used after `fetchAgents` to backfill any installed agent
+   * that somehow has no profile icon. Idempotent.
+   *
+   * Each entry may carry a `builtin_avatar` hint from the manifest.
+   */
+  ensureBuiltinAvatars: (
+    agents: ReadonlyArray<{
+      agent_id: string;
+      avatar?: string | null;
+      builtin_avatar?: string | null;
+    }>,
+  ) => void;
 }
 
 function loadProfiles(): Record<string, AgentProfileSettings> {
@@ -139,6 +172,52 @@ export const useAgentProfileStore = create<AgentProfileStore>((set, get) => ({
       delete updated[agentId];
       saveProfiles(updated);
       return { profiles: updated };
+    });
+  },
+
+  assignRandomAvatarIfMissing: (agentId, hasPackagedAvatar, builtinAvatarHint) => {
+    if (!agentId) return;
+    if (hasPackagedAvatar) return;
+    const state = get();
+    const existing = state.profiles[agentId];
+    if (existing && existing.avatarIconId) return;
+    // Prefer the manifest's builtin_avatar hint; fall back to a random pick.
+    const iconId = normalizeBuiltinAvatarId(builtinAvatarHint) ?? pickRandomBuiltinIconId();
+    if (!iconId) return;
+    set((s) => {
+      const current = s.profiles[agentId] ?? { ...DEFAULT_SETTINGS };
+      if (current.avatarIconId) return s; // someone else won the race
+      const updated: Record<string, AgentProfileSettings> = {
+        ...s.profiles,
+        [agentId]: { ...current, avatarIconId: iconId },
+      };
+      saveProfiles(updated);
+      return { profiles: updated };
+    });
+  },
+
+  ensureBuiltinAvatars: (agents) => {
+    if (!agents || agents.length === 0) return;
+    const state = get();
+    const updates: Record<string, AgentProfileSettings> = {};
+    let dirty = false;
+    for (const agent of agents) {
+      const id = agent.agent_id;
+      if (!id) continue;
+      if (agent.avatar) continue; // has packaged avatar
+      const current = state.profiles[id];
+      if (current && current.avatarIconId) continue; // user already set one
+      // Prefer the manifest's builtin_avatar hint; fall back to a random pick.
+      const iconId = normalizeBuiltinAvatarId(agent.builtin_avatar) ?? pickRandomBuiltinIconId();
+      if (!iconId) continue;
+      updates[id] = { ...(current ?? { ...DEFAULT_SETTINGS }), avatarIconId: iconId };
+      dirty = true;
+    }
+    if (!dirty) return;
+    set((s) => {
+      const next = { ...s.profiles, ...updates };
+      saveProfiles(next);
+      return { profiles: next };
     });
   },
 }));

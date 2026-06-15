@@ -3,6 +3,7 @@
 //! Implements the Agent CRUD and lifecycle endpoints:
 //! - GET    /api/agents           — list all agents with status
 //! - GET    /api/agents/:id       — get agent detail
+//! - GET    /api/agents/:id/avatar — get agent's packaged avatar image
 //! - POST   /api/agents/install  — install a .agent package
 //! - POST   /api/agents/:id/clone — clone an agent (skeleton or full)
 //! - DELETE /api/agents/:id       — uninstall an agent
@@ -11,8 +12,9 @@
 
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, State},
-    http::StatusCode,
+    body::Body,
+    extract::{Multipart, Path, Query, State},
+    http::{Response, StatusCode, header},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,15 @@ pub fn agent_routes() -> Router<AppState> {
             "/api/agents/{id}",
             get(get_agent_detail).delete(uninstall_agent),
         )
+        .route("/api/agents/{id}/avatar", get(get_agent_avatar))
+        .route(
+            "/api/agents/{id}/manifest/avatar",
+            post(update_agent_manifest_avatar),
+        )
+        .route(
+            "/api/agents/{id}/manifest/file",
+            post(upload_agent_file),
+        )
         .route("/api/agents/install", post(install_agent))
         .route("/api/agents/{id}/clone", post(clone_agent))
         .route("/api/agents/{id}/start", post(start_agent))
@@ -90,6 +101,11 @@ pub struct AgentListResponse {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub avatar: Option<String>,
+    /// Builtin avatar index declared in the manifest (e.g. "icon-05").
+    /// Used as the default builtin avatar on first install when `avatar`
+    /// (a packaged image path) is not set. The client normalises and
+    /// validates this against its bundled icon set.
+    pub builtin_avatar: Option<String>,
     pub version: String,
     pub running: bool,
     pub connected: bool,
@@ -109,6 +125,8 @@ pub struct AgentDetailResponse {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub avatar: Option<String>,
+    /// Builtin avatar index declared in the manifest (e.g. "icon-05").
+    pub builtin_avatar: Option<String>,
     pub version: String,
     pub description: String,
     pub author: String,
@@ -166,6 +184,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 display_name: info.manifest.display_name.clone(),
                 role: info.manifest.role.clone(),
                 avatar: info.manifest.avatar.clone(),
+                builtin_avatar: info.manifest.builtin_avatar.clone(),
                 version: info.version.clone(),
                 running: actually_running,
                 connected,
@@ -212,6 +231,7 @@ pub async fn get_agent_detail(
         display_name: info.manifest.display_name.clone(),
         role: info.manifest.role.clone(),
         avatar: info.manifest.avatar.clone(),
+        builtin_avatar: info.manifest.builtin_avatar.clone(),
         version: info.version.clone(),
         description: info.manifest.description.clone(),
         author: info.manifest.author.clone(),
@@ -225,6 +245,364 @@ pub async fn get_agent_detail(
         embed_config_json: build_embed_config_json(&state).await,
     };
     Ok(Json(resp))
+}
+
+/// `GET /api/agents/:id/avatar` — serve the agent's packaged avatar image.
+///
+/// The avatar path in the manifest is a relative path inside the installed
+/// package directory. We resolve it to `<install_path>/<avatar>` and stream
+/// the file bytes with a content type derived from the extension.
+///
+/// Returns 404 if:
+/// - the agent is not installed
+/// - the manifest does not declare an `avatar` field
+/// - the resolved file does not exist
+/// - the resolved file escapes the install directory (path traversal guard)
+pub async fn get_agent_avatar(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    let (install_path, avatar_rel) = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        let avatar = info.manifest.avatar.clone().ok_or_else(|| {
+            ApiError::not_found(&format!("Agent '{}' has no packaged avatar", agent_id))
+        })?;
+        (info.install_path.clone(), avatar)
+    };
+
+    let install_dir = std::path::Path::new(&install_path);
+    let avatar_path = install_dir.join(&avatar_rel);
+
+    // Canonicalize both to detect path traversal (e.g. "../../etc/passwd").
+    // If the install dir doesn't exist, fall through to 404.
+    let canonical_install = match std::fs::canonicalize(install_dir) {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(ApiError::not_found(&format!(
+                "Install directory not found for agent '{}'",
+                agent_id
+            )));
+        }
+    };
+    let canonical_avatar = match std::fs::canonicalize(&avatar_path) {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(ApiError::not_found(&format!(
+                "Avatar file not found for agent '{}': {}",
+                agent_id, avatar_rel
+            )));
+        }
+    };
+    if !canonical_avatar.starts_with(&canonical_install) {
+        tracing::warn!(
+            "Avatar path traversal blocked: agent={} avatar={} resolved={}",
+            agent_id,
+            avatar_rel,
+            canonical_avatar.display()
+        );
+        return Err(ApiError::not_found("Avatar path is outside the install directory"));
+    }
+
+    let bytes = std::fs::read(&canonical_avatar).map_err(|e| {
+        tracing::warn!(
+            "Failed to read avatar file '{}': {}",
+            canonical_avatar.display(),
+            e
+        );
+        ApiError::not_found(&format!("Failed to read avatar: {}", e))
+    })?;
+
+    let content_type = guess_avatar_content_type(&canonical_avatar);
+    let resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(&format!("Failed to build avatar response: {}", e)))?;
+    Ok(resp)
+}
+
+/// Best-effort MIME type detection for avatar files by extension.
+/// Supports the formats documented in `docs/02-agent-package.md` (PNG, JPG).
+fn guess_avatar_content_type(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Request body for `POST /api/agents/{id}/manifest/avatar`.
+///
+/// Either field is optional. Pass `null` (or an empty string) to remove a
+/// previously set value. Omitting a field leaves it unchanged.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateAvatarRequest {
+    /// Packaged image path (e.g. "assets/avatar.png"). Set to null/empty to remove.
+    #[serde(default)]
+    pub avatar: Option<String>,
+    /// Builtin avatar index (e.g. "icon-05"). Set to null/empty to remove.
+    #[serde(default)]
+    pub builtin_avatar: Option<String>,
+}
+
+/// `POST /api/agents/{id}/manifest/avatar` — update the avatar fields in the
+/// agent's installed `manifest.toml`. Used by the Publish wizard to bake the
+/// user's selection into the package before build.
+///
+/// Persists the in-memory `AgentInfo.manifest` AND writes the on-disk
+/// `manifest.toml` so the next `build_publish` reads the updated value.
+pub async fn update_agent_manifest_avatar(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<UpdateAvatarRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let install_path = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        info.install_path.clone()
+    };
+
+    // Apply changes: empty string is treated the same as null (clear the field).
+    let new_avatar = req
+        .avatar
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let new_builtin_avatar = req
+        .builtin_avatar
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    // Validate builtin_avatar: must match icon-NN or N. Backend is permissive
+    // (the client is the source of truth for the icon set), but we reject
+    // obviously malformed values so a typo doesn't silently leak into the
+    // built package.
+    if let Some(ref value) = new_builtin_avatar {
+        if !is_plausible_builtin_avatar_id(value) {
+            return Err(ApiError::bad_request(&format!(
+                "Invalid builtin_avatar value '{}': expected 'icon-NN' or numeric 1-99",
+                value
+            )));
+        }
+    }
+
+    let manifest_path = std::path::Path::new(&install_path).join("manifest.toml");
+
+    // Read-modify-write the on-disk manifest. We do this synchronously because
+    // publish flow is a single-user CLI operation.
+    let manifest_toml = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        ApiError::not_found(&format!(
+            "manifest.toml not found at {}: {}",
+            manifest_path.display(),
+            e
+        ))
+    })?;
+    let mut manifest: AgentManifest = AgentManifest::from_toml(&manifest_toml).map_err(|e| {
+        ApiError::internal(&format!("Failed to parse existing manifest.toml: {}", e))
+    })?;
+    if req.avatar.is_some() {
+        manifest.avatar = new_avatar.clone();
+    }
+    if req.builtin_avatar.is_some() {
+        manifest.builtin_avatar = new_builtin_avatar.clone();
+    }
+    let new_toml = manifest
+        .to_toml()
+        .map_err(|e| ApiError::internal(&format!("Failed to serialize manifest: {}", e)))?;
+    std::fs::write(&manifest_path, new_toml).map_err(|e| {
+        ApiError::internal(&format!(
+            "Failed to write manifest.toml at {}: {}",
+            manifest_path.display(),
+            e
+        ))
+    })?;
+
+    // Update the in-memory copy so the next list_agents/get_agent_detail
+    // returns the new values without requiring a Gateway restart.
+    {
+        let mut gw = state.gateway_state.write().await;
+        if let Some(info) = gw.installed_agents.get_mut(&agent_id) {
+            if req.avatar.is_some() {
+                info.manifest.avatar = new_avatar.clone();
+            }
+            if req.builtin_avatar.is_some() {
+                info.manifest.builtin_avatar = new_builtin_avatar.clone();
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "message": "Manifest avatar fields updated",
+        "agent_id": agent_id,
+        "avatar": new_avatar,
+        "builtin_avatar": new_builtin_avatar,
+    })))
+}
+
+/// Loose syntactic check for builtin_avatar values. Accepts "icon-NN" with
+/// 1-99, or bare numeric 1-99. The client is still the source of truth for
+/// whether the ID corresponds to a bundled icon — this is just a guard
+/// against obvious typos.
+fn is_plausible_builtin_avatar_id(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if let Some(num) = lower.strip_prefix("icon-") {
+        if let Ok(n) = num.parse::<u32>() {
+            return (1..=99).contains(&n);
+        }
+        return false;
+    }
+    if let Ok(n) = lower.parse::<u32>() {
+        return (1..=99).contains(&n);
+    }
+    false
+}
+
+/// `POST /api/agents/{id}/manifest/file?path=<relative>`
+///
+/// Write a single file into the agent's install directory at the given
+/// relative path. Used by the Publish wizard to upload a custom avatar
+/// image that the wizard then references from `manifest.toml`.
+///
+/// The relative path is restricted to plain image extensions
+/// (png/jpg/jpeg/gif/webp/svg) and is canonicalised to prevent escape
+/// from the install dir (path traversal guard).
+pub async fn upload_agent_file(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(params): Query<UploadFileQuery>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let install_path = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        info.install_path.clone()
+    };
+
+    let relative = params.path.trim();
+    if relative.is_empty() {
+        return Err(ApiError::bad_request("Missing 'path' query parameter"));
+    }
+
+    // Whitelist image extensions — this endpoint is specifically for avatar
+    // uploads, not arbitrary files. New use cases should add their own
+    // endpoint with broader validation.
+    let ext = std::path::Path::new(relative)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let allowed = matches!(
+        ext.as_deref(),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("svg")
+    );
+    if !allowed {
+        return Err(ApiError::bad_request(&format!(
+            "Unsupported file extension: {}. Allowed: png, jpg, jpeg, gif, webp, svg",
+            ext.as_deref().unwrap_or("(none)")
+        )));
+    }
+
+    let install_dir = std::path::Path::new(&install_path);
+    let target_path = install_dir.join(relative);
+
+    // Path traversal guard: canonicalise and ensure the target is inside
+    // the install dir. If the install dir doesn't exist, fall through to 404.
+    let canonical_install = std::fs::canonicalize(install_dir).map_err(|e| {
+        ApiError::not_found(&format!(
+            "Install directory not found for agent '{}': {}",
+            agent_id, e
+        ))
+    })?;
+    if let Some(parent) = target_path.parent() {
+        // Best-effort: create parent directories if missing. This is needed
+        // because the canonicalize check below requires the parent to exist.
+        std::fs::create_dir_all(parent).ok();
+    }
+    let canonical_target = std::fs::canonicalize(target_path.parent().unwrap_or(install_dir))
+        .map_err(|e| {
+            ApiError::internal(&format!(
+                "Failed to resolve target directory for avatar upload: {}",
+                e
+            ))
+        })?;
+    if !canonical_target.starts_with(&canonical_install) {
+        tracing::warn!(
+            "Agent file upload blocked: agent={} path={} resolved={}",
+            agent_id,
+            relative,
+            canonical_target.display()
+        );
+        return Err(ApiError::bad_request("File path is outside the install directory"));
+    }
+
+    // Drain the multipart body. We only expect a single "file" field.
+    let mut bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {}", e)))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "file" {
+            let data = field.bytes().await.map_err(|e| {
+                ApiError::bad_request(&format!("Failed to read file field: {}", e))
+            })?;
+            bytes = Some(data.to_vec());
+            break;
+        }
+    }
+    let bytes = bytes.ok_or_else(|| ApiError::bad_request("Missing required field: 'file'"))?;
+    if bytes.is_empty() {
+        return Err(ApiError::bad_request("Uploaded file is empty"));
+    }
+    // 10 MB cap — avatars are small. Larger uploads likely indicate a misuse.
+    if bytes.len() > 10 * 1024 * 1024 {
+        return Err(ApiError::bad_request("Uploaded file exceeds 10 MB limit"));
+    }
+
+    std::fs::write(&target_path, &bytes).map_err(|e| {
+        ApiError::internal(&format!(
+            "Failed to write file '{}': {}",
+            target_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "message": "File uploaded",
+        "agent_id": agent_id,
+        "path": relative,
+        "size": bytes.len(),
+    })))
+}
+
+/// Query parameters for `upload_agent_file`.
+#[derive(Debug, Deserialize)]
+pub struct UploadFileQuery {
+    /// Relative file path within the agent's install directory
+    /// (e.g. "assets/avatar.png").
+    pub path: String,
 }
 
 /// `POST /api/agents/install` — upload and install a .agent package.
@@ -1514,6 +1892,7 @@ mod tests {
             display_name: None,
             role: None,
             avatar: None,
+            builtin_avatar: Some("icon-05".to_string()),
             version: "1.0.0".to_string(),
             running: false,
             connected: false,
@@ -1524,6 +1903,7 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));
         assert!(json.contains("Weather Agent"));
+        assert!(json.contains("icon-05"));
     }
 
     #[test]
@@ -1533,5 +1913,25 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("Agent started"));
+    }
+
+    #[test]
+    fn test_is_plausible_builtin_avatar_id() {
+        // Accepted forms
+        assert!(is_plausible_builtin_avatar_id("icon-05"));
+        assert!(is_plausible_builtin_avatar_id("icon-1"));
+        assert!(is_plausible_builtin_avatar_id("ICON-12"));
+        assert!(is_plausible_builtin_avatar_id("5"));
+        assert!(is_plausible_builtin_avatar_id("01"));
+        assert!(is_plausible_builtin_avatar_id("99"));
+        // Rejected forms
+        assert!(!is_plausible_builtin_avatar_id("icon-100"));
+        assert!(!is_plausible_builtin_avatar_id("icon-0"));
+        assert!(!is_plausible_builtin_avatar_id("icon-foo"));
+        assert!(!is_plausible_builtin_avatar_id("icon-"));
+        assert!(!is_plausible_builtin_avatar_id("foo"));
+        assert!(!is_plausible_builtin_avatar_id(""));
+        assert!(!is_plausible_builtin_avatar_id("0"));
+        assert!(!is_plausible_builtin_avatar_id("100"));
     }
 }

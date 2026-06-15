@@ -47,6 +47,13 @@ export interface AgentInfo {
   display_name?: string;
   role?: string;
   avatar?: string;
+  /**
+   * Builtin avatar index declared in the agent's manifest.toml
+   * (e.g. "icon-05"). Used as the default avatar on first install when
+   * `avatar` (a packaged image path) is not set. The client normalises
+   * and validates this against its bundled builtin icon set.
+   */
+  builtin_avatar?: string;
   version: string;
   running: boolean;
   connected: boolean;
@@ -62,6 +69,11 @@ export interface AgentDetail {
   display_name?: string;
   role?: string;
   avatar?: string;
+  /**
+   * Builtin avatar index declared in the agent's manifest.toml
+   * (e.g. "icon-05"). See `AgentInfo.builtin_avatar` for details.
+   */
+  builtin_avatar?: string;
   version: string;
   description: string;
   author: string;

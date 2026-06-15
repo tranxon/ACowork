@@ -65,6 +65,12 @@ pub struct AgentManifest {
     /// Path to avatar image within the .agent package (e.g. "assets/avatar.png")
     #[serde(default)]
     pub avatar: Option<String>,
+    /// Builtin avatar index selected at packaging time (e.g. "icon-05" or "5").
+    /// Used as the default avatar for first install when `avatar` is not set.
+    /// Resolved by the client against its bundled builtin icon set; an
+    /// unrecognised value falls back to a random builtin icon at install time.
+    #[serde(default)]
+    pub builtin_avatar: Option<String>,
     /// Short description
     pub description: String,
     /// Author identifier
@@ -179,6 +185,13 @@ impl AgentManifest {
             .iter()
             .filter(|t| t.trigger_type == "cron")
             .collect()
+    }
+
+    /// Get the raw builtin_avatar value from the manifest, if any.
+    /// Returns the value as-authored (e.g. "icon-05", "5", "05"); the client
+    /// is responsible for normalising it against its bundled icon set.
+    pub fn builtin_avatar(&self) -> Option<&str> {
+        self.builtin_avatar.as_deref()
     }
 
     /// Get the first RAG tool configuration, if any.
@@ -665,5 +678,40 @@ mod tests {
         let tool = manifest.get_tool("weather").unwrap();
         assert_eq!(tool.tool_type, "builtin");
         assert!(!tool.is_rag());
+    }
+
+    #[test]
+    fn test_manifest_builtin_avatar_optional() {
+        // Backward-compat: legacy packages without builtin_avatar still parse.
+        let toml_str = r#"
+            agent_id = "com.example.legacy"
+            version = "1.0.0"
+            name = "Legacy"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+        "#;
+        let manifest = AgentManifest::from_toml(toml_str).unwrap();
+        assert!(manifest.builtin_avatar.is_none());
+        assert!(manifest.builtin_avatar().is_none());
+    }
+
+    #[test]
+    fn test_manifest_builtin_avatar_field() {
+        // New manifest can carry a builtin_avatar field. The exact form
+        // ("icon-05" vs "5") is the client's concern; the schema just stores
+        // the raw string.
+        let toml_str = r#"
+            agent_id = "com.example.branded"
+            version = "1.0.0"
+            name = "Branded"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+            builtin_avatar = "icon-05"
+        "#;
+        let manifest = AgentManifest::from_toml(toml_str).unwrap();
+        assert_eq!(manifest.builtin_avatar.as_deref(), Some("icon-05"));
+        assert_eq!(manifest.builtin_avatar(), Some("icon-05"));
     }
 }

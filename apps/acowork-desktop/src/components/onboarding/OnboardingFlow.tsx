@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useUserProfileStore } from "../../stores/userProfileStore";
+import { useAgentProfileStore } from "../../stores/agentProfileStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders, createUser } from "../../lib/gateway-api";
@@ -95,7 +98,14 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
       }).catch((err) => {
         console.warn("Failed to create user profile during onboarding:", err);
       });
+      // Sync the display name to the local profile store so the avatar
+      // picker in ProfileTab immediately shows the name just entered.
+      useUserProfileStore.getState().setProfile({ displayName: state.name.trim() });
     }
+    // Assign a random builtin avatar if the user doesn't have one yet,
+    // so the freshly-onboarded user shows a real icon (not the legacy
+    // letter/gradient fallback) from the very first session.
+    useUserProfileStore.getState().assignRandomAvatarIfMissing();
     localStorage.setItem("acowork_onboarding", "completed");
     setState((prev) => ({ ...prev, completed: true }));
     onComplete?.();
@@ -730,6 +740,21 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         setInstalling(agent?.name ?? resourceName);
         await invoke("install_bundled_agent", { resourceName, devMode: true });
       }
+      // Refresh the agent list so the global backfill (ensureBuiltinAvatars)
+      // runs and assigns a random builtin icon to each freshly installed
+      // agent that doesn't ship its own avatar. Each manifest's
+      // `builtin_avatar` hint is preferred over a random pick.
+      await useAgentStore.getState().fetchAgents();
+      // Belt-and-suspenders: explicitly backfill again in case fetchAgents
+      // failed or the bundled agent list was empty.
+      const installed = useAgentStore.getState().agents;
+      useAgentProfileStore.getState().ensureBuiltinAvatars(
+        installed.map((a) => ({
+          agent_id: a.agent_id,
+          avatar: a.avatar ?? null,
+          builtin_avatar: a.builtin_avatar ?? null,
+        })),
+      );
       setInstalling(null);
     } catch (err) {
       setInstalling(null);
@@ -747,6 +772,8 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         setInstallError(null);
         setInstalling(selected);
         await invoke("install_agent", { packagePath: selected });
+        // Refresh the agent list so the backfill runs for the new agent.
+        await useAgentStore.getState().fetchAgents();
         setInstalling(null);
       }
     } catch (err) {

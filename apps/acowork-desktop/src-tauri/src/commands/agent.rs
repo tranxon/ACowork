@@ -178,3 +178,49 @@ pub async fn clone_agent(
         .await
         .map_err(|e| e.to_string())
 }
+
+/// Update the avatar / builtin_avatar fields in the agent's installed
+/// `manifest.toml`. Used by the Publish wizard to bake the user's avatar
+/// selection into the package before build.
+///
+/// Pass `Some("...")` to set, `Some("")` or omit to leave the field unchanged.
+#[tauri::command]
+pub async fn update_agent_manifest_avatar(
+    state: State<'_, AppState>,
+    agent_id: String,
+    avatar: Option<String>,
+    builtin_avatar: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = state.gateway.read().await;
+    client
+        .update_agent_manifest_avatar(
+            &agent_id,
+            avatar.as_deref(),
+            builtin_avatar.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Upload a file into the agent's install directory. Used by the Publish
+/// wizard to attach a custom avatar image before the manifest is updated to
+/// reference it.
+///
+/// `relative_path` is the destination path inside the install dir
+/// (e.g. "assets/avatar.png"). The server restricts accepted extensions to
+/// image formats.
+#[tauri::command]
+pub async fn upload_agent_file(
+    state: State<'_, AppState>,
+    agent_id: String,
+    relative_path: String,
+    file_path: String,
+) -> Result<serde_json::Value, String> {
+    let bytes = std::fs::read(&file_path)
+        .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
+    let client = state.gateway.read().await;
+    client
+        .upload_agent_file(&agent_id, &relative_path, &bytes)
+        .await
+        .map_err(|e| e.to_string())
+}

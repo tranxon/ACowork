@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentInfo, AgentDetail } from "../lib/types";
+import { useAgentProfileStore } from "./agentProfileStore";
 
 /** System Agent ID — always auto-started by Gateway */
 const SYSTEM_AGENT_ID = "com.acowork.system";
@@ -41,6 +42,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         console.log(`[AgentStore] fetchAgents took ${(t1 - t0).toFixed(0)}ms | senior-engineer: running=${sr.running} ready=${sr.ready} connected=${sr.connected}`);
       }
       set({ agents, loading: false });
+
+      // Backfill builtin avatars for any agent that has neither a packaged
+      // avatar (manifest.avatar) nor a profile icon set. Idempotent and safe
+      // to call on every fetch — the helper skips already-assigned agents.
+      // Each manifest's `builtin_avatar` hint is preferred over a random pick.
+      useAgentProfileStore.getState().ensureBuiltinAvatars(
+        agents.map((a) => ({
+          agent_id: a.agent_id,
+          avatar: a.avatar ?? null,
+          builtin_avatar: a.builtin_avatar ?? null,
+        })),
+      );
 
       // Auto-select System Agent if available and nothing is selected
       const current = get();

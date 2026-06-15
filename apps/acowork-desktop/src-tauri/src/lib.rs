@@ -56,6 +56,8 @@ pub fn run() {
             commands::agent::stop_agent,
             commands::agent::restart_agent_in_debug,
             commands::agent::clone_agent,
+            commands::agent::update_agent_manifest_avatar,
+            commands::agent::upload_agent_file,
             commands::chat::send_message,
             commands::chat::upload_document,
             commands::vault::list_keys,
