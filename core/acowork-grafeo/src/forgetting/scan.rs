@@ -27,17 +27,13 @@ use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, NodeStatus};
+use crate::types::{NodeStatus, labels};
 
-use super::decay::{compute_decay_score, DecayConfig};
+use super::decay::{DecayConfig, compute_decay_score};
 
 /// Labels that participate in decay scanning.
 /// Autobiographical nodes are skipped (always Active).
-const DECAY_LABELS: &[&str] = &[
-    labels::EPISODIC,
-    labels::KNOWLEDGE,
-    labels::PROCEDURAL,
-];
+const DECAY_LABELS: &[&str] = &[labels::EPISODIC, labels::KNOWLEDGE, labels::PROCEDURAL];
 
 impl GrafeoStore {
     /// Scan all nodes and update decay scores.
@@ -210,15 +206,16 @@ impl GrafeoStore {
         let new_access_count = self
             .db
             .get_node(node_id)
-            .and_then(|n| n.properties.get(&"access_count".into()).and_then(|v| v.as_int64()))
+            .and_then(|n| {
+                n.properties
+                    .get(&"access_count".into())
+                    .and_then(|v| v.as_int64())
+            })
             .unwrap_or(0)
             + 1;
 
-        self.db.set_node_property(
-            node_id,
-            "status",
-            Value::from(NodeStatus::Active.as_str()),
-        );
+        self.db
+            .set_node_property(node_id, "status", Value::from(NodeStatus::Active.as_str()));
         self.db
             .set_node_property(node_id, "dormant_since", Value::Null);
         self.db
@@ -289,12 +286,22 @@ mod tests {
 
         // Verify the old node is now Dormant.
         let node = store.db.get_node(_old).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Dormant");
 
         // Verify the fresh node is still Active.
         let node = store.db.get_node(_fresh).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Active");
     }
 
@@ -319,7 +326,12 @@ mod tests {
         store.transition_to_dormant(node_id).unwrap();
 
         let node = store.db.get_node(node_id).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Dormant");
         assert!(node.properties.contains_key(&"dormant_since".into()));
     }
@@ -335,7 +347,12 @@ mod tests {
 
         for id in [n1, n2] {
             let node = store.db.get_node(id).unwrap();
-            let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+            let status = node
+                .properties
+                .get(&"status".into())
+                .unwrap()
+                .as_str()
+                .unwrap();
             assert_eq!(status, "Dormant");
         }
     }
@@ -352,7 +369,12 @@ mod tests {
         store.reactivate_node(node_id).unwrap();
 
         let node = store.db.get_node(node_id).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Active");
 
         // dormant_since should be cleared.
@@ -391,12 +413,22 @@ mod tests {
 
         // n1 should still be Dormant (not double-processed).
         let node = store.db.get_node(n1).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Dormant");
 
         // n2 should now be Dormant.
         let node = store.db.get_node(n2).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Dormant");
     }
 
@@ -417,7 +449,12 @@ mod tests {
 
         // Verify it's Dormant.
         let node = store.db.get_node(node_id).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Dormant");
 
         // Reactivate (simulates user accessing a "forgotten" memory).
@@ -425,7 +462,12 @@ mod tests {
 
         // Verify it's back to Active and dormant_since is cleared.
         let node = store.db.get_node(node_id).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Active");
         assert!(
             node.properties
@@ -437,6 +479,9 @@ mod tests {
         // Run scan again — the node should now stay Active because access_count
         // was incremented, boosting its activity signal.
         let count = store.run_decay_scan(&config).unwrap();
-        assert_eq!(count, 0, "reactivated node should not be re-dormanted immediately");
+        assert_eq!(
+            count, 0,
+            "reactivated node should not be re-dormanted immediately"
+        );
     }
 }

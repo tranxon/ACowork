@@ -173,9 +173,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
 
         let request = OllamaEmbeddingRequest {
             model: self.model.clone(),
-            input: OllamaEmbeddingInput::Batch(
-                texts.iter().map(|t| t.to_string()).collect(),
-            ),
+            input: OllamaEmbeddingInput::Batch(texts.iter().map(|t| t.to_string()).collect()),
         };
 
         let url = format!("{}/api/embed", self.base_url);
@@ -234,8 +232,11 @@ mod tests {
 
     #[test]
     fn test_ollama_embedding_provider_custom() {
-        let provider =
-            OllamaEmbeddingProvider::with_config("http://192.168.1.100:11434", "mxbai-embed-large", 1024);
+        let provider = OllamaEmbeddingProvider::with_config(
+            "http://192.168.1.100:11434",
+            "mxbai-embed-large",
+            1024,
+        );
         assert_eq!(provider.base_url, "http://192.168.1.100:11434");
         assert_eq!(provider.model, "mxbai-embed-large");
         assert_eq!(provider.dimension(), 1024);

@@ -29,7 +29,10 @@ impl AgentLoop {
         let params: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
             Ok(p) => p,
             Err(e) => {
-                return format!("Error: ask_user_question arguments are not valid JSON: {}", e);
+                return format!(
+                    "Error: ask_user_question arguments are not valid JSON: {}",
+                    e
+                );
             }
         };
 
@@ -43,7 +46,8 @@ impl AgentLoop {
         // Generate unique request ID
         let request_id = format!(
             "q-{}",
-            self.approval_next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            self.approval_next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
 
         tracing::info!(
@@ -68,7 +72,9 @@ impl AgentLoop {
         });
 
         // Wait for the user's answer (with optional timeout)
-        let answer = self.await_question_answer(&request_id, parsed.timeout_seconds).await;
+        let answer = self
+            .await_question_answer(&request_id, parsed.timeout_seconds)
+            .await;
 
         // Transition back to Streaming (the loop will continue)
         self.transition_status(SessionStatus::Streaming { message_id: None });
@@ -121,7 +127,7 @@ impl AgentLoop {
             let content = match item.get("content").and_then(|v| v.as_str()) {
                 Some(s) => s.to_string(),
                 None => {
-                    return format!("Error: todo item '{}' missing required 'content' field", id)
+                    return format!("Error: todo item '{}' missing required 'content' field", id);
                 }
             };
             let status = match item.get("status").and_then(|v| v.as_str()) {
@@ -132,10 +138,10 @@ impl AgentLoop {
                     return format!(
                         "Error: todo item '{}' has invalid status '{}'. Must be one of: pending, in_progress, completed",
                         id, other
-                    )
+                    );
                 }
                 None => {
-                    return format!("Error: todo item '{}' missing required 'status' field", id)
+                    return format!("Error: todo item '{}' missing required 'status' field", id);
                 }
             };
             items.push(TodoItem {

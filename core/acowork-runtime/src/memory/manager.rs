@@ -10,18 +10,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-use grafeo_common::types::{NodeId, Timestamp, Value};
 use acowork_grafeo::{
     grafeo::GrafeoStore,
     spreading::{config_from_hint, get_hint_weights},
     types::labels,
 };
 use acowork_memory::{HintType, MemoryQuery, RetrievalMetrics};
+use chrono::{DateTime, Utc};
+use grafeo_common::types::{NodeId, Timestamp, Value};
 
 use crate::embedding::EmbeddingProvider;
-use crate::error::{Result, RuntimeError};
 use crate::episode_distill::DistilledEpisode;
+use crate::error::{Result, RuntimeError};
 use crate::tools::rag::client::RagClient;
 
 // ---------------------------------------------------------------------------
@@ -231,7 +231,11 @@ impl MemoryManager {
             }
         }
 
-        let k = if query.limit > 0 { query.limit } else { self.config.default_k };
+        let k = if query.limit > 0 {
+            query.limit
+        } else {
+            self.config.default_k
+        };
         let min_score = query.min_score.unwrap_or(self.config.default_min_score);
         let hint_type = query.hint_type;
         let (vector_weight, text_weight, _graph_weight) = get_hint_weights(hint_type.as_str());
@@ -252,19 +256,27 @@ impl MemoryManager {
 
         for label in &search_labels {
             let search_result = if let Some(ref embedding) = query.embedding {
-                store.hybrid_search_full(
-                    label,
-                    &query.query_text,
-                    embedding,
-                    k,
-                    text_weight,
-                    vector_weight,
-                    Some(min_score),
-                )
-                .map_err(|e| RuntimeError::Tool(format!("Hybrid search failed: {e}")))
+                store
+                    .hybrid_search_full(
+                        label,
+                        &query.query_text,
+                        embedding,
+                        k,
+                        text_weight,
+                        vector_weight,
+                        Some(min_score),
+                    )
+                    .map_err(|e| RuntimeError::Tool(format!("Hybrid search failed: {e}")))
             } else {
                 // Fallback to text search when no embedding is available.
-                store.text_search_with_filter(label, "content", &query.query_text, k, Some(min_score))
+                store
+                    .text_search_with_filter(
+                        label,
+                        "content",
+                        &query.query_text,
+                        k,
+                        Some(min_score),
+                    )
                     .map_err(|e| RuntimeError::Tool(format!("Text search failed: {e}")))
             };
 
@@ -300,8 +312,10 @@ impl MemoryManager {
                 .map(|(id, score, _, _)| (NodeId::new(*id), *score))
                 .collect();
 
-            match store.graph_expand(&seeds, &expand_config)
-                .map_err(|e| RuntimeError::Tool(format!("Graph expand failed: {e}"))) {
+            match store
+                .graph_expand(&seeds, &expand_config)
+                .map_err(|e| RuntimeError::Tool(format!("Graph expand failed: {e}")))
+            {
                 Ok(expanded) => {
                     graph_expand_count = expanded.len();
                     for node in expanded {
@@ -359,7 +373,10 @@ impl MemoryManager {
 
         // Apply PageRank topology boost for re-ranking (S2.8.3).
         // Only when graph expansion is enabled and weight > 0.
-        if self.config.enable_graph_expand && self.config.pagerank_weight > 0.0 && !best_by_id.is_empty() {
+        if self.config.enable_graph_expand
+            && self.config.pagerank_weight > 0.0
+            && !best_by_id.is_empty()
+        {
             let mut scored: Vec<(NodeId, f64)> = best_by_id
                 .iter()
                 .map(|(id, (score, _, _))| (NodeId::new(*id), *score))
@@ -403,7 +420,11 @@ impl MemoryManager {
             for annotated in rag_results {
                 memories.push(RetrievedMemory {
                     content: annotated.item.content,
-                    label: annotated.source_label.trim_start_matches('[').trim_end_matches(']').to_string(),
+                    label: annotated
+                        .source_label
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .to_string(),
                     score: annotated.item.score as f64,
                     source: "rag".to_string(),
                     node_id: 0, // RAG results have no Grafeo node
@@ -423,7 +444,10 @@ impl MemoryManager {
         memories.truncate(result_count);
 
         // Compute metrics.
-        let max_score = memories.iter().map(|m| m.score as f32).fold(0.0f32, f32::max);
+        let max_score = memories
+            .iter()
+            .map(|m| m.score as f32)
+            .fold(0.0f32, f32::max);
         let avg_score = if result_count > 0 {
             memories.iter().map(|m| m.score as f32).sum::<f32>() / result_count as f32
         } else {
@@ -623,17 +647,15 @@ impl MemoryManager {
             ("content", Value::from(content.as_str())),
             (
                 "created_at",
-                Value::from(Timestamp::from_micros(
-                    record.timestamp.timestamp_micros(),
-                )),
+                Value::from(Timestamp::from_micros(record.timestamp.timestamp_micros())),
             ),
             ("consolidated", Value::from(false)),
         ];
 
         // Store retrieved memory IDs as metadata.
         if !record.retrieved_memory_ids.is_empty() {
-            let ids_json = serde_json::to_string(&record.retrieved_memory_ids)
-                .map_err(RuntimeError::Json)?;
+            let ids_json =
+                serde_json::to_string(&record.retrieved_memory_ids).map_err(RuntimeError::Json)?;
             props.push(("metadata", Value::from(ids_json.as_str())));
         }
 
@@ -693,8 +715,8 @@ impl MemoryManager {
         };
 
         let entities_str = episode.entities.join(", ");
-        let triples_json = serde_json::to_string(&episode.triples)
-            .unwrap_or_else(|_| "[]".to_string());
+        let triples_json =
+            serde_json::to_string(&episode.triples).unwrap_or_else(|_| "[]".to_string());
 
         let props = vec![
             ("session_id", Value::from(episode.session_id.as_str())),
@@ -722,13 +744,11 @@ impl MemoryManager {
 
         // Store embedding vector on the node for future vector retrieval.
         if let Some(ref emb) = episode_embedding {
-            store
-                .db()
-                .set_node_property(
-                    node_id,
-                    "embedding",
-                    grafeo_common::types::Value::Vector(std::sync::Arc::from(emb.as_slice())),
-                );
+            store.db().set_node_property(
+                node_id,
+                "embedding",
+                grafeo_common::types::Value::Vector(std::sync::Arc::from(emb.as_slice())),
+            );
         }
 
         tracing::debug!(
@@ -766,14 +786,16 @@ impl MemoryManager {
 
         // Check for an existing procedure with the same trigger.
         let trigger = format!("使用 {} 工具时", tool_name);
-        let existing = store.find_procedural_by_trigger(&trigger, 1)
+        let existing = store
+            .find_procedural_by_trigger(&trigger, 1)
             .map_err(|e| RuntimeError::Tool(format!("Failed to find procedure: {e}")))?;
 
         if let Some(mut node) = existing.into_iter().next() {
             // Reinforce existing: increment fail count.
             node.fail_count += 1;
             node.updated_at = chrono::Utc::now();
-            store.update_procedural(&node)
+            store
+                .update_procedural(&node)
                 .map_err(|e| RuntimeError::Tool(format!("Failed to update procedure: {e}")))?;
 
             tracing::info!(
@@ -815,7 +837,8 @@ impl MemoryManager {
             metadata: std::collections::HashMap::new(),
         };
 
-        let id = store.store_procedural(&node)
+        let id = store
+            .store_procedural(&node)
             .map_err(|e| RuntimeError::Tool(format!("Failed to store procedure: {e}")))?;
         tracing::info!(
             node_id = id.as_u64(),
@@ -861,8 +884,14 @@ fn extract_node_content(store: &GrafeoStore, node_id: u64) -> String {
     //   [Autobiographical] Capability: language: Rust
     //   [Autobiographical] Preference: answer_style: 大鱼 prefers concise answers
     if let Some(category) = node.get_property("category").and_then(|v| v.as_str()) {
-        let key = node.get_property("key").and_then(|v| v.as_str()).unwrap_or("");
-        let value = node.get_property("value").and_then(|v| v.as_str()).unwrap_or("");
+        let key = node
+            .get_property("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let value = node
+            .get_property("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if !key.is_empty() && !value.is_empty() {
             return format!("{category}: {key}: {value}");
         }
@@ -876,7 +905,9 @@ fn extract_node_content(store: &GrafeoStore, node_id: u64) -> String {
     // ProceduralNode.to_properties() stores a combined "content" field
     // that doesn't use the guideline format.
     // "当 [trigger_condition] 时，优先 [action_pattern]"
-    let trigger = node.get_property("trigger_condition").and_then(|v| v.as_str());
+    let trigger = node
+        .get_property("trigger_condition")
+        .and_then(|v| v.as_str());
     let action = node.get_property("action_pattern").and_then(|v| v.as_str());
     if let (Some(t), Some(a)) = (trigger, action) {
         return format!("当 {} 时，优先 {}", t, a);
@@ -963,8 +994,8 @@ fn estimate_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acowork_grafeo::types::{DEFAULT_EMBEDDING_DIM, labels};
     use grafeo_common::types::Value;
-    use acowork_grafeo::types::{labels, DEFAULT_EMBEDDING_DIM};
 
     /// Helper: create an in-memory GrafeoStore for testing.
     fn test_store() -> GrafeoStore {
@@ -990,7 +1021,13 @@ mod tests {
     }
 
     /// Helper: store a Knowledge node with embedding.
-    fn store_knowledge(store: &GrafeoStore, subject: &str, predicate: &str, object: &str, embedding: &[f32]) -> u64 {
+    fn store_knowledge(
+        store: &GrafeoStore,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        embedding: &[f32],
+    ) -> u64 {
         let id = store
             .store_node(
                 labels::KNOWLEDGE,
@@ -1014,7 +1051,12 @@ mod tests {
 
     /// Helper: store an Autobiographical node.
     #[allow(dead_code)]
-    fn store_autobiographical(store: &GrafeoStore, key: &str, value: &str, embedding: &[f32]) -> u64 {
+    fn store_autobiographical(
+        store: &GrafeoStore,
+        key: &str,
+        value: &str,
+        embedding: &[f32],
+    ) -> u64 {
         let id = store
             .store_node(
                 labels::AUTOBIOGRAPHICAL,
@@ -1041,7 +1083,12 @@ mod tests {
         use acowork_grafeo::types::{NodeStatus, ProceduralNode};
         let node = ProceduralNode {
             id: None,
-            name: trigger.split_whitespace().take(3).collect::<Vec<_>>().join("_").to_lowercase(),
+            name: trigger
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("_")
+                .to_lowercase(),
             trigger_condition: trigger.to_string(),
             action_pattern: action.to_string(),
             success_count: 0,
@@ -1243,7 +1290,8 @@ mod tests {
         let retrieval = RetrievalResult {
             memories: vec![
                 RetrievedMemory {
-                    content: "User likes Rust programming language for systems development.".to_string(),
+                    content: "User likes Rust programming language for systems development."
+                        .to_string(),
                     label: "Knowledge".to_string(),
                     score: 0.95,
                     source: "hybrid".to_string(),
@@ -1252,7 +1300,8 @@ mod tests {
                     chunk_id: None,
                 },
                 RetrievedMemory {
-                    content: "Another very long memory content that takes up many tokens.".to_string(),
+                    content: "Another very long memory content that takes up many tokens."
+                        .to_string(),
                     label: "Episodic".to_string(),
                     score: 0.85,
                     source: "hybrid".to_string(),
@@ -1261,7 +1310,8 @@ mod tests {
                     chunk_id: None,
                 },
                 RetrievedMemory {
-                    content: "Third memory with even more text content to exceed token budget.".to_string(),
+                    content: "Third memory with even more text content to exceed token budget."
+                        .to_string(),
                     label: "Procedural".to_string(),
                     score: 0.75,
                     source: "hybrid".to_string(),
@@ -1328,7 +1378,10 @@ mod tests {
         let text_results = store
             .text_search_with_filter(labels::EPISODIC, "content", "Hello", 5, None)
             .unwrap();
-        assert!(!text_results.is_empty(), "expected recorded episode to be found");
+        assert!(
+            !text_results.is_empty(),
+            "expected recorded episode to be found"
+        );
     }
 
     // =====================================================================
@@ -1353,7 +1406,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let (injected, metrics) = manager.process_turn(&store, &mut query, None).await.unwrap();
+        let (injected, metrics) = manager
+            .process_turn(&store, &mut query, None)
+            .await
+            .unwrap();
 
         assert!(!injected.formatted_text.is_empty());
         assert!(metrics.result_count > 0);
@@ -1382,7 +1438,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let (injected, metrics) = manager.process_turn(&store, &mut query, None).await.unwrap();
+        let (injected, metrics) = manager
+            .process_turn(&store, &mut query, None)
+            .await
+            .unwrap();
 
         assert!(metrics.abstention_triggered);
         assert_eq!(injected.memory_count, 0);
@@ -1406,20 +1465,10 @@ mod tests {
 
         // Create edges: A → B and C → B, making B the hub with 2 incoming edges.
         store
-            .create_memory_edge(
-                NodeId::new(a_id),
-                NodeId::new(b_id),
-                "RELATES_TO",
-                vec![],
-            )
+            .create_memory_edge(NodeId::new(a_id), NodeId::new(b_id), "RELATES_TO", vec![])
             .unwrap();
         store
-            .create_memory_edge(
-                NodeId::new(c_id),
-                NodeId::new(b_id),
-                "RELATES_TO",
-                vec![],
-            )
+            .create_memory_edge(NodeId::new(c_id), NodeId::new(b_id), "RELATES_TO", vec![])
             .unwrap();
 
         // Retrieve with PageRank enabled (default config, strong boost).
@@ -1440,7 +1489,10 @@ mod tests {
         };
 
         let result = manager.retrieve(&store, &mut query, None).await.unwrap();
-        assert!(!result.memories.is_empty(), "should retrieve Rust-related nodes");
+        assert!(
+            !result.memories.is_empty(),
+            "should retrieve Rust-related nodes"
+        );
     }
 
     // =====================================================================
@@ -1455,12 +1507,7 @@ mod tests {
         let a_id = store_episode(&store, "Python is a scripting language", &emb);
         let b_id = store_episode(&store, "Python excels at data science", &emb);
         store
-            .create_memory_edge(
-                NodeId::new(a_id),
-                NodeId::new(b_id),
-                "RELATES_TO",
-                vec![],
-            )
+            .create_memory_edge(NodeId::new(a_id), NodeId::new(b_id), "RELATES_TO", vec![])
             .unwrap();
 
         // PageRank disabled.
@@ -1529,7 +1576,11 @@ mod tests {
         let injected = manager.inject(&retrieval);
 
         // At least one core memory is always included.
-        assert!(injected.formatted_text.contains("Identity: name: WeatherBot"));
+        assert!(
+            injected
+                .formatted_text
+                .contains("Identity: name: WeatherBot")
+        );
         // The long role and capability should be truncated by budget.
         assert!(injected.truncated);
         assert!(injected.memory_count < 3);
@@ -1657,12 +1708,30 @@ mod tests {
 
     #[test]
     fn test_autobio_subcategory() {
-        assert_eq!(autobio_subcategory("Identity: name: Bot"), AutobioGroup::Core);
-        assert_eq!(autobio_subcategory("Capability: language: Rust"), AutobioGroup::Core);
-        assert_eq!(autobio_subcategory("Limitation: max_days: 7"), AutobioGroup::Core);
-        assert_eq!(autobio_subcategory("History: milestone: v1"), AutobioGroup::History);
-        assert_eq!(autobio_subcategory("Relationship: user: Alice"), AutobioGroup::History);
-        assert_eq!(autobio_subcategory("Preference: style: concise"), AutobioGroup::History);
+        assert_eq!(
+            autobio_subcategory("Identity: name: Bot"),
+            AutobioGroup::Core
+        );
+        assert_eq!(
+            autobio_subcategory("Capability: language: Rust"),
+            AutobioGroup::Core
+        );
+        assert_eq!(
+            autobio_subcategory("Limitation: max_days: 7"),
+            AutobioGroup::Core
+        );
+        assert_eq!(
+            autobio_subcategory("History: milestone: v1"),
+            AutobioGroup::History
+        );
+        assert_eq!(
+            autobio_subcategory("Relationship: user: Alice"),
+            AutobioGroup::History
+        );
+        assert_eq!(
+            autobio_subcategory("Preference: style: concise"),
+            AutobioGroup::History
+        );
         // Unknown prefix defaults to Core.
         assert_eq!(autobio_subcategory("unknown content"), AutobioGroup::Core);
     }
@@ -1808,7 +1877,9 @@ mod tests {
 
     #[test]
     fn test_self_evaluate_creates_limitation_node() {
-        use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus, ProceduralNode};
+        use acowork_grafeo::types::{
+            AutobioCategory, AutobiographicalNode, NodeStatus, ProceduralNode,
+        };
 
         let store = test_store();
 
@@ -1836,7 +1907,8 @@ mod tests {
         // Manually run the self-evaluation logic (normally in AgentLoop,
         // but we test the core logic here).
         let nodes = store.get_all_procedural_nodes().unwrap();
-        let mut skill_stats: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+        let mut skill_stats: std::collections::HashMap<String, (u32, u32)> =
+            std::collections::HashMap::new();
         for n in &nodes {
             if let Some(ref skill) = n.source_skill {
                 let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
@@ -1907,7 +1979,8 @@ mod tests {
 
         // Compute stats.
         let nodes = store.get_all_procedural_nodes().unwrap();
-        let mut skill_stats: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+        let mut skill_stats: std::collections::HashMap<String, (u32, u32)> =
+            std::collections::HashMap::new();
         for n in &nodes {
             if let Some(ref skill) = n.source_skill {
                 let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
@@ -1921,7 +1994,11 @@ mod tests {
         let rate = *success as f32 / total as f32;
 
         // Rate should be 80%, above the 60% threshold.
-        assert!(rate > 0.60, "python skill success rate should be > 60%, got {}", rate);
+        assert!(
+            rate > 0.60,
+            "python skill success rate should be > 60%, got {}",
+            rate
+        );
 
         // No Limitation node should exist for python.
         let found = store.find_autobiographical_by_key("skill_python").unwrap();
@@ -1965,7 +2042,10 @@ mod tests {
         for id in episodic_ids {
             if let Some(n) = db.get_node(id) {
                 episode_count += 1;
-                if let Some(ts) = n.get_property("created_at").and_then(grafeo_common::types::Value::as_timestamp) {
+                if let Some(ts) = n
+                    .get_property("created_at")
+                    .and_then(grafeo_common::types::Value::as_timestamp)
+                {
                     if let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
                         match earliest_time {
                             None => earliest_time = Some(dt),
@@ -1979,7 +2059,11 @@ mod tests {
 
         let earliest = earliest_time.unwrap();
         let span_days = (chrono::Utc::now() - earliest).num_days();
-        assert!(span_days >= 30, "span should be >= 30 days, got {}", span_days);
+        assert!(
+            span_days >= 30,
+            "span should be >= 30 days, got {}",
+            span_days
+        );
 
         // Create the Relationship node.
         let key = "collaboration_span".to_string();
@@ -2041,7 +2125,10 @@ mod tests {
         let mut earliest_time: Option<chrono::DateTime<chrono::Utc>> = None;
         for id in episodic_ids {
             if let Some(n) = db.get_node(id) {
-                if let Some(ts) = n.get_property("created_at").and_then(grafeo_common::types::Value::as_timestamp) {
+                if let Some(ts) = n
+                    .get_property("created_at")
+                    .and_then(grafeo_common::types::Value::as_timestamp)
+                {
                     if let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
                         match earliest_time {
                             None => earliest_time = Some(dt),
@@ -2054,10 +2141,16 @@ mod tests {
         }
 
         let span_days = (chrono::Utc::now() - earliest_time.unwrap()).num_days();
-        assert!(span_days < 30, "span should be < 30 days, got {}", span_days);
+        assert!(
+            span_days < 30,
+            "span should be < 30 days, got {}",
+            span_days
+        );
 
         // No Relationship node should exist.
-        let found = store.find_autobiographical_by_key("collaboration_span").unwrap();
+        let found = store
+            .find_autobiographical_by_key("collaboration_span")
+            .unwrap();
         assert!(found.is_none());
     }
 }

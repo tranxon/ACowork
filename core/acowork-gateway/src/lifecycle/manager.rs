@@ -1,10 +1,12 @@
 //! Agent process lifecycle manager
 
-use std::path::PathBuf;
 use crate::error::GatewayError;
 use crate::gateway::state::{GatewayState, RunningAgentInfo};
-use crate::lifecycle::process::{spawn_agent_process, kill_agent_process, check_health, find_available_debug_port};
+use crate::lifecycle::process::{
+    check_health, find_available_debug_port, kill_agent_process, spawn_agent_process,
+};
 use acowork_core::protocol::GatewayResponse;
+use std::path::PathBuf;
 
 /// System Agent ID — always auto-started with Gateway
 pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
@@ -23,8 +25,18 @@ pub struct LifecycleManager {
 }
 
 impl LifecycleManager {
-    pub fn new(idle_timeout_secs: u64, gateway_grpc_endpoint: String, log_file_size_mb: u64, log_file_count: u64) -> Self {
-        Self { idle_timeout_secs, gateway_grpc_endpoint, log_file_size_mb, log_file_count }
+    pub fn new(
+        idle_timeout_secs: u64,
+        gateway_grpc_endpoint: String,
+        log_file_size_mb: u64,
+        log_file_count: u64,
+    ) -> Self {
+        Self {
+            idle_timeout_secs,
+            gateway_grpc_endpoint,
+            log_file_size_mb,
+            log_file_count,
+        }
     }
 
     /// Start an agent process
@@ -40,7 +52,9 @@ impl LifecycleManager {
         }
 
         // Check if installed
-        let info = state.installed_agents.get(agent_id)
+        let info = state
+            .installed_agents
+            .get(agent_id)
             .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?
             .clone();
 
@@ -64,10 +78,11 @@ impl LifecycleManager {
             debug_port,
             self.log_file_size_mb,
             self.log_file_count,
-        ).await?;
+        )
+        .await?;
 
         let pid = child.id();
-        
+
         state.add_running(RunningAgentInfo {
             agent_id: agent_id.to_string(),
             pid,
@@ -119,11 +134,13 @@ impl LifecycleManager {
         // System Agent cannot be stopped
         if agent_id == SYSTEM_AGENT_ID {
             return Err(GatewayError::Lifecycle(
-                "System Agent (com.acowork.system) cannot be stopped".to_string()
+                "System Agent (com.acowork.system) cannot be stopped".to_string(),
             ));
         }
 
-        let running = state.running_agents.get(agent_id)
+        let running = state
+            .running_agents
+            .get(agent_id)
             .ok_or_else(|| GatewayError::AgentNotRunning(agent_id.to_string()))?
             .clone();
 
@@ -288,5 +305,4 @@ mod tests {
         let result = mgr.auto_start_system_agent(&mut state).await;
         assert!(result.is_ok());
     }
-
 }

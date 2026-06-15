@@ -31,11 +31,7 @@ impl GrafeoStore {
     }
 
     /// Get all outgoing edges of a specific type from a node.
-    pub fn get_edges_by_type(
-        &self,
-        node_id: NodeId,
-        edge_type: &str,
-    ) -> Result<Vec<EdgeInfo>> {
+    pub fn get_edges_by_type(&self, node_id: NodeId, edge_type: &str) -> Result<Vec<EdgeInfo>> {
         let graph = self.db.graph_store();
         let edge_refs = graph.edges_from(node_id, Direction::Outgoing);
 
@@ -144,13 +140,26 @@ mod tests {
     #[test]
     fn test_get_edges_by_type() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
 
-        store.create_memory_edge(a, b, "REFERENCES", vec![]).unwrap();
         store
-            .create_memory_edge(a, c, "DERIVED_FROM", vec![("p".to_string(), Value::from("v"))])
+            .create_memory_edge(a, b, "REFERENCES", vec![])
+            .unwrap();
+        store
+            .create_memory_edge(
+                a,
+                c,
+                "DERIVED_FROM",
+                vec![("p".to_string(), Value::from("v"))],
+            )
             .unwrap();
 
         let refs = store.get_edges_by_type(a, "REFERENCES").unwrap();
@@ -166,10 +175,18 @@ mod tests {
     #[test]
     fn test_get_neighbors() {
         let store = test_store();
-        let n1 = store.store_node("Knowledge", [("k", Value::from("1"))]).unwrap();
-        let n2 = store.store_node("Knowledge", [("k", Value::from("2"))]).unwrap();
-        let n3 = store.store_node("Procedural", [("k", Value::from("3"))]).unwrap();
-        let n4 = store.store_node("Knowledge", [("k", Value::from("4"))]).unwrap();
+        let n1 = store
+            .store_node("Knowledge", [("k", Value::from("1"))])
+            .unwrap();
+        let n2 = store
+            .store_node("Knowledge", [("k", Value::from("2"))])
+            .unwrap();
+        let n3 = store
+            .store_node("Procedural", [("k", Value::from("3"))])
+            .unwrap();
+        let n4 = store
+            .store_node("Knowledge", [("k", Value::from("4"))])
+            .unwrap();
 
         // n1 -> n2 -> n3, and n1 -> n4
         store.create_memory_edge(n1, n2, "R", vec![]).unwrap();

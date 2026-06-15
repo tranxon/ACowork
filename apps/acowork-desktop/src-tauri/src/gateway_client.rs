@@ -5,12 +5,12 @@
 //! WebSocket. It references acowork_core::defaults for shared constants
 //! (host, port, URL) to avoid hardcoded duplication.
 
+use acowork_core::defaults;
 use anyhow::Result;
 use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use acowork_core::defaults;
 
 /// Default Gateway base URL (from shared core constants)
 const DEFAULT_BASE_URL: &str = defaults::GATEWAY_HTTP_URL;
@@ -80,7 +80,11 @@ impl GatewayClient {
 
     /// `GET /api/agents`
     pub async fn list_agents(&self) -> Result<Vec<AgentListEntry>> {
-        let resp = self.client.get(format!("{}/api/agents", self.base_url)).send().await?;
+        let resp = self
+            .client
+            .get(format!("{}/api/agents", self.base_url))
+            .send()
+            .await?;
         parse_gateway_response(resp).await
     }
 
@@ -95,7 +99,11 @@ impl GatewayClient {
     }
 
     /// `POST /api/agents/install` — upload .agent package via multipart
-    pub async fn install_agent(&self, package_bytes: &[u8], dev_mode: bool) -> Result<GenericMessageResponse> {
+    pub async fn install_agent(
+        &self,
+        package_bytes: &[u8],
+        dev_mode: bool,
+    ) -> Result<GenericMessageResponse> {
         let form = reqwest::multipart::Form::new()
             .part(
                 "package",
@@ -126,7 +134,11 @@ impl GatewayClient {
     }
 
     /// `POST /api/agents/:id/start`
-    pub async fn start_agent(&self, agent_id: &str, dev_mode: bool) -> Result<GenericMessageResponse> {
+    pub async fn start_agent(
+        &self,
+        agent_id: &str,
+        dev_mode: bool,
+    ) -> Result<GenericMessageResponse> {
         let body = serde_json::json!({ "dev_mode": dev_mode });
         let resp = self
             .client
@@ -151,7 +163,10 @@ impl GatewayClient {
     pub async fn restart_agent_in_debug(&self, agent_id: &str) -> Result<GenericMessageResponse> {
         let resp = self
             .client
-            .post(format!("{}/api/agents/{}/restart-debug", self.base_url, agent_id))
+            .post(format!(
+                "{}/api/agents/{}/restart-debug",
+                self.base_url, agent_id
+            ))
             .send()
             .await?;
         parse_gateway_response(resp).await
@@ -182,11 +197,18 @@ impl GatewayClient {
     // ── Publish ────────────────────────────────────────────────────────
 
     /// `POST /api/agents/:id/publish/prepare`
-    pub async fn prepare_publish(&self, agent_id: &str, clean: bool) -> Result<PreparePublishResponse> {
+    pub async fn prepare_publish(
+        &self,
+        agent_id: &str,
+        clean: bool,
+    ) -> Result<PreparePublishResponse> {
         let body = serde_json::json!({ "clean": clean });
         let resp = self
             .client
-            .post(format!("{}/api/agents/{}/publish/prepare", self.base_url, agent_id))
+            .post(format!(
+                "{}/api/agents/{}/publish/prepare",
+                self.base_url, agent_id
+            ))
             .json(&body)
             .send()
             .await?;
@@ -206,7 +228,10 @@ impl GatewayClient {
         }
         let resp = self
             .client
-            .post(format!("{}/api/agents/{}/publish/build", self.base_url, agent_id))
+            .post(format!(
+                "{}/api/agents/{}/publish/build",
+                self.base_url, agent_id
+            ))
             .json(&body)
             .send()
             .await?;
@@ -217,7 +242,10 @@ impl GatewayClient {
     pub async fn export_package(&self, agent_id: &str) -> Result<ExportPackageResponse> {
         let resp = self
             .client
-            .post(format!("{}/api/agents/{}/publish/export", self.base_url, agent_id))
+            .post(format!(
+                "{}/api/agents/{}/publish/export",
+                self.base_url, agent_id
+            ))
             .send()
             .await?;
         parse_gateway_response(resp).await
@@ -226,7 +254,14 @@ impl GatewayClient {
     // ── Chat ───────────────────────────────────────────────────────────
 
     /// `POST /api/agents/:id/message`
-    pub async fn send_message(&self, agent_id: &str, content: &str, session_id: Option<&str>, command: Option<&str>, document_ids: Option<&[String]>) -> Result<SendMessageResponse> {
+    pub async fn send_message(
+        &self,
+        agent_id: &str,
+        content: &str,
+        session_id: Option<&str>,
+        command: Option<&str>,
+        document_ids: Option<&[String]>,
+    ) -> Result<SendMessageResponse> {
         let mut body = serde_json::json!({ "content": content });
         if let Some(sid) = session_id {
             body["session_id"] = serde_json::json!(sid);
@@ -259,7 +294,11 @@ impl GatewayClient {
     // ── Documents ──────────────────────────────────────────────────────
 
     /// `POST /api/sessions/:session_id/documents` — multipart upload
-    pub async fn upload_document(&self, session_id: &str, file_path: &str) -> Result<DocumentUploadResponse> {
+    pub async fn upload_document(
+        &self,
+        session_id: &str,
+        file_path: &str,
+    ) -> Result<DocumentUploadResponse> {
         let file_name = std::path::Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -276,7 +315,10 @@ impl GatewayClient {
 
         let resp = self
             .client
-            .post(format!("{}/api/sessions/{}/documents", self.base_url, session_id))
+            .post(format!(
+                "{}/api/sessions/{}/documents",
+                self.base_url, session_id
+            ))
             .multipart(form)
             .send()
             .await?;
@@ -314,7 +356,10 @@ impl GatewayClient {
         if let Some(models_list) = models {
             if !models_list.is_empty() {
                 body["models"] = serde_json::Value::Array(
-                    models_list.iter().map(|m| serde_json::Value::String(m.clone())).collect()
+                    models_list
+                        .iter()
+                        .map(|m| serde_json::Value::String(m.clone()))
+                        .collect(),
                 );
             }
         } else if let Some(model) = default_model {
@@ -322,8 +367,8 @@ impl GatewayClient {
         }
         // Send model_capabilities if not empty
         if !model_capabilities.is_empty() {
-            body["model_capabilities"] = serde_json::to_value(model_capabilities)
-                .unwrap_or_else(|e| {
+            body["model_capabilities"] =
+                serde_json::to_value(model_capabilities).unwrap_or_else(|e| {
                     eprintln!("serde_json::to_value failed for model_capabilities: {e}");
                     serde_json::to_value(model_capabilities)
                         .expect("model_capabilities serialization failed twice")
@@ -373,7 +418,10 @@ impl GatewayClient {
             }
         }
         if let Some(url) = base_url {
-            body.insert("base_url".to_string(), serde_json::Value::String(url.to_string()));
+            body.insert(
+                "base_url".to_string(),
+                serde_json::Value::String(url.to_string()),
+            );
         }
         // Send models list if provided; otherwise fallback to default_model
         if let Some(models_list) = models {
@@ -381,28 +429,36 @@ impl GatewayClient {
                 body.insert(
                     "models".to_string(),
                     serde_json::Value::Array(
-                        models_list.iter().map(|m| serde_json::Value::String(m.clone())).collect()
+                        models_list
+                            .iter()
+                            .map(|m| serde_json::Value::String(m.clone()))
+                            .collect(),
                     ),
                 );
             }
         } else if let Some(model) = default_model {
-            body.insert("default_model".to_string(), serde_json::Value::String(model.to_string()));
+            body.insert(
+                "default_model".to_string(),
+                serde_json::Value::String(model.to_string()),
+            );
         }
         // Send model_capabilities if not empty
         if !model_capabilities.is_empty() {
             body.insert(
                 "model_capabilities".to_string(),
-                serde_json::to_value(model_capabilities)
-                    .unwrap_or_else(|e| {
-                        eprintln!("serde_json::to_value failed for model_capabilities: {e}");
-                        serde_json::to_value(model_capabilities)
-                            .expect("model_capabilities serialization failed twice")
-                    }),
+                serde_json::to_value(model_capabilities).unwrap_or_else(|e| {
+                    eprintln!("serde_json::to_value failed for model_capabilities: {e}");
+                    serde_json::to_value(model_capabilities)
+                        .expect("model_capabilities serialization failed twice")
+                }),
             );
         }
         // Send compact_model if provided
         if let Some(cm) = compact_model {
-            body.insert("compact_model".to_string(), serde_json::Value::String(cm.to_string()));
+            body.insert(
+                "compact_model".to_string(),
+                serde_json::Value::String(cm.to_string()),
+            );
         }
         let resp = self
             .client
@@ -413,7 +469,7 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
-        // ── Search Keys ─────────────────────────────────────────────────────
+    // ── Search Keys ─────────────────────────────────────────────────────
 
     /// `GET /api/search/keys` — list search provider keys (masked)
     pub async fn list_search_keys(&self) -> Result<Vec<SearchVaultKeyEntry>> {
@@ -471,7 +527,10 @@ impl GatewayClient {
             }
         }
         if let Some(url) = base_url {
-            body.insert("base_url".to_string(), serde_json::Value::String(url.to_string()));
+            body.insert(
+                "base_url".to_string(),
+                serde_json::Value::String(url.to_string()),
+            );
         }
         let resp = self
             .client

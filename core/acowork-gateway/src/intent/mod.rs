@@ -6,4 +6,4 @@
 pub mod privacy;
 pub mod router;
 
-pub use router::{IntentRouter, IntentError, IntentResult, DEFAULT_INTENT_TIMEOUT_SECS};
+pub use router::{DEFAULT_INTENT_TIMEOUT_SECS, IntentError, IntentResult, IntentRouter};

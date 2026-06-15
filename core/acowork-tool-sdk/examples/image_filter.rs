@@ -5,7 +5,7 @@
 //!
 //! Build with: cargo build --target wasm32-wasip2 --release
 
-use acowork_tool_sdk::{ToolInput, ToolOutput, ToolError, tool_entry};
+use acowork_tool_sdk::{ToolError, ToolInput, ToolOutput, tool_entry};
 
 /// Image filter tool: applies a named filter to an image URL.
 ///
@@ -34,8 +34,9 @@ fn main() {
     // When compiled for wasm32-wasip2, the tool_entry! macro
     // generates the `execute` export that the Runtime calls.
     let input = ToolInput::from_json(
-        r#"{"image_url": "https://example.com/photo.jpg", "filter": "grayscale"}"#
-    ).unwrap();
+        r#"{"image_url": "https://example.com/photo.jpg", "filter": "grayscale"}"#,
+    )
+    .unwrap();
     let output = image_filter(input).unwrap();
     println!("{}", output.to_json_string());
 }
@@ -47,13 +48,19 @@ mod tests {
     #[test]
     fn test_image_filter_grayscale() {
         let input = ToolInput::from_json(
-            r#"{"image_url": "https://example.com/photo.jpg", "filter": "grayscale"}"#
-        ).unwrap();
+            r#"{"image_url": "https://example.com/photo.jpg", "filter": "grayscale"}"#,
+        )
+        .unwrap();
 
         let output = image_filter(input).unwrap();
         assert_eq!(output.data["status"], "success");
         assert_eq!(output.data["filter"], "grayscale");
-        assert!(output.data["filtered_image_url"].as_str().unwrap().contains("grayscale"));
+        assert!(
+            output.data["filtered_image_url"]
+                .as_str()
+                .unwrap()
+                .contains("grayscale")
+        );
     }
 
     #[test]
@@ -65,7 +72,8 @@ mod tests {
 
     #[test]
     fn test_image_filter_missing_filter() {
-        let input = ToolInput::from_json(r#"{"image_url": "https://example.com/test.jpg"}"#).unwrap();
+        let input =
+            ToolInput::from_json(r#"{"image_url": "https://example.com/test.jpg"}"#).unwrap();
         let result = image_filter(input);
         assert!(result.is_err());
     }

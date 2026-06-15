@@ -7,12 +7,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures_core::Stream;
 use acowork_core::providers::error_patterns::is_non_retryable_rate_limit;
 use acowork_core::providers::traits::{
     ChatMessage, ChatRequest, ChatResponse, Provider, ProviderError, ProviderErrorType, StreamEvent,
 };
+use async_trait::async_trait;
+use futures_core::Stream;
 use tokio::time::sleep;
 
 /// Retry configuration
@@ -234,10 +234,7 @@ impl Provider for ReliableProvider {
         ))
     }
 
-    async fn chat_token_count(
-        &self,
-        messages: &[ChatMessage],
-    ) -> acowork_core::error::Result<u64> {
+    async fn chat_token_count(&self, messages: &[ChatMessage]) -> acowork_core::error::Result<u64> {
         self.primary.chat_token_count(messages).await
     }
 }
@@ -263,7 +260,8 @@ mod tests {
 
     #[test]
     fn test_is_retryable() {
-        let err = acowork_core::AcoworkError::Provider(ProviderError::network("timeout".to_string()));
+        let err =
+            acowork_core::AcoworkError::Provider(ProviderError::network("timeout".to_string()));
         assert!(ReliableProvider::is_retryable(&err));
 
         let err = acowork_core::AcoworkError::Provider(ProviderError::from_status_code(

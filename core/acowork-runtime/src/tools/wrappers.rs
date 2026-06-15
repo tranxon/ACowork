@@ -5,8 +5,8 @@
 //! instead of ZeroClaw's config-driven security policy.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -60,7 +60,11 @@ impl Tool for RateLimitedTool {
         self.inner.spec()
     }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         if let Err(e) = self.check_rate_limit() {
             return Ok(ToolResult {
                 ok: false,
@@ -133,12 +137,13 @@ impl PathGuardedTool {
             let normalized = normalized.unwrap();
 
             // Also normalize the allowed dir for consistent comparison
-            let allowed_normalized = Self::normalize_path(allowed)
-                .unwrap_or_else(|| allowed.to_path_buf());
+            let allowed_normalized =
+                Self::normalize_path(allowed).unwrap_or_else(|| allowed.to_path_buf());
 
             // Convert to string and normalize separators for cross-platform comparison
             let target_str = path_utils::normalize_separators(&normalized.to_string_lossy());
-            let allowed_str = path_utils::normalize_separators(&allowed_normalized.to_string_lossy());
+            let allowed_str =
+                path_utils::normalize_separators(&allowed_normalized.to_string_lossy());
 
             tracing::debug!(
                 target_path = %target_str,
@@ -165,12 +170,12 @@ impl PathGuardedTool {
         }
 
         // Return the access level of the best match, or error if no match
-        best_match
-            .map(|(_, access)| access)
-            .ok_or_else(|| format!(
+        best_match.map(|(_, access)| access).ok_or_else(|| {
+            format!(
                 "Path '{}' is outside all allowed workspace directories",
                 path
-            ))
+            )
+        })
     }
 
     /// Normalize a path by resolving ".." components without touching the filesystem.
@@ -185,9 +190,9 @@ impl PathGuardedTool {
                 std::path::Component::CurDir => { /* skip current dir */ }
                 std::path::Component::ParentDir => {
                     // Pop the last normal component; fail if we'd escape root
-                    let popped = components.iter().rposition(|c| {
-                        matches!(c, std::path::Component::Normal(_))
-                    });
+                    let popped = components
+                        .iter()
+                        .rposition(|c| matches!(c, std::path::Component::Normal(_)));
                     if let Some(pos) = popped {
                         components.truncate(pos);
                     } else {
@@ -204,16 +209,18 @@ impl PathGuardedTool {
     fn is_filesystem_tool(&self) -> bool {
         matches!(
             self.inner.name().as_str(),
-            "file_read" | "file_write" | "file_edit" | "glob_search" | "content_search" | "doc_reader"
+            "file_read"
+                | "file_write"
+                | "file_edit"
+                | "glob_search"
+                | "content_search"
+                | "doc_reader"
         )
     }
 
     /// Check if the wrapped tool performs write operations
     fn is_write_tool(&self) -> bool {
-        matches!(
-            self.inner.name().as_str(),
-            "file_write" | "file_edit"
-        )
+        matches!(self.inner.name().as_str(), "file_write" | "file_edit")
     }
 }
 
@@ -223,7 +230,11 @@ impl Tool for PathGuardedTool {
         self.inner.spec()
     }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let mut params = params;
         if self.is_filesystem_tool() {
             // Check path parameter
@@ -253,7 +264,9 @@ impl Tool for PathGuardedTool {
                                 // correct access level for the actual target location.
                                 match self.validate_path(&abs_path_str) {
                                     Ok(resolved_access) => {
-                                        if self.is_write_tool() && resolved_access != WorkspaceAccess::ReadWrite {
+                                        if self.is_write_tool()
+                                            && resolved_access != WorkspaceAccess::ReadWrite
+                                        {
                                             return Ok(ToolResult {
                                                 ok: false,
                                                 content: String::new(),
@@ -264,7 +277,8 @@ impl Tool for PathGuardedTool {
                                                 token_usage: None,
                                             });
                                         }
-                                        params["path"] = serde_json::Value::String(abs_path_str.into_owned());
+                                        params["path"] =
+                                            serde_json::Value::String(abs_path_str.into_owned());
                                     }
                                     Err(e) => {
                                         return Ok(ToolResult {
@@ -309,7 +323,11 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }
         }
-        async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+        async fn execute(
+            &self,
+            params: Value,
+            _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
                 ok: true,
                 content: params.to_string(),
@@ -329,7 +347,11 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }
         }
-        async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+        async fn execute(
+            &self,
+            params: Value,
+            _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
                 ok: true,
                 content: format!("Read: {}", params["path"].as_str().unwrap_or("")),
@@ -366,14 +388,20 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_allows_within_dir() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-workdir".to_string(),
-            access: WorkspaceAccess::ReadWrite,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+            }],
+        );
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/file.txt" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-workdir/file.txt" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -382,29 +410,40 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_blocks_outside_dir() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-workdir".to_string(),
-            access: WorkspaceAccess::ReadWrite,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+            }],
+        );
         let result = tool
             .execute(serde_json::json!({ "path": "/etc/passwd" }), None)
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("outside all allowed workspace directories")
+        );
     }
 
     #[tokio::test]
     async fn test_path_guarded_relative_path() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-workdir".to_string(),
-            access: WorkspaceAccess::ReadWrite,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+            }],
+        );
         let result = tool
             .execute(serde_json::json!({ "path": "subdir/file.txt" }), None)
             .await
@@ -415,12 +454,15 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_non_filesystem_tool() {
         let inner = Arc::new(EchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-workdir".to_string(),
-            access: WorkspaceAccess::ReadWrite,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+            }],
+        );
         // echo is not a filesystem tool, so no path check
         let result = tool
             .execute(serde_json::json!({ "path": "/etc/passwd" }), None)
@@ -432,51 +474,79 @@ mod tests {
     #[tokio::test]
     async fn test_path_guarded_blocks_traversal() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-workdir".to_string(),
-            access: WorkspaceAccess::ReadWrite,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+            }],
+        );
         // Path traversal via ".." resolves to /etc/passwd which is outside allowed dir
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-workdir/../../etc/passwd" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-workdir/../../etc/passwd" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("outside all allowed workspace directories")
+        );
     }
 
     #[tokio::test]
     async fn test_path_guarded_blocks_prefix_suffix_attack() {
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-workdir".to_string(),
-            access: WorkspaceAccess::ReadWrite,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+            }],
+        );
         // Prefix-suffix attack: "/tmp/agent-workdir-eval" starts with "/tmp/agent-workdir"
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-workdir-eval/secret" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-workdir-eval/secret" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("outside all allowed workspace directories"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("outside all allowed workspace directories")
+        );
     }
 
     #[tokio::test]
     async fn test_readonly_allows_read() {
         // A file_read tool should be allowed in a ReadOnly directory
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-pkg".to_string(),
-            access: WorkspaceAccess::ReadOnly,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-pkg".to_string(),
+                access: WorkspaceAccess::ReadOnly,
+                last_active: false,
+            }],
+        );
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -495,7 +565,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+            async fn execute(
+                &self,
+                params: Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
@@ -506,14 +580,20 @@ mod tests {
         }
 
         let inner = Arc::new(FileWriteEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-pkg".to_string(),
-            access: WorkspaceAccess::ReadOnly,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-pkg".to_string(),
+                access: WorkspaceAccess::ReadOnly,
+                last_active: false,
+            }],
+        );
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-pkg/manifest.toml" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
@@ -533,7 +613,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+            async fn execute(
+                &self,
+                params: Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
                     ok: true,
                     content: format!("Edited: {}", params["path"].as_str().unwrap_or("")),
@@ -544,14 +628,20 @@ mod tests {
         }
 
         let inner = Arc::new(FileEditEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![WorkspaceDir {
-            id: "test-ws".to_string(),
-            path: "/tmp/agent-pkg".to_string(),
-            access: WorkspaceAccess::ReadOnly,
-            last_active: false,
-        }]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-pkg".to_string(),
+                access: WorkspaceAccess::ReadOnly,
+                last_active: false,
+            }],
+        );
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/prompts/system.md" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-pkg/prompts/system.md" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
@@ -564,23 +654,29 @@ mod tests {
         // the more specific (longest prefix) ReadWrite should win.
         // This simulates: package_root=ReadOnly, workspace=ReadWrite
         let inner = Arc::new(FileEchoTool);
-        let tool = PathGuardedTool::new(inner, vec![
-            WorkspaceDir {
-                id: "rw".to_string(),
-                path: "/tmp/agent-pkg".to_string(),
-                access: WorkspaceAccess::ReadOnly,
-                last_active: false,
-            },
-            WorkspaceDir {
-                id: "ws".to_string(),
-                path: "/tmp/agent-pkg/workspace".to_string(),
-                access: WorkspaceAccess::ReadWrite,
-                last_active: false,
-            },
-        ]);
+        let tool = PathGuardedTool::new(
+            inner,
+            vec![
+                WorkspaceDir {
+                    id: "rw".to_string(),
+                    path: "/tmp/agent-pkg".to_string(),
+                    access: WorkspaceAccess::ReadOnly,
+                    last_active: false,
+                },
+                WorkspaceDir {
+                    id: "ws".to_string(),
+                    path: "/tmp/agent-pkg/workspace".to_string(),
+                    access: WorkspaceAccess::ReadWrite,
+                    last_active: false,
+                },
+            ],
+        );
         // Read within workspace should succeed (ReadWrite wins)
         let result = tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/workspace/file.txt" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-pkg/workspace/file.txt" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -591,20 +687,23 @@ mod tests {
         // When a ReadWrite parent and ReadOnly child both match,
         // the more specific (longest prefix) ReadOnly should win.
         let inner = Arc::new(FileEchoTool);
-        let _tool = PathGuardedTool::new(inner, vec![
-            WorkspaceDir {
-                id: "rw".to_string(),
-                path: "/tmp/agent-pkg".to_string(),
-                access: WorkspaceAccess::ReadWrite,
-                last_active: false,
-            },
-            WorkspaceDir {
-                id: "ro".to_string(),
-                path: "/tmp/agent-pkg/readonly".to_string(),
-                access: WorkspaceAccess::ReadOnly,
-                last_active: false,
-            },
-        ]);
+        let _tool = PathGuardedTool::new(
+            inner,
+            vec![
+                WorkspaceDir {
+                    id: "rw".to_string(),
+                    path: "/tmp/agent-pkg".to_string(),
+                    access: WorkspaceAccess::ReadWrite,
+                    last_active: false,
+                },
+                WorkspaceDir {
+                    id: "ro".to_string(),
+                    path: "/tmp/agent-pkg/readonly".to_string(),
+                    access: WorkspaceAccess::ReadOnly,
+                    last_active: false,
+                },
+            ],
+        );
         // A write tool should be blocked in the nested ReadOnly directory
         struct FileWriteEchoTool2;
         #[async_trait]
@@ -616,7 +715,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+            async fn execute(
+                &self,
+                params: Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
@@ -627,23 +730,29 @@ mod tests {
         }
 
         let write_inner = Arc::new(FileWriteEchoTool2);
-        let write_tool = PathGuardedTool::new(write_inner, vec![
-            WorkspaceDir {
-                id: "rw".to_string(),
-                path: "/tmp/agent-pkg".to_string(),
-                access: WorkspaceAccess::ReadWrite,
-                last_active: false,
-            },
-            WorkspaceDir {
-                id: "ro".to_string(),
-                path: "/tmp/agent-pkg/readonly".to_string(),
-                access: WorkspaceAccess::ReadOnly,
-                last_active: false,
-            },
-        ]);
+        let write_tool = PathGuardedTool::new(
+            write_inner,
+            vec![
+                WorkspaceDir {
+                    id: "rw".to_string(),
+                    path: "/tmp/agent-pkg".to_string(),
+                    access: WorkspaceAccess::ReadWrite,
+                    last_active: false,
+                },
+                WorkspaceDir {
+                    id: "ro".to_string(),
+                    path: "/tmp/agent-pkg/readonly".to_string(),
+                    access: WorkspaceAccess::ReadOnly,
+                    last_active: false,
+                },
+            ],
+        );
         // Write within /tmp/agent-pkg/readonly should be blocked
         let result = write_tool
-            .execute(serde_json::json!({ "path": "/tmp/agent-pkg/readonly/secret.txt" }), None)
+            .execute(
+                serde_json::json!({ "path": "/tmp/agent-pkg/readonly/secret.txt" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);

@@ -10,9 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use super::protocol::{
-    ContextSections, DebugPhase, DebugUsage, SectionMeta,
-};
+use super::protocol::{ContextSections, DebugPhase, DebugUsage, SectionMeta};
 
 // ── Debug Execution State ─────────────────────────────────────────────
 

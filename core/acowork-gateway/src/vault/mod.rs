@@ -161,10 +161,13 @@ impl VaultFacade {
 
     /// Unlock the vault with a password (delegates to acowork_vault)
     pub fn unlock(&mut self, password: &str) -> Result<(), GatewayError> {
-        self.vault.unlock(password)
+        self.vault
+            .unlock(password)
             .map_err(|e| GatewayError::Vault(format!("Failed to unlock vault: {}", e)))?;
         // Refresh provider list after unlock
-        self.provider_names = self.vault.list()
+        self.provider_names = self
+            .vault
+            .list()
             .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {}", e)))?;
         Ok(())
     }
@@ -184,7 +187,14 @@ impl VaultFacade {
     /// Stores the full provider configuration as JSON:
     /// `{ "api_key": "...", "base_url": "...", "models": ["..."] }`
     pub fn store_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
-        self.store_provider(provider, None, &[], api_key, &std::collections::HashMap::new(), None)
+        self.store_provider(
+            provider,
+            None,
+            &[],
+            api_key,
+            &std::collections::HashMap::new(),
+            None,
+        )
     }
 
     /// Store a full provider entry with optional base_url, models list, and capabilities
@@ -206,9 +216,11 @@ impl VaultFacade {
             model_capabilities: capabilities.clone(),
             compact_model: compact_model.map(|s| s.to_string()),
         };
-        let json = serde_json::to_string(&entry)
-            .map_err(|e| GatewayError::Vault(format!("Failed to serialize provider entry: {}", e)))?;
-        self.vault.store(provider, &json)
+        let json = serde_json::to_string(&entry).map_err(|e| {
+            GatewayError::Vault(format!("Failed to serialize provider entry: {}", e))
+        })?;
+        self.vault
+            .store(provider, &json)
             .map_err(|e| GatewayError::Vault(format!("Failed to store key: {}", e)))?;
         if !self.provider_names.contains(&provider.to_string()) {
             self.provider_names.push(provider.to_string());
@@ -276,7 +288,7 @@ impl VaultFacade {
                     Ok(entry) => {
                         let key = &entry.api_key;
                         if key.len() > 6 {
-                            format!("{}...{}", &key[..3], &key[key.len()-3..])
+                            format!("{}...{}", &key[..3], &key[key.len() - 3..])
                         } else {
                             "***".to_string()
                         }
@@ -303,10 +315,9 @@ impl VaultFacade {
         let mut removed_any = false;
         for candidate in &candidates {
             if self.vault.exists(candidate) {
-                self.vault.delete(candidate)
-                    .map_err(|e| GatewayError::Vault(format!(
-                        "Failed to remove key for '{}': {}", candidate, e
-                    )))?;
+                self.vault.delete(candidate).map_err(|e| {
+                    GatewayError::Vault(format!("Failed to remove key for '{}': {}", candidate, e))
+                })?;
                 self.provider_names.retain(|p| p != candidate);
                 removed_any = true;
             }
@@ -330,7 +341,8 @@ impl VaultFacade {
         if !self.vault.is_unlocked() {
             return Err(GatewayError::Vault("Vault is locked".into()));
         }
-        self.vault.store(&key_name, api_key)
+        self.vault
+            .store(&key_name, api_key)
             .map_err(|e| GatewayError::Vault(format!("Failed to store search key: {e}")))?;
         Ok(())
     }
@@ -341,7 +353,9 @@ impl VaultFacade {
             return Err(GatewayError::Vault("Vault is locked".into()));
         }
         let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
-        let secret = self.vault.retrieve(&key_name)
+        let secret = self
+            .vault
+            .retrieve(&key_name)
             .map_err(|e| GatewayError::Vault(format!("No search key for '{provider}': {e}")))?;
         Ok(SearchKeyStorageEntry {
             api_key: secret.expose_secret().to_string(),
@@ -354,7 +368,9 @@ impl VaultFacade {
         if !self.vault.is_unlocked() {
             return Err(GatewayError::Vault("Vault is locked".into()));
         }
-        let all_keys = self.vault.list()
+        let all_keys = self
+            .vault
+            .list()
             .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {e}")))?;
         let mut entries = Vec::new();
         for key_name in &all_keys {
@@ -363,7 +379,7 @@ impl VaultFacade {
                     Ok(secret) => {
                         let key = secret.expose_secret();
                         if key.len() > 6 {
-                            format!("{}...{}", &key[..3], &key[key.len()-3..])
+                            format!("{}...{}", &key[..3], &key[key.len() - 3..])
                         } else {
                             "***".to_string()
                         }
@@ -383,9 +399,12 @@ impl VaultFacade {
     pub fn remove_search_key(&mut self, provider: &str) -> Result<(), GatewayError> {
         let key_name = format!("{}{provider}", Self::SEARCH_PREFIX);
         if !self.vault.exists(&key_name) {
-            return Err(GatewayError::Vault(format!("No search key for '{provider}'")));
+            return Err(GatewayError::Vault(format!(
+                "No search key for '{provider}'"
+            )));
         }
-        self.vault.delete(&key_name)
+        self.vault
+            .delete(&key_name)
             .map_err(|e| GatewayError::Vault(format!("Failed to remove search key: {e}")))?;
         Ok(())
     }
@@ -475,10 +494,22 @@ mod tests {
         let dir = temp_vault_dir("store_provider");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault.store_provider("deepseek", Some("https://api.deepseek.com/v1"), &["deepseek-chat".to_string()], "sk-abc", &std::collections::HashMap::new(), None).unwrap();
+        vault
+            .store_provider(
+                "deepseek",
+                Some("https://api.deepseek.com/v1"),
+                &["deepseek-chat".to_string()],
+                "sk-abc",
+                &std::collections::HashMap::new(),
+                None,
+            )
+            .unwrap();
         let entry = vault.get_provider("deepseek").unwrap();
         assert_eq!(entry.api_key, "sk-abc");
-        assert_eq!(entry.base_url, Some("https://api.deepseek.com/v1".to_string()));
+        assert_eq!(
+            entry.base_url,
+            Some("https://api.deepseek.com/v1".to_string())
+        );
         assert_eq!(entry.default_model, Some("deepseek-chat".to_string()));
         assert_eq!(entry.models, vec!["deepseek-chat"]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -489,7 +520,16 @@ mod tests {
         let dir = temp_vault_dir("store_provider_min");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault.store_provider("openai", None, &[], "sk-test", &std::collections::HashMap::new(), None).unwrap();
+        vault
+            .store_provider(
+                "openai",
+                None,
+                &[],
+                "sk-test",
+                &std::collections::HashMap::new(),
+                None,
+            )
+            .unwrap();
         let entry = vault.get_provider("openai").unwrap();
         assert_eq!(entry.api_key, "sk-test");
         assert_eq!(entry.base_url, None);

@@ -21,9 +21,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use acowork_core::protocol::{
-    McpKeyEntry, McpListItem, ProviderListItem, ProviderModelEntry,
+    EmbeddingModelsFile, McpKeyEntry, McpListItem, ProviderListItem, ProviderModelEntry,
     SearchKeyEntry, SearchProviderListItem, UserProfileListFile,
-    EmbeddingModelsFile,
 };
 
 /// In-memory resource cache loaded at Gateway startup.
@@ -213,12 +212,18 @@ fn load_user_profile_list(data_dir: &Path) -> UserProfileListFile {
                     error = %e,
                     "Failed to parse user_profiles.json, using empty list"
                 );
-                UserProfileListFile { version: 0, users: Vec::new() }
+                UserProfileListFile {
+                    version: 0,
+                    users: Vec::new(),
+                }
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!("user_profiles.json not found, initializing empty");
-            UserProfileListFile { version: 0, users: Vec::new() }
+            UserProfileListFile {
+                version: 0,
+                users: Vec::new(),
+            }
         }
         Err(e) => {
             tracing::warn!(
@@ -226,7 +231,10 @@ fn load_user_profile_list(data_dir: &Path) -> UserProfileListFile {
                 error = %e,
                 "Failed to read user_profiles.json, using empty list"
             );
-            UserProfileListFile { version: 0, users: Vec::new() }
+            UserProfileListFile {
+                version: 0,
+                users: Vec::new(),
+            }
         }
     }
 }
@@ -244,7 +252,10 @@ fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
                     error = %e,
                     "Failed to parse embedding_models.json, using empty list"
                 );
-                EmbeddingModelsFile { version: 0, models: Vec::new() }
+                EmbeddingModelsFile {
+                    version: 0,
+                    models: Vec::new(),
+                }
             }
         };
     }
@@ -283,7 +294,10 @@ fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
                         error = %e,
                         "Failed to parse bundled embedding_models.json, using empty list"
                     );
-                    return EmbeddingModelsFile { version: 0, models: Vec::new() };
+                    return EmbeddingModelsFile {
+                        version: 0,
+                        models: Vec::new(),
+                    };
                 }
             }
         }
@@ -294,7 +308,10 @@ fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
         bundled = %bundled.map(|p| p.display().to_string()).unwrap_or_else(|| "<unresolved>".to_string()),
         "embedding_models.json not found. Dev: run dev/build_core.sh after building. Release: reinstall the package."
     );
-    EmbeddingModelsFile { version: 0, models: Vec::new() }
+    EmbeddingModelsFile {
+        version: 0,
+        models: Vec::new(),
+    }
 }
 
 /// Path to the bundled `embedding_models.json` next to the running gateway binary.
@@ -406,11 +423,7 @@ pub(crate) async fn rebuild_and_save_provider_cache(
         // Note: lookup_protocol_info is sync (uses offline data).
         let (protocol_type, api_base_url) =
             crate::http::models_api::lookup_protocol_info(name, None);
-        let base_url = entry
-            .base_url
-            .clone()
-            .or(api_base_url)
-            .unwrap_or_default();
+        let base_url = entry.base_url.clone().or(api_base_url).unwrap_or_default();
 
         // Build model list with capabilities.
         // Priority: user-stored capabilities > models.dev lookup > minimal fallback.
@@ -419,8 +432,8 @@ pub(crate) async fn rebuild_and_save_provider_cache(
             let capabilities = if let Some(cap) = entry.model_capabilities.get(model_id) {
                 acowork_core::protocol::ModelCapabilitiesInfo::from(cap.clone())
             } else {
-                crate::http::models_api::lookup_model_capabilities(name, model_id)
-                    .unwrap_or(acowork_core::protocol::ModelCapabilitiesInfo {
+                crate::http::models_api::lookup_model_capabilities(name, model_id).unwrap_or(
+                    acowork_core::protocol::ModelCapabilitiesInfo {
                         context_window: 128_000,
                         max_output_tokens: 16_384,
                         max_input_tokens: None,
@@ -433,7 +446,8 @@ pub(crate) async fn rebuild_and_save_provider_cache(
                         name: None,
                         family: None,
                         knowledge_cutoff: None,
-                    })
+                    },
+                )
             };
             models.push(ProviderModelEntry {
                 id: model_id.clone(),
@@ -536,7 +550,8 @@ pub fn rebuild_and_save_search_cache(
         SearchProviderListItem {
             id: "google-cse".to_string(),
             name: "Google CSE".to_string(),
-            description: "Google Custom Search Engine — requires API key + Search Engine ID (CX)".to_string(),
+            description: "Google Custom Search Engine — requires API key + Search Engine ID (CX)"
+                .to_string(),
             requires_api_key: true,
             base_url: "https://www.googleapis.com".to_string(),
         },
@@ -600,17 +615,18 @@ pub fn rebuild_and_save_user_profile_cache(
 /// Build search key vault from Vault entries.
 ///
 /// Reads decrypted API keys from Vault for each configured search provider.
-pub fn build_search_key_vault(
-    gw: &crate::gateway::state::GatewayState,
-) -> Vec<SearchKeyEntry> {
+pub fn build_search_key_vault(gw: &crate::gateway::state::GatewayState) -> Vec<SearchKeyEntry> {
     let providers = &["tavily", "brave", "firecrawl", "searxng"];
     providers
         .iter()
         .filter_map(|id| {
-            gw.vault.get_search_key(id).ok().map(|entry| SearchKeyEntry {
-                provider_id: id.to_string(),
-                api_key: entry.api_key,
-            })
+            gw.vault
+                .get_search_key(id)
+                .ok()
+                .map(|entry| SearchKeyEntry {
+                    provider_id: id.to_string(),
+                    api_key: entry.api_key,
+                })
         })
         .collect()
 }
@@ -715,8 +731,14 @@ impl Default for ResourceCache {
             provider_list: ProviderListFile::default(),
             mcp_list: McpListFile::default(),
             search_list: SearchListFile::default(),
-            user_profile_list: UserProfileListFile { version: 0, users: Vec::new() },
-            embedding_models: EmbeddingModelsFile { version: 0, models: Vec::new() },
+            user_profile_list: UserProfileListFile {
+                version: 0,
+                users: Vec::new(),
+            },
+            embedding_models: EmbeddingModelsFile {
+                version: 0,
+                models: Vec::new(),
+            },
         }
     }
 }
@@ -801,7 +823,10 @@ mod tests {
                 transport: acowork_core::protocol::McpTransportDef::Stdio,
                 url: None,
                 command: "npx".to_string(),
-                args: vec!["-y".to_string(), "@modelcontextprotocol/server-github".to_string()],
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-github".to_string(),
+                ],
                 env: HashMap::from([("GITHUB_TOKEN".to_string(), "ghp_xxx".to_string())]),
                 headers: HashMap::new(),
                 tool_timeout_secs: Some(30),
@@ -849,9 +874,7 @@ mod tests {
     fn test_extract_api_key_from_headers() {
         let config = acowork_core::protocol::McpServerConfigDef {
             name: "test".to_string(),
-            headers: HashMap::from([
-                ("Authorization".to_string(), "Bearer token-456".to_string()),
-            ]),
+            headers: HashMap::from([("Authorization".to_string(), "Bearer token-456".to_string())]),
             ..Default::default()
         };
         let key = extract_api_key_from_mcp_config(&config);

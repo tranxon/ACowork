@@ -11,14 +11,13 @@ pub mod types;
 // Re-exports for convenience
 pub use store::MemoryStore;
 pub use types::{
-    AutobioCategory, AutobiographicalNode, ConflictSignal, ConflictType,
-    ContextSource, DecayConfig, DecayScanResult, Episode,
-    KnowledgeNode, KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery,
-    NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource,
+    AutobioCategory, AutobiographicalNode, ConflictSignal, ConflictType, ContextSource,
+    DecayConfig, DecayScanResult, Episode, KnowledgeNode, KnowledgeSubType, MemoryContext,
+    MemoryNode, MemoryQuery, NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource,
     RetrievalMetrics, SearchResult, StoreHealth, StoreStats,
 };
 
 // Label and edge type constants
-pub use types::labels;
 pub use types::edge_types;
+pub use types::labels;
 pub use types::{HintType, MemoryFilters, NodeTypeFilter};

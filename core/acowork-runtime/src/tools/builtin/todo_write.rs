@@ -5,8 +5,8 @@
 //! parses the parameters, updates `SessionState.todos`, and injects the formatted
 //! list into `ContextBuilder` so the LLM sees current tasks in every system prompt.
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 /// Todo list management tool.
@@ -83,7 +83,11 @@ impl Tool for TodoWriteTool {
     /// Placeholder execution — the real logic is handled by AgentLoop
     /// interception in `loop_.rs`. This path should not be reached during
     /// normal operation; it returns a descriptive error if it is.
-    async fn execute(&self, _params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        _params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         Ok(ToolResult {
             ok: false,
             content: String::new(),

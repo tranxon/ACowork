@@ -19,9 +19,16 @@ pub mod scheduler;
 pub mod triple_extraction;
 
 pub use ambiguous::AmbiguousConflict;
-pub use conflict_llm::{LlmConflictType, ConflictClassification, classify_conflict};
-pub use generalization::{BehaviorPattern, GeneralizationConfig, GeneralizationResult, PatternCategory, detect_simple_patterns, discover_patterns_llm};
-pub use instant::{ConflictCandidate, MemoryStoreInput, ConflictResolutionDetail, ProcessResult};
-pub use offline::{ConflictResolutionResult, OfflineConsolidationConfig, OfflineConsolidationResult};
-pub use scheduler::{ConsolidationScheduler, SchedulerConfig, ConsolidationRun, TriggerReason};
-pub use triple_extraction::{ExtractedTriple, ExtractionResult, LlmMessage, LlmResponse, TripleExtractorLlm};
+pub use conflict_llm::{ConflictClassification, LlmConflictType, classify_conflict};
+pub use generalization::{
+    BehaviorPattern, GeneralizationConfig, GeneralizationResult, PatternCategory,
+    detect_simple_patterns, discover_patterns_llm,
+};
+pub use instant::{ConflictCandidate, ConflictResolutionDetail, MemoryStoreInput, ProcessResult};
+pub use offline::{
+    ConflictResolutionResult, OfflineConsolidationConfig, OfflineConsolidationResult,
+};
+pub use scheduler::{ConsolidationRun, ConsolidationScheduler, SchedulerConfig, TriggerReason};
+pub use triple_extraction::{
+    ExtractedTriple, ExtractionResult, LlmMessage, LlmResponse, TripleExtractorLlm,
+};

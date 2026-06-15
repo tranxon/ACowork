@@ -1,14 +1,14 @@
 //! Gateway global state
 
-use std::collections::HashMap;
-use crate::vault::VaultFacade;
 use crate::budget::tracker::BudgetTracker;
-use crate::rate::bucket::RateLimiter;
 use crate::capability::registry::CapabilityRegistry;
 use crate::cron::CronScheduler;
 use crate::cron::store::CronStore;
-use crate::resource_cache::ResourceCache;
 use crate::lifecycle::embed::EmbedProcessState;
+use crate::rate::bucket::RateLimiter;
+use crate::resource_cache::ResourceCache;
+use crate::vault::VaultFacade;
+use std::collections::HashMap;
 
 /// Information about an installed agent
 #[derive(Debug, Clone)]
@@ -126,10 +126,8 @@ impl GatewayState {
     /// Add an installed agent
     pub fn add_installed(&mut self, info: AgentInfo) {
         // S4.2.2: Register capabilities from manifest on install
-        self.capability_registry.register_from_manifest(
-            &info.agent_id,
-            &info.manifest,
-        );
+        self.capability_registry
+            .register_from_manifest(&info.agent_id, &info.manifest);
         self.installed_agents.insert(info.agent_id.clone(), info);
     }
 
@@ -213,7 +211,7 @@ mod tests {
         let dir = temp_vault_dir("install");
         let mut state = GatewayState::new(&dir);
         assert!(!state.is_installed("com.example.weather"));
-        
+
         let toml_str = r#"
             agent_id = "com.example.weather"
             version = "1.0.0"
@@ -226,7 +224,7 @@ mod tests {
             model = "gpt-4"
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
-        
+
         state.add_installed(AgentInfo {
             agent_id: "com.example.weather".to_string(),
             version: "1.0.0".to_string(),
@@ -254,7 +252,7 @@ mod tests {
             workspace_config_json: None,
         });
         assert!(state.is_running("com.example.weather"));
-        
+
         state.remove_running("com.example.weather");
         assert!(!state.is_running("com.example.weather"));
         let _ = std::fs::remove_dir_all(&dir);

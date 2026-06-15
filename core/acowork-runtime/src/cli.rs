@@ -5,13 +5,13 @@ use crate::agent::session::{SessionManager, SessionManagerConfig, SessionMessage
 use crate::agent_config::AgentMcpConfig;
 use crate::config::RuntimeConfig;
 use crate::error::{Result, RuntimeError};
-use clap::Parser;
 use acowork_core::protocol::{McpListItem, ProtocolType, ProviderListItem};
 use acowork_core::tools::traits::Tool;
+use clap::Parser;
 use std::sync::Arc;
 
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, reload, util::SubscriberInitExt};
 use acowork_core::logging::ChronoLocalTimer;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, reload, util::SubscriberInitExt};
 
 /// Type alias for the reload handle used to dynamically change log level.
 pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
@@ -164,7 +164,9 @@ impl Cli {
             0
         };
         let file_appender = Arc::new(acowork_core::logging::SizeRollingFileAppender::new(
-            log_dir, max_mb, max_file_count,
+            log_dir,
+            max_mb,
+            max_file_count,
         ));
 
         // Store for LogRotate IPC handler
@@ -319,9 +321,9 @@ async fn async_main(
 ) -> Result<()> {
     use crate::agent::context::ContextBuilder;
     use crate::agent::loop_::AgentLoop;
-    use crate::embedding::{FallbackEmbeddingProvider, EmbeddingConfig, EmbeddingProvider};
     use crate::embedding::ollama::OllamaEmbeddingProvider;
     use crate::embedding::remote::RemoteEmbeddingProvider;
+    use crate::embedding::{EmbeddingConfig, EmbeddingProvider, FallbackEmbeddingProvider};
     use crate::package::loader::load_package;
     use crate::package::prompt_builder::build_system_prompt_with_mode;
     use crate::tools::builtin;
@@ -445,8 +447,7 @@ async fn async_main(
                 // Use the first available provider with an API key.
                 // Provider/model selection is governed by resource_cache.providers,
                 // not by manifest fields.
-                let chosen_prov =
-                    providers.iter().find(|p| has_api_key(&p.id));
+                let chosen_prov = providers.iter().find(|p| has_api_key(&p.id));
                 if let Some(prov) = chosen_prov {
                     // Capture current provider ID for compact_model lookup at distillation time
                     gateway_current_provider_id = Some(prov.id.clone());
@@ -462,7 +463,8 @@ async fn async_main(
                     // ADR-012: Model is per-session. Use the first model from the provider list.
                     // The session initialization will use the model from JSONL metadata
                     // or Gateway LLMConfigDelivery.
-                    let model_id = prov.models
+                    let model_id = prov
+                        .models
                         .first()
                         .map(|m| m.id.clone())
                         .unwrap_or_else(|| "default".to_string());
@@ -529,7 +531,11 @@ async fn async_main(
     let embed_dimension = hello_config
         .as_ref()
         .and_then(|cfg| cfg.embed_dimension)
-        .or_else(|| std::env::var("ACOWORK_EMBED_DIMENSION").ok().and_then(|s| s.parse().ok()))
+        .or_else(|| {
+            std::env::var("ACOWORK_EMBED_DIMENSION")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
         .unwrap_or(512);
 
     if let Some(ref endpoint) = embed_endpoint {
@@ -558,8 +564,9 @@ async fn async_main(
     }
 
     // Provider 2: Ollama local (always attempted)
-    let ollama_primary = OllamaEmbeddingProvider::try_new()
-        .map_err(|e| RuntimeError::Config(format!("Failed to create Ollama embedding provider: {e}")))?;
+    let ollama_primary = OllamaEmbeddingProvider::try_new().map_err(|e| {
+        RuntimeError::Config(format!("Failed to create Ollama embedding provider: {e}"))
+    })?;
     let ollama_dim = ollama_primary.dimension();
     embedding_providers.push((Box::new(ollama_primary), 200));
 
@@ -613,13 +620,11 @@ async fn async_main(
         }
     };
 
-    let remote_fallback = RemoteEmbeddingProvider::try_with_config(
-        &base_url,
-        api_key.as_deref(),
-        &model,
-        dim,
-    )
-    .map_err(|e| RuntimeError::Config(format!("Failed to create remote embedding provider: {e}")))?;
+    let remote_fallback =
+        RemoteEmbeddingProvider::try_with_config(&base_url, api_key.as_deref(), &model, dim)
+            .map_err(|e| {
+                RuntimeError::Config(format!("Failed to create remote embedding provider: {e}"))
+            })?;
     embedding_providers.push((Box::new(remote_fallback), 5000));
 
     let fallback_emb = Arc::new(FallbackEmbeddingProvider::with_providers(
@@ -649,9 +654,9 @@ async fn async_main(
     // Create shared memory session handle — tools and AgentCore share
     // the same handle. GrafeoStore is lazily initialized later via
     // init_memory_store(); session_id is updated per-turn in loop_.rs.
-    let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
-        Some(emb_provider.clone()),
-    ));
+    let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(Some(
+        emb_provider.clone(),
+    )));
 
     // Create MCP config change notifier — tools call notify() after
     // writing to agent_mcp.json, and the main loop receives the signal
@@ -666,7 +671,7 @@ async fn async_main(
         has_search_providers,
         None, // GrafeoStore not yet initialized — tool uses fallback path
         Some(memory_session.clone()), // Shared session handle for memory_recall
-        Some(mcp_notifier.clone()),   // MCP config change notifier
+        Some(mcp_notifier.clone()), // MCP config change notifier
         config.work_dir.clone(), // Agent home for MCP config persistence
     ) {
         registry.register(tool);
@@ -810,14 +815,11 @@ async fn async_main(
         //    provider that was already resolved at startup.
         let is_valid = match (&session_model, &session_provider) {
             (Some(model), Some(provider_id)) => {
-                let in_cache = resource_cache
-                    .providers
-                    .as_ref()
-                    .map_or(true, |providers| {
-                        providers.iter().any(|p| {
-                            p.id == *provider_id && p.models.iter().any(|m| m.id == *model)
-                        })
-                    });
+                let in_cache = resource_cache.providers.as_ref().map_or(true, |providers| {
+                    providers
+                        .iter()
+                        .any(|p| p.id == *provider_id && p.models.iter().any(|m| m.id == *model))
+                });
                 if !in_cache {
                     false
                 } else {
@@ -951,7 +953,6 @@ async fn async_main(
             c.init_memory_store(work_dir_path);
         }
 
-
         let session_manager_config = SessionManagerConfig {
             inbound_channel_capacity: 64,
             system_prompt: system_prompt.clone(),
@@ -992,7 +993,8 @@ async fn async_main(
         // If the session's provider differs from the startup-resolved provider,
         // we need to rebuild the Provider with the correct base_url + API key.
         let resumed_model: Option<String> = conversation_session.as_ref().and_then(|c| c.model());
-        let resumed_provider: Option<String> = conversation_session.as_ref().and_then(|c| c.provider());
+        let resumed_provider: Option<String> =
+            conversation_session.as_ref().and_then(|c| c.provider());
 
         let initial_session_id = if let Some(conv) = conversation_session {
             let sid = conv.session_id().to_string();
@@ -1132,8 +1134,8 @@ async fn async_main(
                 );
             }
 
-        // ADR-012: Per-session model — no global agent_model.json anymore.
-        // Model is initialized per-session and persisted in JSONL SessionMetadata.
+            // ADR-012: Per-session model — no global agent_model.json anymore.
+            // Model is initialized per-session and persisted in JSONL SessionMetadata.
         }
 
         // ── DevMode: start Debug Protocol server at startup when --dev-mode ──
@@ -1161,9 +1163,9 @@ async fn async_main(
         let mcp_startup_rx: Option<
             tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
         > = {
-            let mcp_configs = crate::agent_config::load_merged_mcp_configs(
-                std::path::Path::new(&config.work_dir),
-            );
+            let mcp_configs = crate::agent_config::load_merged_mcp_configs(std::path::Path::new(
+                &config.work_dir,
+            ));
             if !mcp_configs.is_empty() {
                 let (tx, rx) =
                     tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);
@@ -1190,8 +1192,7 @@ async fn async_main(
                                 registry.clone(),
                             );
                             let tool_spec = wrapper.spec();
-                            let serialized =
-                                serde_json::to_value(&tool_spec).unwrap_or_default();
+                            let serialized = serde_json::to_value(&tool_spec).unwrap_or_default();
                             specs.push((tool_spec.name.clone(), serialized));
                             wrappers.push(wrapper);
                         }
@@ -1426,7 +1427,12 @@ async fn async_main(
                             relay_intent(&outbound_tx, "agent_stopped", &params).await;
                         }
 
-                        crate::agent::loop_::ChunkEvent::SessionStateChanged { status, model, provider, workspace_id } => {
+                        crate::agent::loop_::ChunkEvent::SessionStateChanged {
+                            status,
+                            model,
+                            provider,
+                            workspace_id,
+                        } => {
                             let mut params = serde_json::json!({
                                 "status": status,
                                 "session_id": sid,
@@ -1485,9 +1491,8 @@ async fn async_main(
         // Runtime MCP connect channel — used by RuntimeConfigUpdate and
         // mcp_config_rx handlers to spawn background MCP connections
         // without blocking the Gateway message loop (avoids session timeout).
-        let (mcp_runtime_tx, mcp_runtime_rx) = tokio::sync::mpsc::channel::<
-            crate::tools::mcp_manager::McpConnectResult,
-        >(1);
+        let (mcp_runtime_tx, mcp_runtime_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);
 
         // Extract gateway query receiver before passing client to the loop.
         // This avoids &mut self conflicts when tokio::select! polls both
@@ -2079,8 +2084,7 @@ async fn process_gateway_recv(
                         let (session_model, session_provider, session_workspace_id) = {
                             let conversations_dir =
                                 std::path::Path::new(work_dir).join("conversations");
-                            let file_path =
-                                conversations_dir.join(format!("{}.jsonl", session_id));
+                            let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
                             match crate::conversation::read_session_metadata(&file_path) {
                                 Ok(meta) => (meta.model, meta.provider, meta.workspace_id),
                                 Err(_) => (None, None, None),
@@ -2291,13 +2295,9 @@ async fn process_gateway_recv(
                         //    cleanly after the current operation is aborted.
                         match session_manager.get_session(&target_session_id) {
                             Some(handle) => {
-                                if let Err(e) =
-                                    handle.send_inbound(InboundMessage::Stop { reason })
+                                if let Err(e) = handle.send_inbound(InboundMessage::Stop { reason })
                                 {
-                                    tracing::warn!(
-                                        "Failed to deliver stop to AgentLoop: {}",
-                                        e
-                                    );
+                                    tracing::warn!("Failed to deliver stop to AgentLoop: {}", e);
                                 }
                             }
 
@@ -2445,10 +2445,9 @@ async fn process_gateway_recv(
                             session_id = %target_session_id,
                             "Routing compact_context to session"
                         );
-                        if let Err(e) = session_manager.send_to_session(
-                            &target_session_id,
-                            SessionMessage::CompactContext,
-                        ) {
+                        if let Err(e) = session_manager
+                            .send_to_session(&target_session_id, SessionMessage::CompactContext)
+                        {
                             tracing::warn!(
                                 session_id = %target_session_id,
                                 error = %e,
@@ -2622,7 +2621,10 @@ async fn process_gateway_recv(
                     return LoopAction::Continue;
                 }
 
-                GatewayResponse::UserProfileUpdate { user_identity, version } => {
+                GatewayResponse::UserProfileUpdate {
+                    user_identity,
+                    version,
+                } => {
                     tracing::info!(
                         has_profile = user_identity.is_some(),
                         version = version,
@@ -2710,14 +2712,21 @@ async fn process_gateway_recv(
                         session_manager
                             .pending_workspaces
                             .insert(session_id.clone(), workspace_id.clone());
-                        session_manager.set_session_workspace_with_resolver(&session_id, "__agent_home__", &resolver_guard);
+                        session_manager.set_session_workspace_with_resolver(
+                            &session_id,
+                            "__agent_home__",
+                            &resolver_guard,
+                        );
                     } else {
-                        session_manager.set_session_workspace_with_resolver(&session_id, &workspace_id, &resolver_guard);
+                        session_manager.set_session_workspace_with_resolver(
+                            &session_id,
+                            &workspace_id,
+                            &resolver_guard,
+                        );
                     }
 
                     // Format and send per-session workspace context
-                    session_manager
-                        .update_session_workspace_context(&session_id, &resolver_guard);
+                    session_manager.update_session_workspace_context(&session_id, &resolver_guard);
                     drop(resolver_guard);
                     return LoopAction::Continue;
                 }
@@ -2785,7 +2794,11 @@ async fn process_gateway_recv(
                         "Received LogFileCountUpdate from Gateway — enforcing limit"
                     );
                     if let Some(appender) = FILE_APPENDER.get() {
-                        let max = if log_file_count > 0 { log_file_count as usize } else { 0 };
+                        let max = if log_file_count > 0 {
+                            log_file_count as usize
+                        } else {
+                            0
+                        };
                         appender.set_max_file_count(max);
                         tracing::info!(
                             log_file_count = log_file_count,
@@ -2854,7 +2867,8 @@ async fn process_gateway_recv(
                         let full_mcp_configs = AgentMcpConfig {
                             catalog: catalog_mcp_configs.clone(),
                             local: merged.local,
-                        }.merged();
+                        }
+                        .merged();
 
                         // Disconnect existing MCP connections inline (fast).
                         session_manager.apply_mcp_servers(vec![]).await;
@@ -2874,11 +2888,14 @@ async fn process_gateway_recv(
                             for prefixed_name in registry.tool_names() {
                                 if let Some(def) = registry.get_tool_def(&prefixed_name) {
                                     let wrapper = acowork_mcp::wrapper::McpToolWrapper::new(
-                                        prefixed_name.clone(), def, registry.clone(),
+                                        prefixed_name.clone(),
+                                        def,
+                                        registry.clone(),
                                     );
                                     use acowork_core::tools::traits::Tool;
                                     let tool_spec = wrapper.spec();
-                                    let serialized = serde_json::to_value(&tool_spec).unwrap_or_default();
+                                    let serialized =
+                                        serde_json::to_value(&tool_spec).unwrap_or_default();
                                     specs.push((tool_spec.name.clone(), serialized));
                                     wrappers.push(wrapper);
                                 }
@@ -2901,9 +2918,9 @@ async fn process_gateway_recv(
                                 tracing::info!("Removed agent_search.json (empty config)");
                             }
                         } else {
-                            match serde_json::from_str::<
-                                acowork_core::protocol::AgentSearchConfig,
-                            >(search_json) {
+                            match serde_json::from_str::<acowork_core::protocol::AgentSearchConfig>(
+                                search_json,
+                            ) {
                                 Ok(search_cfg) => {
                                     let _ = crate::agent_config::save_agent_search_config(
                                         std::path::Path::new(&work_dir),
@@ -3167,7 +3184,9 @@ fn handle_memory_nodes_query(
     // and builds a full Vec in memory before paginating.  This is safe
     // for small databases but becomes a denial-of-service vector when
     // the node count grows into the tens of thousands.
-    let has_filter = !query.keyword.is_empty() || !query.r#type.is_empty() || !query.time_range.is_empty() && query.time_range != "all";
+    let has_filter = !query.keyword.is_empty()
+        || !query.r#type.is_empty()
+        || !query.time_range.is_empty() && query.time_range != "all";
     if !has_filter {
         let total_nodes: usize = labels.iter().map(|l| graph.nodes_by_label(l).len()).sum();
         if total_nodes > MAX_UNFILTERED_MEMORY_SCAN {
@@ -3766,9 +3785,9 @@ async fn send_session_response(
     data: serde_json::Value,
 ) {
     let params = serde_json::json!({
-        "request_id": request_id,
-        "data": data,
-   });
+         "request_id": request_id,
+         "data": data,
+    });
     if let Err(e) = grpc_client
         .send_intent("http-api", "session_response", params, true)
         .await

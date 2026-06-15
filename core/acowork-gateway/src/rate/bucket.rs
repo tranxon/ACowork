@@ -207,9 +207,10 @@ impl RateLimiter {
         // S4.4.5: Fair scheduling check
         let total_usage: u64 = bucket.agent_usage.values().sum();
         if total_usage > 0 {
-            let agent_share = bucket.agent_usage.get(agent_id).copied().unwrap_or(0) as f64
-                / total_usage as f64;
-            if agent_share > self.fairness_threshold && bucket.tokens < bucket.capacity as f64 * 0.2 {
+            let agent_share =
+                bucket.agent_usage.get(agent_id).copied().unwrap_or(0) as f64 / total_usage as f64;
+            if agent_share > self.fairness_threshold && bucket.tokens < bucket.capacity as f64 * 0.2
+            {
                 // Agent is over its fair share and bucket is running low
                 let tokens_needed = 1.0 - bucket.tokens;
                 let wait_secs = if bucket.refill_per_sec > 0.0 {

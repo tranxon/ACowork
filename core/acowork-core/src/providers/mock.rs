@@ -6,14 +6,14 @@
 use async_trait::async_trait;
 use futures_core::Stream;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use crate::error::Result;
 use crate::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, FunctionCall, Provider, StreamEvent,
-    ToolCall, UsageInfo,
+    ChatMessage, ChatRequest, ChatResponse, FunctionCall, Provider, StreamEvent, ToolCall,
+    UsageInfo,
 };
 
 /// A single canned response step for the mock provider
@@ -22,7 +22,10 @@ pub enum MockResponse {
     /// Return a text response (ends the conversation)
     Text { content: String },
     /// Return tool calls (continues the loop)
-    ToolCalls { tool_calls: Vec<ToolCall>, content: String },
+    ToolCalls {
+        tool_calls: Vec<ToolCall>,
+        content: String,
+    },
     /// Return an error
     Error { message: String },
 }
@@ -61,11 +64,7 @@ impl MockProvider {
     }
 
     /// Create a mock provider that first calls tools, then returns text
-    pub fn tool_call_then_text(
-        tool_name: &str,
-        tool_args: &str,
-        final_text: &str,
-    ) -> Self {
+    pub fn tool_call_then_text(tool_name: &str, tool_args: &str, final_text: &str) -> Self {
         Self::new(vec![
             MockResponse::ToolCalls {
                 tool_calls: vec![ToolCall {
@@ -117,7 +116,9 @@ impl Provider for MockProvider {
         // Get next response
         let response = {
             let mut responses = self.responses.lock().map_err(|e| {
-                crate::error::AcoworkError::Provider(crate::providers::ProviderError::unknown(format!("Mock lock error: {e}")))
+                crate::error::AcoworkError::Provider(crate::providers::ProviderError::unknown(
+                    format!("Mock lock error: {e}"),
+                ))
             })?;
             if responses.is_empty() {
                 MockResponse::Text {
@@ -139,7 +140,10 @@ impl Provider for MockProvider {
                 }),
                 ..Default::default()
             }),
-            MockResponse::ToolCalls { tool_calls, content } => Ok(ChatResponse {
+            MockResponse::ToolCalls {
+                tool_calls,
+                content,
+            } => Ok(ChatResponse {
                 content,
                 tool_calls: Some(tool_calls),
                 usage: Some(UsageInfo {
@@ -150,9 +154,9 @@ impl Provider for MockProvider {
                 }),
                 ..Default::default()
             }),
-            MockResponse::Error { message } => {
-                Err(crate::error::AcoworkError::Provider(crate::providers::ProviderError::unknown(message)))
-            }
+            MockResponse::Error { message } => Err(crate::error::AcoworkError::Provider(
+                crate::providers::ProviderError::unknown(message),
+            )),
         }
     }
 

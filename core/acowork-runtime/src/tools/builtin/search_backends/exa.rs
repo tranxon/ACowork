@@ -100,9 +100,10 @@ impl SearchBackend for ExaBackend {
             )));
         }
 
-        let data: ExaResponse = resp.json().await.map_err(|e| {
-            SearchBackendError::Parse(format!("Failed to parse Exa response: {e}"))
-        })?;
+        let data: ExaResponse = resp
+            .json()
+            .await
+            .map_err(|e| SearchBackendError::Parse(format!("Failed to parse Exa response: {e}")))?;
 
         let results: Vec<SearchResult> = data
             .results

@@ -67,15 +67,25 @@ pub struct PurgeLogEntry {
 impl PurgeLogEntry {
     /// Convert to Grafeo node properties for storage.
     pub fn to_properties(&self) -> Vec<(String, Value)> {
-        let purged_ts = grafeo_common::types::Timestamp::from_micros(self.purged_at.timestamp_micros());
+        let purged_ts =
+            grafeo_common::types::Timestamp::from_micros(self.purged_at.timestamp_micros());
         let recover_ts =
             grafeo_common::types::Timestamp::from_micros(self.recoverable_until.timestamp_micros());
 
         vec![
-            ("node_id".to_string(), Value::from(self.node_id.as_u64() as i64)),
+            (
+                "node_id".to_string(),
+                Value::from(self.node_id.as_u64() as i64),
+            ),
             ("label".to_string(), Value::from(self.label.as_str())),
-            ("properties_json".to_string(), Value::from(self.properties_json.as_str())),
-            ("purge_reason".to_string(), Value::from(self.purge_reason.to_json().as_str())),
+            (
+                "properties_json".to_string(),
+                Value::from(self.properties_json.as_str()),
+            ),
+            (
+                "purge_reason".to_string(),
+                Value::from(self.purge_reason.to_json().as_str()),
+            ),
             ("purged_at".to_string(), Value::from(purged_ts)),
             ("recoverable_until".to_string(), Value::from(recover_ts)),
         ]
@@ -155,10 +165,15 @@ impl GrafeoStore {
                     if let Some(ds) = dormant_since {
                         let days_dormant = (now - ds).num_days() as u32;
                         if days_dormant > retention_days {
-                            let entry = self.purge_node(node_id, label, &node.properties, PurgeReason::TimeExpired {
-                                dormant_days: days_dormant,
-                                importance,
-                            })?;
+                            let entry = self.purge_node(
+                                node_id,
+                                label,
+                                &node.properties,
+                                PurgeReason::TimeExpired {
+                                    dormant_days: days_dormant,
+                                    importance,
+                                },
+                            )?;
                             purged.push(entry);
                         }
                     }
@@ -223,10 +238,9 @@ impl GrafeoStore {
 
     /// Purge by user request (Path 3).
     pub fn purge_by_user(&self, node_id: NodeId) -> Result<PurgeLogEntry> {
-        let node = self
-            .db
-            .get_node(node_id)
-            .ok_or_else(|| crate::error::GrafeoError::Memory(format!("node not found: {node_id}")))?;
+        let node = self.db.get_node(node_id).ok_or_else(|| {
+            crate::error::GrafeoError::Memory(format!("node not found: {node_id}"))
+        })?;
 
         let label = node
             .labels
@@ -283,10 +297,8 @@ impl GrafeoStore {
 
                 let props: Vec<(String, Value)> =
                     serde_json::from_str(&properties_json).unwrap_or_default();
-                let new_id = self.store_node(
-                    &label,
-                    props.iter().map(|(k, v)| (k.as_str(), v.clone())),
-                )?;
+                let new_id =
+                    self.store_node(&label, props.iter().map(|(k, v)| (k.as_str(), v.clone())))?;
 
                 // Set status to Active.
                 self.db
@@ -338,7 +350,10 @@ impl GrafeoStore {
     fn store_purge_log(&self, entry: &PurgeLogEntry) -> Result<NodeId> {
         let id = self.store_node(
             PURGE_LOG_LABEL,
-            entry.to_properties().iter().map(|(k, v)| (k.as_str(), v.clone())),
+            entry
+                .to_properties()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone())),
         )?;
         Ok(id)
     }
@@ -359,8 +374,8 @@ impl GrafeoStore {
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.clone()))
             .collect();
-        let properties_json = serde_json::to_string(&props_vec)
-            .unwrap_or_else(|_| "{}".to_string());
+        let properties_json =
+            serde_json::to_string(&props_vec).unwrap_or_else(|_| "{}".to_string());
 
         let entry = PurgeLogEntry {
             node_id,
@@ -391,14 +406,18 @@ mod tests {
         GrafeoStore::new_in_memory().unwrap()
     }
 
-    fn create_dormant_node(store: &GrafeoStore, label: &str, importance: f64, dormant_days: i64) -> NodeId {
+    fn create_dormant_node(
+        store: &GrafeoStore,
+        label: &str,
+        importance: f64,
+        dormant_days: i64,
+    ) -> NodeId {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as i64;
-        let dormant_ts = grafeo_common::types::Timestamp::from_micros(
-            now - (dormant_days * 86400 * 1_000_000),
-        );
+        let dormant_ts =
+            grafeo_common::types::Timestamp::from_micros(now - (dormant_days * 86400 * 1_000_000));
 
         store
             .store_node(
@@ -442,9 +461,15 @@ mod tests {
         let n3 = create_dormant_node(&store, labels::KNOWLEDGE, 0.2, 10);
 
         // Set decay_score so n1 < n2 < n3.
-        store.db.set_node_property(n1, "decay_score", Value::from(0.1f64));
-        store.db.set_node_property(n2, "decay_score", Value::from(0.2f64));
-        store.db.set_node_property(n3, "decay_score", Value::from(0.3f64));
+        store
+            .db
+            .set_node_property(n1, "decay_score", Value::from(0.1f64));
+        store
+            .db
+            .set_node_property(n2, "decay_score", Value::from(0.2f64));
+        store
+            .db
+            .set_node_property(n3, "decay_score", Value::from(0.3f64));
 
         let purged = store.purge_by_capacity(2).unwrap();
         assert_eq!(purged.len(), 2);
@@ -480,7 +505,12 @@ mod tests {
 
         let new_id = recovered.unwrap();
         let node = store.db.get_node(new_id).unwrap();
-        let status = node.properties.get(&"status".into()).unwrap().as_str().unwrap();
+        let status = node
+            .properties
+            .get(&"status".into())
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(status, "Active");
     }
 

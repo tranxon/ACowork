@@ -92,7 +92,9 @@ impl From<&protocol::SessionInfoDto> for proto::SessionInfoDto {
             message_count: s.message_count,
             title: s.title.clone().unwrap_or_default(),
             corrupted: s.corrupted,
-            status_json: s.status.as_ref()
+            status_json: s
+                .status
+                .as_ref()
                 .map(|st| serde_json::to_string(st).unwrap_or_default())
                 .unwrap_or_default(),
             workspace_id: s.workspace_id.clone().unwrap_or_default(),
@@ -108,16 +110,32 @@ impl From<proto::SessionInfoDto> for protocol::SessionInfoDto {
             session_id: s.session_id,
             created_at: s.created_at,
             message_count: s.message_count,
-            title: if s.title.is_empty() { None } else { Some(s.title) },
+            title: if s.title.is_empty() {
+                None
+            } else {
+                Some(s.title)
+            },
             corrupted: s.corrupted,
             status: if s.status_json.is_empty() {
                 None
             } else {
                 serde_json::from_str(&s.status_json).ok()
             },
-            workspace_id: if s.workspace_id.is_empty() { None } else { Some(s.workspace_id) },
-            model: if s.model.is_empty() { None } else { Some(s.model) },
-            provider: if s.provider.is_empty() { None } else { Some(s.provider) },
+            workspace_id: if s.workspace_id.is_empty() {
+                None
+            } else {
+                Some(s.workspace_id)
+            },
+            model: if s.model.is_empty() {
+                None
+            } else {
+                Some(s.model)
+            },
+            provider: if s.provider.is_empty() {
+                None
+            } else {
+                Some(s.provider)
+            },
         }
     }
 }
@@ -224,67 +242,64 @@ impl From<proto::BudgetInfo> for BudgetInfoData {
 impl GatewayRequestToProto for protocol::GatewayRequest {
     fn to_proto(&self, request_id: u64) -> proto::ClientMessage {
         let payload = match self {
-            protocol::GatewayRequest::KeyRelease { provider } => {
-                Some(proto::client_message::Payload::KeyRelease(
-                    proto::KeyReleaseRequest { provider: provider.clone() },
-                ))
-            }
-            protocol::GatewayRequest::IntentSend { target, action, params, async_ } => {
-                Some(proto::client_message::Payload::IntentSend(
-                    proto::IntentSendRequest {
-                        target: target.clone(),
-                        action: action.clone(),
-                        params_json: params.to_string(),
-                        r#async: *async_,
-                    },
-                ))
-            }
-            protocol::GatewayRequest::BudgetQuery { provider } => {
-                Some(proto::client_message::Payload::BudgetQuery(
-                    proto::BudgetQueryRequest { provider: provider.clone() },
-                ))
-            }
+            protocol::GatewayRequest::KeyRelease { provider } => Some(
+                proto::client_message::Payload::KeyRelease(proto::KeyReleaseRequest {
+                    provider: provider.clone(),
+                }),
+            ),
+            protocol::GatewayRequest::IntentSend {
+                target,
+                action,
+                params,
+                async_,
+            } => Some(proto::client_message::Payload::IntentSend(
+                proto::IntentSendRequest {
+                    target: target.clone(),
+                    action: action.clone(),
+                    params_json: params.to_string(),
+                    r#async: *async_,
+                },
+            )),
+            protocol::GatewayRequest::BudgetQuery { provider } => Some(
+                proto::client_message::Payload::BudgetQuery(proto::BudgetQueryRequest {
+                    provider: provider.clone(),
+                }),
+            ),
             protocol::GatewayRequest::UsageReport(report) => {
                 Some(proto::client_message::Payload::UsageReport(report.into()))
             }
-            protocol::GatewayRequest::RateAcquire { provider } => {
-                Some(proto::client_message::Payload::RateAcquire(
-                    proto::RateAcquireRequest { provider: provider.clone() },
-                ))
-            }
-            protocol::GatewayRequest::CapabilityQuery { agent_id } => {
-                Some(proto::client_message::Payload::CapabilityQuery(
-                    proto::CapabilityQueryRequest {
-                        agent_id: agent_id.clone().unwrap_or_default(),
-                    },
-                ))
-            }
+            protocol::GatewayRequest::RateAcquire { provider } => Some(
+                proto::client_message::Payload::RateAcquire(proto::RateAcquireRequest {
+                    provider: provider.clone(),
+                }),
+            ),
+            protocol::GatewayRequest::CapabilityQuery { agent_id } => Some(
+                proto::client_message::Payload::CapabilityQuery(proto::CapabilityQueryRequest {
+                    agent_id: agent_id.clone().unwrap_or_default(),
+                }),
+            ),
             protocol::GatewayRequest::CronRegister {
                 agent_id,
                 schedule,
                 action,
                 params,
                 ..
-            } => {
-                Some(proto::client_message::Payload::CronRegister(
-                    proto::CronRegisterRequest {
-                        agent_id: agent_id.clone(),
-                        schedule: schedule.clone(),
-                        action: action.clone(),
-                        params_json: params.to_string(),
-                    },
-                ))
-            }
-            protocol::GatewayRequest::CronUnregister { cron_id } => {
-                Some(proto::client_message::Payload::CronUnregister(
-                    proto::CronUnregisterRequest { cron_id: cron_id.clone() },
-                ))
-            }
-            protocol::GatewayRequest::CronList {} => {
-                Some(proto::client_message::Payload::CronList(
-                    proto::CronListRequest {},
-                ))
-            }
+            } => Some(proto::client_message::Payload::CronRegister(
+                proto::CronRegisterRequest {
+                    agent_id: agent_id.clone(),
+                    schedule: schedule.clone(),
+                    action: action.clone(),
+                    params_json: params.to_string(),
+                },
+            )),
+            protocol::GatewayRequest::CronUnregister { cron_id } => Some(
+                proto::client_message::Payload::CronUnregister(proto::CronUnregisterRequest {
+                    cron_id: cron_id.clone(),
+                }),
+            ),
+            protocol::GatewayRequest::CronList {} => Some(
+                proto::client_message::Payload::CronList(proto::CronListRequest {}),
+            ),
             protocol::GatewayRequest::ContextUsageReport { agent_id, context } => {
                 Some(proto::client_message::Payload::ContextUsageReport(
                     proto::ContextUsageReportRequest {
@@ -301,49 +316,41 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 mcp_list_version,
                 search_list_version,
                 user_profile_version,
-            } => {
-                Some(proto::client_message::Payload::AgentHello(
-                    proto::AgentHelloRequest {
-                        agent_id: agent_id.clone(),
-                        version: version.clone(),
-                        connection_role: connection_role.clone(),
-                        provider_list_version: *provider_list_version,
-                        mcp_list_version: *mcp_list_version,
-                        search_list_version: *search_list_version,
-                        user_profile_version: *user_profile_version,
-                    },
-                ))
-            }
-            protocol::GatewayRequest::ListSessions => {
-                Some(proto::client_message::Payload::ListSessions(
-                    proto::ListSessionsRequest {},
-                ))
-            }
+            } => Some(proto::client_message::Payload::AgentHello(
+                proto::AgentHelloRequest {
+                    agent_id: agent_id.clone(),
+                    version: version.clone(),
+                    connection_role: connection_role.clone(),
+                    provider_list_version: *provider_list_version,
+                    mcp_list_version: *mcp_list_version,
+                    search_list_version: *search_list_version,
+                    user_profile_version: *user_profile_version,
+                },
+            )),
+            protocol::GatewayRequest::ListSessions => Some(
+                proto::client_message::Payload::ListSessions(proto::ListSessionsRequest {}),
+            ),
             protocol::GatewayRequest::GetSessionMessages {
                 session_id,
                 cursor,
                 limit,
                 direction,
-            } => {
-                Some(proto::client_message::Payload::GetSessionMessages(
-                    proto::GetSessionMessagesRequest {
-                        session_id: session_id.clone(),
-                        cursor: cursor.clone().unwrap_or_default(),
-                        limit: *limit,
-                        direction: direction.clone(),
-                    },
-                ))
-            }
-            protocol::GatewayRequest::CreateSession => {
-                Some(proto::client_message::Payload::CreateSession(
-                    proto::CreateSessionRequest {},
-                ))
-            }
-            protocol::GatewayRequest::DeleteSession { session_id } => {
-                Some(proto::client_message::Payload::DeleteSession(
-                    proto::DeleteSessionRequest { session_id: session_id.clone() },
-                ))
-            }
+            } => Some(proto::client_message::Payload::GetSessionMessages(
+                proto::GetSessionMessagesRequest {
+                    session_id: session_id.clone(),
+                    cursor: cursor.clone().unwrap_or_default(),
+                    limit: *limit,
+                    direction: direction.clone(),
+                },
+            )),
+            protocol::GatewayRequest::CreateSession => Some(
+                proto::client_message::Payload::CreateSession(proto::CreateSessionRequest {}),
+            ),
+            protocol::GatewayRequest::DeleteSession { session_id } => Some(
+                proto::client_message::Payload::DeleteSession(proto::DeleteSessionRequest {
+                    session_id: session_id.clone(),
+                }),
+            ),
             protocol::GatewayRequest::ConfigSnapshot {
                 request_id: snap_request_id,
                 model,
@@ -422,12 +429,23 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 embed_model_id,
                 embed_dimension,
             } => {
-                let _ = (provider_list, provider_list_version, mcp_list, mcp_list_version);
+                let _ = (
+                    provider_list,
+                    provider_list_version,
+                    mcp_list,
+                    mcp_list_version,
+                );
                 // AgentHelloResult now carries structured resource lists with version-driven diff sync.
                 // gRPC bridge serializes these as JSON strings for backward compat with proto.
-                let pl_json = provider_list.as_ref().map(|pl| serde_json::to_string(pl).unwrap_or_default());
-                let ml_json = mcp_list.as_ref().map(|ml| serde_json::to_string(ml).unwrap_or_default());
-                let sl_json = search_list.as_ref().map(|sl| serde_json::to_string(sl).unwrap_or_default());
+                let pl_json = provider_list
+                    .as_ref()
+                    .map(|pl| serde_json::to_string(pl).unwrap_or_default());
+                let ml_json = mcp_list
+                    .as_ref()
+                    .map(|ml| serde_json::to_string(ml).unwrap_or_default());
+                let sl_json = search_list
+                    .as_ref()
+                    .map(|sl| serde_json::to_string(sl).unwrap_or_default());
                 let pkv_json = serde_json::to_string(&provider_key_vault).unwrap_or_default();
                 let mkv_json = serde_json::to_string(&mcp_key_vault).unwrap_or_default();
                 let skv_json = serde_json::to_string(&search_key_vault).unwrap_or_default();
@@ -453,114 +471,101 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     },
                 ))
             }
-            protocol::GatewayResponse::KeyReleaseResult { api_key, error } => {
-                Some(proto::server_message::Payload::KeyReleaseResult(
-                    proto::KeyReleaseResult {
-                        api_key: api_key.clone().unwrap_or_default(),
-                        error: error.clone().unwrap_or_default(),
-                    },
-                ))
-            }
-            protocol::GatewayResponse::IntentDelivered { message_id } => {
-                Some(proto::server_message::Payload::IntentDelivered(
-                    proto::IntentDelivered { message_id: message_id.clone() },
-                ))
-            }
-            protocol::GatewayResponse::IntentReceived { from, action, params, command } => {
-                Some(proto::server_message::Payload::IntentReceived(
-                    proto::IntentReceived {
-                        from: from.clone(),
-                        action: action.clone(),
-                        params_json: params.to_string(),
-                        command: command.clone().unwrap_or_default(),
-                    },
-                ))
-            }
+            protocol::GatewayResponse::KeyReleaseResult { api_key, error } => Some(
+                proto::server_message::Payload::KeyReleaseResult(proto::KeyReleaseResult {
+                    api_key: api_key.clone().unwrap_or_default(),
+                    error: error.clone().unwrap_or_default(),
+                }),
+            ),
+            protocol::GatewayResponse::IntentDelivered { message_id } => Some(
+                proto::server_message::Payload::IntentDelivered(proto::IntentDelivered {
+                    message_id: message_id.clone(),
+                }),
+            ),
+            protocol::GatewayResponse::IntentReceived {
+                from,
+                action,
+                params,
+                command,
+            } => Some(proto::server_message::Payload::IntentReceived(
+                proto::IntentReceived {
+                    from: from.clone(),
+                    action: action.clone(),
+                    params_json: params.to_string(),
+                    command: command.clone().unwrap_or_default(),
+                },
+            )),
             protocol::GatewayResponse::BudgetInfo {
                 remaining_tokens,
                 remaining_cost_usd,
-            } => {
-                Some(proto::server_message::Payload::BudgetInfo(
-                    proto::BudgetInfo {
-                        remaining_tokens: *remaining_tokens,
-                        remaining_cost_usd: *remaining_cost_usd,
-                    },
-                ))
-            }
-            protocol::GatewayResponse::UsageReportAck {} => {
-                Some(proto::server_message::Payload::UsageReportAck(
-                    proto::UsageReportAck {},
-                ))
-            }
-            protocol::GatewayResponse::ContextUsageAck {} => {
-                Some(proto::server_message::Payload::ContextUsageAck(
-                    proto::ContextUsageAck {},
-                ))
-            }
-            protocol::GatewayResponse::RateToken { granted, retry_after_ms } => {
-                Some(proto::server_message::Payload::RateToken(
-                    proto::RateToken {
-                        granted: *granted,
-                        retry_after_ms: retry_after_ms.unwrap_or(0),
-                    },
-                ))
-            }
+            } => Some(proto::server_message::Payload::BudgetInfo(
+                proto::BudgetInfo {
+                    remaining_tokens: *remaining_tokens,
+                    remaining_cost_usd: *remaining_cost_usd,
+                },
+            )),
+            protocol::GatewayResponse::UsageReportAck {} => Some(
+                proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
+            ),
+            protocol::GatewayResponse::ContextUsageAck {} => Some(
+                proto::server_message::Payload::ContextUsageAck(proto::ContextUsageAck {}),
+            ),
+            protocol::GatewayResponse::RateToken {
+                granted,
+                retry_after_ms,
+            } => Some(proto::server_message::Payload::RateToken(
+                proto::RateToken {
+                    granted: *granted,
+                    retry_after_ms: retry_after_ms.unwrap_or(0),
+                },
+            )),
             protocol::GatewayResponse::ProviderListUpdate {
                 provider_list,
                 provider_list_version,
                 provider_key_vault,
-            } => {
-                Some(proto::server_message::Payload::ProviderListUpdate(
-                    proto::ProviderListUpdate {
-                        provider_list_json: serde_json::to_string(provider_list).unwrap_or_default(),
-                        provider_list_version: *provider_list_version,
-                        provider_key_vault_json: serde_json::to_string(provider_key_vault).unwrap_or_default(),
-                    },
-                ))
-            }
-            protocol::GatewayResponse::CapabilityOverview { capabilities } => {
-                Some(proto::server_message::Payload::CapabilityOverview(
-                    proto::CapabilityOverview {
-                        capabilities: capabilities
-                            .iter()
-                            .map(|(k, v)| (k.clone(), proto::StringList { items: v.clone() }))
-                            .collect(),
-                    },
-                ))
-            }
+            } => Some(proto::server_message::Payload::ProviderListUpdate(
+                proto::ProviderListUpdate {
+                    provider_list_json: serde_json::to_string(provider_list).unwrap_or_default(),
+                    provider_list_version: *provider_list_version,
+                    provider_key_vault_json: serde_json::to_string(provider_key_vault)
+                        .unwrap_or_default(),
+                },
+            )),
+            protocol::GatewayResponse::CapabilityOverview { capabilities } => Some(
+                proto::server_message::Payload::CapabilityOverview(proto::CapabilityOverview {
+                    capabilities: capabilities
+                        .iter()
+                        .map(|(k, v)| (k.clone(), proto::StringList { items: v.clone() }))
+                        .collect(),
+                }),
+            ),
             protocol::GatewayResponse::CapabilityUpdate {
                 agent_id,
                 actions,
                 removed,
-            } => {
-                Some(proto::server_message::Payload::CapabilityUpdate(
-                    proto::CapabilityUpdate {
-                        agent_id: agent_id.clone(),
-                        actions: actions.clone(),
-                        removed: *removed,
-                    },
-                ))
-            }
-            protocol::GatewayResponse::CronRegisterResult { cron_id, error } => {
-                Some(proto::server_message::Payload::CronRegisterResult(
-                    proto::CronRegisterResult {
-                        cron_id: cron_id.clone().unwrap_or_default(),
-                        error: error.clone().unwrap_or_default(),
-                    },
-                ))
-            }
+            } => Some(proto::server_message::Payload::CapabilityUpdate(
+                proto::CapabilityUpdate {
+                    agent_id: agent_id.clone(),
+                    actions: actions.clone(),
+                    removed: *removed,
+                },
+            )),
+            protocol::GatewayResponse::CronRegisterResult { cron_id, error } => Some(
+                proto::server_message::Payload::CronRegisterResult(proto::CronRegisterResult {
+                    cron_id: cron_id.clone().unwrap_or_default(),
+                    error: error.clone().unwrap_or_default(),
+                }),
+            ),
             protocol::GatewayResponse::CronUnregisterResult { removed } => {
                 Some(proto::server_message::Payload::CronUnregisterResult(
                     proto::CronUnregisterResult { removed: *removed },
                 ))
             }
-            protocol::GatewayResponse::CronListResult { entries } => {
-                Some(proto::server_message::Payload::CronListResult(
-                    proto::CronListResult {
-                        entries: entries.iter().map(|e| e.into()).collect(),
-                    },
-                ))
-            }
+            protocol::GatewayResponse::CronListResult { entries } => Some(
+                proto::server_message::Payload::CronListResult(proto::CronListResult {
+                    entries: entries.iter().map(|e| e.into()).collect(),
+                }),
+            ),
             protocol::GatewayResponse::WorkspaceConfigUpdate { config_json } => {
                 Some(proto::server_message::Payload::WorkspaceConfigUpdate(
                     proto::WorkspaceConfigUpdate {
@@ -571,72 +576,63 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             protocol::GatewayResponse::SetSessionWorkspace {
                 session_id,
                 workspace_id,
-            } => {
-                Some(proto::server_message::Payload::SetSessionWorkspace(
-                    proto::SetSessionWorkspace {
-                        session_id: session_id.clone(),
-                        workspace_id: workspace_id.clone(),
-                    },
-                ))
-            }
+            } => Some(proto::server_message::Payload::SetSessionWorkspace(
+                proto::SetSessionWorkspace {
+                    session_id: session_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                },
+            )),
             protocol::GatewayResponse::IterationLimitPaused {
                 iteration,
                 max_iterations,
                 message,
-            } => {
-                Some(proto::server_message::Payload::IterationLimitPaused(
-                    proto::IterationLimitPaused {
-                        iteration: *iteration,
-                        max_iterations: *max_iterations,
-                        message: message.clone(),
-                    },
-                ))
-            }
-            protocol::GatewayResponse::SessionList { sessions } => {
-                Some(proto::server_message::Payload::SessionList(
-                    proto::SessionList {
-                        sessions: sessions.iter().map(|s| s.into()).collect(),
-                    },
-                ))
-            }
+            } => Some(proto::server_message::Payload::IterationLimitPaused(
+                proto::IterationLimitPaused {
+                    iteration: *iteration,
+                    max_iterations: *max_iterations,
+                    message: message.clone(),
+                },
+            )),
+            protocol::GatewayResponse::SessionList { sessions } => Some(
+                proto::server_message::Payload::SessionList(proto::SessionList {
+                    sessions: sessions.iter().map(|s| s.into()).collect(),
+                }),
+            ),
             protocol::GatewayResponse::SessionMessages {
                 messages,
                 cursor,
                 has_more,
-            } => {
-                Some(proto::server_message::Payload::SessionMessages(
-                    proto::SessionMessages {
-                        messages: messages.iter().map(|m| m.into()).collect(),
-                        cursor: cursor.clone().unwrap_or_default(),
-                        has_more: *has_more,
-                    },
-                ))
-            }
-            protocol::GatewayResponse::SessionCreated { session_id } => {
-                Some(proto::server_message::Payload::SessionCreated(
-                    proto::SessionCreated { session_id: session_id.clone() },
-                ))
-            }
-            protocol::GatewayResponse::SessionDeleted { success, error } => {
-                Some(proto::server_message::Payload::SessionDeleted(
-                    proto::SessionDeleted { success: *success, error: error.clone().unwrap_or_default() },
-                ))
-            }
-            protocol::GatewayResponse::LogLevelUpdate { log_level } => {
-                Some(proto::server_message::Payload::LogLevelUpdate(
-                    proto::LogLevelUpdate { log_level: log_level.clone() },
-                ))
-            }
-            protocol::GatewayResponse::LogRotate => {
-                Some(proto::server_message::Payload::LogRotate(
-                    proto::LogRotate {},
-                ))
-            }
-            protocol::GatewayResponse::LogFileCountUpdate { log_file_count } => {
-                Some(proto::server_message::Payload::LogFileCountUpdate(
-                    proto::LogFileCountUpdate { log_file_count: *log_file_count },
-                ))
-            }
+            } => Some(proto::server_message::Payload::SessionMessages(
+                proto::SessionMessages {
+                    messages: messages.iter().map(|m| m.into()).collect(),
+                    cursor: cursor.clone().unwrap_or_default(),
+                    has_more: *has_more,
+                },
+            )),
+            protocol::GatewayResponse::SessionCreated { session_id } => Some(
+                proto::server_message::Payload::SessionCreated(proto::SessionCreated {
+                    session_id: session_id.clone(),
+                }),
+            ),
+            protocol::GatewayResponse::SessionDeleted { success, error } => Some(
+                proto::server_message::Payload::SessionDeleted(proto::SessionDeleted {
+                    success: *success,
+                    error: error.clone().unwrap_or_default(),
+                }),
+            ),
+            protocol::GatewayResponse::LogLevelUpdate { log_level } => Some(
+                proto::server_message::Payload::LogLevelUpdate(proto::LogLevelUpdate {
+                    log_level: log_level.clone(),
+                }),
+            ),
+            protocol::GatewayResponse::LogRotate => Some(
+                proto::server_message::Payload::LogRotate(proto::LogRotate {}),
+            ),
+            protocol::GatewayResponse::LogFileCountUpdate { log_file_count } => Some(
+                proto::server_message::Payload::LogFileCountUpdate(proto::LogFileCountUpdate {
+                    log_file_count: *log_file_count,
+                }),
+            ),
             protocol::GatewayResponse::RuntimeConfigUpdate {
                 max_output_tokens,
                 max_iterations,
@@ -666,7 +662,9 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         max_iterations: max_iterations.clone(),
                         temperature: temperature.clone(),
                         system_prompt_override: system_prompt_override.clone().unwrap_or_default(),
-                        shell_approval_threshold: shell_approval_threshold.clone().unwrap_or_default(),
+                        shell_approval_threshold: shell_approval_threshold
+                            .clone()
+                            .unwrap_or_default(),
                         mcp_servers_json,
                         model: model.clone(),
                         provider: provider.clone(),
@@ -677,11 +675,13 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     },
                 ))
             }
-            protocol::GatewayResponse::QueryConfig { request_id: q_request_id } => {
-                Some(proto::server_message::Payload::QueryConfig(
-                    proto::QueryConfig { request_id: q_request_id.clone() },
-                ))
-            }
+            protocol::GatewayResponse::QueryConfig {
+                request_id: q_request_id,
+            } => Some(proto::server_message::Payload::QueryConfig(
+                proto::QueryConfig {
+                    request_id: q_request_id.clone(),
+                },
+            )),
             protocol::GatewayResponse::SearchConfigDelivery {
                 search_list,
                 search_list_version,
@@ -726,29 +726,23 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             // generated on the Runtime side when incoming proto messages
             // are malformed or unrecognized. Mapping them to UsageReportAck
             // ensures the server can still construct a valid ServerMessage.
-            protocol::GatewayResponse::Unknown {} => {
-                Some(proto::server_message::Payload::UsageReportAck(
-                    proto::UsageReportAck {},
-                ))
-            }
-            protocol::GatewayResponse::EnableDebugMode { debug_port } => {
-                Some(proto::server_message::Payload::EnableDebugMode(
-                    proto::EnableDebugMode {
-                        debug_port: *debug_port,
-                    },
-                ))
-            }
+            protocol::GatewayResponse::Unknown {} => Some(
+                proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
+            ),
+            protocol::GatewayResponse::EnableDebugMode { debug_port } => Some(
+                proto::server_message::Payload::EnableDebugMode(proto::EnableDebugMode {
+                    debug_port: *debug_port,
+                }),
+            ),
             // EmbeddingConfigUpdate — no proto message defined.
             // This variant is only used in direct IPC (non-gRPC) scenarios.
             // For gRPC delivery, the Gateway uses RuntimeConfigUpdate.embed_config_json
             // instead, which has proper proto representation.
             // Mapping to UsageReportAck here is safe because the gRPC path
             // never generates this variant.
-            protocol::GatewayResponse::EmbeddingConfigUpdate { .. } => {
-                Some(proto::server_message::Payload::UsageReportAck(
-                    proto::UsageReportAck {},
-                ))
-            }
+            protocol::GatewayResponse::EmbeddingConfigUpdate { .. } => Some(
+                proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
+            ),
         };
 
         proto::ServerMessage {
@@ -905,7 +899,9 @@ mod tests {
             message_count: 3,
             title: None,
             corrupted: false,
-            status: Some(protocol::SessionStatusDto::WaitingApproval { request_id: "req-123".to_string() }),
+            status: Some(protocol::SessionStatusDto::WaitingApproval {
+                request_id: "req-123".to_string(),
+            }),
             workspace_id: None,
             model: None,
             provider: None,

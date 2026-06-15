@@ -158,7 +158,12 @@ impl LoopDetector {
 
     /// Check the latest tool call for loop patterns
     /// Call this after step ⑥ (append to history)
-    pub fn check(&mut self, tool_name: &str, params: &str, result_content: &str) -> LoopDetectionResult {
+    pub fn check(
+        &mut self,
+        tool_name: &str,
+        params: &str,
+        result_content: &str,
+    ) -> LoopDetectionResult {
         // Check Exact Repeat
         if let Some(result) = self.check_exact_repeat(tool_name, params) {
             return result;
@@ -171,7 +176,8 @@ impl LoopDetector {
 
         // Check No Progress
         if self.config.no_progress_enabled
-            && let Some(result) = self.check_no_progress(tool_name, result_content) {
+            && let Some(result) = self.check_no_progress(tool_name, result_content)
+        {
             return result;
         }
 
@@ -236,9 +242,8 @@ impl LoopDetector {
                     let key = "ping_pong";
                     let hit_val = self.hit_counts.get(key).copied().unwrap_or(0) + 1;
                     let level = self.response_level(hit_val);
-                    let message = format!(
-                        "Detected ping-pong between [{a}] and [{b}] ({cycles} cycles)"
-                    );
+                    let message =
+                        format!("Detected ping-pong between [{a}] and [{b}] ({cycles} cycles)");
 
                     return Some(LoopDetectionResult::LoopDetected {
                         pattern: LoopPattern::PingPong,
@@ -323,9 +328,8 @@ impl LoopDetector {
                     };
 
                     let level = self.response_level(hit_val);
-                    let message = format!(
-                        "Detected ping-pong between [{a}] and [{b}] ({cycles} cycles)"
-                    );
+                    let message =
+                        format!("Detected ping-pong between [{a}] and [{b}] ({cycles} cycles)");
 
                     self.ping_pong_state.history.clear();
 
@@ -360,7 +364,11 @@ impl LoopDetector {
         cycles
     }
 
-    fn check_no_progress(&mut self, tool_name: &str, result_content: &str) -> Option<LoopDetectionResult> {
+    fn check_no_progress(
+        &mut self,
+        tool_name: &str,
+        result_content: &str,
+    ) -> Option<LoopDetectionResult> {
         let result_hash = self.simple_hash(result_content);
 
         match &self.no_progress_state.tool_name {
@@ -454,7 +462,11 @@ impl LoopDetector {
             self.tool_call_window.pop_front();
         }
 
-        let count = self.tool_call_window.iter().filter(|t| *t == tool_name).count() as u32;
+        let count = self
+            .tool_call_window
+            .iter()
+            .filter(|t| *t == tool_name)
+            .count() as u32;
 
         if count >= self.config.same_tool_flood_threshold {
             let level = if count >= self.config.same_tool_flood_threshold + 2 {

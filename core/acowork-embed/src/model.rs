@@ -107,7 +107,8 @@ impl EmbeddingModel {
             .map_err(|e| ModelError::Session(format!("Failed to create session builder: {e}")))?;
 
         tracing::info!(path = %onnx_path.display(), "Loading ONNX model from file...");
-        let session = builder.commit_from_file(onnx_path)
+        let session = builder
+            .commit_from_file(onnx_path)
             .map_err(|e| ModelError::Session(format!("Failed to load ONNX model: {e}")))?;
 
         tracing::info!(
@@ -150,80 +151,87 @@ impl EmbeddingModel {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-    
+
         // Tokenize all texts (lightweight — stays on async thread)
         let encodings = self
             .tokenizer
             .encode_batch(texts.iter().map(|s| s.to_string()).collect(), true)
             .map_err(|e| ModelError::Tokenizer(format!("Tokenization failed: {e}")))?;
-    
+
         // Get max sequence length for manual padding
         let max_len = encodings
             .iter()
             .map(|e| e.get_ids().len())
             .max()
             .unwrap_or(0);
-    
+
         let batch_size = encodings.len();
-    
+
         // Build flat input arrays with manual padding
         let mut input_ids_flat = Vec::with_capacity(batch_size * max_len);
         let mut attention_mask_flat = Vec::with_capacity(batch_size * max_len);
         let mut token_type_ids_flat = Vec::with_capacity(batch_size * max_len);
-    
+
         for encoding in &encodings {
             let ids = encoding.get_ids();
             let mask = encoding.get_attention_mask();
             let type_ids = encoding.get_type_ids();
-    
+
             for i in 0..max_len {
                 input_ids_flat.push(if i < ids.len() { ids[i] as i64 } else { 0 });
                 attention_mask_flat.push(if i < mask.len() { mask[i] as i64 } else { 0 });
-                token_type_ids_flat.push(if i < type_ids.len() { type_ids[i] as i64 } else { 0 });
+                token_type_ids_flat.push(if i < type_ids.len() {
+                    type_ids[i] as i64
+                } else {
+                    0
+                });
             }
         }
-    
+
         // Clone the attention_mask_flat for post-inference pooling
         let attention_mask_for_pooling = attention_mask_flat.clone();
-    
+
         // Move ONNX inference to a blocking thread to avoid blocking tokio workers.
         // We use std::sync::Mutex so the guard can be held across the blocking call.
         let session = self.session.clone();
         let pooling = self.pooling.clone();
         let dimension = self.dimension;
         let model_id = self.model_id.clone();
-    
+
         let result = tokio::task::spawn_blocking(move || {
-            let mut session = session.lock().map_err(|e| {
-                ModelError::Inference(format!("Session lock poisoned: {e}"))
-            })?;
-    
+            let mut session = session
+                .lock()
+                .map_err(|e| ModelError::Inference(format!("Session lock poisoned: {e}")))?;
+
             // Check if model expects token_type_ids
             let has_token_type_ids = session
                 .inputs()
                 .iter()
                 .any(|info| info.name() == "token_type_ids");
-    
+
             // Create input tensors
-            let input_ids_tensor = Tensor::from_array((
-                [batch_size, max_len],
-                input_ids_flat,
-            ))
-            .map_err(|e| ModelError::Inference(format!("Failed to create input_ids tensor: {e}")))?;
-    
+            let input_ids_tensor = Tensor::from_array(([batch_size, max_len], input_ids_flat))
+                .map_err(|e| {
+                    ModelError::Inference(format!("Failed to create input_ids tensor: {e}"))
+                })?;
+
             let attention_mask_tensor = Tensor::from_array((
                 [batch_size, max_len],
                 attention_mask_flat.clone(),
             ))
-            .map_err(|e| ModelError::Inference(format!("Failed to create attention_mask tensor: {e}")))?;
-    
+            .map_err(|e| {
+                ModelError::Inference(format!("Failed to create attention_mask tensor: {e}"))
+            })?;
+
             let outputs = if has_token_type_ids {
                 let token_type_ids_tensor = Tensor::from_array((
                     [batch_size, max_len],
                     token_type_ids_flat,
                 ))
-                .map_err(|e| ModelError::Inference(format!("Failed to create token_type_ids tensor: {e}")))?;
-    
+                .map_err(|e| {
+                    ModelError::Inference(format!("Failed to create token_type_ids tensor: {e}"))
+                })?;
+
                 session
                     .run(ort::inputs![
                         "input_ids" => input_ids_tensor,
@@ -239,20 +247,20 @@ impl EmbeddingModel {
                     ])
                     .map_err(|e| ModelError::Inference(format!("ONNX inference failed: {e}")))?
             };
-    
+
             // Extract output data — must copy before releasing session
             let output = &outputs[0];
             let (shape, data) = output
                 .try_extract_tensor::<f32>()
                 .map_err(|e| ModelError::Inference(format!("Failed to extract output: {e}")))?;
-    
+
             let shape_vec: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
             let data_vec: Vec<f32> = data.to_vec();
-    
+
             // Release session lock + outputs — all data is copied out
             drop(outputs);
             drop(session);
-    
+
             // Validate shape: should be [batch, seq_len, hidden_dim]
             if shape_vec.len() != 3 || shape_vec[0] != batch_size {
                 return Err(ModelError::InvalidShape(format!(
@@ -260,10 +268,10 @@ impl EmbeddingModel {
                     shape_vec
                 )));
             }
-    
+
             let seq_len = shape_vec[1];
             let hidden_dim = shape_vec[2];
-    
+
             // Apply pooling for each item in batch
             let mut results = Vec::with_capacity(batch_size);
             for b in 0..batch_size {
@@ -276,18 +284,18 @@ impl EmbeddingModel {
                     }
                     hidden_state.push(row);
                 }
-    
+
                 // Extract attention_mask for this batch item
                 let mask: Vec<i64> = (0..max_len)
                     .map(|s| attention_mask_for_pooling[b * max_len + s])
                     .collect();
-    
+
                 // Apply pooling
                 let mut pooled = apply_pooling(&hidden_state, &mask, &pooling);
-    
+
                 // L2 normalize
                 l2_normalize(&mut pooled);
-    
+
                 // Validate dimension
                 if pooled.len() != dimension {
                     return Err(ModelError::InvalidShape(format!(
@@ -296,21 +304,17 @@ impl EmbeddingModel {
                         pooled.len()
                     )));
                 }
-    
+
                 results.push(pooled);
             }
-    
+
             Ok(results)
         })
         .await
         .map_err(|e| ModelError::Inference(format!("spawn_blocking task failed: {e}")))??;
-    
-        tracing::trace!(
-            model_id,
-            batch_size,
-            "Embedding batch completed"
-        );
-    
+
+        tracing::trace!(model_id, batch_size, "Embedding batch completed");
+
         Ok(result)
     }
 

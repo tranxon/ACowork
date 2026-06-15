@@ -295,7 +295,10 @@ mod tests {
                 [
                     ("subject", grafeo_common::types::Value::from("user")),
                     ("predicate", grafeo_common::types::Value::from("has")),
-                    ("object", grafeo_common::types::Value::from("API key: sk-xxx")),
+                    (
+                        "object",
+                        grafeo_common::types::Value::from("API key: sk-xxx"),
+                    ),
                 ],
             )
             .unwrap();
@@ -326,11 +329,7 @@ mod tests {
         // Verify A cannot see B's data
         if let Some(node) = grafeo_a.get_node(node_id_b) {
             let object = node.get_property("object").and_then(|v| v.as_str());
-            assert_ne!(
-                object,
-                Some("rust"),
-                "A should not retrieve B's node by ID"
-            );
+            assert_ne!(object, Some("rust"), "A should not retrieve B's node by ID");
         }
 
         // Verify each agent only sees its own nodes via capacity status

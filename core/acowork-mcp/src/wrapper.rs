@@ -253,21 +253,33 @@ mod tests {
 
     #[test]
     fn classify_timeout_as_transient() {
-        assert_eq!(classify_mcp_error("MCP server timed out after 30s"), "transient");
+        assert_eq!(
+            classify_mcp_error("MCP server timed out after 30s"),
+            "transient"
+        );
     }
 
     #[test]
     fn classify_disconnect_as_transient() {
-        assert_eq!(classify_mcp_error("MCP server is disconnected"), "transient");
+        assert_eq!(
+            classify_mcp_error("MCP server is disconnected"),
+            "transient"
+        );
     }
 
     #[test]
     fn classify_unauthorized_as_permission() {
-        assert_eq!(classify_mcp_error("Unauthorized access to resource"), "permission");
+        assert_eq!(
+            classify_mcp_error("Unauthorized access to resource"),
+            "permission"
+        );
     }
 
     #[test]
     fn classify_unknown_error_as_transient_default() {
-        assert_eq!(classify_mcp_error("something unexpected happened"), "transient");
+        assert_eq!(
+            classify_mcp_error("something unexpected happened"),
+            "transient"
+        );
     }
 }

@@ -37,7 +37,9 @@ pub fn find_eocd(data: &[u8]) -> Result<usize> {
 pub fn get_cd_offset(data: &[u8], eocd_offset: usize) -> Result<usize> {
     let field_start = eocd_offset + EOCD_CD_OFFSET_FIELD;
     if field_start + 4 > data.len() {
-        return Err(SignError::InvalidPackage("EOCD too short to read CD offset".into()));
+        return Err(SignError::InvalidPackage(
+            "EOCD too short to read CD offset".into(),
+        ));
     }
 
     let cd_offset = u32::from_le_bytes([
@@ -54,7 +56,9 @@ pub fn get_cd_offset(data: &[u8], eocd_offset: usize) -> Result<usize> {
 fn get_cd_size(data: &[u8], eocd_offset: usize) -> Result<usize> {
     let field_start = eocd_offset + 12;
     if field_start + 4 > data.len() {
-        return Err(SignError::InvalidPackage("EOCD too short to read CD size".into()));
+        return Err(SignError::InvalidPackage(
+            "EOCD too short to read CD size".into(),
+        ));
     }
 
     let cd_size = u32::from_le_bytes([
@@ -108,12 +112,10 @@ pub fn insert_block_before_cd(zip_data: &[u8], block: &[u8]) -> Result<Vec<u8>> 
 
     // Verify CD offset + CD size == EOCD offset
     if new_cd_offset + cd_size != new_eocd_offset {
-        return Err(SignError::InvalidPackage(
-            format!(
-                "ZIP structure validation failed after block insertion: cd_offset({}) + cd_size({}) != eocd_offset({})",
-                new_cd_offset, cd_size, new_eocd_offset
-            ),
-        ));
+        return Err(SignError::InvalidPackage(format!(
+            "ZIP structure validation failed after block insertion: cd_offset({}) + cd_size({}) != eocd_offset({})",
+            new_cd_offset, cd_size, new_eocd_offset
+        )));
     }
 
     // Verify CD offset is within bounds
@@ -319,7 +321,10 @@ mod tests {
         let eocd_offset = find_eocd(&result).unwrap();
         let cd_offset = get_cd_offset(&result, eocd_offset).unwrap();
         let cd_size = get_cd_size(&result, eocd_offset).unwrap();
-        assert_eq!(cd_offset + cd_size, eocd_offset,
-            "CD offset + CD size should equal EOCD offset after insertion");
+        assert_eq!(
+            cd_offset + cd_size,
+            eocd_offset,
+            "CD offset + CD size should equal EOCD offset after insertion"
+        );
     }
 }

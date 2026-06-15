@@ -56,9 +56,8 @@ macro_rules! tool_entry {
         #[unsafe(no_mangle)]
         pub extern "C" fn execute(input_ptr: u32, input_len: u32) -> u32 {
             // Read input from WASM linear memory
-            let input_bytes = unsafe {
-                core::slice::from_raw_parts(input_ptr as *const u8, input_len as usize)
-            };
+            let input_bytes =
+                unsafe { core::slice::from_raw_parts(input_ptr as *const u8, input_len as usize) };
 
             // Parse input
             let input = match $crate::ToolInput::from_bytes(input_bytes) {
@@ -95,7 +94,7 @@ macro_rules! tool_entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{ToolInput, ToolOutput, ToolError};
+    use crate::tool::{ToolError, ToolInput, ToolOutput};
 
     #[test]
     fn test_set_output_and_read() {

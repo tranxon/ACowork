@@ -6,11 +6,11 @@
 //! wires to GrafeoStore for instant extraction pipeline.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use acowork_grafeo::consolidation::MemoryStoreInput;
 use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::types::KnowledgeSubType;
+use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -91,7 +91,11 @@ impl Tool for MemoryStoreTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         // --- Validate content ---
         let content = match params.get("content").and_then(|v| v.as_str()) {
             Some(c) if !c.trim().is_empty() => c.trim().to_string(),
@@ -168,20 +172,18 @@ impl Tool for MemoryStoreTool {
                 };
 
                 match store.process_memory_store(&input) {
-                    Ok(Some(result)) => {
-                        Ok(ToolResult {
-                            ok: true,
-                            content: format!(
-                                "Stored {cat}: \"{content}\" (confidence: {conf:.2}, id: {id})",
-                                cat = category_display,
-                                content = content,
-                                conf = confidence,
-                                id = result.node_id.0
-                            ),
-                            error: None,
-                            token_usage: None,
-                        })
-                    }
+                    Ok(Some(result)) => Ok(ToolResult {
+                        ok: true,
+                        content: format!(
+                            "Stored {cat}: \"{content}\" (confidence: {conf:.2}, id: {id})",
+                            cat = category_display,
+                            content = content,
+                            conf = confidence,
+                            id = result.node_id.0
+                        ),
+                        error: None,
+                        token_usage: None,
+                    }),
                     Ok(None) => {
                         // Duplicate skipped
                         Ok(ToolResult {
@@ -249,7 +251,12 @@ mod tests {
         assert!(required.contains(&"content"));
         assert!(required.contains(&"category"));
         // key should NOT be in schema
-        assert!(!spec.input_schema["properties"].as_object().unwrap().contains_key("key"));
+        assert!(
+            !spec.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("key")
+        );
     }
 
     #[tokio::test]
@@ -260,7 +267,12 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("Missing required parameter 'content'"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("Missing required parameter 'content'")
+        );
     }
 
     #[tokio::test]
@@ -271,17 +283,25 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("Missing required parameter 'category'"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("Missing required parameter 'category'")
+        );
     }
 
     #[tokio::test]
     async fn test_memory_store_invalid_category() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({
-                "content": "User prefers Rust",
-                "category": "daily"
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers Rust",
+                    "category": "daily"
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
@@ -292,7 +312,10 @@ mod tests {
     async fn test_memory_store_empty_content() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({ "content": "", "category": "fact" }), None)
+            .execute(
+                serde_json::json!({ "content": "", "category": "fact" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
@@ -302,11 +325,14 @@ mod tests {
     async fn test_memory_store_basic_fact() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({
-                "content": "User lives in Beijing",
-                "category": "fact",
-                "confidence": 0.9
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "User lives in Beijing",
+                    "category": "fact",
+                    "confidence": 0.9
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -318,11 +344,14 @@ mod tests {
     async fn test_memory_store_preference() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({
-                "content": "User prefers dark mode",
-                "category": "preference",
-                "confidence": 0.6
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers dark mode",
+                    "category": "preference",
+                    "confidence": 0.6
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -334,11 +363,14 @@ mod tests {
     async fn test_memory_store_relation() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({
-                "content": "Alice is the team lead of Bob",
-                "category": "relation",
-                "keywords": ["alice", "bob", "team"]
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "Alice is the team lead of Bob",
+                    "category": "relation",
+                    "keywords": ["alice", "bob", "team"]
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -349,10 +381,13 @@ mod tests {
     async fn test_memory_store_default_confidence() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({
-                "content": "User likes coffee",
-                "category": "preference"
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "User likes coffee",
+                    "category": "preference"
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -365,11 +400,14 @@ mod tests {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         // confidence > 1.0 → clamped to 1.0
         let result = tool
-            .execute(serde_json::json!({
-                "content": "2 + 2 = 4",
-                "category": "fact",
-                "confidence": 99.0
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "2 + 2 = 4",
+                    "category": "fact",
+                    "confidence": 99.0
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -377,11 +415,14 @@ mod tests {
 
         // confidence < 0 → clamped to 0.0
         let result = tool
-            .execute(serde_json::json!({
-                "content": "Maybe it will rain",
-                "category": "fact",
-                "confidence": -5.0
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "Maybe it will rain",
+                    "category": "fact",
+                    "confidence": -5.0
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -392,11 +433,14 @@ mod tests {
     async fn test_memory_store_procedure() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({
-                "content": "When user asks for summary, reply concisely",
-                "category": "procedure",
-                "confidence": 0.9
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "When user asks for summary, reply concisely",
+                    "category": "procedure",
+                    "confidence": 0.9
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -408,11 +452,14 @@ mod tests {
     async fn test_memory_store_procedure_low_confidence() {
         let tool = MemoryStoreTool::new("com.test.agent", None);
         let result = tool
-            .execute(serde_json::json!({
-                "content": "User might prefer tables",
-                "category": "procedure",
-                "confidence": 0.5
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "content": "User might prefer tables",
+                    "category": "procedure",
+                    "confidence": 0.5
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);

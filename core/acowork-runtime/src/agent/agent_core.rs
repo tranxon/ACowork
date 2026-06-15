@@ -12,17 +12,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::Utc;
 use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem};
 use acowork_core::providers::traits::Provider;
 use acowork_core::tools::traits::Tool;
-use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::consolidation::ConsolidationScheduler;
+use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::retrieval_metrics::MetricsAggregator;
 use acowork_grafeo::types::GrafeoConfig;
 use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
-use tokio::sync::mpsc;
+use chrono::Utc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use crate::agent::loop_approval::ApprovalHandle;
@@ -115,7 +115,8 @@ pub struct AgentCore {
     /// The AgentLoop writes to this via `transition_status()`;
     /// the SessionHandle holds the Receiver for non-blocking reads.
     /// None for CLI-only sessions (no SessionHandle).
-    pub(crate) status_tx: Option<tokio::sync::watch::Sender<crate::agent::session_state::SessionStatus>>,
+    pub(crate) status_tx:
+        Option<tokio::sync::watch::Sender<crate::agent::session_state::SessionStatus>>,
     /// Memory session handle — shared between agent loop and memory tools.
     /// Created at tool registry time, store initialized lazily.
     pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
@@ -160,8 +161,9 @@ impl AgentCore {
         observer: crate::debug::DebugObserverSlot,
     ) -> Self {
         let initial_work_dir = config.work_dir.clone();
-        let shell_approval_threshold = ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
-            .unwrap_or_default();
+        let shell_approval_threshold =
+            ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
+                .unwrap_or_default();
         Self {
             config,
             manifest,
@@ -186,7 +188,9 @@ impl AgentCore {
             shell_approval_threshold,
             status_tx: None,
             embedding_provider: None,
-            metrics_aggregator: Arc::new(std::sync::Mutex::new(MetricsAggregator::with_defaults(1.0))),
+            metrics_aggregator: Arc::new(std::sync::Mutex::new(MetricsAggregator::with_defaults(
+                1.0,
+            ))),
             consolidation_scheduler: None,
             consolidation_bg_task: None,
             current_work_dir: Some(initial_work_dir),
@@ -205,7 +209,14 @@ impl AgentCore {
         tools: Vec<Arc<dyn Tool>>,
         on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
     ) -> Self {
-        Self::new_with_observer(config, manifest, provider, tools, on_chunk, DebugObserverSlot::production())
+        Self::new_with_observer(
+            config,
+            manifest,
+            provider,
+            tools,
+            on_chunk,
+            DebugObserverSlot::production(),
+        )
     }
 
     /// Rebuild the merged `all_tools` list from built-in `tools` + `mcp_tools`.
@@ -291,7 +302,8 @@ impl AgentCore {
     /// false if channel full/closed or session_id missing.
     pub fn try_send_chunk(&self, event: ChunkEvent) -> bool {
         if let Some(wrapped) = self.make_chunk_event(event) {
-            self.on_chunk.as_ref()
+            self.on_chunk
+                .as_ref()
                 .map(|tx| tx.try_send(wrapped).is_ok())
                 .unwrap_or(false)
         } else {
@@ -320,7 +332,8 @@ impl AgentCore {
         &mut self,
         new_provider: Arc<dyn crate::embedding::EmbeddingProvider>,
     ) {
-        let old_name = self.embedding_provider
+        let old_name = self
+            .embedding_provider
             .as_ref()
             .map(|p| p.name())
             .unwrap_or("none")
@@ -337,7 +350,11 @@ impl AgentCore {
     /// Update gateway model capabilities at runtime.
     /// Now inserts into the global_provider_list for the matching model.
     /// `model_id` is the model identifier string.
-    pub fn update_gateway_model_capabilities(&mut self, model_id: &str, caps: ModelCapabilitiesInfo) {
+    pub fn update_gateway_model_capabilities(
+        &mut self,
+        model_id: &str,
+        caps: ModelCapabilitiesInfo,
+    ) {
         tracing::info!(
             model = %model_id,
             context_window = caps.context_window,
@@ -387,7 +404,10 @@ impl AgentCore {
         shell_approval_threshold: Option<String>,
     ) {
         if let Some(limit) = max_output_tokens {
-            tracing::info!(new = limit, "runtime config: max_output_tokens updated (all models)");
+            tracing::info!(
+                new = limit,
+                "runtime config: max_output_tokens updated (all models)"
+            );
             self.update_max_output_tokens_limit(limit);
         }
         if let Some(n) = max_iterations {
@@ -404,14 +424,17 @@ impl AgentCore {
         }
         if system_prompt_override.is_some() {
             tracing::info!(
-                has_override = system_prompt_override.as_ref().map(|s| !s.is_empty()).unwrap_or(false),
+                has_override = system_prompt_override
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
                 "runtime config: system_prompt_override updated"
             );
             self.system_prompt_override = system_prompt_override;
         }
         if let Some(ref threshold) = shell_approval_threshold {
-            let new_threshold = ShellApprovalThreshold::from_str_loose(threshold)
-                .unwrap_or_default();
+            let new_threshold =
+                ShellApprovalThreshold::from_str_loose(threshold).unwrap_or_default();
             tracing::info!(
                 old = ?self.shell_approval_threshold,
                 new = ?new_threshold,
@@ -567,7 +590,9 @@ impl AgentCore {
             };
             match store.store_autobiographical(&node) {
                 Ok(_) => bootstrapped += 1,
-                Err(e) => tracing::warn!(key = %key, error = %e, "Failed to bootstrap Autobiographical/Identity node"),
+                Err(e) => {
+                    tracing::warn!(key = %key, error = %e, "Failed to bootstrap Autobiographical/Identity node")
+                }
             }
         }
 
@@ -588,7 +613,9 @@ impl AgentCore {
             };
             match store.store_autobiographical(&node) {
                 Ok(_) => bootstrapped += 1,
-                Err(e) => tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node"),
+                Err(e) => {
+                    tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node")
+                }
             }
         }
 
@@ -681,7 +708,11 @@ impl AgentCore {
     /// while value fields (config, manifest, capabilities) are deep-cloned.
     /// The `on_chunk` channel and `session_id` are replaced with the caller-provided ones,
     /// since each session needs its own streaming channel and identity.
-    pub(crate) fn clone_for_session(&self, on_chunk: Option<mpsc::Sender<SessionChunkEvent>>, session_id: String) -> Self {
+    pub(crate) fn clone_for_session(
+        &self,
+        on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
+        session_id: String,
+    ) -> Self {
         Self {
             config: self.config.clone(),
             manifest: self.manifest.clone(),
@@ -740,7 +771,8 @@ impl AgentCore {
             }
         }
         if !list.is_empty() {
-            let available: Vec<&str> = list.iter()
+            let available: Vec<&str> = list
+                .iter()
                 .flat_map(|p| p.models.iter().map(|m| m.id.as_str()))
                 .collect();
             tracing::warn!(
@@ -772,12 +804,18 @@ impl AgentCore {
     pub fn build_provider_for(&self, provider_id: &str) -> Option<Arc<dyn Provider>> {
         let provider_meta = self.get_provider(provider_id)?;
         let api_key = self.get_provider_api_key(provider_id);
-        let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&self.config));
+        let timeouts = Some(crate::providers::router::ProviderTimeouts::from(
+            &self.config,
+        ));
         Some(crate::providers::router::create_provider(
             &provider_meta.id,
             &provider_meta.protocol_type,
             api_key.as_deref(),
-            if provider_meta.base_url.is_empty() { None } else { Some(&provider_meta.base_url) },
+            if provider_meta.base_url.is_empty() {
+                None
+            } else {
+                Some(&provider_meta.base_url)
+            },
             timeouts,
         ))
     }
@@ -798,7 +836,10 @@ impl AgentCore {
 
     /// Set the pending injection channel on the debug observer (DevMode only).
     /// No-op for Production mode.
-    pub fn set_debug_pending_injection(&mut self, ch: std::sync::Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>) {
+    pub fn set_debug_pending_injection(
+        &mut self,
+        ch: std::sync::Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>,
+    ) {
         self.debug_observer.set_pending_injection(ch);
     }
 
@@ -871,7 +912,10 @@ mod tests {
 
     fn make_core_with_channel(
         session_id: Option<&str>,
-    ) -> (AgentCore, mpsc::Receiver<crate::agent::loop_::SessionChunkEvent>) {
+    ) -> (
+        AgentCore,
+        mpsc::Receiver<crate::agent::loop_::SessionChunkEvent>,
+    ) {
         let (tx, rx) = mpsc::channel(16);
         let manifest = acowork_core::AgentManifest::from_toml(
             r#"
@@ -884,8 +928,9 @@ mod tests {
             [llm]
             provider = "mock"
             model = "mock-model"
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
         let config = RuntimeConfig::default();
         let provider = Arc::new(MockProvider::single_text("OK"));
         let mut core = AgentCore::new(config, manifest, provider, vec![], Some(tx));
@@ -899,7 +944,10 @@ mod tests {
         assert!(core.try_send_chunk(crate::agent::loop_::ChunkEvent::ReasoningStarted));
         let evt = rx.try_recv().unwrap();
         assert_eq!(evt.session_id, "s1");
-        assert!(matches!(evt.event, crate::agent::loop_::ChunkEvent::ReasoningStarted));
+        assert!(matches!(
+            evt.event,
+            crate::agent::loop_::ChunkEvent::ReasoningStarted
+        ));
     }
 
     #[test]
@@ -924,8 +972,9 @@ mod tests {
             [llm]
             provider = "mock"
             model = "mock-model"
-            "#
-        ).unwrap();
+            "#,
+        )
+        .unwrap();
         let config = RuntimeConfig::default();
         let provider = Arc::new(MockProvider::single_text("OK"));
         let mut core = AgentCore::new(config, manifest, provider, vec![], Some(tx));

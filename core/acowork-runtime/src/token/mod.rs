@@ -12,7 +12,7 @@
 //! they cause the debug panel and status panel to show contradictory numbers.
 pub mod counter;
 
-pub use counter::{TokenCounter, TokenCountTier, estimate_image_tokens};
+pub use counter::{TokenCountTier, TokenCounter, estimate_image_tokens};
 
 /// The single unified entry point for token counting in AgentCowork.
 ///

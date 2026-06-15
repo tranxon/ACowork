@@ -25,10 +25,10 @@ use std::sync::Arc;
 use acowork_core::tools::traits::Tool;
 use tokio::sync::Notify;
 
+use super::DebugHandles;
 use super::controller::DebugController;
 use super::protocol::DebugPhase;
 use super::server::DebugEventSender;
-use super::DebugHandles;
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;
@@ -91,7 +91,13 @@ pub trait DebugObserver: Send + Sync {
     }
 
     /// Called after a phase completes with its result.
-    fn on_phase_step(&self, _phase: DebugPhase, _input: Option<serde_json::Value>, _output: Option<serde_json::Value>) {}
+    fn on_phase_step(
+        &self,
+        _phase: DebugPhase,
+        _input: Option<serde_json::Value>,
+        _output: Option<serde_json::Value>,
+    ) {
+    }
 
     /// Called after a phase step completes; auto-pauses if in stepping mode.
     async fn on_phase_step_done(&self) {}

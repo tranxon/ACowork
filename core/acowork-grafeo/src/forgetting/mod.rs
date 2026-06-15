@@ -13,5 +13,5 @@ pub mod decay;
 pub mod purge_log;
 pub mod scan;
 
-pub use decay::{compute_decay_score, DecayConfig};
-pub use purge_log::{PurgeLogEntry, PurgeReason, PURGE_LOG_LABEL};
+pub use decay::{DecayConfig, compute_decay_score};
+pub use purge_log::{PURGE_LOG_LABEL, PurgeLogEntry, PurgeReason};

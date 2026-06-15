@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use acowork_core::packaging::{should_exclude_path, PackageOptions};
+use acowork_core::packaging::{PackageOptions, should_exclude_path};
 
 use crate::error::Result;
 
@@ -399,8 +399,14 @@ mod tests {
         let mut content = String::new();
         export_file.read_to_string(&mut content).unwrap();
 
-        assert!(content.contains("Knowledge"), "Export should contain Knowledge label");
-        assert!(content.contains("AgentCowork"), "Export should contain node data");
+        assert!(
+            content.contains("Knowledge"),
+            "Export should contain Knowledge label"
+        );
+        assert!(
+            content.contains("AgentCowork"),
+            "Export should contain node data"
+        );
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
@@ -421,11 +427,7 @@ mod tests {
         assert!(!has_conversation_data(&agent_dir));
 
         // With JSONL file
-        fs::write(
-            agent_dir.join("conversations/20260501_abc.jsonl"),
-            b"test",
-        )
-        .unwrap();
+        fs::write(agent_dir.join("conversations/20260501_abc.jsonl"), b"test").unwrap();
         assert!(has_conversation_data(&agent_dir));
 
         let _ = fs::remove_dir_all(&tmp_dir);

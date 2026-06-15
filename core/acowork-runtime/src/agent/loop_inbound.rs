@@ -39,8 +39,15 @@ pub(super) fn inject_inbound_into_history(
             history.append(ChatMessage::user(text));
             true
         }
-        InboundMessage::SystemNotification { notification_type, data } => {
-            tracing::info!("inject_inbound_into_history: system notification: {} = {:?}", notification_type, data);
+        InboundMessage::SystemNotification {
+            notification_type,
+            data,
+        } => {
+            tracing::info!(
+                "inject_inbound_into_history: system notification: {} = {:?}",
+                notification_type,
+                data
+            );
             // Changed from System to User — MiniMax API rejects non-first system messages
             history.append(ChatMessage {
                 role: MessageRole::User,
@@ -50,11 +57,21 @@ pub(super) fn inject_inbound_into_history(
             });
             true
         }
-        InboundMessage::IntentMessage { from, action, params } => {
-            tracing::info!("inject_inbound_into_history: intent from {}: {} params={:?}", from, action, params);
-            history.append(ChatMessage::user(
-                format!("[intent:{}:{}] {}", from, action, params),
-            ));
+        InboundMessage::IntentMessage {
+            from,
+            action,
+            params,
+        } => {
+            tracing::info!(
+                "inject_inbound_into_history: intent from {}: {} params={:?}",
+                from,
+                action,
+                params
+            );
+            history.append(ChatMessage::user(format!(
+                "[intent:{}:{}] {}",
+                from, action, params
+            )));
             true
         }
         // Control messages are NOT injected into history
@@ -82,11 +99,15 @@ impl AgentLoop {
                 false
             }
             crate::agent::inbound::UserOp::ApprovalDecision { .. } => {
-                tracing::debug!("UserOp: approval decision (no-op here; handled via approval subsystem)");
+                tracing::debug!(
+                    "UserOp: approval decision (no-op here; handled via approval subsystem)"
+                );
                 false
             }
             crate::agent::inbound::UserOp::QuestionAnswer { .. } => {
-                tracing::debug!("UserOp: question answer (no-op here; handled via ask_user_question subsystem)");
+                tracing::debug!(
+                    "UserOp: question answer (no-op here; handled via ask_user_question subsystem)"
+                );
                 false
             }
             crate::agent::inbound::UserOp::UpdateRuntimeConfig {
@@ -143,7 +164,9 @@ impl AgentLoop {
                                 op = ?std::mem::discriminant(&op),
                                 "poll_stop(): buffering UserOp for re-injection by drain_inbound_queue()"
                             );
-                            self.session.deferred_inbound.push(InboundMessage::UserOperation(op));
+                            self.session
+                                .deferred_inbound
+                                .push(InboundMessage::UserOperation(op));
                         }
                     }
                 }

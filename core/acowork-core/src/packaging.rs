@@ -16,16 +16,13 @@ use serde::{Deserialize, Serialize};
 /// These contain runtime data that should never be shipped inside a
 /// distributable `.agent` file.
 pub const PACKAGE_ALWAYS_EXCLUDE_DIRS: &[&str] = &[
-    "memory",   // Grafeo raw DB (exported via node-type filter instead)
+    "memory",    // Grafeo raw DB (exported via node-type filter instead)
     "workspace", // User workspace state
-    "runtime",  // Runtime temporary files
+    "runtime",   // Runtime temporary files
 ];
 
 /// File patterns to always exclude when building an .agent package.
-pub const PACKAGE_EXCLUDE_PATTERNS: &[&str] = &[
-    "*.log",
-    "*.tmp",
-];
+pub const PACKAGE_EXCLUDE_PATTERNS: &[&str] = &["*.log", "*.tmp"];
 
 /// Directories excluded by default but user-can-include via packaging UI.
 pub const PACKAGE_DEFAULT_EXCLUDE_DIRS: &[&str] = &[
@@ -150,13 +147,31 @@ mod tests {
     #[test]
     fn test_package_options_default() {
         let opts = PackageOptions::default();
-        assert!(!opts.include_conversations, "conversations should default to excluded");
-        assert!(!opts.include_episodes, "episodes should default to excluded");
-        assert!(!opts.include_private_knowledge, "private knowledge should default to excluded");
+        assert!(
+            !opts.include_conversations,
+            "conversations should default to excluded"
+        );
+        assert!(
+            !opts.include_episodes,
+            "episodes should default to excluded"
+        );
+        assert!(
+            !opts.include_private_knowledge,
+            "private knowledge should default to excluded"
+        );
         assert!(!opts.include_config, "config should default to excluded");
-        assert!(opts.include_procedural, "procedural should default to included");
-        assert!(opts.include_autobiographical, "autobiographical should default to included");
-        assert!(opts.include_public_knowledge, "public knowledge should default to included");
+        assert!(
+            opts.include_procedural,
+            "procedural should default to included"
+        );
+        assert!(
+            opts.include_autobiographical,
+            "autobiographical should default to included"
+        );
+        assert!(
+            opts.include_public_knowledge,
+            "public knowledge should default to included"
+        );
     }
 
     #[test]

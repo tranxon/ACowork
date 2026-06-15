@@ -8,8 +8,8 @@
 //! Actual classification (Evolution / Correction / Ambiguous) is deferred to
 //! Phase 3 offline LLM arbitration ([`crate::consolidation::conflict_llm`]).
 
-use grafeo_common::types::NodeId;
 use acowork_memory::{ConflictSignal, ConflictType};
+use grafeo_common::types::NodeId;
 
 use crate::types::NodeStatus;
 
@@ -26,7 +26,10 @@ pub const TEMPORAL_WINDOW_HOURS: u64 = 24;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictAction {
     /// Auto-resolve: new replaces old.
-    AutoReplace { old_node_id: NodeId, new_status: NodeStatus },
+    AutoReplace {
+        old_node_id: NodeId,
+        new_status: NodeStatus,
+    },
     /// Both kept, marked for user confirmation.
     MarkAmbiguous { conflict_group_id: String },
     /// Defer to LLM offline arbitration (Phase 3).

@@ -63,10 +63,9 @@ impl McpManager {
         // McpServerConfigDef is now the single source of truth for MCP config,
         // shared between acowork-core (wire format) and acowork-mcp (runtime).
         // No conversion needed — the same type flows through both crates.
-        let (registry, failures) =
-            McpRegistry::connect_all(configs)
-                .await
-                .expect("connect_all is non-fatal and should never fail");
+        let (registry, failures) = McpRegistry::connect_all(configs)
+            .await
+            .expect("connect_all is non-fatal and should never fail");
         let registry = Arc::new(registry);
 
         // Build tool wrappers and specs from the registry

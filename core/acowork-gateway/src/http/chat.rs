@@ -11,15 +11,14 @@
 //!                     { "type": "tool_result", "name": "...", "result": {...} }
 //!                     { "type": "done", "message_id": "...", "usage": {...} }
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
     response::IntoResponse,
     routing::{delete, get, post, put},
-    Router,
 };
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};
@@ -33,13 +32,34 @@ pub fn chat_routes() -> Router<AppState> {
         .route("/api/agents/{id}/message", post(send_message))
         .route("/api/agents/{id}/stream", get(agent_stream_ws))
         .route("/api/agents/{id}/conversations", get(get_conversations))
-        .route("/api/agents/{id}/conversations/latest", get(get_latest_conversation))
-        .route("/api/agents/{id}/sessions", get(list_sessions).post(create_session))
-        .route("/api/agents/{id}/sessions/{session_id}/activate", post(activate_session))
-        .route("/api/agents/{id}/sessions/{session_id}/title", put(update_session_title))
-        .route("/api/agents/{id}/sessions/{session_id}/messages", get(get_session_messages))
-        .route("/api/agents/{id}/sessions/{session_id}", delete(delete_session))
-        .route("/api/agents/{id}/sessions/{session_id}/close", post(close_session))
+        .route(
+            "/api/agents/{id}/conversations/latest",
+            get(get_latest_conversation),
+        )
+        .route(
+            "/api/agents/{id}/sessions",
+            get(list_sessions).post(create_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/activate",
+            post(activate_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/title",
+            put(update_session_title),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/messages",
+            get(get_session_messages),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}",
+            delete(delete_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/close",
+            post(close_session),
+        )
         .route("/api/agents/{id}/continue", post(continue_execution))
 }
 
@@ -167,7 +187,10 @@ pub async fn send_message(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -180,10 +203,17 @@ pub async fn send_message(
     // P1-2 fix: Validate conversation_id format
     if let Some(conv_id) = &body.conversation_id {
         if conv_id.len() > 128 {
-            return Err(ApiError::bad_request("conversation_id too long (max 128 characters)"));
+            return Err(ApiError::bad_request(
+                "conversation_id too long (max 128 characters)",
+            ));
         }
-        if !conv_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return Err(ApiError::bad_request("conversation_id contains invalid characters (only alphanumeric, '-', '_' allowed)"));
+        if !conv_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(ApiError::bad_request(
+                "conversation_id contains invalid characters (only alphanumeric, '-', '_' allowed)",
+            ));
         }
     }
 
@@ -209,39 +239,39 @@ pub async fn send_message(
         let mgr = session_mgr.lock().await;
         if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
             let mut params = serde_json::json!({
-                    "content": body.content,
-                    "message_id": message_id,
-                    "conversation_id": body.conversation_id,
-                });
-                // Explicit session_id pass-through for multi-session routing (P0 fix)
-                if let Some(ref sid) = body.session_id {
-                    params["session_id"] = serde_json::json!(sid);
+                "content": body.content,
+                "message_id": message_id,
+                "conversation_id": body.conversation_id,
+            });
+            // Explicit session_id pass-through for multi-session routing (P0 fix)
+            if let Some(ref sid) = body.session_id {
+                params["session_id"] = serde_json::json!(sid);
 
-                    // Resolve document references if document_ids was provided
-                    if let Some(ref doc_ids) = body.document_ids {
-                        if !doc_ids.is_empty() {
-                            if let Some(docs) = resolve_document_refs(&state, sid, doc_ids).await {
-                                params["documents"] = docs;
-                            }
+                // Resolve document references if document_ids was provided
+                if let Some(ref doc_ids) = body.document_ids {
+                    if !doc_ids.is_empty() {
+                        if let Some(docs) = resolve_document_refs(&state, sid, doc_ids).await {
+                            params["documents"] = docs;
                         }
                     }
                 }
-                // Pass through multimodal content_parts (e.g. text + image_url)
-                if let Some(ref parts) = body.content_parts {
-                    params["content_parts"] = serde_json::json!(parts);
+            }
+            // Pass through multimodal content_parts (e.g. text + image_url)
+            if let Some(ref parts) = body.content_parts {
+                params["content_parts"] = serde_json::json!(parts);
+            }
+            // Pass through attached_context (files/selections added by user)
+            if let Some(ref ctx) = body.attached_context {
+                if !ctx.is_empty() {
+                    params["attached_context"] = serde_json::json!(ctx);
                 }
-                // Pass through attached_context (files/selections added by user)
-                if let Some(ref ctx) = body.attached_context {
-                    if !ctx.is_empty() {
-                        params["attached_context"] = serde_json::json!(ctx);
-                    }
-                }
-                let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                    from: "http-api".to_string(),
-                    action: "chat_message".to_string(),
-                    params,
-                    command: body.command.clone(),
-                };
+            }
+            let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
+                from: "http-api".to_string(),
+                action: "chat_message".to_string(),
+                params,
+                command: body.command.clone(),
+            };
             let pushed = session.push_message(intent).await;
             if !pushed {
                 tracing::warn!(
@@ -315,10 +345,10 @@ pub async fn get_conversations(
             match wait_for_session_response(&state, &request_id).await {
                 Ok(data) => {
                     // Convert SessionInfoDto to ConversationSummary
-                    let sessions: Vec<acowork_core::protocol::SessionInfoDto> =
-                        data.get("sessions")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
+                    let sessions: Vec<acowork_core::protocol::SessionInfoDto> = data
+                        .get("sessions")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
                     let conversations: Vec<ConversationSummary> = sessions
                         .into_iter()
                         .map(|s| ConversationSummary {
@@ -331,7 +361,10 @@ pub async fn get_conversations(
                     return Ok(Json(ConversationsListResponse { conversations }));
                 }
                 Err(e) => {
-                    tracing::warn!("Session IPC query timed out or failed: {}, falling back to Grafeo", e);
+                    tracing::warn!(
+                        "Session IPC query timed out or failed: {}, falling back to Grafeo",
+                        e
+                    );
                 }
             }
         }
@@ -373,7 +406,9 @@ pub async fn get_latest_conversation(
     }
 
     if query.session_id.is_empty() {
-        return Err(ApiError::bad_request("session_id query parameter is required and must not be empty"));
+        return Err(ApiError::bad_request(
+            "session_id query parameter is required and must not be empty",
+        ));
     }
 
     // Fetch messages for the target session via IPC
@@ -383,10 +418,16 @@ pub async fn get_latest_conversation(
         "direction": "backward",
     });
 
-    let messages = match forward_session_query(&state, &agent_id, "get_session_messages", params).await {
-        Ok(data) => {
-            data.get("messages")
-                .and_then(|v| serde_json::from_value::<Vec<acowork_core::protocol::ConversationEntryDto>>(v.clone()).ok())
+    let messages =
+        match forward_session_query(&state, &agent_id, "get_session_messages", params).await {
+            Ok(data) => data
+                .get("messages")
+                .and_then(|v| {
+                    serde_json::from_value::<Vec<acowork_core::protocol::ConversationEntryDto>>(
+                        v.clone(),
+                    )
+                    .ok()
+                })
                 .unwrap_or_default()
                 .into_iter()
                 .enumerate()
@@ -396,10 +437,9 @@ pub async fn get_latest_conversation(
                     timestamp: parse_iso8601_to_unix(&m.ts),
                     turn_index: i as u32,
                 })
-                .collect()
-        }
-        Err(_) => vec![],
-    };
+                .collect(),
+            Err(_) => vec![],
+        };
 
     Ok(Json(LatestConversationResponse {
         session_id: query.session_id,
@@ -420,7 +460,10 @@ pub async fn agent_stream_ws(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
     }
 
@@ -507,12 +550,7 @@ async fn handle_ws(mut socket: WebSocket, agent_id: String, state: AppState) {
 }
 
 /// Handle a single text message from the WebSocket client
-async fn handle_ws_text(
-    socket: &mut WebSocket,
-    agent_id: &str,
-    state: &AppState,
-    text: &str,
-) {
+async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState, text: &str) {
     // Parse client message
     let client_msg: WsClientMessage = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -576,7 +614,6 @@ async fn handle_ws_text(
         // The Gateway no longer writes to the agent workspace.
 
         if pushed_ok {
-
             let ack = serde_json::json!({
                 "type": "ack",
                 "message_id": message_id,
@@ -594,7 +631,9 @@ async fn handle_ws_text(
             if let Some(ref sid) = client_msg.session_id {
                 confirmed["session_id"] = serde_json::json!(sid);
             }
-            let _ = socket.send(Message::Text(confirmed.to_string().into())).await;
+            let _ = socket
+                .send(Message::Text(confirmed.to_string().into()))
+                .await;
         } else {
             let err = serde_json::json!({
                 "type": "error",
@@ -616,8 +655,8 @@ async fn handle_ws_text(
             let mgr = session_mgr.lock().await;
             if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
                 let mut params = serde_json::json!({
-                        "reason": "user_requested",
-                    });
+                    "reason": "user_requested",
+                });
                 // Explicit session_id pass-through for multi-session routing
                 if let Some(ref sid) = client_msg.session_id {
                     params["session_id"] = serde_json::json!(sid);
@@ -737,9 +776,9 @@ async fn handle_ws_text(
         let mgr = session_mgr.lock().await;
         if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
             let mut params = serde_json::json!({
-                    "content": content,
-                    "message_id": message_id,
-                });
+                "content": content,
+                "message_id": message_id,
+            });
             // Explicit session_id pass-through for multi-session routing (P0 fix)
             if let Some(ref sid) = client_msg.session_id {
                 params["session_id"] = serde_json::json!(sid);
@@ -842,7 +881,7 @@ mod tests {
         assert_eq!(msg.content, Some("Hi there".to_string()));
         assert!(msg.command.is_none());
     }
-    
+
     #[test]
     fn test_ws_client_message_with_command() {
         let json = r#"{"type": "message", "content": "Review code", "command": "/review-pr"}"#;
@@ -863,7 +902,10 @@ mod tests {
         // Valid formats
         let valid_ids = ["conv-123", "abc_def", "ABC123", "conv-2024-01-01"];
         for id in &valid_ids {
-            assert!(id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+            assert!(
+                id.chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            );
         }
     }
 
@@ -872,7 +914,10 @@ mod tests {
         // Invalid: contains spaces, dots, slashes
         let invalid_ids = ["conv 123", "conv.123", "conv/123", "conv@123"];
         for id in &invalid_ids {
-            assert!(!id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+            assert!(
+                !id.chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            );
         }
     }
 }
@@ -900,7 +945,10 @@ pub async fn continue_execution(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -915,8 +963,8 @@ pub async fn continue_execution(
         let mgr = session_mgr.lock().await;
         if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
             let mut params = serde_json::json!({
-                    "reason": "user_requested",
-                });
+                "reason": "user_requested",
+            });
             // Explicit session_id pass-through for multi-session routing
             if let Some(ref sid) = body.session_id {
                 params["session_id"] = serde_json::json!(sid);
@@ -929,7 +977,9 @@ pub async fn continue_execution(
             };
             let pushed = session.push_message(intent).await;
             if !pushed {
-                return Err(ApiError::internal("Failed to deliver continue signal to agent"));
+                return Err(ApiError::internal(
+                    "Failed to deliver continue signal to agent",
+                ));
             }
         } else {
             return Err(ApiError::service_unavailable(&format!(
@@ -1057,7 +1107,10 @@ pub async fn list_sessions(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         // If agent is not running, return empty list instead of error.
         // This is friendlier for clients like AgentList that fetch the latest session title
@@ -1077,8 +1130,11 @@ pub async fn list_sessions(
     });
     let data = forward_session_query(&state, &agent_id, "list_sessions", params).await?;
 
-    let sessions: Vec<SessionInfoResponse> = data.get("sessions")
-        .and_then(|v| serde_json::from_value::<Vec<acowork_core::protocol::SessionInfoDto>>(v.clone()).ok())
+    let sessions: Vec<SessionInfoResponse> = data
+        .get("sessions")
+        .and_then(|v| {
+            serde_json::from_value::<Vec<acowork_core::protocol::SessionInfoDto>>(v.clone()).ok()
+        })
         .unwrap_or_default()
         .into_iter()
         .map(|s| SessionInfoResponse {
@@ -1091,16 +1147,22 @@ pub async fn list_sessions(
         })
         .collect();
 
-    let total_count = data.get("total_count")
+    let total_count = data
+        .get("total_count")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or(sessions.len());
-    let total_pages = data.get("total_pages")
+    let total_pages = data
+        .get("total_pages")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or(1);
 
-    Ok(Json(SessionsListResponse { sessions, total_count, total_pages }))
+    Ok(Json(SessionsListResponse {
+        sessions,
+        total_count,
+        total_pages,
+    }))
 }
 
 /// `GET /api/agents/{id}/sessions/{session_id}/messages` — get paginated session messages (S1.14)
@@ -1115,7 +1177,10 @@ pub async fn get_session_messages(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -1139,8 +1204,12 @@ pub async fn get_session_messages(
         return Err(ApiError::bad_request(error));
     }
 
-    let messages: Vec<MessageEntryResponse> = data.get("messages")
-        .and_then(|v| serde_json::from_value::<Vec<acowork_core::protocol::ConversationEntryDto>>(v.clone()).ok())
+    let messages: Vec<MessageEntryResponse> = data
+        .get("messages")
+        .and_then(|v| {
+            serde_json::from_value::<Vec<acowork_core::protocol::ConversationEntryDto>>(v.clone())
+                .ok()
+        })
         .unwrap_or_default()
         .into_iter()
         .map(|m| MessageEntryResponse {
@@ -1152,8 +1221,14 @@ pub async fn get_session_messages(
         })
         .collect();
 
-    let cursor = data.get("cursor").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let has_more = data.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cursor = data
+        .get("cursor")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let has_more = data
+        .get("has_more")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     Ok(Json(SessionMessagesResponse {
         messages,
@@ -1175,7 +1250,10 @@ pub async fn create_session(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -1204,15 +1282,13 @@ pub async fn create_session(
         return Err(ApiError::internal(error));
     }
 
-    let session_id = data.get("session_id")
+    let session_id = data
+        .get("session_id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
 
-    Ok((
-        StatusCode::OK,
-        Json(SessionCreatedResponse { session_id }),
-    ))
+    Ok((StatusCode::OK, Json(SessionCreatedResponse { session_id })))
 }
 
 /// `POST /api/agents/{id}/sessions/{session_id}/activate` — activate an existing session (S1.14)
@@ -1232,7 +1308,10 @@ pub async fn activate_session(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -1275,7 +1354,10 @@ pub async fn update_session_title(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -1312,7 +1394,10 @@ pub async fn close_session(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -1347,7 +1432,10 @@ pub async fn delete_session(
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if !gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
@@ -1374,11 +1462,15 @@ pub async fn delete_session(
     {
         let data_dir = {
             let gw = state.gateway_state.read().await;
-            gw.config.as_ref()
+            gw.config
+                .as_ref()
                 .map(|c| std::path::PathBuf::from(&c.data_dir))
                 .unwrap_or_else(|| std::path::PathBuf::from("./data"))
         };
-        let docs_dir = data_dir.join("sessions").join(&session_id).join("documents");
+        let docs_dir = data_dir
+            .join("sessions")
+            .join(&session_id)
+            .join("documents");
         if docs_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&docs_dir) {
                 tracing::warn!(
@@ -1415,9 +1507,10 @@ async fn forward_session_query(
     action: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
-    let session_mgr = state.session_mgr.as_ref().ok_or_else(|| {
-        ApiError::internal("Session manager not available")
-    })?;
+    let session_mgr = state
+        .session_mgr
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Session manager not available"))?;
 
     let request_id = format!("sess-{}-{}", action, uuid::Uuid::new_v4());
 
@@ -1448,24 +1541,25 @@ async fn forward_session_query(
         // Clean up pending request
         let mut pending = state.session_pending.lock().await;
         pending.remove(&request_id);
-        return Err(ApiError::internal("Failed to deliver session query to agent"));
+        return Err(ApiError::internal(
+            "Failed to deliver session query to agent",
+        ));
     }
     drop(mgr); // Release lock before awaiting
 
     // Wait for response with timeout
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(SESSION_IPC_TIMEOUT_SECS),
-        rx,
-    ).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(SESSION_IPC_TIMEOUT_SECS), rx).await {
         Ok(Ok(data)) => Ok(data),
-        Ok(Err(_)) => {
-            Err(ApiError::internal("Session response channel closed unexpectedly"))
-        }
+        Ok(Err(_)) => Err(ApiError::internal(
+            "Session response channel closed unexpectedly",
+        )),
         Err(_) => {
             // Timeout — clean up pending request
             let mut pending = state.session_pending.lock().await;
             pending.remove(&request_id);
-            Err(ApiError::internal("Session query timed out — agent did not respond"))
+            Err(ApiError::internal(
+                "Session query timed out — agent did not respond",
+            ))
         }
     }
 }
@@ -1484,10 +1578,7 @@ async fn wait_for_session_response(
         pending.insert(request_id.to_string(), tx);
     }
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(SESSION_IPC_TIMEOUT_SECS),
-        rx,
-    ).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(SESSION_IPC_TIMEOUT_SECS), rx).await {
         Ok(Ok(data)) => Ok(data),
         Ok(Err(_)) => Err("Session response channel closed".to_string()),
         Err(_) => {
@@ -1520,7 +1611,8 @@ async fn resolve_document_refs(
 ) -> Option<serde_json::Value> {
     let data_dir = {
         let gw = state.gateway_state.read().await;
-        gw.config.as_ref()
+        gw.config
+            .as_ref()
             .map(|c| std::path::PathBuf::from(&c.data_dir))
             .unwrap_or_else(|| std::path::PathBuf::from("./data"))
     };

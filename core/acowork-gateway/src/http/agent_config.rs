@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 use acowork_core::ShellApprovalThreshold;
+use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 
 /// Effective (merged) config returned to API consumers.
 #[derive(Debug, Clone, Serialize)]

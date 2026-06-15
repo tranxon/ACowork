@@ -3,8 +3,8 @@
 //! Contains types used by the gRPC client.
 //! The legacy IPC GatewayClient has been removed in favor of gRPC.
 
-use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::ProtocolType;
+use acowork_core::protocol::ModelCapabilitiesInfo;
 
 /// LLM configuration received from Gateway
 ///

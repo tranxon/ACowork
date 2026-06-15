@@ -73,7 +73,8 @@ impl SearchBackend for GoogleCseBackend {
             Some((k, c)) => (k, c),
             None => {
                 return Err(SearchBackendError::Api(
-                    "Google CSE requires api_key in format 'API_KEY|CX' (Search Engine ID)".to_string(),
+                    "Google CSE requires api_key in format 'API_KEY|CX' (Search Engine ID)"
+                        .to_string(),
                 ));
             }
         };

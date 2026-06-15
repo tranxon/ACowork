@@ -52,8 +52,7 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
     }
 
     // ── Fallback: lopdf (content-stream extraction) ──
-    let doc = lopdf::Document::load(path)
-        .map_err(|e| format!("lopdf failed to load PDF: {e}"))?;
+    let doc = lopdf::Document::load(path).map_err(|e| format!("lopdf failed to load PDF: {e}"))?;
 
     let pages = doc.get_pages();
     if pages.is_empty() {
@@ -62,8 +61,16 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
 
     // Build page range respecting opts
     let total_pages = pages.len() as u32;
-    let start = opts.start_page.unwrap_or(1).max(1).min(total_pages as usize);
-    let end = opts.end_page.unwrap_or(total_pages as usize).max(start).min(total_pages as usize);
+    let start = opts
+        .start_page
+        .unwrap_or(1)
+        .max(1)
+        .min(total_pages as usize);
+    let end = opts
+        .end_page
+        .unwrap_or(total_pages as usize)
+        .max(start)
+        .min(total_pages as usize);
     let max_pages = end.saturating_sub(start).saturating_add(1).min(MAX_PAGES);
 
     let mut output = String::from("[Extracted via lopdf — content-stream fallback]\n");
@@ -104,14 +111,22 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
 }
 
 /// Format pages extracted by `pdf_extract` (or any per-page `Vec<String>`).
-fn format_pdf_pages(pages: &[String], opts: &ExtractOptions, _source: &str) -> Result<String, String> {
+fn format_pdf_pages(
+    pages: &[String],
+    opts: &ExtractOptions,
+    _source: &str,
+) -> Result<String, String> {
     let total_pages = pages.len();
     if total_pages == 0 {
         return Ok("(empty PDF)".to_string());
     }
 
     let start = opts.start_page.unwrap_or(1).max(1).min(total_pages);
-    let end = opts.end_page.unwrap_or(total_pages).max(start).min(total_pages);
+    let end = opts
+        .end_page
+        .unwrap_or(total_pages)
+        .max(start)
+        .min(total_pages);
     let max_pages = end.saturating_sub(start).saturating_add(1).min(MAX_PAGES);
 
     let mut output = String::new();

@@ -200,10 +200,7 @@ impl GrafeoStore {
         }
 
         // Step 5: Store new triples as KnowledgeNodes
-        let source_ids: Vec<String> = episode_contents
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
+        let source_ids: Vec<String> = episode_contents.iter().map(|(id, _)| id.clone()).collect();
 
         for triple in &new_triples {
             let embedding = embedding_fn(&format!(
@@ -413,7 +410,8 @@ mod tests {
 
     #[test]
     fn test_parse_triples_confidence_clamped() {
-        let response = r#"[{"subject":"x","predicate":"y","object":"z","confidence":1.5,"sub_type":"fact"}]"#;
+        let response =
+            r#"[{"subject":"x","predicate":"y","object":"z","confidence":1.5,"sub_type":"fact"}]"#;
         let triples = parse_triples(response).unwrap();
         assert!((triples[0].confidence - 1.0).abs() < f32::EPSILON);
     }
@@ -546,7 +544,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TripleExtractorLlm for MockLlm {
-        async fn chat(&self, _messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String> {
+        async fn chat(
+            &self,
+            _messages: Vec<LlmMessage>,
+        ) -> std::result::Result<LlmResponse, String> {
             Ok(LlmResponse {
                 content: self.response.clone(),
                 usage_tokens: Some(150),
@@ -571,7 +572,10 @@ mod tests {
 
         let result = store
             .extract_triples(
-                &[("ep-1".to_string(), "I love coffee and I live in Shanghai".to_string())],
+                &[(
+                    "ep-1".to_string(),
+                    "I love coffee and I live in Shanghai".to_string(),
+                )],
                 &llm,
                 &test_embedding_arc(),
             )
@@ -614,7 +618,10 @@ mod tests {
 
         let result = store
             .extract_triples(
-                &[("ep-2".to_string(), "I like coffee now and work at Acme".to_string())],
+                &[(
+                    "ep-2".to_string(),
+                    "I like coffee now and work at Acme".to_string(),
+                )],
                 &llm,
                 &test_embedding_arc(),
             )

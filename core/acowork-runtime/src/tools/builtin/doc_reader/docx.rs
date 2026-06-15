@@ -150,7 +150,10 @@ fn render_markdown_table(output: &mut String, rows: &[Vec<String>]) {
     let header = &rows[0];
     output.push('|');
     for c in 0..col_count {
-        output.push_str(&format!(" {} |", header.get(c).map(|s| s.as_str()).unwrap_or("")));
+        output.push_str(&format!(
+            " {} |",
+            header.get(c).map(|s| s.as_str()).unwrap_or("")
+        ));
     }
     output.push('\n');
 
@@ -165,7 +168,10 @@ fn render_markdown_table(output: &mut String, rows: &[Vec<String>]) {
     for row in &rows[1..] {
         output.push('|');
         for c in 0..col_count {
-            output.push_str(&format!(" {} |", row.get(c).map(|s| s.as_str()).unwrap_or("")));
+            output.push_str(&format!(
+                " {} |",
+                row.get(c).map(|s| s.as_str()).unwrap_or("")
+            ));
         }
         output.push('\n');
     }

@@ -24,7 +24,11 @@ impl std::fmt::Display for ChronoLocalTimer {
 
 impl tracing_subscriber::fmt::time::FormatTime for ChronoLocalTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+        write!(
+            w,
+            "{}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+        )
     }
 }
 
@@ -166,7 +170,11 @@ impl Write for &SizeRollingFileAppender {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).file.flush()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .file
+            .flush()
     }
 }
 

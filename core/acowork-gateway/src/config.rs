@@ -8,10 +8,10 @@
 
 use std::path::PathBuf;
 
-use acowork_core::defaults;
-use serde::{Deserialize, Serialize};
 use crate::cli::Cli;
 use crate::error::GatewayError;
+use acowork_core::defaults;
+use serde::{Deserialize, Serialize};
 
 /// Compute the single application root directory for the gateway.
 ///
@@ -44,9 +44,7 @@ pub(crate) fn project_root() -> PathBuf {
     let home_var = std::env::var("HOME").ok();
 
     match home_var {
-        Some(h) if !h.is_empty() => PathBuf::from(h)
-            .join(".acowork")
-            .join("acowork-gateway"),
+        Some(h) if !h.is_empty() => PathBuf::from(h).join(".acowork").join("acowork-gateway"),
         _ => PathBuf::from(".").join(".acowork-gateway"),
     }
 }
@@ -143,10 +141,18 @@ pub struct HttpConfig {
     pub auth_enabled: bool,
 }
 
-fn default_http_enabled() -> bool { true }
-fn default_http_host() -> String { defaults::GATEWAY_HTTP_HOST.to_string() }
-fn default_http_port() -> u16 { defaults::GATEWAY_HTTP_PORT }
-fn default_http_port_max() -> u16 { defaults::GATEWAY_HTTP_PORT_MAX }
+fn default_http_enabled() -> bool {
+    true
+}
+fn default_http_host() -> String {
+    defaults::GATEWAY_HTTP_HOST.to_string()
+}
+fn default_http_port() -> u16 {
+    defaults::GATEWAY_HTTP_PORT
+}
+fn default_http_port_max() -> u16 {
+    defaults::GATEWAY_HTTP_PORT_MAX
+}
 
 impl Default for HttpConfig {
     fn default() -> Self {
@@ -161,13 +167,27 @@ impl Default for HttpConfig {
     }
 }
 
-fn default_log_level() -> String { "info".to_string() }
-fn default_log_file_size_mb() -> u64 { 10 }
-fn default_log_file_count() -> u64 { 20 }
-fn default_idle_timeout() -> u64 { 300 } // 5 minutes
-fn default_max_iterations() -> u32 { 20 }
-fn default_iteration_timeout_ms() -> u64 { 30_000 }
-fn default_max_output_tokens_limit() -> u64 { 32_768 }
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_file_size_mb() -> u64 {
+    10
+}
+fn default_log_file_count() -> u64 {
+    20
+}
+fn default_idle_timeout() -> u64 {
+    300
+} // 5 minutes
+fn default_max_iterations() -> u32 {
+    20
+}
+fn default_iteration_timeout_ms() -> u64 {
+    30_000
+}
+fn default_max_output_tokens_limit() -> u64 {
+    32_768
+}
 
 impl GatewayConfig {
     /// Get the config directory: `<root>/config/`
@@ -278,13 +298,10 @@ impl GatewayConfig {
         let default_socket = if cfg!(windows) {
             r"\\.\pipe\acowork-gateway".to_string()
         } else {
-            base_dir.join("gateway.sock")
-                .to_string_lossy().to_string()
+            base_dir.join("gateway.sock").to_string_lossy().to_string()
         };
-        let default_vault = base_dir.join("vault")
-            .to_string_lossy().to_string();
-        let default_packages = base_dir.join("packages")
-            .to_string_lossy().to_string();
+        let default_vault = base_dir.join("vault").to_string_lossy().to_string();
+        let default_packages = base_dir.join("packages").to_string_lossy().to_string();
 
         let data_dir = Self::project_data_dir();
         let default_data = data_dir.to_string_lossy().to_string();
@@ -293,61 +310,93 @@ impl GatewayConfig {
         let config_path = if let Some(path) = &cli.config_path {
             Some(path.clone())
         } else {
-            Self::default_config_path().ok().map(|p| p.to_string_lossy().to_string())
+            Self::default_config_path()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
         };
 
         // Merge: CLI > env > file > defaults
         Ok(Self {
             config_source_path: config_path,
-            socket_path: cli.socket_path.clone()
+            socket_path: cli
+                .socket_path
+                .clone()
                 .or(file_config.as_ref().map(|c| c.socket_path.clone()))
                 .unwrap_or(default_socket),
-            vault_dir: cli.vault_dir.clone()
+            vault_dir: cli
+                .vault_dir
+                .clone()
                 .or(file_config.as_ref().map(|c| c.vault_dir.clone()))
                 .unwrap_or(default_vault),
-            packages_dir: cli.packages_dir.clone()
+            packages_dir: cli
+                .packages_dir
+                .clone()
                 .or(file_config.as_ref().map(|c| c.packages_dir.clone()))
                 .unwrap_or(default_packages),
-            data_dir: file_config.as_ref().map(|c| c.data_dir.clone())
+            data_dir: file_config
+                .as_ref()
+                .map(|c| c.data_dir.clone())
                 .unwrap_or(default_data),
             log_level: if cli.log_level != "info" {
                 cli.log_level.clone()
             } else {
-                file_config.as_ref().map(|c| c.log_level.clone())
+                file_config
+                    .as_ref()
+                    .map(|c| c.log_level.clone())
                     .unwrap_or_else(default_log_level)
             },
-            log_file_size_mb: file_config.as_ref()
+            log_file_size_mb: file_config
+                .as_ref()
                 .map(|c| c.log_file_size_mb)
                 .unwrap_or_else(default_log_file_size_mb),
-            log_file_count: file_config.as_ref()
+            log_file_count: file_config
+                .as_ref()
                 .map(|c| c.log_file_count)
                 .unwrap_or_else(default_log_file_count),
-            idle_timeout_secs: file_config.as_ref().map(|c| c.idle_timeout_secs)
+            idle_timeout_secs: file_config
+                .as_ref()
+                .map(|c| c.idle_timeout_secs)
                 .unwrap_or_else(default_idle_timeout),
-            max_iterations: file_config.as_ref().map(|c| c.max_iterations)
+            max_iterations: file_config
+                .as_ref()
+                .map(|c| c.max_iterations)
                 .unwrap_or_else(default_max_iterations),
-            iteration_timeout_ms: file_config.as_ref().map(|c| c.iteration_timeout_ms)
+            iteration_timeout_ms: file_config
+                .as_ref()
+                .map(|c| c.iteration_timeout_ms)
                 .unwrap_or_else(default_iteration_timeout_ms),
             dev_mode: file_config.as_ref().map(|c| c.dev_mode).unwrap_or(true),
-            http: file_config.as_ref().map(|c| c.http.clone())
+            http: file_config
+                .as_ref()
+                .map(|c| c.http.clone())
                 .unwrap_or_default(),
-            default_provider: file_config.as_ref().and_then(|c| c.default_provider.clone()),
+            default_provider: file_config
+                .as_ref()
+                .and_then(|c| c.default_provider.clone()),
             default_model: file_config.as_ref().and_then(|c| c.default_model.clone()),
-            max_output_tokens_limit: file_config.as_ref().map(|c| c.max_output_tokens_limit)
+            max_output_tokens_limit: file_config
+                .as_ref()
+                .map(|c| c.max_output_tokens_limit)
                 .unwrap_or_else(default_max_output_tokens_limit),
-            hf_mirrors: file_config.as_ref().map(|c| c.hf_mirrors.clone())
+            hf_mirrors: file_config
+                .as_ref()
+                .map(|c| c.hf_mirrors.clone())
                 .unwrap_or_default(),
-            lsp_config_dir: cli.lsp_config_dir.clone()
+            lsp_config_dir: cli
+                .lsp_config_dir
+                .clone()
                 .or_else(|| file_config.as_ref().and_then(|c| c.lsp_config_dir.clone())),
         })
     }
 
     /// Load config from a TOML file
     fn load_from_file(path: &str) -> Result<Option<Self>, GatewayError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| GatewayError::Config(format!("Failed to read config file '{}': {}", path, e)))?;
-        let config: Self = toml::from_str(&content)
-            .map_err(|e| GatewayError::Config(format!("Failed to parse config file '{}': {}", path, e)))?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            GatewayError::Config(format!("Failed to read config file '{}': {}", path, e))
+        })?;
+        let config: Self = toml::from_str(&content).map_err(|e| {
+            GatewayError::Config(format!("Failed to parse config file '{}': {}", path, e))
+        })?;
         Ok(Some(config))
     }
 
@@ -360,8 +409,7 @@ impl GatewayConfig {
     /// Ensure required directories exist
     pub fn ensure_dirs(&self) -> Result<(), GatewayError> {
         for dir in [&self.vault_dir, &self.packages_dir, &self.data_dir] {
-            std::fs::create_dir_all(dir)
-                .map_err(GatewayError::Io)?;
+            std::fs::create_dir_all(dir).map_err(GatewayError::Io)?;
         }
         Ok(())
     }
@@ -369,22 +417,28 @@ impl GatewayConfig {
     /// Persist the current configuration to its source TOML file.
     /// Falls back to `default_config_path()` if `config_source_path` is not set.
     pub fn save(&self) -> Result<(), GatewayError> {
-        let path = self.config_source_path.as_ref()
+        let path = self
+            .config_source_path
+            .as_ref()
             .map(std::path::PathBuf::from)
             .or_else(|| Self::default_config_path().ok())
             .ok_or_else(|| GatewayError::Config("Cannot determine config file path".to_string()))?;
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| GatewayError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(|e| GatewayError::Io(e))?;
         }
 
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| GatewayError::Config(format!("Failed to serialize config: {}", e)))?;
 
-        std::fs::write(&path, &toml_str)
-            .map_err(|e| GatewayError::Config(format!("Failed to write config to '{}': {}", path.display(), e)))?;
+        std::fs::write(&path, &toml_str).map_err(|e| {
+            GatewayError::Config(format!(
+                "Failed to write config to '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         tracing::info!(path = %path.display(), "Configuration persisted");
         Ok(())
@@ -450,7 +504,12 @@ fn legacy_data_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
         .filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".local").join("share").join("acowork-gateway"))
+        .map(|h| {
+            PathBuf::from(h)
+                .join(".local")
+                .join("share")
+                .join("acowork-gateway")
+        })
 }
 
 #[cfg(test)]
@@ -485,8 +544,10 @@ mod tests {
     fn test_config_from_cli_overrides() {
         let cli = Cli::parse_from([
             "acowork-gateway",
-            "--socket-path", "/tmp/custom.sock",
-            "--log-level", "debug",
+            "--socket-path",
+            "/tmp/custom.sock",
+            "--log-level",
+            "debug",
         ]);
         let config = GatewayConfig::from_cli(&cli).unwrap();
         assert_eq!(config.socket_path, "/tmp/custom.sock");
@@ -518,13 +579,18 @@ mod tests {
         // env-mutating work; concurrent tests don't touch ACOWORK_HOME.
         // (cargo test runs tests in parallel by default, so we accept
         // the small flake risk in exchange for keeping tests simple.)
-        unsafe { std::env::remove_var("ACOWORK_HOME"); }
+        unsafe {
+            std::env::remove_var("ACOWORK_HOME");
+        }
 
         let cfg = GatewayConfig::default();
         let root = project_root();
         // config and data dirs must be siblings under the same root.
         assert!(cfg.vault_dir.starts_with(root.to_string_lossy().as_ref()));
-        assert!(cfg.packages_dir.starts_with(root.to_string_lossy().as_ref()));
+        assert!(
+            cfg.packages_dir
+                .starts_with(root.to_string_lossy().as_ref())
+        );
         // data_dir is its own sibling, not nested under config_dir.
         let root_str = root.to_string_lossy().to_string();
         assert!(
@@ -533,7 +599,9 @@ mod tests {
             cfg.data_dir
         );
         // config/vault path: <root>/config/vault
-        assert!(cfg.vault_dir.contains("/config/vault") || cfg.vault_dir.contains("\\config\\vault"));
+        assert!(
+            cfg.vault_dir.contains("/config/vault") || cfg.vault_dir.contains("\\config\\vault")
+        );
         // data path: <root>/data
         assert!(cfg.data_dir.ends_with("/data") || cfg.data_dir.ends_with("\\data"));
     }
@@ -541,9 +609,13 @@ mod tests {
     #[test]
     fn test_project_root_respects_acowork_home() {
         // SAFETY: see comment in test_project_root_default_layout.
-        unsafe { std::env::set_var("ACOWORK_HOME", "/tmp/acowork-home-test"); }
+        unsafe {
+            std::env::set_var("ACOWORK_HOME", "/tmp/acowork-home-test");
+        }
         let root = project_root();
         assert_eq!(root, PathBuf::from("/tmp/acowork-home-test"));
-        unsafe { std::env::remove_var("ACOWORK_HOME"); }
+        unsafe {
+            std::env::remove_var("ACOWORK_HOME");
+        }
     }
 }

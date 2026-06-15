@@ -4,7 +4,7 @@ use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, edge_types, Episode};
+use crate::types::{Episode, edge_types, labels};
 
 // ---------------------------------------------------------------------------
 // GrafeoStore episode writes
@@ -15,12 +15,19 @@ impl GrafeoStore {
     /// Returns the newly created [`NodeId`].
     pub fn store_episode(&self, episode: &Episode) -> Result<NodeId> {
         let props = episode.to_properties();
-        let embedding = props.iter().find(|(k, _)| k == "embedding").map(|(_, v)| v.clone());
-        let non_emb_props: Vec<_> = props.into_iter().filter(|(k, _)| k != "embedding").collect();
+        let embedding = props
+            .iter()
+            .find(|(k, _)| k == "embedding")
+            .map(|(_, v)| v.clone());
+        let non_emb_props: Vec<_> = props
+            .into_iter()
+            .filter(|(k, _)| k != "embedding")
+            .collect();
 
-        let id = self
-            .db
-            .create_node_with_props(&[labels::EPISODIC], non_emb_props.iter().map(|(k, v)| (k.as_str(), v.clone())));
+        let id = self.db.create_node_with_props(
+            &[labels::EPISODIC],
+            non_emb_props.iter().map(|(k, v)| (k.as_str(), v.clone())),
+        );
 
         if let Some(emb) = embedding {
             self.db.set_node_property(id, "embedding", emb);
@@ -147,7 +154,8 @@ mod tests {
 
         // Verify session node exists and HAS_MEMORY edge was created.
         let session = store.db.session();
-        let gql = "MATCH (s:Session)-[:HAS_MEMORY]->(e:Episodic) WHERE s.session_id = 'sess-42' RETURN e";
+        let gql =
+            "MATCH (s:Session)-[:HAS_MEMORY]->(e:Episodic) WHERE s.session_id = 'sess-42' RETURN e";
         let result = session.execute(gql).unwrap();
         assert_eq!(result.rows().len(), 1);
     }

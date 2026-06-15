@@ -10,8 +10,8 @@
 //! | PPTX   | `zip`+`quick-xml` | Slide text extraction |
 //! | XLSX   | `calamine`   | Sheet / row iteration  |
 
-pub mod pdf;
 pub mod docx;
+pub mod pdf;
 pub mod pptx;
 pub mod xlsx;
 
@@ -41,8 +41,8 @@ pub fn detect_format(path: &Path) -> Option<&'static str> {
 
 // ── Tool trait implementation ───────────────────────────────────────────
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::tools::output;
@@ -63,13 +63,12 @@ impl DocReaderTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "doc_reader".to_string(),
-            description:
-                "Read and extract text from documents (PDF, DOCX, PPTX, XLSX). \
+            description: "Read and extract text from documents (PDF, DOCX, PPTX, XLSX). \
                  Use this tool to ingest document content for analysis. \
                  Accepts both relative paths (within workspace) and absolute paths. \
                  Returns plain text with structural markers (page/slide/sheet headers, \
                  optional Markdown tables)."
-                    .to_string(),
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -102,7 +101,11 @@ impl Tool for DocReaderTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let raw_path = params["path"].as_str().unwrap_or("");
         if raw_path.is_empty() {
             return Ok(ToolResult {
@@ -115,7 +118,8 @@ impl Tool for DocReaderTool {
 
         // Support both relative and absolute paths.
         // Absolute paths (e.g. from Gateway document upload) bypass work_dir join.
-        let is_absolute = raw_path.starts_with('/') || (raw_path.len() > 2 && raw_path.as_bytes()[1] == b':');
+        let is_absolute =
+            raw_path.starts_with('/') || (raw_path.len() > 2 && raw_path.as_bytes()[1] == b':');
         let full_path = if is_absolute {
             std::path::PathBuf::from(raw_path)
         } else {
@@ -209,9 +213,7 @@ impl Tool for DocReaderTool {
             .and_then(|r| r)
         })
         .await
-        .map_err(|join_err| {
-            format!("Document extraction task cancelled or panicked: {join_err}")
-        })
+        .map_err(|join_err| format!("Document extraction task cancelled or panicked: {join_err}"))
         .and_then(|r| r);
 
         match raw {
@@ -221,8 +223,10 @@ impl Tool for DocReaderTool {
                     ok: true,
                     content: truncated,
                     error: if was_truncated {
-                        Some("Output truncated: document content exceeded the maximum output size."
-                            .to_string())
+                        Some(
+                            "Output truncated: document content exceeded the maximum output size."
+                                .to_string(),
+                        )
                     } else {
                         None
                     },

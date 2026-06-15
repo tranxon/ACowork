@@ -3,9 +3,9 @@
 //! Manages the `acowork-embed` child process: auto-start at Gateway startup,
 //! health-check, model switching, and graceful shutdown.
 
+use std::fs;
 use std::path::Path;
 use std::process::Stdio;
-use std::fs;
 
 use crate::error::GatewayError;
 
@@ -16,7 +16,7 @@ const EMBED_DEFAULT_PORT: u16 = 18080;
 /// State of the embedding service process.
 #[derive(Debug, Clone)]
 pub struct EmbedProcessState {
-    /// PID of the running acowork-embed process.
+    /// PID of the running acowork-embed process. Zero means an already-running external embed service.
     pub pid: u32,
     /// Port the embedding service is listening on.
     pub port: u16,
@@ -26,6 +26,24 @@ pub struct EmbedProcessState {
     pub active_dimension: Option<usize>,
     /// Whether the process has completed startup and health check.
     pub ready: bool,
+}
+
+/// Create gateway state for an already-running embed service.
+pub fn attach_existing_embed_process(
+    port: u16,
+    health: Option<EmbedHealthStatus>,
+) -> EmbedProcessState {
+    EmbedProcessState {
+        pid: 0,
+        port,
+        active_model_id: health
+            .as_ref()
+            .and_then(|h| h.model.as_ref().map(|m| m.id.clone())),
+        active_dimension: health
+            .as_ref()
+            .and_then(|h| h.model.as_ref().map(|m| m.dimension)),
+        ready: health.as_ref().map(|h| h.ready).unwrap_or(false),
+    }
 }
 
 /// Spawn the acowork-embed process.
@@ -79,7 +97,10 @@ pub async fn spawn_embed_process(
     })?;
     let log_path = log_dir.join("embed.log");
     let log_file = fs::File::create(&log_path).map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to create embed log file {:?}: {}", log_path, e))
+        GatewayError::Lifecycle(format!(
+            "Failed to create embed log file {:?}: {}",
+            log_path, e
+        ))
     })?;
     tracing::info!(path = %log_path.display(), "Embed process logging to file");
 
@@ -159,7 +180,11 @@ pub async fn spawn_embed_process(
         )
     })?;
 
-    tracing::info!("Spawned acowork-embed process (PID: {}, port: {})", pid, port);
+    tracing::info!(
+        "Spawned acowork-embed process (PID: {}, port: {})",
+        pid,
+        port
+    );
 
     Ok((
         EmbedProcessState {
@@ -217,10 +242,7 @@ pub struct EmbedModelInfo {
 }
 
 /// Select an embedding model by triggering acowork-embed's load endpoint.
-pub async fn select_embed_model(
-    port: u16,
-    model_id: &str,
-) -> Result<(), GatewayError> {
+pub async fn select_embed_model(port: u16, model_id: &str) -> Result<(), GatewayError> {
     let url = format!("http://127.0.0.1:{}/models/{}/load", port, model_id);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60)) // model loading can take a while
@@ -228,7 +250,10 @@ pub async fn select_embed_model(
         .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
 
     let resp = client.post(&url).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to call load endpoint for model '{}': {}", model_id, e))
+        GatewayError::Lifecycle(format!(
+            "Failed to call load endpoint for model '{}': {}",
+            model_id, e
+        ))
     })?;
 
     if !resp.status().is_success() {
@@ -265,7 +290,10 @@ pub async fn download_embed_model(
     });
 
     let resp = client.post(&url).json(&body).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to call download endpoint for model '{}': {}", model_id, e))
+        GatewayError::Lifecycle(format!(
+            "Failed to call download endpoint for model '{}': {}",
+            model_id, e
+        ))
     })?;
 
     // 202 Accepted (fire-and-forget) or 200 OK (already_downloaded)
@@ -294,12 +322,16 @@ pub async fn get_embed_model_status(
         .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
 
     let resp = client.get(&url).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to get status for model '{}': {}", model_id, e))
+        GatewayError::Lifecycle(format!(
+            "Failed to get status for model '{}': {}",
+            model_id, e
+        ))
     })?;
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to parse status response: {}", e))
-    })?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| GatewayError::Lifecycle(format!("Failed to parse status response: {}", e)))?;
 
     Ok(body)
 }
@@ -318,12 +350,16 @@ pub async fn delete_embed_model(
         .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
 
     let resp = client.delete(&url).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to call delete endpoint for model '{}': {}", model_id, e))
+        GatewayError::Lifecycle(format!(
+            "Failed to call delete endpoint for model '{}': {}",
+            model_id, e
+        ))
     })?;
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to parse delete response: {}", e))
-    })?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| GatewayError::Lifecycle(format!("Failed to parse delete response: {}", e)))?;
 
     Ok(body)
 }
@@ -331,7 +367,6 @@ pub async fn delete_embed_model(
 /// Result of an embedding test.
 #[derive(Debug, Clone)]
 pub struct EmbedTestResult {
-
     /// Whether the test succeeded.
     pub success: bool,
     /// Model ID that was tested.
@@ -382,7 +417,10 @@ pub async fn test_embed_model(port: u16) -> Result<EmbedTestResult, GatewayError
     })?;
 
     // Extract model name and embedding dimension from response
-    let model_id = resp_body.get("model").and_then(|m| m.as_str()).map(|s| s.to_string());
+    let model_id = resp_body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
     let dimension = resp_body
         .get("data")
         .and_then(|d| d.as_array())

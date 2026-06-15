@@ -7,8 +7,8 @@
 //! The salt is stored alongside the vault data so that the same password
 //! always produces the same master key.
 
-use argon2::{Algorithm, Argon2, Params, Version};
 use crate::error::{Result, VaultError};
+use argon2::{Algorithm, Argon2, Params, Version};
 
 /// Salt length in bytes (16 bytes = 128 bits)
 pub const SALT_LEN: usize = 16;
@@ -33,8 +33,13 @@ const ARGON2_PARALLELISM: u32 = 4;
 /// # Returns
 /// 32-byte derived key suitable for ChaCha20-Poly1305
 pub fn derive_key(password: &str, salt: &[u8]) -> Result<Vec<u8>> {
-    let params = Params::new(ARGON2_MEMORY_COST, ARGON2_TIME_COST, ARGON2_PARALLELISM, Some(KEY_LEN))
-        .map_err(|e| VaultError::Encryption(format!("Invalid Argon2 params: {e}")))?;
+    let params = Params::new(
+        ARGON2_MEMORY_COST,
+        ARGON2_TIME_COST,
+        ARGON2_PARALLELISM,
+        Some(KEY_LEN),
+    )
+    .map_err(|e| VaultError::Encryption(format!("Invalid Argon2 params: {e}")))?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 

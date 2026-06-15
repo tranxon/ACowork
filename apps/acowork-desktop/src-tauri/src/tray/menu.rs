@@ -1,9 +1,6 @@
 //! Tray menu items
 
-use tauri::{
-    menu::MenuItemBuilder,
-    App,
-};
+use tauri::{App, menu::MenuItemBuilder};
 
 /// Build the "Show Dashboard" menu item
 pub fn build_show_dashboard(

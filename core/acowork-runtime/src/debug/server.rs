@@ -22,17 +22,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use futures::stream::StreamExt;
 use futures::SinkExt;
+use futures::stream::StreamExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use super::controller::DebugController;
 use super::controller::DebugState;
-use super::protocol::{
-    self, DebugPhase, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-};
+use super::protocol::{self, DebugPhase, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
 // ── Event Bus ─────────────────────────────────────────────────────────
 
@@ -388,14 +386,11 @@ impl DebugProtocolServer {
             "DebugProtocolServer: received JSON-RPC request"
         );
 
-        let result = self.route_method(&request.method, &request.params, request.id.clone()).await;
+        let result = self
+            .route_method(&request.method, &request.params, request.id.clone())
+            .await;
         let response = result.unwrap_or_else(|e| {
-            JsonRpcResponse::error(
-                request.id.clone(),
-                e.code,
-                e.message,
-                e.data,
-            )
+            JsonRpcResponse::error(request.id.clone(), e.code, e.message, e.data)
         });
 
         Some(serde_json::to_string(&response).unwrap_or_default())
@@ -412,9 +407,7 @@ impl DebugProtocolServer {
         // 1. Explicit `session_id` in params (sent by frontend)
         // 2. Last session targeted by a control command (step/resume/pause)
         // 3. First session in the map (best-effort fallback)
-        let explicit_session_id = params
-            .get("session_id")
-            .and_then(|v| v.as_str());
+        let explicit_session_id = params.get("session_id").and_then(|v| v.as_str());
         let session_id = explicit_session_id
             .map(|s| s.to_string())
             .or_else(|| self.last_active_session_id.clone())
@@ -451,14 +444,13 @@ impl DebugProtocolServer {
         let mut ctrl = ctrl_arc.lock().await;
 
         // Helper to send a tagged event for the current session.
-        let send_event = |event_tx: &mpsc::UnboundedSender<TaggedEvent>,
-                          sid: &str,
-                          event: DebugEvent| {
-            let _ = event_tx.send(TaggedEvent {
-                session_id: sid.to_string(),
-                event,
-            });
-        };
+        let send_event =
+            |event_tx: &mpsc::UnboundedSender<TaggedEvent>, sid: &str, event: DebugEvent| {
+                let _ = event_tx.send(TaggedEvent {
+                    session_id: sid.to_string(),
+                    event,
+                });
+            };
 
         match method {
             // ── Execution Control ──
@@ -483,10 +475,7 @@ impl DebugProtocolServer {
                 // already polling in await_debug_resume.
                 ctrl.resume_notify.notify_one();
                 tracing::info!("Debug: resume — agent loop will continue");
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    serde_json::json!({}),
-                ))
+                Ok(JsonRpcResponse::success(id.clone(), serde_json::json!({})))
             }
 
             "debugger.pause" => {
@@ -502,10 +491,7 @@ impl DebugProtocolServer {
                     },
                 );
                 tracing::info!("Debug: pause — agent loop will pause at next check");
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    serde_json::json!({}),
-                ))
+                Ok(JsonRpcResponse::success(id.clone(), serde_json::json!({})))
             }
 
             "debugger.step" => {
@@ -526,10 +512,7 @@ impl DebugProtocolServer {
                 // idle-session cases.
                 ctrl.resume_notify.notify_one();
                 tracing::info!("Debug: step — agent loop will execute one step");
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    serde_json::json!({}),
-                ))
+                Ok(JsonRpcResponse::success(id.clone(), serde_json::json!({})))
             }
 
             "debugger.stop" => {
@@ -545,10 +528,7 @@ impl DebugProtocolServer {
                     },
                 );
                 tracing::info!("Debug: stop — agent loop terminated");
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    serde_json::json!({}),
-                ))
+                Ok(JsonRpcResponse::success(id.clone(), serde_json::json!({})))
             }
 
             // ── State Query ──
@@ -584,16 +564,14 @@ impl DebugProtocolServer {
                     dbg_state = %serde_json::to_string(&current_state).unwrap_or_default().trim_matches('"'),
                     "[DBG-TRACE] Debug: getState response"
                 );
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    result,
-                ))
+                Ok(JsonRpcResponse::success(id.clone(), result))
             }
 
             // ── Context Snapshots (S2.4 will flesh these out) ──
             "debugger.getContextSnapshot" => {
-                let snap_params: protocol::GetContextSnapshotParams = serde_json::from_value(params.clone())
-                    .map_err(|e| MethodError::invalid_params(e.to_string()))?;
+                let snap_params: protocol::GetContextSnapshotParams =
+                    serde_json::from_value(params.clone())
+                        .map_err(|e| MethodError::invalid_params(e.to_string()))?;
                 match ctrl.get_context_snapshot(snap_params.iteration) {
                     Some(snap) => {
                         let sections = protocol::ContextSections::from(&snap.sections);
@@ -606,10 +584,7 @@ impl DebugProtocolServer {
                         };
                         let json = serde_json::to_value(result)
                             .map_err(|e| MethodError::internal(e.to_string()))?;
-                        Ok(JsonRpcResponse::success(
-                            id.clone(),
-                            json,
-                        ))
+                        Ok(JsonRpcResponse::success(id.clone(), json))
                     }
                     None => Err(MethodError::new(
                         -32002,
@@ -659,10 +634,7 @@ impl DebugProtocolServer {
                             content_len = section_content.content.len(),
                             "Debug: getSection returning result"
                         );
-                        Ok(JsonRpcResponse::success(
-                            id.clone(),
-                            json,
-                        ))
+                        Ok(JsonRpcResponse::success(id.clone(), json))
                     }
                     None => {
                         tracing::warn!(
@@ -671,10 +643,7 @@ impl DebugProtocolServer {
                         );
                         Err(MethodError::new(
                             -32002,
-                            format!(
-                                "No context snapshot for iteration {}",
-                                sec_params.iteration
-                            ),
+                            format!("No context snapshot for iteration {}", sec_params.iteration),
                         ))
                     }
                 }
@@ -749,15 +718,13 @@ impl DebugProtocolServer {
                 })
                 .map_err(|e| MethodError::internal(e.to_string()))?;
 
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    result,
-                ))
+                Ok(JsonRpcResponse::success(id.clone(), result))
             }
 
             "debugger.patchContext" => {
-                let pc_params: protocol::PatchContextParams = serde_json::from_value(params.clone())
-                    .map_err(|e| MethodError::invalid_params(e.to_string()))?;
+                let pc_params: protocol::PatchContextParams =
+                    serde_json::from_value(params.clone())
+                        .map_err(|e| MethodError::invalid_params(e.to_string()))?;
 
                 // Bug 2 fix: merge incrementally instead of replacing
                 let merged_patches = match ctrl.pending_patches.take() {
@@ -832,10 +799,7 @@ impl DebugProtocolServer {
                 ctrl.pending_patches = Some(merged_patches);
 
                 tracing::info!("Debug: context patches merged and stored for next reExecute");
-                Ok(JsonRpcResponse::success(
-                    id.clone(),
-                    serde_json::json!({}),
-                ))
+                Ok(JsonRpcResponse::success(id.clone(), serde_json::json!({})))
             }
 
             "debugger.reExecute" => {
@@ -843,7 +807,9 @@ impl DebugProtocolServer {
                 ctrl.set_re_execute_pending();
                 // Set state to Running so the agent loop can proceed
                 ctrl.state = super::controller::DebugState::Running;
-                tracing::info!("Debug: reExecute — pending flag set, execution will proceed with patches (if any)");
+                tracing::info!(
+                    "Debug: reExecute — pending flag set, execution will proceed with patches (if any)"
+                );
                 Ok(JsonRpcResponse::success(
                     id.clone(),
                     serde_json::json!({ "has_patches": ctrl.pending_patches.is_some() }),

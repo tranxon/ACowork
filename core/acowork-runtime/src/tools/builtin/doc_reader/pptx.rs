@@ -60,8 +60,8 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
                 .read_to_end(&mut xml_bytes)
                 .map_err(|e| format!("Failed to read slide {slide_num}: {e}"))?;
         }
-        let xml_str = String::from_utf8(xml_bytes)
-            .unwrap_or_else(|_| "(non-UTF-8 slide)".to_string());
+        let xml_str =
+            String::from_utf8(xml_bytes).unwrap_or_else(|_| "(non-UTF-8 slide)".to_string());
 
         let text = extract_shape_text(&xml_str, &mut buf);
         if text.is_empty() {

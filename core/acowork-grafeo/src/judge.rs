@@ -52,11 +52,7 @@ pub fn should_sample(config: &JudgeConfig, query_hash: u64) -> bool {
 ///
 /// In Phase 3 this will perform an actual LLM call. For now it returns
 /// a fixed synthetic score for framework validation.
-pub fn evaluate_retrieval(
-    _config: &JudgeConfig,
-    _query: &str,
-    _results: &[String],
-) -> JudgeResult {
+pub fn evaluate_retrieval(_config: &JudgeConfig, _query: &str, _results: &[String]) -> JudgeResult {
     JudgeResult {
         relevance_score: 4,
         reason: "Mock evaluation: results appear relevant to the query.".to_string(),
@@ -100,7 +96,10 @@ mod tests {
         let config = JudgeConfig::default();
         // With sample_rate 0.1, roughly 10% of hashes should return true.
         let count: usize = (0..1000).filter(|i| should_sample(&config, *i)).count();
-        assert!(count > 50 && count < 150, "Expected ~100 samples, got {count}");
+        assert!(
+            count > 50 && count < 150,
+            "Expected ~100 samples, got {count}"
+        );
     }
 
     #[test]

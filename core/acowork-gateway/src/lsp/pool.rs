@@ -5,13 +5,13 @@
 //! Idle processes are reaped after a configurable timeout.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use std::process::Stdio;
 
@@ -173,7 +173,7 @@ impl LspPool {
             .stderr(Stdio::piped())
             // Do NOT use kill_on_drop — pool manages lifecycle
             .spawn()?;
-    
+
         let pid = child.id().unwrap_or(0);
         tracing::info!(
             "[LSP Pool] Spawned '{}' (PID {}) in workspace '{}', args={:?}",

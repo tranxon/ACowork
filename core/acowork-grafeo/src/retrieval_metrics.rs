@@ -625,19 +625,14 @@ mod tests {
 
     #[test]
     fn test_mrr_perfect() {
-        let queries = vec![
-            (vec![1, 2, 3], vec![1, 4]),
-            (vec![5, 2, 3], vec![2, 6]),
-        ];
+        let queries = vec![(vec![1, 2, 3], vec![1, 4]), (vec![5, 2, 3], vec![2, 6])];
         let mrr = mean_reciprocal_rank(&queries);
         assert!((mrr - 0.75).abs() < f32::EPSILON);
     }
 
     #[test]
     fn test_mrr_no_hits() {
-        let queries = vec![
-            (vec![5, 6, 7], vec![1, 2]),
-        ];
+        let queries = vec![(vec![5, 6, 7], vec![1, 2])];
         let mrr = mean_reciprocal_rank(&queries);
         assert!(mrr.abs() < f32::EPSILON);
     }
@@ -665,10 +660,7 @@ mod tests {
             },
         ];
 
-        let results = vec![
-            vec![1, 5, 2],
-            vec![3, 6, 4],
-        ];
+        let results = vec![vec![1, 5, 2], vec![3, 6, 4]];
 
         let metrics = evaluate_retrieval_quality(&queries, &results, &[1, 3, 5]);
 
@@ -849,11 +841,17 @@ mod tests {
         let mut got_alert = false;
         for _ in 0..15 {
             let alerts = agg.record_retrieval(&low_nrr_metrics);
-            if alerts.iter().any(|a| a.alert_type == MetricsAlertType::LowNrr) {
+            if alerts
+                .iter()
+                .any(|a| a.alert_type == MetricsAlertType::LowNrr)
+            {
                 got_alert = true;
             }
         }
-        assert!(got_alert, "Should trigger LowNrr alert after 10+ consecutive low NRR");
+        assert!(
+            got_alert,
+            "Should trigger LowNrr alert after 10+ consecutive low NRR"
+        );
     }
 
     // =====================================================================
@@ -877,7 +875,10 @@ mod tests {
         let mut got_alert = false;
         for _ in 0..40 {
             let alerts = agg.record_retrieval(&abstention_metrics);
-            if alerts.iter().any(|a| a.alert_type == MetricsAlertType::HighAbstentionRate) {
+            if alerts
+                .iter()
+                .any(|a| a.alert_type == MetricsAlertType::HighAbstentionRate)
+            {
                 got_alert = true;
             }
         }
@@ -914,7 +915,10 @@ mod tests {
             alert.is_some(),
             "Should alert when conflict accuracy drops below 80%"
         );
-        assert_eq!(alert.unwrap().alert_type, MetricsAlertType::LowConflictAccuracy);
+        assert_eq!(
+            alert.unwrap().alert_type,
+            MetricsAlertType::LowConflictAccuracy
+        );
     }
 
     // =====================================================================
@@ -938,7 +942,10 @@ mod tests {
         let mut got_alert = false;
         for _ in 0..15 {
             let alerts = agg.record_retrieval(&degraded_metrics);
-            if alerts.iter().any(|a| a.alert_type == MetricsAlertType::HighDegradationRate) {
+            if alerts
+                .iter()
+                .any(|a| a.alert_type == MetricsAlertType::HighDegradationRate)
+            {
                 got_alert = true;
             }
         }

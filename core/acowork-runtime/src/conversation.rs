@@ -90,8 +90,16 @@ pub struct ConversationWriter {
 
 impl ConversationWriter {
     /// Create a new writer.
-    fn new(file: std::fs::File, path: PathBuf, receiver: mpsc::UnboundedReceiver<WriterCommand>) -> Self {
-        Self { file, path, receiver }
+    fn new(
+        file: std::fs::File,
+        path: PathBuf,
+        receiver: mpsc::UnboundedReceiver<WriterCommand>,
+    ) -> Self {
+        Self {
+            file,
+            path,
+            receiver,
+        }
     }
 
     /// Run the writer loop. Blocks until Shutdown is received.
@@ -220,11 +228,7 @@ impl ConversationSession {
     /// Creates `{work_dir}/conversations/{session_id}.jsonl`, writes the
     /// `SessionMetadata` header (including initial model/provider/workspace_id),
     /// and starts the background writer thread.
-    pub fn new(
-        work_dir: &Path,
-        session_id: &str,
-        config: SessionConfig,
-    ) -> Result<Self> {
+    pub fn new(work_dir: &Path, session_id: &str, config: SessionConfig) -> Result<Self> {
         let conversations_dir = work_dir.join("conversations");
         std::fs::create_dir_all(&conversations_dir)?;
 
@@ -315,12 +319,7 @@ impl ConversationSession {
     ///
     /// This is non-blocking: the message is sent via channel to the
     /// background writer thread.
-    pub fn append_message(
-        &self,
-        role: &str,
-        content: &str,
-        metadata: Option<serde_json::Value>,
-    ) {
+    pub fn append_message(&self, role: &str, content: &str, metadata: Option<serde_json::Value>) {
         let entry = ConversationEntry {
             id: uuid::Uuid::new_v4().to_string(),
             ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -371,7 +370,10 @@ impl ConversationSession {
     /// Non-blocking: sent via channel to the writer thread.
     pub fn update_metadata(&self, metadata: SessionMetadata) {
         if let Err(e) = self.sender.send(WriterCommand::UpdateMetadata(metadata)) {
-            tracing::error!("Failed to send metadata update to conversation writer: {}", e);
+            tracing::error!(
+                "Failed to send metadata update to conversation writer: {}",
+                e
+            );
         }
     }
 
@@ -409,7 +411,9 @@ impl ConversationSession {
             created_at: self.created_at.clone(),
             agent_id: self.agent_id.clone(),
             title: Some(title.clone()),
-            updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            updated_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
             message_count: None,
             corrupted: false,
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
@@ -451,7 +455,9 @@ impl ConversationSession {
             created_at: self.created_at.clone(),
             agent_id: self.agent_id.clone(),
             title: Some(truncated.clone()),
-            updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            updated_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
             message_count: None,
             corrupted: false,
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
@@ -485,7 +491,9 @@ impl ConversationSession {
             created_at: self.created_at.clone(),
             agent_id: self.agent_id.clone(),
             title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            updated_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
             message_count: None,
             corrupted: false,
             workspace_id: Some(workspace_id.to_string()),
@@ -535,7 +543,9 @@ impl ConversationSession {
             created_at: self.created_at.clone(),
             agent_id: self.agent_id.clone(),
             title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            updated_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
             message_count: None,
             corrupted: false,
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
@@ -736,7 +746,9 @@ fn read_lines_forward(
 ///
 /// Returns the byte offset, or `None` if the cursor format is invalid.
 fn parse_offset_cursor(cursor: &str) -> Option<u64> {
-    cursor.strip_prefix("offset:").and_then(|s| s.parse::<u64>().ok())
+    cursor
+        .strip_prefix("offset:")
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 /// Get the byte offset where message data begins (after metadata line).
@@ -818,7 +830,9 @@ pub fn scan_sessions_async(
         let mut sessions = Vec::new();
         for entry in entries_page {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
                 && let Ok(meta) = read_session_metadata(&path)
             {
                 sessions.push(SessionInfo {
@@ -1026,12 +1040,22 @@ mod tests {
         let id = generate_session_id();
         // Format: YYYYMMDD_HHMMSS_xxxxxx (6-char short UUID)
         let parts: Vec<&str> = id.split('_').collect();
-        assert_eq!(parts.len(), 3, "Session ID should have 3 parts separated by underscores");
+        assert_eq!(
+            parts.len(),
+            3,
+            "Session ID should have 3 parts separated by underscores"
+        );
         assert_eq!(parts[0].len(), 8, "Date part should be 8 chars (YYYYMMDD)");
         assert_eq!(parts[1].len(), 6, "Time part should be 6 chars (HHMMSS)");
         assert_eq!(parts[2].len(), 6, "Short UUID should be 6 chars");
-        assert!(parts[0].chars().all(|c| c.is_ascii_digit()), "Date should be digits");
-        assert!(parts[1].chars().all(|c| c.is_ascii_digit()), "Time should be digits");
+        assert!(
+            parts[0].chars().all(|c| c.is_ascii_digit()),
+            "Date should be digits"
+        );
+        assert!(
+            parts[1].chars().all(|c| c.is_ascii_digit()),
+            "Time should be digits"
+        );
     }
 
     #[test]
@@ -1042,12 +1066,17 @@ mod tests {
         let agent_id = "com.test.agent";
 
         // Create session and write messages
-        let session = ConversationSession::new(work_dir, &session_id, SessionConfig {
-            agent_id: agent_id.to_string(),
-            workspace_id: None,
-            model: None,
-            provider: None,
-        }).unwrap();
+        let session = ConversationSession::new(
+            work_dir,
+            &session_id,
+            SessionConfig {
+                agent_id: agent_id.to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+        )
+        .unwrap();
         session.append_message("user", "Hello", None);
         session.append_message(
             "assistant",
@@ -1066,7 +1095,9 @@ mod tests {
         });
 
         // Verify file contents
-        let file_path = work_dir.join("conversations").join(format!("{}.jsonl", session_id));
+        let file_path = work_dir
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 4, "Should have 4 lines: metadata + 3 messages");
@@ -1087,7 +1118,10 @@ mod tests {
         let entry: ConversationEntry = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(entry.role, "assistant");
         assert_eq!(entry.content, "Hi there!");
-        assert_eq!(entry.metadata, Some(serde_json::json!({"model": "test-model"})));
+        assert_eq!(
+            entry.metadata,
+            Some(serde_json::json!({"model": "test-model"}))
+        );
 
         // Fourth line is tool_call
         let entry: ConversationEntry = serde_json::from_str(lines[3]).unwrap();
@@ -1186,7 +1220,11 @@ mod tests {
 
         // Verify cursor format is "offset:<bytes>"
         let cursor = page.cursor.unwrap();
-        assert!(cursor.starts_with("offset:"), "Cursor should be offset format, got: {}", cursor);
+        assert!(
+            cursor.starts_with("offset:"),
+            "Cursor should be offset format, got: {}",
+            cursor
+        );
 
         // Continue backward from cursor
         let page2 = read_messages_paginated(&file_path, Some(cursor), 2, "backward").unwrap();
@@ -1200,7 +1238,10 @@ mod tests {
         assert!(cursor2.starts_with("offset:"));
         let page3 = read_messages_paginated(&file_path, Some(cursor2), 2, "backward").unwrap();
         assert_eq!(page3.messages.len(), 1);
-        assert!(!page3.has_more, "No more messages after reaching the beginning");
+        assert!(
+            !page3.has_more,
+            "No more messages after reaching the beginning"
+        );
         assert_eq!(page3.messages[0].content, "Message 0");
 
         // Read forward from beginning (no cursor)
@@ -1229,12 +1270,17 @@ mod tests {
         let agent_id = "com.test.resume";
 
         // Create initial session
-        let session = ConversationSession::new(work_dir, session_id, SessionConfig {
-            agent_id: agent_id.to_string(),
-            workspace_id: None,
-            model: None,
-            provider: None,
-        }).unwrap();
+        let session = ConversationSession::new(
+            work_dir,
+            session_id,
+            SessionConfig {
+                agent_id: agent_id.to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+        )
+        .unwrap();
         session.append_message("user", "First message", None);
         std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -1256,7 +1302,9 @@ mod tests {
         });
 
         // Verify file has both messages
-        let file_path = work_dir.join("conversations").join(format!("{}.jsonl", session_id));
+        let file_path = work_dir
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3, "Should have metadata + 2 messages");
@@ -1295,15 +1343,25 @@ mod tests {
 
         // read_session_metadata should return degraded metadata instead of Err
         let meta = read_session_metadata(&file_path).unwrap();
-        assert!(meta.corrupted, "corrupted flag should be true for degraded metadata");
-        assert_eq!(meta.session_id, session_id, "session_id should be recovered from filename");
+        assert!(
+            meta.corrupted,
+            "corrupted flag should be true for degraded metadata"
+        );
+        assert_eq!(
+            meta.session_id, session_id,
+            "session_id should be recovered from filename"
+        );
         assert_eq!(meta.title, Some("(corrupted session)".to_string()));
         assert!(meta.created_at.is_empty());
         assert!(meta.agent_id.is_empty());
 
         // read_messages_paginated should still work, skipping the corrupted header
         let page = read_messages_paginated(&file_path, None, 10, "backward").unwrap();
-        assert_eq!(page.messages.len(), 1, "Should recover the valid message entry");
+        assert_eq!(
+            page.messages.len(),
+            1,
+            "Should recover the valid message entry"
+        );
         assert_eq!(page.messages[0].content, "Hello");
     }
 
@@ -1335,7 +1393,10 @@ mod tests {
         writeln!(file).unwrap();
 
         let read_meta = read_session_metadata(&file_path).unwrap();
-        assert!(!read_meta.corrupted, "valid metadata should not be marked as corrupted");
+        assert!(
+            !read_meta.corrupted,
+            "valid metadata should not be marked as corrupted"
+        );
         assert_eq!(read_meta.session_id, session_id);
         assert_eq!(read_meta.title, Some("Valid session".to_string()));
     }
@@ -1373,18 +1434,27 @@ mod tests {
         writeln!(file, "BROKEN METADATA LINE").unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (sessions, total) = rt.block_on(async {
-            scan_sessions_async(conv_dir, None, None).await.unwrap()
-        });
+        let (sessions, total) =
+            rt.block_on(async { scan_sessions_async(conv_dir, None, None).await.unwrap() });
 
-        assert_eq!(sessions.len(), 2, "Should find both valid and corrupted sessions");
+        assert_eq!(
+            sessions.len(),
+            2,
+            "Should find both valid and corrupted sessions"
+        );
 
         let valid_session = sessions.iter().find(|s| s.session_id == valid_id).unwrap();
         assert!(!valid_session.corrupted);
 
-        let corrupt_session = sessions.iter().find(|s| s.session_id == corrupt_id).unwrap();
+        let corrupt_session = sessions
+            .iter()
+            .find(|s| s.session_id == corrupt_id)
+            .unwrap();
         assert!(corrupt_session.corrupted);
-        assert_eq!(corrupt_session.title, Some("(corrupted session)".to_string()));
+        assert_eq!(
+            corrupt_session.title,
+            Some("(corrupted session)".to_string())
+        );
     }
 
     #[test]
@@ -1392,7 +1462,10 @@ mod tests {
         // Ensure old JSON without "corrupted" field deserializes with corrupted=false
         let old_json = r#"{"version":1,"session_id":"test","created_at":"2026-01-01T00:00:00Z","agent_id":"com.test","title":null,"updated_at":null,"message_count":0}"#;
         let meta: SessionMetadata = serde_json::from_str(old_json).unwrap();
-        assert!(!meta.corrupted, "Missing 'corrupted' field should default to false");
+        assert!(
+            !meta.corrupted,
+            "Missing 'corrupted' field should default to false"
+        );
         assert_eq!(meta.session_id, "test");
     }
 }

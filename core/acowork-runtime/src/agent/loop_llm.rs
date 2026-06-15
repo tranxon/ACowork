@@ -12,9 +12,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use acowork_core::providers::traits::{ChatResponse, StreamEvent, ToolCall};
 use chrono::Utc;
 use futures::StreamExt;
-use acowork_core::providers::traits::{ChatResponse, StreamEvent, ToolCall};
 
 use super::context::ContextBuilder;
 use super::loop_::{AgentLoop, ChunkEvent};
@@ -315,8 +315,7 @@ impl AgentLoop {
         {
             for (i, tc) in tcs.iter_mut().enumerate() {
                 if let Some(args) = tool_call_args_buffer.get(&(i as u64))
-                    && (tc.function.arguments.is_empty()
-                        || tc.function.arguments == "{}")
+                    && (tc.function.arguments.is_empty() || tc.function.arguments == "{}")
                 {
                     // Validate JSON before applying — stream interruption can
                     // leave incomplete arguments that would fail at tool execution.
@@ -365,10 +364,7 @@ impl AgentLoop {
 /// Build a partial [`ChatResponse`] for stream stop.
 ///
 /// Returns the accumulated content so far and discards any partial tool calls.
-fn build_stopped_response(
-    content: String,
-    reasoning_content: String,
-) -> ChatResponse {
+fn build_stopped_response(content: String, reasoning_content: String) -> ChatResponse {
     ChatResponse {
         content,
         reasoning_content: if reasoning_content.is_empty() {

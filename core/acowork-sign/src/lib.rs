@@ -5,11 +5,11 @@
 //! - acowork-sign: Sign .agent packages
 //! - acowork-verify: Verify .agent package signatures
 
-pub mod signing_block;
-pub mod keygen;
-pub mod sign;
-pub mod verify;
 pub mod certificate;
 pub mod error;
-pub mod zip_utils;
+pub mod keygen;
 pub mod packager;
+pub mod sign;
+pub mod signing_block;
+pub mod verify;
+pub mod zip_utils;

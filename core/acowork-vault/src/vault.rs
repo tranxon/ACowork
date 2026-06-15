@@ -11,16 +11,16 @@
 //! └── ...
 //! ```
 
-use secrecy::SecretString;
 #[cfg(test)]
 use secrecy::ExposeSecret;
-use zeroize::Zeroize;
+use secrecy::SecretString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroize;
 
 use crate::encryption;
-use crate::key_derivation;
 use crate::error::{Result, VaultError};
+use crate::key_derivation;
 
 /// Vault for storing API keys
 pub struct Vault {

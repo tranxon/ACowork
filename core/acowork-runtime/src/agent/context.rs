@@ -349,7 +349,9 @@ impl ContextBuilder {
         // When ≥ 3 pending ambiguous conflicts exist, inject a hint that
         // guides the Agent to naturally ask the user for disambiguation.
         if let Some(ref hint) = self.ambiguous_confirmation_hint {
-            system_content.push_str(&format!("\n\n## Memory Conflicts Needing Confirmation\n{hint}"));
+            system_content.push_str(&format!(
+                "\n\n## Memory Conflicts Needing Confirmation\n{hint}"
+            ));
         }
 
         // 2.6 Skill instructions (debug patching or runtime config)
@@ -405,7 +407,8 @@ impl ContextBuilder {
         // history still contains base64 image data that would otherwise be
         // sent to a model that cannot process it.
         if let Some(caps) = gateway_capabilities {
-            let supports_image = caps.modalities
+            let supports_image = caps
+                .modalities
                 .as_ref()
                 .map(|m| m.input.iter().any(|s| s == "image"))
                 .unwrap_or(true); // true=don't filter when modalities unknown
@@ -526,9 +529,11 @@ impl ContextBuilder {
                     acc
                 });
                 // Safety margin: +10% overhead for role labels, formatting, and special tokens.
-                let approx_msg_tokens = (crate::token::count_text(&combined, &model) as f64 * 1.1).ceil() as u64;
+                let approx_msg_tokens =
+                    (crate::token::count_text(&combined, &model) as f64 * 1.1).ceil() as u64;
                 if (approx_msg_tokens + mt as u64) > context_window {
-                    let safe_max = (context_window.saturating_sub(approx_msg_tokens)).max(256) as u32;
+                    let safe_max =
+                        (context_window.saturating_sub(approx_msg_tokens)).max(256) as u32;
                     tracing::warn!(
                         model = %model,
                         requested_max_tokens = mt,
@@ -572,7 +577,11 @@ pub fn detect_environment_text() -> String {
     let shell_tools_desc: Vec<String> = available_shells
         .iter()
         .map(|s| {
-            let primary = if s.is_primary { " (primary)" } else { " (fallback)" };
+            let primary = if s.is_primary {
+                " (primary)"
+            } else {
+                " (fallback)"
+            };
             format!("{}{}", s.tool_name, primary)
         })
         .collect();
@@ -591,7 +600,8 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AgentManifest {
-        AgentManifest::from_toml(r#"
+        AgentManifest::from_toml(
+            r#"
             agent_id = "com.test.ctx"
             version = "1.0.0"
             name = "Test Agent"
@@ -603,7 +613,9 @@ mod tests {
             provider = "openai"
             model = "gpt-4"
             temperature = 0.7
-        "#).unwrap()
+        "#,
+        )
+        .unwrap()
     }
 
     #[test]

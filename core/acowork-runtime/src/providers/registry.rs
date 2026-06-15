@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
 use acowork_core::providers::traits::Provider;
+use parking_lot::RwLock;
 
 use crate::providers::reliable::{ReliableProvider, RetryConfig};
 
@@ -145,18 +145,10 @@ impl ProviderRegistry {
     }
 
     /// Register a simple provider with default settings
-    pub fn register_provider(
-        &self,
-        name: &str,
-        provider: Arc<dyn Provider>,
-        models: Vec<String>,
-    ) {
+    pub fn register_provider(&self, name: &str, provider: Arc<dyn Provider>, models: Vec<String>) {
         let mut capabilities = HashMap::new();
         for model in &models {
-            capabilities.insert(
-                model.clone(),
-                default_capabilities_for_model(model),
-            );
+            capabilities.insert(model.clone(), default_capabilities_for_model(model));
         }
 
         self.register(
@@ -179,10 +171,7 @@ impl ProviderRegistry {
 
     /// Get a provider by name
     pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
-        self.providers
-            .read()
-            .get(name)
-            .map(|e| e.provider.clone())
+        self.providers.read().get(name).map(|e| e.provider.clone())
     }
 
     /// Get a provider entry by name
@@ -242,10 +231,8 @@ impl ProviderRegistry {
         let providers = self.providers.read();
         let primary_entry = providers.get(primary_provider)?;
 
-        let reliable = ReliableProvider::new(
-            primary_entry.provider.clone(),
-            self.retry_config.clone(),
-        );
+        let reliable =
+            ReliableProvider::new(primary_entry.provider.clone(), self.retry_config.clone());
 
         // Add fallback providers sorted by priority
         let mut fallbacks: Vec<&ProviderEntry> = providers
@@ -329,7 +316,10 @@ fn default_capabilities_for_model(model: &str) -> Vec<ModelCapability> {
     }
 
     // Claude 3.5+ supports vision
-    if lower.contains("claude-3") || lower.contains("claude-sonnet") || lower.contains("claude-opus") {
+    if lower.contains("claude-3")
+        || lower.contains("claude-sonnet")
+        || lower.contains("claude-opus")
+    {
         caps.push(ModelCapability::Vision);
     }
 
@@ -359,15 +349,19 @@ fn default_capabilities_for_model(model: &str) -> Vec<ModelCapability> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::openai::OpenAIProvider;
-    use crate::providers::ollama::OllamaProvider;
     use crate::providers::anthropic::AnthropicProvider;
+    use crate::providers::ollama::OllamaProvider;
+    use crate::providers::openai::OpenAIProvider;
 
     #[test]
     fn test_register_provider() {
         let registry = ProviderRegistry::new();
         let provider = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", provider, vec!["gpt-4".to_string(), "gpt-4o".to_string()]);
+        registry.register_provider(
+            "openai",
+            provider,
+            vec!["gpt-4".to_string(), "gpt-4o".to_string()],
+        );
 
         assert!(registry.get("openai").is_some());
         assert_eq!(registry.list_providers().len(), 1);
@@ -414,10 +408,22 @@ mod tests {
 
     #[test]
     fn test_routing_strategy_parse() {
-        assert_eq!(RoutingStrategy::from_str("cost_priority"), RoutingStrategy::CostPriority);
-        assert_eq!(RoutingStrategy::from_str("quality_priority"), RoutingStrategy::QualityPriority);
-        assert_eq!(RoutingStrategy::from_str("latency_priority"), RoutingStrategy::LatencyPriority);
-        assert_eq!(RoutingStrategy::from_str("unknown"), RoutingStrategy::QualityPriority);
+        assert_eq!(
+            RoutingStrategy::from_str("cost_priority"),
+            RoutingStrategy::CostPriority
+        );
+        assert_eq!(
+            RoutingStrategy::from_str("quality_priority"),
+            RoutingStrategy::QualityPriority
+        );
+        assert_eq!(
+            RoutingStrategy::from_str("latency_priority"),
+            RoutingStrategy::LatencyPriority
+        );
+        assert_eq!(
+            RoutingStrategy::from_str("unknown"),
+            RoutingStrategy::QualityPriority
+        );
     }
 
     #[test]
@@ -458,7 +464,9 @@ mod tests {
             priority: 20,
             is_fallback: true,
         };
-        entry.capabilities.insert("gpt-4".to_string(), default_capabilities_for_model("gpt-4"));
+        entry
+            .capabilities
+            .insert("gpt-4".to_string(), default_capabilities_for_model("gpt-4"));
         registry.register("ollama", entry);
 
         let reliable = registry.build_reliable_provider("openai", "gpt-4");
@@ -473,6 +481,9 @@ mod tests {
 
     #[test]
     fn test_routing_strategy_display() {
-        assert_eq!(format!("{}", RoutingStrategy::CostPriority), "cost_priority");
+        assert_eq!(
+            format!("{}", RoutingStrategy::CostPriority),
+            "cost_priority"
+        );
     }
 }

@@ -23,8 +23,8 @@
 //!
 //! The resulting .wasm file goes into the .agent package's `tools/` directory.
 
-pub mod tool;
 pub mod exports;
+pub mod tool;
 
 // Re-export core types
-pub use tool::{ToolInput, ToolOutput, ToolError};
+pub use tool::{ToolError, ToolInput, ToolOutput};

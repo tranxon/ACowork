@@ -21,25 +21,25 @@
 //! | rag_query | rag:query + network:<rag_url> (conditional) |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 
-pub mod memory_recall;
-pub mod memory_store;
-pub mod http_request;
-pub mod web_fetch;
-pub mod web_search;
-pub mod shell;
+pub mod ask_user_question;
+pub mod content_search;
+pub mod doc_reader;
+pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
-pub mod file_edit;
-pub mod doc_reader;
 pub mod glob_search;
-pub mod content_search;
+pub mod http_request;
 pub mod intent_send;
-pub mod rag_query;
-pub mod ask_user_question;
 pub mod mcp_install;
 pub mod mcp_uninstall;
+pub mod memory_recall;
+pub mod memory_store;
+pub mod rag_query;
 pub mod search_backends;
+pub mod shell;
 pub mod todo_write;
+pub mod web_fetch;
+pub mod web_search;
 
 use acowork_core::tools::traits::Tool;
 use acowork_grafeo::grafeo::GrafeoStore;
@@ -94,10 +94,15 @@ pub fn all_builtin_tools(
         .collect();
 
     let mut tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(memory_recall::MemoryRecallTool::new(agent_id, memory_session)),
+        Arc::new(memory_recall::MemoryRecallTool::new(
+            agent_id,
+            memory_session,
+        )),
         Arc::new(memory_store::MemoryStoreTool::new(agent_id, grafeo_store)),
         Arc::new(http_request::HttpRequestTool::new()),
-        Arc::new(web_fetch::WebFetchTool::with_timeout(Duration::from_millis(tool_http_timeout_ms))),
+        Arc::new(web_fetch::WebFetchTool::with_timeout(
+            Duration::from_millis(tool_http_timeout_ms),
+        )),
         Arc::new(file_read::FileReadTool::new()),
         Arc::new(file_write::FileWriteTool::new()),
         Arc::new(file_edit::FileEditTool::new()),
@@ -124,7 +129,8 @@ pub fn all_builtin_tools(
         // Build search engine from agent's configured backends.
         // Initially empty — backends are populated when search config arrives from Gateway.
         // The timeout is passed through so that build_backend() creates backends with the configured value.
-        let search_engine = WebSearchEngine::new(Vec::new(), Duration::from_millis(tool_http_timeout_ms));
+        let search_engine =
+            WebSearchEngine::new(Vec::new(), Duration::from_millis(tool_http_timeout_ms));
         tools.push(Arc::new(web_search::WebSearchTool::new(search_engine)));
     }
 

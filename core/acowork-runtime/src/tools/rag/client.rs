@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use acowork_core::RagToolConfig;
 
-use super::types::{
-    AnnotatedRagResult, RagQueryRequest, RagQueryResponse, RagResultItem,
-};
+use super::types::{AnnotatedRagResult, RagQueryRequest, RagQueryResponse, RagResultItem};
 
 /// Authentication credential for RAG service
 #[derive(Debug, Clone)]
@@ -40,12 +38,10 @@ impl RagAuthCredential {
         key_value: Option<&str>,
     ) -> Self {
         match (auth_ref, key_value) {
-            (Some(_), Some(value)) => {
-                match auth_type {
-                    "api_key" => RagAuthCredential::ApiKey(value.to_string()),
-                    _ => RagAuthCredential::Bearer(value.to_string()),
-                }
-            }
+            (Some(_), Some(value)) => match auth_type {
+                "api_key" => RagAuthCredential::ApiKey(value.to_string()),
+                _ => RagAuthCredential::Bearer(value.to_string()),
+            },
             // No auth_ref means no authentication needed
             // or key_value is None means key not found in Vault
             _ => RagAuthCredential::None,
@@ -159,11 +155,11 @@ impl RagClient {
     }
 
     /// Send the HTTP request to the RAG endpoint
-    async fn send_request(&self, request: &RagQueryRequest) -> Result<RagQueryResponse, RagClientError> {
-        let mut req_builder = self
-            .http
-            .post(&self.config.endpoint)
-            .json(request);
+    async fn send_request(
+        &self,
+        request: &RagQueryRequest,
+    ) -> Result<RagQueryResponse, RagClientError> {
+        let mut req_builder = self.http.post(&self.config.endpoint).json(request);
 
         // Apply authentication
         match &self.config.auth {
@@ -338,11 +334,8 @@ mod tests {
         assert!(matches!(cred, RagAuthCredential::None));
 
         // auth_ref but no key_value → None (key not found in Vault)
-        let cred = RagAuthCredential::from_vault_ref(
-            Some("vault:rag_enterprise_key"),
-            "bearer",
-            None,
-        );
+        let cred =
+            RagAuthCredential::from_vault_ref(Some("vault:rag_enterprise_key"), "bearer", None);
         assert!(matches!(cred, RagAuthCredential::None));
     }
 
@@ -356,9 +349,6 @@ mod tests {
             RagAuthCredential::vault_provider_name("not-a-vault-ref"),
             None
         );
-        assert_eq!(
-            RagAuthCredential::vault_provider_name("vault:"),
-            Some("")
-        );
+        assert_eq!(RagAuthCredential::vault_provider_name("vault:"), Some(""));
     }
 }

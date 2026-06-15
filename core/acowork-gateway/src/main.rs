@@ -1,7 +1,7 @@
 //! acowork-gateway CLI entry point
 
-use clap::Parser;
 use acowork_gateway::cli::Cli;
+use clap::Parser;
 
 fn main() {
     let cli = Cli::parse();

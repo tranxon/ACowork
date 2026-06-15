@@ -13,13 +13,13 @@
 
 pub mod store;
 
+use chrono::{Datelike, Timelike};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use chrono::{Timelike, Datelike};
 
 use crate::ipc::session::SessionManager;
-pub use store::{CronStore, StoredCronEntry, CronStoreError};
+pub use store::{CronStore, CronStoreError, StoredCronEntry};
 
 /// A registered cron entry (S5.8 enhanced)
 #[derive(Debug, Clone)]
@@ -130,7 +130,10 @@ impl CronScheduler {
 
         tracing::info!(
             "Cron registered: id={} agent={} schedule={} action={}",
-            id, agent_id, schedule, action
+            id,
+            agent_id,
+            schedule,
+            action
         );
         self.entries.insert(id.clone(), entry);
         Ok(id)
@@ -160,7 +163,11 @@ impl CronScheduler {
             self.entries.remove(&id);
         }
         if count > 0 {
-            tracing::info!("Cron: unregistered {} entries for agent {}", count, agent_id);
+            tracing::info!(
+                "Cron: unregistered {} entries for agent {}",
+                count,
+                agent_id
+            );
         }
         count
     }
@@ -169,7 +176,10 @@ impl CronScheduler {
     ///
     /// Returns a list of (agent_id, action, params) tuples for entries
     /// whose schedule matches the given time.
-    pub fn check(&self, time: &chrono::DateTime<chrono::Utc>) -> Vec<(&str, &str, &serde_json::Value)> {
+    pub fn check(
+        &self,
+        time: &chrono::DateTime<chrono::Utc>,
+    ) -> Vec<(&str, &str, &serde_json::Value)> {
         let minute = time.minute() as u8;
         let hour = time.hour() as u8;
         let day = time.day() as u8;
@@ -210,7 +220,9 @@ impl CronScheduler {
 
     /// Load entries from a CronStore (used on Gateway restart)
     pub fn load_from_store(&mut self, store: &CronStore) -> Result<(), String> {
-        let stored = store.list_all().map_err(|e| format!("Failed to load cron entries: {}", e))?;
+        let stored = store
+            .list_all()
+            .map_err(|e| format!("Failed to load cron entries: {}", e))?;
         for entry in stored {
             if let Ok(parsed) = parse_cron(&entry.schedule) {
                 let cron_entry = CronEntry {
@@ -218,8 +230,7 @@ impl CronScheduler {
                     agent_id: entry.agent_id.clone(),
                     schedule: entry.schedule.clone(),
                     action: entry.action.clone(),
-                    params: serde_json::from_str(&entry.params)
-                        .unwrap_or(serde_json::json!({})),
+                    params: serde_json::from_str(&entry.params).unwrap_or(serde_json::json!({})),
                     timezone: entry.timezone.clone(),
                     retry_count: entry.retry_count,
                     retry_interval_secs: entry.retry_interval_secs,
@@ -233,13 +244,15 @@ impl CronScheduler {
                 // Update next_id counter to avoid ID collisions
                 if let Some(num) = entry.id.strip_prefix("cron-")
                     && let Ok(n) = num.parse::<u64>()
-                    && n >= self.next_id {
-                        self.next_id = n + 1;
+                    && n >= self.next_id
+                {
+                    self.next_id = n + 1;
                 }
             } else {
                 tracing::warn!(
                     "Skipping cron entry with invalid schedule: id={} schedule={}",
-                    entry.id, entry.schedule
+                    entry.id,
+                    entry.schedule
                 );
             }
         }
@@ -307,7 +320,10 @@ fn parse_field(field: &str, min: u8, max: u8, name: &str) -> Result<Vec<u8>, Str
             // Range syntax: start-end
             let parts: Vec<&str> = part.split('-').collect();
             if parts.len() != 2 {
-                return Err(format!("Invalid range syntax in {} field: '{}'", name, part));
+                return Err(format!(
+                    "Invalid range syntax in {} field: '{}'",
+                    name, part
+                ));
             }
             let start: u8 = parts[0]
                 .parse()
@@ -391,12 +407,21 @@ pub async fn run_cron_scheduler(
                     // Start the agent process
                     let grpc_addr = crate::grpc::server::default_grpc_addr();
                     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
-                    let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
+                    let log_file_size_mb =
+                        gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
                     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
-                    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(0, gateway_grpc_endpoint, log_file_size_mb, log_file_count);
+                    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
+                        0,
+                        gateway_grpc_endpoint,
+                        log_file_size_mb,
+                        log_file_count,
+                    );
                     match lifecycle.start_agent(&agent_id, &mut gw, false).await {
                         Ok(()) => {
-                            tracing::info!("Cron: started agent {} for scheduled trigger", agent_id);
+                            tracing::info!(
+                                "Cron: started agent {} for scheduled trigger",
+                                agent_id
+                            );
                         }
                         Err(e) => {
                             tracing::error!("Cron: failed to start agent {}: {}", agent_id, e);
@@ -502,7 +527,12 @@ mod tests {
     fn test_scheduler_register() {
         let mut scheduler = CronScheduler::new();
         let id = scheduler
-            .register("com.example.weather", "0 * * * *", "hourly_check", serde_json::json!({}))
+            .register(
+                "com.example.weather",
+                "0 * * * *",
+                "hourly_check",
+                serde_json::json!({}),
+            )
             .unwrap();
         assert!(id.starts_with("cron-"));
         assert_eq!(scheduler.len(), 1);
@@ -512,7 +542,12 @@ mod tests {
     fn test_scheduler_unregister() {
         let mut scheduler = CronScheduler::new();
         let id = scheduler
-            .register("com.example.weather", "0 * * * *", "hourly_check", serde_json::json!({}))
+            .register(
+                "com.example.weather",
+                "0 * * * *",
+                "hourly_check",
+                serde_json::json!({}),
+            )
             .unwrap();
         assert!(scheduler.unregister(&id));
         assert!(scheduler.is_empty());
@@ -522,13 +557,28 @@ mod tests {
     fn test_scheduler_unregister_agent() {
         let mut scheduler = CronScheduler::new();
         scheduler
-            .register("com.example.weather", "0 * * * *", "hourly_check", serde_json::json!({}))
+            .register(
+                "com.example.weather",
+                "0 * * * *",
+                "hourly_check",
+                serde_json::json!({}),
+            )
             .unwrap();
         scheduler
-            .register("com.example.weather", "0 9 * * *", "morning_check", serde_json::json!({}))
+            .register(
+                "com.example.weather",
+                "0 9 * * *",
+                "morning_check",
+                serde_json::json!({}),
+            )
             .unwrap();
         scheduler
-            .register("com.example.calendar", "0 0 * * *", "daily_check", serde_json::json!({}))
+            .register(
+                "com.example.calendar",
+                "0 0 * * *",
+                "daily_check",
+                serde_json::json!({}),
+            )
             .unwrap();
         assert_eq!(scheduler.len(), 3);
 
@@ -541,7 +591,12 @@ mod tests {
     fn test_scheduler_check() {
         let mut scheduler = CronScheduler::new();
         scheduler
-            .register("com.example.weather", "30 9 * * *", "morning_report", serde_json::json!({"type": "daily"}))
+            .register(
+                "com.example.weather",
+                "30 9 * * *",
+                "morning_report",
+                serde_json::json!({"type": "daily"}),
+            )
             .unwrap();
 
         // 9:30 AM on any day should match
@@ -565,17 +620,20 @@ mod tests {
     fn test_scheduler_check_step() {
         let mut scheduler = CronScheduler::new();
         scheduler
-            .register("com.example.monitor", "*/15 * * * *", "health_check", serde_json::json!({}))
+            .register(
+                "com.example.monitor",
+                "*/15 * * * *",
+                "health_check",
+                serde_json::json!({}),
+            )
             .unwrap();
 
         // Should match at minute 0, 15, 30, 45
         for minute in [0, 15, 30, 45] {
-            let time = chrono::DateTime::parse_from_rfc3339(&format!(
-                "2026-04-24T09:{:02}:00Z",
-                minute
-            ))
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+            let time =
+                chrono::DateTime::parse_from_rfc3339(&format!("2026-04-24T09:{:02}:00Z", minute))
+                    .unwrap()
+                    .with_timezone(&chrono::Utc);
             let matches = scheduler.check(&time);
             assert_eq!(matches.len(), 1, "Should match at minute {}", minute);
         }
@@ -592,13 +650,28 @@ mod tests {
     fn test_entries_for_agent() {
         let mut scheduler = CronScheduler::new();
         scheduler
-            .register("com.example.weather", "0 * * * *", "hourly", serde_json::json!({}))
+            .register(
+                "com.example.weather",
+                "0 * * * *",
+                "hourly",
+                serde_json::json!({}),
+            )
             .unwrap();
         scheduler
-            .register("com.example.weather", "0 9 * * *", "morning", serde_json::json!({}))
+            .register(
+                "com.example.weather",
+                "0 9 * * *",
+                "morning",
+                serde_json::json!({}),
+            )
             .unwrap();
         scheduler
-            .register("com.example.calendar", "0 0 * * *", "daily", serde_json::json!({}))
+            .register(
+                "com.example.calendar",
+                "0 0 * * *",
+                "daily",
+                serde_json::json!({}),
+            )
             .unwrap();
 
         let weather_entries = scheduler.entries_for_agent("com.example.weather");

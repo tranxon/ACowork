@@ -11,18 +11,17 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
-    Router,
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, sse::Event, Sse},
+    response::{IntoResponse, Sse, sse::Event},
     routing::{delete, get, post},
 };
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::download::{Downloader, DownloadProgress};
+use crate::download::{DownloadProgress, DownloadSpec, Downloader};
 use crate::event_bus::{Event as BusEvent, EventBus, State as BusState};
 use crate::model::EmbeddingModel;
 use crate::registry::{ModelInfo, ModelRegistry, ModelStatus, ModelStatusFlat};
@@ -52,7 +51,8 @@ pub struct AppState {
     pub default_model: Option<String>,
     /// Per-model cancel flags for ongoing downloads. Each download gets its
     /// own AtomicBool so cancelling one model does not affect others.
-    pub download_cancel_flags: RwLock<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    pub download_cancel_flags:
+        RwLock<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
     /// Event bus for the /events SSE endpoint. Publishes heartbeats and
     /// state transitions; the gateway subscribes to learn which model
     /// is loaded and to detect a stuck embed process.
@@ -327,9 +327,7 @@ pub async fn create_embedding(
 }
 
 /// GET /v1/models — OpenAI-compatible model list.
-pub async fn list_models(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let model_guard = state.model.read().await;
     let current_id = model_guard.as_ref().map(|m| m.model_id().to_string());
     drop(model_guard);
@@ -364,14 +362,19 @@ pub async fn list_models(
 }
 
 /// GET /health — Health check.
-pub async fn health_check(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let model_guard = state.model.read().await;
     let model_info = model_guard.as_ref().map(|m| ModelStatusInfo {
         id: m.model_id().to_string(),
         dimension: m.dimension(),
-        pooling: format!("{:?}", state.registry.get(m.model_id()).map(|e| &e.pooling_strategy).unwrap_or(&crate::registry::PoolingStrategy::Cls)),
+        pooling: format!(
+            "{:?}",
+            state
+                .registry
+                .get(m.model_id())
+                .map(|e| &e.pooling_strategy)
+                .unwrap_or(&crate::registry::PoolingStrategy::Cls)
+        ),
     });
 
     let status = if model_guard.is_some() {
@@ -486,12 +489,10 @@ pub async fn load_model(
     drop(model_guard);
 
     // Publish Ready state so the gateway learns the model is now active.
-    state
-        .event_bus
-        .publish_state(BusState::Ready {
-            model_id: model_id_for_state.clone(),
-            dimension: dim,
-        });
+    state.event_bus.publish_state(BusState::Ready {
+        model_id: model_id_for_state.clone(),
+        dimension: dim,
+    });
 
     Json(LoadResponse {
         model_id: model_id.clone(),
@@ -538,14 +539,13 @@ pub async fn download_model(
     }
 
     // Select ONNX variant
-    let variant = req
-        .variant
-        .unwrap_or_else(|| state.onnx_variant.clone());
+    let variant = req.variant.unwrap_or_else(|| state.onnx_variant.clone());
 
     let onnx_file = state
         .registry
         .onnx_path(&model_id, &variant)
         .unwrap_or(entry.onnx_file.clone());
+    let external_data_files = state.registry.external_data_paths(&model_id, &variant);
 
     // Create shared progress tracker
     let progress = Arc::new(DownloadProgress::new());
@@ -574,10 +574,13 @@ pub async fn download_model(
         let result = state2
             .downloader
             .download_model(
-                &mid,
-                &entry.hf_repo,
-                &onnx_file,
-                &entry.tokenizer_file,
+                DownloadSpec {
+                    model_id: &mid,
+                    hf_repo: &entry.hf_repo,
+                    onnx_file: &onnx_file,
+                    tokenizer_file: &entry.tokenizer_file,
+                    external_data_files: &external_data_files,
+                },
                 &progress,
                 &cancel,
             )
@@ -653,7 +656,10 @@ pub async fn cancel_download(
     {
         let mut status = state.download_status.write().await;
         if let Some(ModelStatus::Downloading(_)) = status.get(&model_id) {
-            status.insert(model_id.clone(), ModelStatus::Failed("Cancelled by user".to_string()));
+            status.insert(
+                model_id.clone(),
+                ModelStatus::Failed("Cancelled by user".to_string()),
+            );
         }
     }
 
@@ -738,31 +744,42 @@ pub async fn model_status(
 }
 
 /// GET /models — Extended model list with status (non-OpenAI).
-pub async fn list_models_detail(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn list_models_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let model_guard = state.model.read().await;
     let loaded_id = model_guard.as_ref().map(|m| m.model_id().to_string());
     drop(model_guard);
 
     let models = state.registry.models();
-    let infos: Vec<ModelInfo> = models
-        .iter()
-        .map(|entry| {
-            let status = if loaded_id.as_deref() == Some(entry.id.as_str()) {
-                ModelStatus::Loaded
-            } else if state.downloader.is_downloaded(&entry.id) {
-                ModelStatus::Downloaded
+    let mut infos = Vec::with_capacity(models.len());
+    for entry in models {
+        let status = if loaded_id.as_deref() == Some(entry.id.as_str()) {
+            ModelStatus::Loaded
+        } else {
+            let pm = state.download_progress.read().await;
+            if let Some(progress) = pm.get(&entry.id) {
+                let (pct, _, _) = progress.snapshot();
+                ModelStatus::Downloading(pct)
             } else {
-                ModelStatus::NotDownloaded
-            };
-
-            ModelInfo {
-                entry: entry.clone(),
-                status: status.to_api_parts(),
+                drop(pm);
+                if state.downloader.is_downloaded(&entry.id) {
+                    ModelStatus::Downloaded
+                } else {
+                    state
+                        .download_status
+                        .read()
+                        .await
+                        .get(&entry.id)
+                        .cloned()
+                        .unwrap_or(ModelStatus::NotDownloaded)
+                }
             }
-        })
-        .collect();
+        };
+
+        infos.push(ModelInfo {
+            entry: entry.clone(),
+            status: status.to_api_parts(),
+        });
+    }
 
     Json(ModelsDetailResponse { models: infos }).into_response()
 }

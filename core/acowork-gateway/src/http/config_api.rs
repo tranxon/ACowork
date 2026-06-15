@@ -6,11 +6,10 @@
 //! - GET  /health       — health check (defined in routes.rs)
 
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
-    Json,
     routing::{delete, get},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -106,7 +105,9 @@ pub async fn get_config(
     State(state): State<AppState>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
-    let config = gw.config.as_ref()
+    let config = gw
+        .config
+        .as_ref()
         .ok_or_else(|| ApiError::internal("Gateway config not initialized"))?;
 
     Ok(Json(ConfigResponse {
@@ -164,7 +165,9 @@ pub async fn update_config(
     }
     if let Some(size) = body.log_file_size_mb {
         if size > 1024 {
-            return Err(ApiError::bad_request("log_file_size_mb must be between 0 and 1024"));
+            return Err(ApiError::bad_request(
+                "log_file_size_mb must be between 0 and 1024",
+            ));
         }
         updates.push(format!("log_file_size_mb={}", size));
     }
@@ -241,11 +244,13 @@ pub async fn update_config(
             };
             for agent_id in agent_ids {
                 if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                    let push_result = session.push_message(
-                        acowork_core::protocol::GatewayResponse::LogFileCountUpdate {
-                            log_file_count: count,
-                        }
-                    ).await;
+                    let push_result = session
+                        .push_message(
+                            acowork_core::protocol::GatewayResponse::LogFileCountUpdate {
+                                log_file_count: count,
+                            },
+                        )
+                        .await;
                     if push_result {
                         tracing::info!(agent = %agent_id, "Pushed LogFileCountUpdate to Runtime");
                     } else {
@@ -277,11 +282,11 @@ pub async fn update_config(
             };
             for agent_id in agent_ids {
                 if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                    let push_result = session.push_message(
-                        acowork_core::protocol::GatewayResponse::LogLevelUpdate {
+                    let push_result = session
+                        .push_message(acowork_core::protocol::GatewayResponse::LogLevelUpdate {
                             log_level: level.clone(),
-                        }
-                    ).await;
+                        })
+                        .await;
                     if push_result {
                         tracing::info!(agent = %agent_id, "Pushed LogLevelUpdate to Runtime");
                     } else {
@@ -363,7 +368,10 @@ pub async fn delete_logs(
     // Stopped agents' workspace logs will be cleaned by the Runtime
     // on next startup (self-cleanup). This eliminates the need for the
     // Gateway to touch {install_path}/workspace/logs/.
-    tracing::info!("Log cleanup complete: {} log file(s) deleted", total_deleted);
+    tracing::info!(
+        "Log cleanup complete: {} log file(s) deleted",
+        total_deleted
+    );
     Ok(Json(MessageResponse {
         message: format!("Deleted {} log file(s)", total_deleted),
     }))

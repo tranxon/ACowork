@@ -9,10 +9,10 @@ use std::sync::Arc;
 use clap::Parser;
 
 use acowork_embed::config::Cli;
-use acowork_embed::download::{Downloader, DownloadProgress};
+use acowork_embed::download::{DownloadProgress, DownloadSpec, Downloader};
 use acowork_embed::event_bus::{EventBus, State as BusState};
 use acowork_embed::model::EmbeddingModel;
-use acowork_embed::registry::ModelRegistry;
+use acowork_embed::registry::{ModelRegistry, ModelStatus};
 use acowork_embed::server::AppState;
 use acowork_embed::shutdown::Shutdown;
 
@@ -66,99 +66,8 @@ async fn main() {
 
     tracing::info!(model_id = %default_model_id, "Target model");
 
-    // Try to load model at startup
-    let mut initial_model = load_model_if_available(
-        &default_model_id,
-        &registry,
-        &models_dir,
-        &downloader,
-        &cli.onnx_variant,
-    )
-    .await;
-
-    if initial_model.is_some() {
-        tracing::info!(model_id = %default_model_id, "Model loaded at startup");
-        let dim = initial_model.as_ref().unwrap().dimension();
-        event_bus.publish_state(BusState::Ready {
-            model_id: default_model_id.clone(),
-            dimension: dim,
-        });
-    } else {
-        tracing::warn!(
-            model_id = %default_model_id,
-            "Model not available at startup. Auto-downloading recommended model..."
-        );
-
-        // Auto-download recommended model on first startup
-        if !downloader.is_downloaded(&default_model_id) {
-            tracing::info!(
-                model_id = %default_model_id,
-                "Auto-downloading recommended model..."
-            );
-            event_bus.publish_state(BusState::DownloadingRecommended {
-                model_id: default_model_id.clone(),
-                progress: 0,
-            });
-
-            let entry = registry.get(&default_model_id);
-            if let Some(entry) = entry {
-                let onnx_file = registry
-                    .onnx_path(&default_model_id, &cli.onnx_variant)
-                    .unwrap_or(entry.onnx_file.clone());
-
-                let cancel_flag = std::sync::atomic::AtomicBool::new(false);
-                let progress = DownloadProgress::new();
-                match downloader
-                    .download_model(
-                        &default_model_id,
-                        &entry.hf_repo,
-                        &onnx_file,
-                        &entry.tokenizer_file,
-                        &progress,
-                        &cancel_flag,
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(model_id = %default_model_id, "Auto-download complete, loading model...");
-                        event_bus.publish_state(BusState::Loading {
-                            model_id: default_model_id.clone(),
-                        });
-                        if let Some(model) = try_load_model(&default_model_id, &registry, &models_dir)
-                        {
-                            tracing::info!(model_id = %default_model_id, "Model loaded after auto-download");
-                            let dim = model.dimension();
-                            event_bus.publish_state(BusState::Ready {
-                                model_id: default_model_id.clone(),
-                                dimension: dim,
-                            });
-                            initial_model = Some(model);
-                        } else {
-                            event_bus.publish_state(BusState::Error {
-                                message: format!(
-                                    "Model '{default_model_id}' downloaded but failed to load"
-                                ),
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            model_id = %default_model_id,
-                            error = %e,
-                            "Auto-download failed. Server will start without a loaded model."
-                        );
-                        event_bus.publish_state(BusState::Error {
-                            message: format!("Auto-download of '{default_model_id}' failed: {e}"),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Build application state
     let state = Arc::new(AppState {
-        model: tokio::sync::RwLock::new(initial_model.map(Arc::new)),
+        model: tokio::sync::RwLock::new(None),
         registry,
         downloader,
         download_status: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -166,10 +75,12 @@ async fn main() {
         shutdown: shutdown.clone(),
         models_dir: models_dir.clone(),
         onnx_variant: cli.onnx_variant.clone(),
-        default_model: Some(default_model_id),
+        default_model: Some(default_model_id.clone()),
         download_cancel_flags: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         event_bus: event_bus.clone(),
     });
+
+    tokio::spawn(bootstrap_default_model(state.clone(), default_model_id));
 
     // Build router
     let app = acowork_embed::server::build_router(state.clone());
@@ -190,15 +101,166 @@ async fn main() {
     tracing::info!("AgentCowork Embedding Runtime stopped");
 }
 
-/// Try to load a model if its files are on disk.
-async fn load_model_if_available(
-    model_id: &str,
-    registry: &ModelRegistry,
-    models_dir: &std::path::Path,
-    _downloader: &Downloader,
-    _onnx_variant: &str,
-) -> Option<EmbeddingModel> {
-    try_load_model(model_id, registry, models_dir)
+async fn bootstrap_default_model(state: Arc<AppState>, model_id: String) {
+    if state.downloader.is_downloaded(&model_id) {
+        state.event_bus.publish_state(BusState::Loading {
+            model_id: model_id.clone(),
+        });
+        load_model_into_state(state, model_id).await;
+        return;
+    }
+
+    tracing::warn!(
+        model_id = %model_id,
+        "Model not available at startup. Auto-downloading recommended model..."
+    );
+
+    let Some(entry) = state.registry.get(&model_id).cloned() else {
+        state.event_bus.publish_state(BusState::Error {
+            message: format!("Model '{model_id}' not found in registry"),
+        });
+        return;
+    };
+
+    let onnx_file = state
+        .registry
+        .onnx_path(&model_id, &state.onnx_variant)
+        .unwrap_or(entry.onnx_file.clone());
+    let external_data_files = state
+        .registry
+        .external_data_paths(&model_id, &state.onnx_variant);
+    let progress = Arc::new(DownloadProgress::new());
+    let cancel_flag = std::sync::atomic::AtomicBool::new(false);
+
+    {
+        let mut pm = state.download_progress.write().await;
+        pm.insert(model_id.clone(), progress.clone());
+    }
+    {
+        let mut status = state.download_status.write().await;
+        status.insert(model_id.clone(), ModelStatus::Downloading(0));
+    }
+    state
+        .event_bus
+        .publish_state(BusState::DownloadingRecommended {
+            model_id: model_id.clone(),
+            progress: 0,
+        });
+
+    let progress_bus = progress.clone();
+    let status_state = state.clone();
+    let status_model_id = model_id.clone();
+    let status_publisher = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+        let mut last_progress = 0;
+        loop {
+            ticker.tick().await;
+            let (pct, _, _) = progress_bus.snapshot();
+            if pct != last_progress {
+                last_progress = pct;
+                {
+                    let mut status = status_state.download_status.write().await;
+                    status.insert(status_model_id.clone(), ModelStatus::Downloading(pct));
+                }
+                status_state
+                    .event_bus
+                    .publish_state(BusState::DownloadingRecommended {
+                        model_id: status_model_id.clone(),
+                        progress: pct,
+                    });
+            }
+        }
+    });
+
+    let result = state
+        .downloader
+        .download_model(
+            DownloadSpec {
+                model_id: &model_id,
+                hf_repo: &entry.hf_repo,
+                onnx_file: &onnx_file,
+                tokenizer_file: &entry.tokenizer_file,
+                external_data_files: &external_data_files,
+            },
+            &progress,
+            &cancel_flag,
+        )
+        .await;
+
+    status_publisher.abort();
+    {
+        let mut pm = state.download_progress.write().await;
+        pm.remove(&model_id);
+    }
+
+    match result {
+        Ok(_) => {
+            {
+                let mut status = state.download_status.write().await;
+                status.insert(model_id.clone(), ModelStatus::Downloaded);
+            }
+            tracing::info!(model_id = %model_id, "Auto-download complete, loading model...");
+            state.event_bus.publish_state(BusState::Loading {
+                model_id: model_id.clone(),
+            });
+            load_model_into_state(state, model_id).await;
+        }
+        Err(e) => {
+            {
+                let mut status = state.download_status.write().await;
+                status.insert(model_id.clone(), ModelStatus::Failed(format!("{e}")));
+            }
+            tracing::error!(
+                model_id = %model_id,
+                error = %e,
+                "Auto-download failed. Server will continue without a loaded model."
+            );
+            state.event_bus.publish_state(BusState::Error {
+                message: format!("Auto-download of '{model_id}' failed: {e}"),
+            });
+        }
+    }
+}
+
+async fn load_model_into_state(state: Arc<AppState>, model_id: String) {
+    let registry = state.registry.clone();
+    let models_dir = state.models_dir.clone();
+    let model_id_for_load = model_id.clone();
+    let load_result = tokio::task::spawn_blocking(move || {
+        try_load_model(&model_id_for_load, &registry, &models_dir)
+    })
+    .await;
+
+    match load_result {
+        Ok(Some(model)) => {
+            let dim = model.dimension();
+            {
+                let mut model_guard = state.model.write().await;
+                *model_guard = Some(Arc::new(model));
+            }
+            {
+                let mut status = state.download_status.write().await;
+                status.insert(model_id.clone(), ModelStatus::Loaded);
+            }
+            tracing::info!(model_id = %model_id, "Model loaded");
+            state.event_bus.publish_state(BusState::Ready {
+                model_id,
+                dimension: dim,
+            });
+        }
+        Ok(None) => {
+            let message = format!("Model '{model_id}' files are missing or failed to load");
+            let mut status = state.download_status.write().await;
+            status.insert(model_id.clone(), ModelStatus::Failed(message.clone()));
+            state.event_bus.publish_state(BusState::Error { message });
+        }
+        Err(e) => {
+            let message = format!("Model loading task panicked for '{model_id}': {e}");
+            let mut status = state.download_status.write().await;
+            status.insert(model_id.clone(), ModelStatus::Failed(message.clone()));
+            state.event_bus.publish_state(BusState::Error { message });
+        }
+    }
 }
 
 /// Synchronously try to load a model from disk.
@@ -255,8 +317,7 @@ async fn shutdown_signal(shutdown: Arc<Shutdown>) {
 fn init_logging(level: &str) {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)

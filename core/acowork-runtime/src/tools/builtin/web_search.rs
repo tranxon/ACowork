@@ -3,8 +3,8 @@
 //! Uses the fallback engine from `search_backends::WebSearchEngine` which tries
 //! backends in priority order. If all backends fail, returns an error.
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 use super::search_backends::WebSearchEngine;
@@ -52,7 +52,11 @@ impl Tool for WebSearchTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let query = params["query"].as_str().unwrap_or("");
         if query.is_empty() {
             return Ok(ToolResult {

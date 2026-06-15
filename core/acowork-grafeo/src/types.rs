@@ -229,9 +229,7 @@ impl std::str::FromStr for AutobioCategory {
             "Preference" => Ok(AutobioCategory::Preference),
             "History" => Ok(AutobioCategory::History),
             "Relationship" => Ok(AutobioCategory::Relationship),
-            _ => Err(GrafeoError::Memory(format!(
-                "unknown AutobioCategory: {s}"
-            ))),
+            _ => Err(GrafeoError::Memory(format!("unknown AutobioCategory: {s}"))),
         }
     }
 }
@@ -410,10 +408,7 @@ fn value_to_metadata(value: Option<&Value>) -> Result<HashMap<String, serde_json
 
 /// Build a property map from a slice of (key, value) pairs for lookup.
 fn prop_map(props: &[(String, Value)]) -> HashMap<&str, &Value> {
-    props
-        .iter()
-        .map(|(k, v)| (k.as_str(), v))
-        .collect()
+    props.iter().map(|(k, v)| (k.as_str(), v)).collect()
 }
 
 /// Get a required string property.
@@ -447,7 +442,9 @@ fn get_bool(map: &HashMap<&str, &Value>, key: &str) -> Result<bool> {
 
 /// Get an optional NodeId from an Int64 value.
 fn get_optional_node_id(map: &HashMap<&str, &Value>, key: &str) -> Option<NodeId> {
-    map.get(key).and_then(|v| v.as_int64()).map(|id| NodeId::new(id as u64))
+    map.get(key)
+        .and_then(|v| v.as_int64())
+        .map(|id| NodeId::new(id as u64))
 }
 
 // ---------------------------------------------------------------------------
@@ -458,14 +455,26 @@ impl Episode {
     /// Convert to Grafeo node properties for storage.
     pub fn to_properties(&self) -> Vec<(String, Value)> {
         let mut props = vec![
-            ("session_id".to_string(), Value::from(self.session_id.as_str())),
-            ("turn_index".to_string(), Value::from(i64::from(self.turn_index))),
+            (
+                "session_id".to_string(),
+                Value::from(self.session_id.as_str()),
+            ),
+            (
+                "turn_index".to_string(),
+                Value::from(i64::from(self.turn_index)),
+            ),
             ("role".to_string(), Value::from(self.role.as_str())),
             ("content".to_string(), Value::from(self.content.as_str())),
-            ("created_at".to_string(), Value::from(dt_to_timestamp(self.timestamp))),
+            (
+                "created_at".to_string(),
+                Value::from(dt_to_timestamp(self.timestamp)),
+            ),
             ("consolidated".to_string(), Value::from(self.consolidated)),
             ("metadata".to_string(), metadata_to_value(&self.metadata)),
-            ("importance".to_string(), Value::from(f64::from(self.importance))),
+            (
+                "importance".to_string(),
+                Value::from(f64::from(self.importance)),
+            ),
         ];
         if let Some(ref emb) = self.embedding {
             props.push(("embedding".to_string(), embedding_to_value(Some(emb))));
@@ -510,17 +519,32 @@ impl KnowledgeNode {
         let mut props = vec![
             ("content".to_string(), Value::from(content.as_str())),
             ("subject".to_string(), Value::from(self.subject.as_str())),
-            ("predicate".to_string(), Value::from(self.predicate.as_str())),
+            (
+                "predicate".to_string(),
+                Value::from(self.predicate.as_str()),
+            ),
             ("object".to_string(), Value::from(self.object.as_str())),
             ("sub_type".to_string(), Value::from(self.sub_type.as_str())),
-            ("confidence".to_string(), Value::from(f64::from(self.confidence))),
+            (
+                "confidence".to_string(),
+                Value::from(f64::from(self.confidence)),
+            ),
             ("status".to_string(), Value::from(self.status.as_str())),
-            ("created_at".to_string(), Value::from(dt_to_timestamp(self.created_at))),
-            ("updated_at".to_string(), Value::from(dt_to_timestamp(self.updated_at))),
+            (
+                "created_at".to_string(),
+                Value::from(dt_to_timestamp(self.created_at)),
+            ),
+            (
+                "updated_at".to_string(),
+                Value::from(dt_to_timestamp(self.updated_at)),
+            ),
             ("metadata".to_string(), metadata_to_value(&self.metadata)),
         ];
         if let Some(id) = self.source_episode_id {
-            props.push(("source_episode_id".to_string(), Value::from(id.as_u64() as i64)));
+            props.push((
+                "source_episode_id".to_string(),
+                Value::from(id.as_u64() as i64),
+            ));
         }
         if let Some(ref emb) = self.embedding {
             props.push(("embedding".to_string(), embedding_to_value(Some(emb))));
@@ -563,20 +587,50 @@ impl KnowledgeNode {
 impl ProceduralNode {
     /// Convert to Grafeo node properties for storage.
     pub fn to_properties(&self) -> Vec<(String, Value)> {
-        let content = format!("{} {} {}", self.name, self.trigger_condition, self.action_pattern);
+        let content = format!(
+            "{} {} {}",
+            self.name, self.trigger_condition, self.action_pattern
+        );
         let mut props = vec![
             ("content".to_string(), Value::from(content.as_str())),
             ("name".to_string(), Value::from(self.name.as_str())),
-            ("trigger_condition".to_string(), Value::from(self.trigger_condition.as_str())),
-            ("action_pattern".to_string(), Value::from(self.action_pattern.as_str())),
-            ("success_count".to_string(), Value::from(i64::from(self.success_count))),
-            ("fail_count".to_string(), Value::from(i64::from(self.fail_count))),
-            ("confidence".to_string(), Value::from(f64::from(self.confidence))),
-            ("activation_count".to_string(), Value::from(i64::from(self.activation_count))),
-            ("learned_from".to_string(), Value::from(self.learned_from.as_str())),
+            (
+                "trigger_condition".to_string(),
+                Value::from(self.trigger_condition.as_str()),
+            ),
+            (
+                "action_pattern".to_string(),
+                Value::from(self.action_pattern.as_str()),
+            ),
+            (
+                "success_count".to_string(),
+                Value::from(i64::from(self.success_count)),
+            ),
+            (
+                "fail_count".to_string(),
+                Value::from(i64::from(self.fail_count)),
+            ),
+            (
+                "confidence".to_string(),
+                Value::from(f64::from(self.confidence)),
+            ),
+            (
+                "activation_count".to_string(),
+                Value::from(i64::from(self.activation_count)),
+            ),
+            (
+                "learned_from".to_string(),
+                Value::from(self.learned_from.as_str()),
+            ),
             ("status".to_string(), Value::from(self.status.as_str())),
-            ("created_at".to_string(), Value::from(dt_to_timestamp(self.created_at))),
-            ("updated_at".to_string(), Value::from(dt_to_timestamp(self.updated_at))),
+            (
+                "created_at".to_string(),
+                Value::from(dt_to_timestamp(self.created_at)),
+            ),
+            (
+                "updated_at".to_string(),
+                Value::from(dt_to_timestamp(self.updated_at)),
+            ),
             ("metadata".to_string(), metadata_to_value(&self.metadata)),
         ];
         if let Some(ref skill) = self.source_skill {
@@ -645,14 +699,26 @@ impl AutobiographicalNode {
             ("category".to_string(), Value::from(self.category.as_str())),
             ("key".to_string(), Value::from(self.key.as_str())),
             ("value".to_string(), Value::from(self.value.as_str())),
-            ("confidence".to_string(), Value::from(f64::from(self.confidence))),
+            (
+                "confidence".to_string(),
+                Value::from(f64::from(self.confidence)),
+            ),
             ("status".to_string(), Value::from(self.status.as_str())),
-            ("created_at".to_string(), Value::from(dt_to_timestamp(self.created_at))),
-            ("updated_at".to_string(), Value::from(dt_to_timestamp(self.updated_at))),
+            (
+                "created_at".to_string(),
+                Value::from(dt_to_timestamp(self.created_at)),
+            ),
+            (
+                "updated_at".to_string(),
+                Value::from(dt_to_timestamp(self.updated_at)),
+            ),
             ("metadata".to_string(), metadata_to_value(&self.metadata)),
         ];
         if let Some(id) = self.source_episode_id {
-            props.push(("source_episode_id".to_string(), Value::from(id.as_u64() as i64)));
+            props.push((
+                "source_episode_id".to_string(),
+                Value::from(id.as_u64() as i64),
+            ));
         }
         if let Some(ref emb) = self.embedding {
             props.push(("embedding".to_string(), embedding_to_value(Some(emb))));
@@ -719,7 +785,10 @@ mod tests {
             consolidated: false,
             metadata: {
                 let mut m = HashMap::new();
-                m.insert("topic".to_string(), serde_json::Value::String("greeting".to_string()));
+                m.insert(
+                    "topic".to_string(),
+                    serde_json::Value::String("greeting".to_string()),
+                );
                 m
             },
             importance: 0.5,
@@ -791,7 +860,6 @@ mod tests {
         assert_eq!(restored.confidence, original.confidence);
         assert_eq!(restored.source_episode_id, original.source_episode_id);
         assert_eq!(restored.status, NodeStatus::Active);
-
     }
 
     #[test]
@@ -854,7 +922,6 @@ mod tests {
         assert_eq!(restored.fail_count, 1);
         assert_eq!(restored.confidence, original.confidence);
         assert_eq!(restored.status, NodeStatus::Active);
-
     }
 
     #[test]
@@ -945,7 +1012,12 @@ mod tests {
 
     #[test]
     fn test_knowledge_sub_type_roundtrip() {
-        for variant in [KnowledgeSubType::Fact, KnowledgeSubType::Preference, KnowledgeSubType::Relation, KnowledgeSubType::Procedure] {
+        for variant in [
+            KnowledgeSubType::Fact,
+            KnowledgeSubType::Preference,
+            KnowledgeSubType::Relation,
+            KnowledgeSubType::Procedure,
+        ] {
             let s = variant.as_str();
             let parsed: KnowledgeSubType = s.parse().unwrap();
             assert_eq!(parsed, variant);

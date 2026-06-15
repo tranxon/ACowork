@@ -1,4 +1,4 @@
-﻿//! Anthropic Claude Provider
+//! Anthropic Claude Provider
 //!
 //! Supports the Anthropic Messages API (claude-sonnet-4, claude-haiku, etc.)
 //! with streaming, tool_use, and structured error handling.
@@ -303,9 +303,8 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
                 // Add tool_use blocks if present
                 if let Some(ref tool_calls) = msg.tool_calls {
                     for tc in tool_calls {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&tc.function.arguments)
-                                .unwrap_or(serde_json::Value::Object(Default::default()));
+                        let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
                         content_blocks.push(serde_json::json!({
                             "type": "tool_use",
                             "id": tc.id,
@@ -329,7 +328,8 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
                 // Prefer dedicated tool_call_id field; fall back to content JSON for legacy
                 let tool_call_id = msg.tool_call_id.clone().unwrap_or_else(|| {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                        value.get("tool_call_id")
+                        value
+                            .get("tool_call_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string()
@@ -342,7 +342,8 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
                     msg.content.clone()
                 } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
                     // Legacy format: content JSON contains tool_call_id and content
-                    value.get("content")
+                    value
+                        .get("content")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&msg.content)
                         .to_string()
@@ -519,9 +520,9 @@ impl Provider for AnthropicProvider {
             .send()
             .await
             .map_err(|e| {
-                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(
-                    format!("Anthropic request failed: {e}"),
-                ))
+                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!(
+                    "Anthropic request failed: {e}"
+                )))
             })?;
 
         if !response.status().is_success() {
@@ -544,9 +545,9 @@ impl Provider for AnthropicProvider {
         }
 
         let native_resp: AnthropicResponse = response.json().await.map_err(|e| {
-            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(
-                format!("Failed to parse Anthropic response: {e}"),
-            ))
+            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(format!(
+                "Failed to parse Anthropic response: {e}"
+            )))
         })?;
 
         Ok(parse_response(native_resp))
@@ -614,11 +615,9 @@ impl Provider for AnthropicProvider {
             .send()
             .await
             .map_err(|e| {
-                acowork_core::AcoworkError::Provider(
-                    acowork_core::ProviderError::network(format!(
-                        "Anthropic streaming request failed: {e}"
-                    )),
-                )
+                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!(
+                    "Anthropic streaming request failed: {e}"
+                )))
             })?;
 
         if !response.status().is_success() {
@@ -662,17 +661,16 @@ impl Provider for AnthropicProvider {
                                 &mut accumulated_cache_read_tokens,
                                 &mut accumulated_cache_write_tokens,
                                 &mut block_index_map,
-                            )
-                                && tx.send(Some(event)).await.is_err()
+                            ) && tx.send(Some(event)).await.is_err()
                             {
                                 return; // receiver dropped
                             }
                         }
                     }
                     Ok(Some(Err(e))) => {
-                        let stream_err = acowork_core::providers::classify_stream_error(
-                            &format!("Stream error: {e}"),
-                        );
+                        let stream_err = acowork_core::providers::classify_stream_error(&format!(
+                            "Stream error: {e}"
+                        ));
                         let _ = tx.send(Some(StreamEvent::Error(stream_err))).await;
                         return;
                     }
@@ -686,11 +684,13 @@ impl Provider for AnthropicProvider {
                             timeout_secs = stream_read_timeout.as_secs(),
                             "Stream silence detected, no data received within timeout"
                         );
-                        let _ = tx.send(Some(StreamEvent::Error(
-                            acowork_core::providers::StreamError::stream_timeout(
-                                stream_read_timeout.as_secs(),
-                            ),
-                        ))).await;
+                        let _ = tx
+                            .send(Some(StreamEvent::Error(
+                                acowork_core::providers::StreamError::stream_timeout(
+                                    stream_read_timeout.as_secs(),
+                                ),
+                            )))
+                            .await;
                         return;
                     }
                 }
@@ -701,10 +701,7 @@ impl Provider for AnthropicProvider {
         Ok(Box::new(ChannelStream { rx }))
     }
 
-    async fn chat_token_count(
-        &self,
-        messages: &[ChatMessage],
-    ) -> acowork_core::error::Result<u64> {
+    async fn chat_token_count(&self, messages: &[ChatMessage]) -> acowork_core::error::Result<u64> {
         // Heuristic estimation for Anthropic models:
         // Claude models use a similar tokenization to GPT models.
         // Approximate: English ~4 chars/token, CJK ~2 chars/token
@@ -713,11 +710,7 @@ impl Provider for AnthropicProvider {
 
         for msg in messages {
             total_chars += msg.content.len();
-            cjk_chars += msg
-                .content
-                .chars()
-                .filter(|c| !c.is_ascii())
-                .count();
+            cjk_chars += msg.content.chars().filter(|c| !c.is_ascii()).count();
         }
 
         let ascii_chars = total_chars - cjk_chars;
@@ -822,8 +815,14 @@ fn parse_anthropic_sse_line(
                     // also occupy indices), but loop_.rs expects sequential tool-call indices
                     // (0, 1, 2…). We translate via block_index_map so downstream stays aligned.
                     let content_block_index = event.index.unwrap_or(0);
-                    let tool_index = block_index_map.get(&content_block_index).copied().unwrap_or(0);
-                    return Some(StreamEvent::ToolCallChunk { index: tool_index, arguments: partial_json });
+                    let tool_index = block_index_map
+                        .get(&content_block_index)
+                        .copied()
+                        .unwrap_or(0);
+                    return Some(StreamEvent::ToolCallChunk {
+                        index: tool_index,
+                        arguments: partial_json,
+                    });
                 }
             }
             None
@@ -878,13 +877,11 @@ fn parse_anthropic_sse_line(
             // No action needed for these event types
             None
         }
-        "error" => {
-            Some(StreamEvent::Error(
-                acowork_core::providers::classify_stream_error(
-                    &format!("Anthropic stream error: {data}"),
-                ),
-            ))
-        }
+        "error" => Some(StreamEvent::Error(
+            acowork_core::providers::classify_stream_error(&format!(
+                "Anthropic stream error: {data}"
+            )),
+        )),
         _ => None,
     }
 }
@@ -933,14 +930,17 @@ mod tests {
 
     #[test]
     fn test_convert_messages_with_tool_calls() {
-        let messages = vec![ChatMessage::assistant_with_tools("", vec![ToolCall {
-            id: "toolu_123".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "get_weather".to_string(),
-                arguments: r#"{"city":"Shanghai"}"#.to_string(),
-            },
-        }])];
+        let messages = vec![ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_123".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Shanghai"}"#.to_string(),
+                },
+            }],
+        )];
 
         let (converted, _system) = convert_messages(&messages);
         assert_eq!(converted.len(), 1);
@@ -1151,8 +1151,15 @@ mod tests {
             &mut block_index_map,
         );
         assert!(event.is_some());
-        if let Some(StreamEvent::ToolCallChunk { index, arguments: chunk }) = event {
-            assert_eq!(index, 0, "index should be mapped to tool-call sequential index 0, not content_block index 1");
+        if let Some(StreamEvent::ToolCallChunk {
+            index,
+            arguments: chunk,
+        }) = event
+        {
+            assert_eq!(
+                index, 0,
+                "index should be mapped to tool-call sequential index 0, not content_block index 1"
+            );
             assert!(chunk.contains("expr"));
         } else {
             panic!("Expected ToolCallChunk event");
@@ -1182,7 +1189,9 @@ mod tests {
             &mut cache_write_tokens,
             &mut block_index_map,
         );
-        assert!(matches!(e1, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_001" && tc.function.name == "shell"));
+        assert!(
+            matches!(e1, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_001" && tc.function.name == "shell")
+        );
 
         // content_block_start for second tool (content_block index 2)
         let e2 = parse_anthropic_sse_line(
@@ -1194,7 +1203,9 @@ mod tests {
             &mut cache_write_tokens,
             &mut block_index_map,
         );
-        assert!(matches!(e2, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_002" && tc.function.name == "read_file"));
+        assert!(
+            matches!(e2, Some(StreamEvent::ToolCallStart(ref tc)) if tc.id == "toolu_002" && tc.function.name == "read_file")
+        );
 
         // Delta for first tool (content_block index 1) — should map to tool-call index 0
         let e3 = parse_anthropic_sse_line(
@@ -1207,7 +1218,10 @@ mod tests {
             &mut block_index_map,
         );
         if let Some(StreamEvent::ToolCallChunk { index, arguments }) = e3 {
-            assert_eq!(index, 0, "first tool delta must have sequential tool-call index 0 (content_block 1 -> tool 0)");
+            assert_eq!(
+                index, 0,
+                "first tool delta must have sequential tool-call index 0 (content_block 1 -> tool 0)"
+            );
             assert!(arguments.contains("command"));
         } else {
             panic!("Expected ToolCallChunk for index 0");
@@ -1224,7 +1238,10 @@ mod tests {
             &mut block_index_map,
         );
         if let Some(StreamEvent::ToolCallChunk { index, arguments }) = e4 {
-            assert_eq!(index, 1, "second tool delta must have sequential tool-call index 1 (content_block 2 -> tool 1)");
+            assert_eq!(
+                index, 1,
+                "second tool delta must have sequential tool-call index 1 (content_block 2 -> tool 1)"
+            );
             assert!(arguments.contains("path"));
         } else {
             panic!("Expected ToolCallChunk for index 1");

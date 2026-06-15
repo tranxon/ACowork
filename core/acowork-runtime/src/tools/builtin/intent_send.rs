@@ -5,8 +5,8 @@
 //! - Requires intent:send:<target> permission
 //! - Phase 1 uses IPC client; Phase 2+ supports async Intent
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 /// Intent send tool — send an Intent to another Agent through the Gateway
@@ -62,7 +62,11 @@ impl Tool for IntentSendTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let target = match params.get("target").and_then(|v| v.as_str()) {
             Some(t) if !t.trim().is_empty() => t.trim().to_string(),
             _ => {
@@ -87,8 +91,14 @@ impl Tool for IntentSendTool {
             }
         };
 
-        let intent_params = params.get("params").cloned().unwrap_or(serde_json::json!({}));
-        let async_ = params.get("async").and_then(|v| v.as_bool()).unwrap_or(false);
+        let intent_params = params
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        let async_ = params
+            .get("async")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Validate target format (reverse-domain)
         if !target.contains('.') {
@@ -113,7 +123,8 @@ impl Tool for IntentSendTool {
                 target,
                 action,
                 mode,
-                serde_json::to_string_pretty(&intent_params).unwrap_or_else(|_| intent_params.to_string())
+                serde_json::to_string_pretty(&intent_params)
+                    .unwrap_or_else(|_| intent_params.to_string())
             ),
             error: None,
             token_usage: None,
@@ -141,25 +152,41 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("Missing required parameter 'target'"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("Missing required parameter 'target'")
+        );
     }
 
     #[tokio::test]
     async fn test_intent_send_missing_action() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({ "target": "com.example.calendar" }), None)
+            .execute(
+                serde_json::json!({ "target": "com.example.calendar" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("Missing required parameter 'action'"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("Missing required parameter 'action'")
+        );
     }
 
     #[tokio::test]
     async fn test_intent_send_invalid_target() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({ "target": "calendar", "action": "schedule" }), None)
+            .execute(
+                serde_json::json!({ "target": "calendar", "action": "schedule" }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
@@ -170,11 +197,14 @@ mod tests {
     async fn test_intent_send_basic() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "target": "com.example.calendar",
-                "action": "schedule",
-                "params": { "time": "10:00", "title": "Team sync" }
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "target": "com.example.calendar",
+                    "action": "schedule",
+                    "params": { "time": "10:00", "title": "Team sync" }
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -187,11 +217,14 @@ mod tests {
     async fn test_intent_send_async_mode() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "target": "com.example.weather",
-                "action": "query",
-                "async": true
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "target": "com.example.weather",
+                    "action": "query",
+                    "async": true
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -202,10 +235,13 @@ mod tests {
     async fn test_intent_send_empty_params() {
         let tool = IntentSendTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "target": "com.example.agent",
-                "action": "ping"
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "target": "com.example.agent",
+                    "action": "ping"
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);

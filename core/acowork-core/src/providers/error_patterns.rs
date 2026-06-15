@@ -154,7 +154,9 @@ mod tests {
 
     #[test]
     fn test_context_overflow_detection() {
-        assert!(is_context_overflow("prompt exceeds the context window of this model"));
+        assert!(is_context_overflow(
+            "prompt exceeds the context window of this model"
+        ));
         assert!(is_context_overflow("Prompt is too long: 150000 tokens"));
         assert!(is_context_overflow("context_length_exceeded"));
         assert!(is_context_overflow("Request entity too large"));
@@ -164,7 +166,9 @@ mod tests {
     #[test]
     fn test_stream_decode_error_detection() {
         assert!(is_stream_decode_error("error decoding response body"));
-        assert!(is_stream_decode_error("Stream error: connection reset by peer"));
+        assert!(is_stream_decode_error(
+            "Stream error: connection reset by peer"
+        ));
         assert!(is_stream_decode_error("h2 protocol error"));
         assert!(!is_stream_decode_error("prompt is too long"));
     }

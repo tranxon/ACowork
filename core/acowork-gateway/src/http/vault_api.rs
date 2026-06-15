@@ -6,28 +6,36 @@
 //! - PUT    /api/vault/keys/:provider — update a key
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    Json,
     routing::{delete, get},
-    Router,
 };
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
+use crate::http::models_api;
 use crate::http::routes::{ApiError, AppState};
 use crate::resource_cache;
 use crate::vault::StoredModelCapabilities;
-use crate::http::models_api;
 use std::path::PathBuf;
 
 /// Build the vault router
 pub fn vault_routes() -> Router<AppState> {
     Router::new()
         .route("/api/vault/keys", get(list_keys).post(add_key))
-        .route("/api/vault/keys/{provider}", delete(remove_key).put(update_key))
-        .route("/api/search/keys", get(list_search_keys).post(add_search_key))
-        .route("/api/search/keys/{provider}", delete(remove_search_key).put(update_search_key))
+        .route(
+            "/api/vault/keys/{provider}",
+            delete(remove_key).put(update_key),
+        )
+        .route(
+            "/api/search/keys",
+            get(list_search_keys).post(add_search_key),
+        )
+        .route(
+            "/api/search/keys/{provider}",
+            delete(remove_search_key).put(update_search_key),
+        )
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -145,33 +153,49 @@ pub async fn list_keys(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<VaultKeyEntryResponse>>, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
-    let entries = gw.vault.list_keys()
+    let entries = gw
+        .vault
+        .list_keys()
         .map_err(|e| ApiError::internal(&format!("Failed to list keys: {}", e)))?;
 
-    let response: Vec<VaultKeyEntryResponse> = entries.iter().map(|k| {
-        // Try to get the full provider entry for base_url/default_model/models/capabilities
-        let (base_url, default_model, models, model_capabilities, compact_model) = match gw.vault.get_provider(&k.provider) {
-            Ok(entry) => (
-                entry.base_url.clone(),
-                entry.default_model.clone(),
-                entry.models.clone(),
-                entry.model_capabilities.clone(),
-                entry.compact_model.clone(),
-            ),
-            Err(_) => (None, None, Vec::new(), std::collections::HashMap::new(), None),
-        };
-        let is_local = models_api::is_local_provider(&k.provider);
-        VaultKeyEntryResponse {
-            provider: k.provider.clone(),
-            key_preview: if is_local { "(local)".to_string() } else { k.key_preview.clone() },
-            base_url,
-            default_model,
-            models,
-            model_capabilities,
-            compact_model,
-            local: is_local,
-        }
-    }).collect();
+    let response: Vec<VaultKeyEntryResponse> = entries
+        .iter()
+        .map(|k| {
+            // Try to get the full provider entry for base_url/default_model/models/capabilities
+            let (base_url, default_model, models, model_capabilities, compact_model) =
+                match gw.vault.get_provider(&k.provider) {
+                    Ok(entry) => (
+                        entry.base_url.clone(),
+                        entry.default_model.clone(),
+                        entry.models.clone(),
+                        entry.model_capabilities.clone(),
+                        entry.compact_model.clone(),
+                    ),
+                    Err(_) => (
+                        None,
+                        None,
+                        Vec::new(),
+                        std::collections::HashMap::new(),
+                        None,
+                    ),
+                };
+            let is_local = models_api::is_local_provider(&k.provider);
+            VaultKeyEntryResponse {
+                provider: k.provider.clone(),
+                key_preview: if is_local {
+                    "(local)".to_string()
+                } else {
+                    k.key_preview.clone()
+                },
+                base_url,
+                default_model,
+                models,
+                model_capabilities,
+                compact_model,
+                local: is_local,
+            }
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -183,10 +207,12 @@ pub async fn add_key(
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
     // Validate base_url format if provided
     if let Some(ref url) = body.base_url
-        && !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://")
+        && !url.is_empty()
+        && !url.starts_with("http://")
+        && !url.starts_with("https://")
     {
         return Err(ApiError::bad_request(
-            "base_url must start with http:// or https://"
+            "base_url must start with http:// or https://",
         ));
     }
     // Validate provider name is not empty
@@ -202,7 +228,11 @@ pub async fn add_key(
 
     let mut gw = state.gateway_state.write().await;
     // Local providers use a placeholder key (no real API key needed)
-    let effective_key = if is_local { "local".to_string() } else { body.key.clone() };
+    let effective_key = if is_local {
+        "local".to_string()
+    } else {
+        body.key.clone()
+    };
     // Resolve models: prefer `models` field; fallback to `default_model` for backward compat
     let resolved_models = if !body.models.is_empty() {
         body.models.clone()
@@ -211,14 +241,16 @@ pub async fn add_key(
     } else {
         vec![]
     };
-    gw.vault.store_provider(
-        &body.provider,
-        body.base_url.as_deref(),
-        &resolved_models,
-        &effective_key,
-        &body.model_capabilities,
-        body.compact_model.as_deref(),
-    ).map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
+    gw.vault
+        .store_provider(
+            &body.provider,
+            body.base_url.as_deref(),
+            &resolved_models,
+            &effective_key,
+            &body.model_capabilities,
+            body.compact_model.as_deref(),
+        )
+        .map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
 
     // Rebuild provider_list cache so AgentHello picks up the new provider.
     let data_dir = get_data_dir_from_gw(&gw);
@@ -227,11 +259,16 @@ pub async fn add_key(
 
     // Hot-push resource version change to all connected agents
     // so they pick up the new provider without requiring a Gateway restart.
-    if let Some(ref pusher) = state.pusher { pusher.push_llm_config().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_llm_config().await;
+    }
 
-    Ok((StatusCode::CREATED, Json(MessageResponse {
-        message: format!("Key stored for provider: {}", body.provider),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageResponse {
+            message: format!("Key stored for provider: {}", body.provider),
+        }),
+    ))
 }
 
 /// `DELETE /api/vault/keys/:provider` — delete a key
@@ -240,8 +277,9 @@ pub async fn remove_key(
     Path(provider): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     let mut gw = state.gateway_state.write().await;
-    gw.vault.remove_key(&provider)
-        .map_err(|e| ApiError::not_found(&format!("Key not found for provider '{}': {}", provider, e)))?;
+    gw.vault.remove_key(&provider).map_err(|e| {
+        ApiError::not_found(&format!("Key not found for provider '{}': {}", provider, e))
+    })?;
 
     // Rebuild provider_list cache after removal.
     let data_dir = get_data_dir_from_gw(&gw);
@@ -264,10 +302,12 @@ pub async fn update_key(
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     // Validate base_url format if provided
     if let Some(ref url) = body.base_url
-        && !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://")
+        && !url.is_empty()
+        && !url.starts_with("http://")
+        && !url.starts_with("https://")
     {
         return Err(ApiError::bad_request(
-            "base_url must start with http:// or https://"
+            "base_url must start with http:// or https://",
         ));
     }
 
@@ -284,7 +324,8 @@ pub async fn update_key(
                 Ok(entry) => entry.api_key,
                 Err(e) => {
                     return Err(ApiError::not_found(&format!(
-                        "Provider '{}' not found in Vault: {}", provider, e
+                        "Provider '{}' not found in Vault: {}",
+                        provider, e
                     )));
                 }
             }
@@ -338,14 +379,16 @@ pub async fn update_key(
 
     // Remove old entry, store new with full config
     let _ = gw.vault.remove_key(&provider);
-    gw.vault.store_provider(
-        &provider,
-        resolved_base_url.as_deref(),
-        &resolved_models,
-        &api_key,
-        &resolved_capabilities,
-        resolved_compact_model.as_deref(),
-    ).map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
+    gw.vault
+        .store_provider(
+            &provider,
+            resolved_base_url.as_deref(),
+            &resolved_models,
+            &api_key,
+            &resolved_capabilities,
+            resolved_compact_model.as_deref(),
+        )
+        .map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
 
     // Rebuild provider_list cache after update.
     let data_dir = get_data_dir_from_gw(&gw);
@@ -353,7 +396,9 @@ pub async fn update_key(
     drop(gw); // Release write lock before hot-push (which acquires read lock)
 
     // Hot-push resource version change to all connected agents
-    if let Some(ref pusher) = state.pusher { pusher.push_llm_config().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_llm_config().await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("Key updated for provider: {}", provider),
@@ -367,13 +412,18 @@ pub async fn list_search_keys(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SearchKeyEntryResponse>>, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
-    let entries = gw.vault.list_search_keys()
+    let entries = gw
+        .vault
+        .list_search_keys()
         .map_err(|e| ApiError::internal(&format!("Failed to list search keys: {}", e)))?;
 
-    let response = entries.iter().map(|k| SearchKeyEntryResponse {
-        provider: k.provider.clone(),
-        key_preview: k.key_preview.clone(),
-    }).collect();
+    let response = entries
+        .iter()
+        .map(|k| SearchKeyEntryResponse {
+            provider: k.provider.clone(),
+            key_preview: k.key_preview.clone(),
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -391,7 +441,8 @@ pub async fn add_search_key(
     }
 
     let mut gw = state.gateway_state.write().await;
-    gw.vault.store_search_key(&body.provider, &body.key)
+    gw.vault
+        .store_search_key(&body.provider, &body.key)
         .map_err(|e| ApiError::internal(&format!("Failed to store search key: {}", e)))?;
 
     // Rebuild search_list cache so AgentHello picks up the new provider.
@@ -400,11 +451,16 @@ pub async fn add_search_key(
     drop(gw); // Release write lock before hot-push
 
     // Hot-push search config change to all connected agents
-    if let Some(ref pusher) = state.pusher { pusher.push_search_config().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_search_config().await;
+    }
 
-    Ok((StatusCode::CREATED, Json(MessageResponse {
-        message: format!("Search key stored for provider: {}", body.provider),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageResponse {
+            message: format!("Search key stored for provider: {}", body.provider),
+        }),
+    ))
 }
 
 /// `DELETE /api/search/keys/:provider` — remove a search provider API key
@@ -413,15 +469,18 @@ pub async fn remove_search_key(
     Path(provider): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     let mut gw = state.gateway_state.write().await;
-    gw.vault.remove_search_key(&provider)
-        .map_err(|e| ApiError::not_found(&format!("Search key not found for '{}': {}", provider, e)))?;
+    gw.vault.remove_search_key(&provider).map_err(|e| {
+        ApiError::not_found(&format!("Search key not found for '{}': {}", provider, e))
+    })?;
 
     // Rebuild search_list cache after removal.
     let data_dir = get_data_dir_from_gw(&gw);
     resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
     drop(gw);
 
-    if let Some(ref pusher) = state.pusher { pusher.push_search_config().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_search_config().await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("Search key removed for provider: {}", provider),
@@ -439,21 +498,21 @@ pub async fn update_search_key(
     // Resolve the API key: use provided key, or preserve existing key
     let api_key = match body.key {
         Some(ref k) if !k.is_empty() => k.clone(),
-        _ => {
-            match gw.vault.get_search_key(&provider) {
-                Ok(entry) => entry.api_key,
-                Err(e) => {
-                    return Err(ApiError::not_found(&format!(
-                        "Search key not found for '{}': {}", provider, e
-                    )));
-                }
+        _ => match gw.vault.get_search_key(&provider) {
+            Ok(entry) => entry.api_key,
+            Err(e) => {
+                return Err(ApiError::not_found(&format!(
+                    "Search key not found for '{}': {}",
+                    provider, e
+                )));
             }
-        }
+        },
     };
 
     // Remove old entry, store new
     let _ = gw.vault.remove_search_key(&provider);
-    gw.vault.store_search_key(&provider, &api_key)
+    gw.vault
+        .store_search_key(&provider, &api_key)
         .map_err(|e| ApiError::internal(&format!("Failed to update search key: {}", e)))?;
 
     // Rebuild search_list cache after update.
@@ -461,13 +520,14 @@ pub async fn update_search_key(
     resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
     drop(gw);
 
-    if let Some(ref pusher) = state.pusher { pusher.push_search_config().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_search_config().await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("Search key updated for provider: {}", provider),
     }))
 }
-
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -492,14 +552,17 @@ mod tests {
         assert!(req.base_url.is_none());
         assert!(req.default_model.is_none());
     }
-    
+
     #[test]
     fn test_add_key_request_with_full_config() {
         let json = r#"{"provider": "deepseek", "key": "sk-abc", "base_url": "https://api.deepseek.com/v1", "default_model": "deepseek-chat"}"#;
         let req: AddKeyRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.provider, "deepseek");
         assert_eq!(req.key, "sk-abc");
-        assert_eq!(req.base_url, Some("https://api.deepseek.com/v1".to_string()));
+        assert_eq!(
+            req.base_url,
+            Some("https://api.deepseek.com/v1".to_string())
+        );
         assert_eq!(req.default_model, Some("deepseek-chat".to_string()));
     }
 
@@ -511,7 +574,7 @@ mod tests {
         assert!(req.base_url.is_none());
         assert!(req.default_model.is_none());
     }
-    
+
     #[test]
     fn test_update_key_request_with_full_config() {
         let json = r#"{"key": "sk-new", "base_url": "https://api.custom.com/v1", "default_model": "custom-model"}"#;

@@ -1,8 +1,8 @@
 //! Glob search tool — search files by pattern using globset for matching
 
+use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use ignore::WalkBuilder;
-use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 use std::path::Path;
 
@@ -42,7 +42,11 @@ impl Tool for GlobSearchTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let pattern = params["pattern"]
             .as_str()
             .unwrap_or("")
@@ -98,14 +102,19 @@ impl Tool for GlobSearchTool {
                 Ok(e) => {
                     if e.file_type().is_some_and(|ft| ft.is_file()) {
                         let path = e.path();
-                        let rel_str =
-                            path_utils::normalize_separators(&path_utils::relative_path(path, search_base));
+                        let rel_str = path_utils::normalize_separators(&path_utils::relative_path(
+                            path,
+                            search_base,
+                        ));
                         if glob_set.is_match(&rel_str) {
                             if results.len() >= output::MAX_RESULT_COUNT {
                                 truncated = true;
                                 break;
                             }
-                            if !results.iter().any(|r: &String| r.eq_ignore_ascii_case(&rel_str)) {
+                            if !results
+                                .iter()
+                                .any(|r: &String| r.eq_ignore_ascii_case(&rel_str))
+                            {
                                 results.push(rel_str);
                             }
                         }

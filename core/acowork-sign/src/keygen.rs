@@ -51,7 +51,9 @@ impl KeyPair {
 }
 
 /// Key type (Developer or Platform)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 pub enum KeyType {
     Developer,
     Platform,
@@ -95,7 +97,8 @@ pub fn generate_and_save(output_dir: &Path, key_type: KeyType) -> Result<KeyPair
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     let cert_path = output_dir.join(format!("{key_type}.cert"));
-    let cert_json = serde_json::to_string_pretty(&cert).map_err(|e| SignError::Certificate(e.to_string()))?;
+    let cert_json =
+        serde_json::to_string_pretty(&cert).map_err(|e| SignError::Certificate(e.to_string()))?;
     fs::write(&cert_path, cert_json)?;
 
     Ok(keypair)

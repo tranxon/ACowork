@@ -4,9 +4,9 @@
 //! stored as JSON files on disk. Each provider has its own
 //! accumulation record with daily and monthly totals.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 /// Usage accumulation record for a single (agent, provider) pair
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,17 +109,12 @@ impl BudgetStore {
     }
 
     /// Record usage for an agent+provider pair
-    pub fn record_usage(
-        &mut self,
-        agent_id: &str,
-        provider: &str,
-        tokens: u64,
-        cost_usd: f64,
-    ) {
+    pub fn record_usage(&mut self, agent_id: &str, provider: &str, tokens: u64, cost_usd: f64) {
         let key = Self::cache_key(agent_id, provider);
         let now = chrono::Utc::now();
 
-        let accumulation = self.cache
+        let accumulation = self
+            .cache
             .entry(key.clone())
             .or_insert_with(|| UsageAccumulation::new(agent_id, provider));
 
@@ -177,7 +172,9 @@ impl BudgetStore {
         if self.data_dir.to_string_lossy() == ":memory:" {
             return;
         }
-        let file_path = self.data_dir.join(format!("{}.json", key.replace(':', "_")));
+        let file_path = self
+            .data_dir
+            .join(format!("{}.json", key.replace(':', "_")));
         if let Ok(json) = serde_json::to_string_pretty(accumulation) {
             let _ = std::fs::write(&file_path, json);
         }

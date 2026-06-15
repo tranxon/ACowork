@@ -209,19 +209,23 @@ impl ConsolidationScheduler {
             let result_copy = run.result.clone();
             state.run_history.push(run);
             // Update pending count after run
-            state.pending_count = state.pending_count.saturating_sub(
-                result_copy.upgraded + result_copy.marked_dormant,
-            );
+            state.pending_count = state
+                .pending_count
+                .saturating_sub(result_copy.upgraded + result_copy.marked_dormant);
 
             id
         };
 
         // Fetch the run we just recorded
         let state = self.state.lock().await;
-        let run = state.run_history.iter()
+        let run = state
+            .run_history
+            .iter()
             .find(|r| r.id == run_id)
             .cloned()
-            .ok_or_else(|| crate::error::GrafeoError::Memory("Run not found after insert".to_string()))?;
+            .ok_or_else(|| {
+                crate::error::GrafeoError::Memory("Run not found after insert".to_string())
+            })?;
 
         Ok(run)
     }
@@ -269,7 +273,7 @@ impl ConsolidationScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KnowledgeNode, KnowledgeSubType, DEFAULT_EMBEDDING_DIM};
+    use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeNode, KnowledgeSubType};
 
     fn test_store() -> Arc<Mutex<GrafeoStore>> {
         Arc::new(Mutex::new(GrafeoStore::new_in_memory().unwrap()))
@@ -383,7 +387,10 @@ mod tests {
         let run = scheduler.run_now(TriggerReason::Manual).await.unwrap();
 
         assert_eq!(run.trigger, TriggerReason::Manual);
-        assert_eq!(run.result.upgraded, 1, "One pending node should be upgraded");
+        assert_eq!(
+            run.result.upgraded, 1,
+            "One pending node should be upgraded"
+        );
         assert!(run.started_at <= run.finished_at);
         assert!(run.id.starts_with("consol-"));
         assert_eq!(scheduler.run_count().await, 1);
@@ -443,7 +450,7 @@ mod tests {
     async fn test_idle_timeout_trigger() {
         let store = test_store();
         let config = SchedulerConfig {
-            idle_timeout_secs: 0, // Immediate timeout
+            idle_timeout_secs: 0,        // Immediate timeout
             accumulation_threshold: 999, // Don't trigger on accumulation
             ..SchedulerConfig::default()
         };
@@ -496,7 +503,10 @@ mod tests {
 
         // Pending count should have decreased
         let pending = scheduler.pending_count().await;
-        assert_eq!(pending, 0, "Pending count should be 0 after upgrading all nodes");
+        assert_eq!(
+            pending, 0,
+            "Pending count should be 0 after upgrading all nodes"
+        );
     }
 
     // =====================================================================
@@ -505,7 +515,11 @@ mod tests {
 
     #[test]
     fn test_trigger_reason_serde() {
-        let reasons = [TriggerReason::IdleTimeout, TriggerReason::Accumulation, TriggerReason::Manual];
+        let reasons = [
+            TriggerReason::IdleTimeout,
+            TriggerReason::Accumulation,
+            TriggerReason::Manual,
+        ];
         for reason in &reasons {
             let json = serde_json::to_string(reason).unwrap();
             let decoded: TriggerReason = serde_json::from_str(&json).unwrap();

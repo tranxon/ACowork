@@ -153,10 +153,7 @@ impl ProviderError {
     /// These are retryable — the provider may have been temporarily overloaded.
     pub fn stream_timeout(timeout_secs: u64) -> Self {
         Self {
-            message: format!(
-                "Stream timeout: no data received for {}s",
-                timeout_secs
-            ),
+            message: format!("Stream timeout: no data received for {}s", timeout_secs),
             status_code: None,
             error_type: ProviderErrorType::StreamTimeout,
             retryable: true,
@@ -167,7 +164,11 @@ impl ProviderError {
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(code) = self.status_code {
-            write!(f, "[{}] {} (retryable={})", code, self.message, self.retryable)
+            write!(
+                f,
+                "[{}] {} (retryable={})",
+                code, self.message, self.retryable
+            )
         } else {
             write!(f, "{} (retryable={})", self.message, self.retryable)
         }
@@ -221,10 +222,7 @@ impl StreamError {
     /// These are retryable — the provider may have been temporarily overloaded.
     pub fn stream_timeout(timeout_secs: u64) -> Self {
         Self {
-            message: format!(
-                "Stream timeout: no data received for {}s",
-                timeout_secs
-            ),
+            message: format!("Stream timeout: no data received for {}s", timeout_secs),
             error_type: ProviderErrorType::StreamTimeout,
             retryable: true,
             status_code: None,
@@ -263,7 +261,6 @@ impl std::fmt::Display for StreamError {
 
 impl std::error::Error for StreamError {}
 
-
 /// Chat message role
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -289,9 +286,7 @@ pub enum ContentPart {
     Text { text: String },
     /// Image URL (data:image/...;base64,... or https://...)
     #[serde(rename = "image_url")]
-    ImageUrl {
-        image_url: ImageUrlPart,
-    },
+    ImageUrl { image_url: ImageUrlPart },
 }
 
 /// Image URL details for a ContentPart
@@ -321,7 +316,12 @@ impl ContentPart {
     /// Create an image_url content part from a data URI or URL
     pub fn image_url(url: impl Into<String>) -> Self {
         ContentPart::ImageUrl {
-            image_url: ImageUrlPart { url: url.into(), detail: None, width: None, height: None },
+            image_url: ImageUrlPart {
+                url: url.into(),
+                detail: None,
+                width: None,
+                height: None,
+            },
         }
     }
 
@@ -366,7 +366,11 @@ pub struct ChatMessage {
 impl ChatMessage {
     /// Create a user message
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::User, content: content.into(), ..Default::default() }
+        Self {
+            role: MessageRole::User,
+            content: content.into(),
+            ..Default::default()
+        }
     }
 
     /// Create a user message with multimodal content parts.
@@ -382,11 +386,18 @@ impl ChatMessage {
 
     /// Create an assistant message
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::Assistant, content: content.into(), ..Default::default() }
+        Self {
+            role: MessageRole::Assistant,
+            content: content.into(),
+            ..Default::default()
+        }
     }
 
     /// Create an assistant message with reasoning content (DeepSeek thinking mode)
-    pub fn assistant_with_reasoning(content: impl Into<String>, reasoning: impl Into<String>) -> Self {
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning: impl Into<String>,
+    ) -> Self {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
@@ -400,7 +411,11 @@ impl ChatMessage {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             ..Default::default()
         }
     }
@@ -417,7 +432,11 @@ impl ChatMessage {
 
     /// Create a system message
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::System, content: content.into(), ..Default::default() }
+        Self {
+            role: MessageRole::System,
+            content: content.into(),
+            ..Default::default()
+        }
     }
 }
 

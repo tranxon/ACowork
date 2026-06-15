@@ -8,11 +8,10 @@
 //! - DELETE /api/embedding-models/{id} — delete downloaded model files
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
-    Router,
     routing::{delete, get, post},
 };
 use futures_util::future::join_all;
@@ -94,9 +93,7 @@ pub struct SelectModelRequest {
 // ── Route handlers ─────────────────────────────────────────────────────
 
 /// GET /api/embedding-models — list available embedding models with status.
-pub async fn list_embedding_models(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_embedding_models(State(state): State<AppState>) -> impl IntoResponse {
     // Clone all needed data from the read lock, then drop it before
     // making external HTTP requests (which cross await points).
     let (service_running, active_model_id, embed_port, model_entries) = {
@@ -105,7 +102,13 @@ pub async fn list_embedding_models(
             Some(eps) => (true, eps.active_model_id.clone(), Some(eps.port)),
             None => (false, None, None),
         };
-        let entries: Vec<_> = gw.resource_cache.embedding_models.models.iter().cloned().collect();
+        let entries: Vec<_> = gw
+            .resource_cache
+            .embedding_models
+            .models
+            .iter()
+            .cloned()
+            .collect();
         (sr, ami, ep, entries)
     };
 
@@ -192,7 +195,13 @@ pub async fn download_model(
     };
 
     // Check model exists in registry
-    if !gw.resource_cache.embedding_models.models.iter().any(|m| m.id == model_id) {
+    if !gw
+        .resource_cache
+        .embedding_models
+        .models
+        .iter()
+        .any(|m| m.id == model_id)
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(EmbeddingModelActionResponse {
@@ -256,7 +265,12 @@ pub async fn select_model(
     };
 
     // Check model exists in registry
-    let model_entry = gw.resource_cache.embedding_models.models.iter().find(|m| m.id == model_id);
+    let model_entry = gw
+        .resource_cache
+        .embedding_models
+        .models
+        .iter()
+        .find(|m| m.id == model_id);
     let new_dim = match model_entry {
         Some(entry) => entry.dimension,
         None => {
@@ -273,9 +287,15 @@ pub async fn select_model(
     };
 
     // B6: Dimension change detection — warn if dimensions differ
-    let current_dim = gw.embed_process.as_ref().and_then(|eps| eps.active_dimension);
+    let current_dim = gw
+        .embed_process
+        .as_ref()
+        .and_then(|eps| eps.active_dimension);
     let dimension_changed = current_dim.map_or(false, |cur| cur != new_dim);
-    let current_model_id = gw.embed_process.as_ref().and_then(|eps| eps.active_model_id.clone());
+    let current_model_id = gw
+        .embed_process
+        .as_ref()
+        .and_then(|eps| eps.active_model_id.clone());
 
     drop(gw);
 
@@ -361,7 +381,13 @@ pub async fn get_model_status(
     let gw = state.gateway_state.read().await;
 
     // Check model exists in registry
-    if !gw.resource_cache.embedding_models.models.iter().any(|m| m.id == model_id) {
+    if !gw
+        .resource_cache
+        .embedding_models
+        .models
+        .iter()
+        .any(|m| m.id == model_id)
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -417,9 +443,7 @@ pub struct EmbeddingTestResponse {
 ///
 /// Sends a sample sentence to the embed service and verifies a valid
 /// embedding vector is returned. Reports latency and dimension.
-pub async fn test_embedding_model(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn test_embedding_model(State(state): State<AppState>) -> impl IntoResponse {
     let gw = state.gateway_state.read().await;
 
     let port = match &gw.embed_process {
@@ -495,7 +519,13 @@ pub async fn delete_model(
     };
 
     // Check model exists in registry
-    if !gw.resource_cache.embedding_models.models.iter().any(|m| m.id == model_id) {
+    if !gw
+        .resource_cache
+        .embedding_models
+        .models
+        .iter()
+        .any(|m| m.id == model_id)
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(EmbeddingModelActionResponse {
@@ -508,14 +538,19 @@ pub async fn delete_model(
     }
 
     // Check if this is the active model
-    let is_active = gw.embed_process.as_ref().and_then(|eps| eps.active_model_id.as_deref()) == Some(&model_id);
+    let is_active = gw
+        .embed_process
+        .as_ref()
+        .and_then(|eps| eps.active_model_id.as_deref())
+        == Some(&model_id);
     if is_active {
         return (
             StatusCode::CONFLICT,
             Json(EmbeddingModelActionResponse {
                 model_id,
                 status: "error".to_string(),
-                message: "Cannot delete the currently active model. Switch to another model first.".to_string(),
+                message: "Cannot delete the currently active model. Switch to another model first."
+                    .to_string(),
             }),
         )
             .into_response();
@@ -526,8 +561,14 @@ pub async fn delete_model(
     match embed::delete_embed_model(port, &model_id).await {
         Ok(body) => {
             // Check if the embed service returned an error
-            if let Some(err_msg) = body.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
-                let status_code = if err_msg.contains("currently loaded") || err_msg.contains("being downloaded") {
+            if let Some(err_msg) = body
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+            {
+                let status_code = if err_msg.contains("currently loaded")
+                    || err_msg.contains("being downloaded")
+                {
                     StatusCode::CONFLICT
                 } else {
                     StatusCode::INTERNAL_SERVER_ERROR

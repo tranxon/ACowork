@@ -120,27 +120,28 @@ Write-Host ""
 $step++
 Write-Host "[$step/$totalSteps] Building Embedding Runtime (release mode)..." -ForegroundColor Yellow
 
-# Auto-detect local ONNX Runtime install under .ort/
+$ortDir = Join-Path $WorkspaceRoot ".ort"
+$ortEntries = @()
+if (Test-Path $ortDir) {
+    $ortEntries = Get-ChildItem -Path $ortDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "onnxruntime-win-x64-*" } | Sort-Object Name -Descending
+}
+$preferredOrt = $ortEntries | Where-Object { $_.Name -eq "onnxruntime-win-x64-1.22.0" } | Select-Object -First 1
+if (-not $preferredOrt) {
+    $preferredOrt = $ortEntries | Select-Object -First 1
+}
+if ($preferredOrt) {
+    $libDir = Join-Path $preferredOrt.FullName "lib"
+    $dllPath = Join-Path $libDir "onnxruntime.dll"
+    if (Test-Path $dllPath) {
+        $env:ORT_LIB_LOCATION = $libDir
+        $env:ORT_DYLIB_PATH = $dllPath
+        Write-Host "  Using local ORT: $libDir" -ForegroundColor Green
+    }
+}
 if (-not $env:ORT_LIB_LOCATION) {
-    $ortDir = Join-Path $WorkspaceRoot ".ort"
-    if (Test-Path $ortDir) {
-        $entries = Get-ChildItem -Path $ortDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "onnxruntime-*" }
-        foreach ($entry in $entries) {
-            $libDir = Join-Path $entry.FullName "lib"
-            $dllPath = Join-Path $libDir "onnxruntime.dll"
-            if (Test-Path $dllPath) {
-                $env:ORT_LIB_LOCATION = $libDir
-                $env:ORT_DYLIB_PATH = $dllPath
-                Write-Host "  Detected local ORT: $libDir" -ForegroundColor Green
-                break
-            }
-        }
-    }
-    if (-not $env:ORT_LIB_LOCATION) {
-        Write-Host "  ONNX Runtime not found. Run .\dev\setup_ort.ps1 first." -ForegroundColor Red
-        Write-Host "  Alternative: cargo build --release -p acowork-embed --features download-ort" -ForegroundColor Red
-        exit 1
-    }
+    Write-Host "  ONNX Runtime not found. Run .\dev\setup_ort.ps1 first." -ForegroundColor Red
+    Write-Host "  Alternative: cargo build --release -p acowork-embed --features download-ort" -ForegroundColor Red
+    exit 1
 }
 
 try {
@@ -187,6 +188,12 @@ if (Test-Path $embedModelsSrc) {
     Write-Host "  WARNING: embedding_models.json not found at $embedModelsSrc" -ForegroundColor Red
 }
 
+if ($env:ORT_DYLIB_PATH -and (Test-Path $env:ORT_DYLIB_PATH)) {
+    Copy-Item -Path $env:ORT_DYLIB_PATH -Destination (Join-Path $releaseDir "onnxruntime.dll") -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path $env:ORT_DYLIB_PATH -Destination (Join-Path $debugDir "onnxruntime.dll") -Force -ErrorAction SilentlyContinue
+    Write-Host "  onnxruntime.dll -> $releaseDir, $debugDir" -ForegroundColor Green
+}
+
 Write-Host ""
 
 if ($Start) {
@@ -199,7 +206,7 @@ if ($Start) {
     # Start Gateway in background
     $gatewayExe = Join-Path $WorkspaceRoot "target\release\acowork-gateway.exe"
     if (Test-Path $gatewayExe) {
-        Start-Process -FilePath $gatewayExe -NoNewWindow
+        Start-Process -FilePath $gatewayExe -WorkingDirectory $WorkspaceRoot -NoNewWindow
         Write-Host "  Gateway started." -ForegroundColor Green
     } else {
         Write-Host "  Gateway executable not found at: $gatewayExe" -ForegroundColor Red

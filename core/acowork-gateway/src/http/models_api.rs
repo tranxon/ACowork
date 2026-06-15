@@ -6,14 +6,7 @@
 //!
 //! Data source: offline_providers.json loaded at startup into a static cache.
 
-use axum::{
-    extract::Path,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json,
-    Router,
-};
+use axum::{Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -30,7 +23,7 @@ use crate::http::routes::AppState;
 /// To add a new local provider, add a tuple here — no other changes needed.
 ///   (id, display_name, default_base_url)
 const LOCAL_PROVIDERS: &[(&str, &str, &str)] = &[
-    ("ollama",   "Ollama (Local)",    "http://localhost:11434"),
+    ("ollama", "Ollama (Local)", "http://localhost:11434"),
     ("lmstudio", "LM Studio (Local)", "http://localhost:1234/v1"),
 ];
 
@@ -151,21 +144,19 @@ fn load_offline_providers_from_file() -> Option<serde_json::Value> {
     for path in &candidates {
         if path.exists() {
             match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    match serde_json::from_str::<serde_json::Value>(&content) {
-                        Ok(data) => {
-                            tracing::info!("Loaded offline providers from: {}", path.display());
-                            return Some(data);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to parse offline_providers.json at {}: {}",
-                                path.display(),
-                                e
-                            );
-                        }
+                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(data) => {
+                        tracing::info!("Loaded offline providers from: {}", path.display());
+                        return Some(data);
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse offline_providers.json at {}: {}",
+                            path.display(),
+                            e
+                        );
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         "Failed to read offline_providers.json at {}: {}",
@@ -177,9 +168,7 @@ fn load_offline_providers_from_file() -> Option<serde_json::Value> {
         }
     }
 
-    tracing::warn!(
-        "offline_providers.json not found in any candidate path, using empty data"
-    );
+    tracing::warn!("offline_providers.json not found in any candidate path, using empty data");
     None
 }
 
@@ -189,7 +178,10 @@ fn build_offline_file_candidates() -> Vec<std::path::PathBuf> {
     // 0. CARGO_MANIFEST_DIR ../../assets/  (dev and test via cargo)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let assets = std::path::PathBuf::from(&manifest_dir)
-            .join("..").join("..").join("assets").join("offline_providers.json");
+            .join("..")
+            .join("..")
+            .join("assets")
+            .join("offline_providers.json");
         if assets.exists() {
             candidates.push(assets);
         }
@@ -295,12 +287,20 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
                 .get("modalities")
                 .and_then(|v| v.get("input"))
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()),
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                }),
             output_modalities: model_data
                 .get("modalities")
                 .and_then(|v| v.get("output"))
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()),
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                }),
         };
         models.push(model);
     }
@@ -350,7 +350,10 @@ fn resolve_provider(
     let mut seen = std::collections::HashSet::new();
     all_models.retain(|m| seen.insert(m.id.clone()));
 
-    Some((provider_name.unwrap_or_else(|| provider_id.to_string()), all_models))
+    Some((
+        provider_name.unwrap_or_else(|| provider_id.to_string()),
+        all_models,
+    ))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -358,8 +361,7 @@ fn resolve_provider(
 /// GET /api/models — list all providers with model counts
 ///
 /// Returns offline provider data from the static in-memory cache.
-async fn list_all_providers(
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+async fn list_all_providers() -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let data = offline_providers().clone();
 
     let providers = match data.as_object() {
@@ -368,7 +370,7 @@ async fn list_all_providers(
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Invalid provider data"})),
-            ))
+            ));
         }
     };
 
@@ -401,7 +403,10 @@ async fn list_all_providers(
     // Append / overlay local providers from the static registry.
     // Most local providers don't appear in models.dev, but some (e.g. lmstudio) do.
     for (id, name, default_url) in LOCAL_PROVIDERS {
-        if let Some(existing) = result.iter_mut().find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id)) {
+        if let Some(existing) = result
+            .iter_mut()
+            .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id))
+        {
             // Already present in models.dev data — override to mark as local
             existing["local"] = serde_json::json!(true);
             existing["name"] = serde_json::json!(name);
@@ -529,10 +534,7 @@ async fn fetch_local_server_models(provider_id: &str) -> Option<Vec<ModelInfo>> 
 }
 
 /// Parse an OpenAI-compatible `/v1/models` response into `ModelInfo`.
-async fn fetch_lmstudio_models(
-    client: &reqwest::Client,
-    base_url: &str,
-) -> Option<Vec<ModelInfo>> {
+async fn fetch_lmstudio_models(client: &reqwest::Client, base_url: &str) -> Option<Vec<ModelInfo>> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
@@ -569,10 +571,7 @@ async fn fetch_lmstudio_models(
 }
 
 /// Parse an Ollama `/api/tags` response into `ModelInfo`.
-async fn fetch_ollama_models(
-    client: &reqwest::Client,
-    base_url: &str,
-) -> Option<Vec<ModelInfo>> {
+async fn fetch_ollama_models(client: &reqwest::Client, base_url: &str) -> Option<Vec<ModelInfo>> {
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
@@ -587,10 +586,7 @@ async fn fetch_ollama_models(
             .filter_map(|m| {
                 let name = m.get("name")?.as_str()?;
                 // Strip `:latest` suffix for cleaner display
-                let id = name
-                    .strip_suffix(":latest")
-                    .unwrap_or(name)
-                    .to_string();
+                let id = name.strip_suffix(":latest").unwrap_or(name).to_string();
                 Some(ModelInfo {
                     id: id.clone(),
                     name: id,
@@ -740,7 +736,10 @@ fn cross_provider_lookup(
 
     let providers = data.as_object()?;
     for (pid, provider_data) in providers {
-        if let Some(models) = extract_models(provider_data).into_iter().find(|m| m.id == bare_id || m.id == model_id) {
+        if let Some(models) = extract_models(provider_data)
+            .into_iter()
+            .find(|m| m.id == bare_id || m.id == model_id)
+        {
             tracing::debug!(
                 model_id = model_id,
                 found_in_provider = %pid,
@@ -832,7 +831,8 @@ fn lookup_protocol_info_from_data(
         && let Some(model_provider) = model_obj.get("provider").and_then(|p| p.as_object())
     {
         let model_npm = model_provider.get("npm").and_then(|v| v.as_str());
-        let model_api = model_provider.get("api")
+        let model_api = model_provider
+            .get("api")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -848,7 +848,8 @@ fn lookup_protocol_info_from_data(
     }
 
     // Fall back to provider-level npm + provider-level api
-    let provider_api = provider_obj.get("api")
+    let provider_api = provider_obj
+        .get("api")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
@@ -856,7 +857,9 @@ fn lookup_protocol_info_from_data(
 }
 
 /// Convert a ModelInfo to ModelCapabilitiesInfo
-fn model_to_capabilities(model: &ModelInfo) -> Option<acowork_core::protocol::ModelCapabilitiesInfo> {
+fn model_to_capabilities(
+    model: &ModelInfo,
+) -> Option<acowork_core::protocol::ModelCapabilitiesInfo> {
     Some(acowork_core::protocol::ModelCapabilitiesInfo {
         context_window: model.context_window.unwrap_or(0),
         max_output_tokens: model.max_tokens.unwrap_or(0),
@@ -905,10 +908,23 @@ mod tests {
         let obj = data.as_object().unwrap();
         // Verify all expected providers exist
         let expected = [
-            "openai", "anthropic", "google", "deepseek", "minimax", "minimax-cn",
-            "zhipuai", "moonshotai", "moonshotai-cn",
-            "alibaba", "alibaba-cn", "groq", "mistral", "xai", "openrouter",
-            "azure", "lmstudio",
+            "openai",
+            "anthropic",
+            "google",
+            "deepseek",
+            "minimax",
+            "minimax-cn",
+            "zhipuai",
+            "moonshotai",
+            "moonshotai-cn",
+            "alibaba",
+            "alibaba-cn",
+            "groq",
+            "mistral",
+            "xai",
+            "openrouter",
+            "azure",
+            "lmstudio",
         ];
         for pid in &expected {
             assert!(obj.contains_key(*pid), "Missing provider: {}", pid);
@@ -921,18 +937,36 @@ mod tests {
         let openai = &data["openai"];
         assert!(openai.get("id").is_some(), "provider must have 'id'");
         assert!(openai.get("name").is_some(), "provider must have 'name'");
-        assert!(openai.get("models").is_some(), "provider must have 'models'");
+        assert!(
+            openai.get("models").is_some(),
+            "provider must have 'models'"
+        );
 
         // Check a model has required fields
         let models = openai["models"].as_object().unwrap();
         let (_, first_model) = models.iter().next().unwrap();
         assert!(first_model.get("id").is_some(), "model must have 'id'");
         assert!(first_model.get("name").is_some(), "model must have 'name'");
-        assert!(first_model.get("family").is_some(), "model must have 'family'");
-        assert!(first_model.get("reasoning").is_some(), "model must have 'reasoning'");
-        assert!(first_model.get("attachment").is_some(), "model must have 'attachment'");
-        assert!(first_model.get("tool_call").is_some(), "model must have 'tool_call'");
-        assert!(first_model.get("limit").is_some(), "model must have 'limit'");
+        assert!(
+            first_model.get("family").is_some(),
+            "model must have 'family'"
+        );
+        assert!(
+            first_model.get("reasoning").is_some(),
+            "model must have 'reasoning'"
+        );
+        assert!(
+            first_model.get("attachment").is_some(),
+            "model must have 'attachment'"
+        );
+        assert!(
+            first_model.get("tool_call").is_some(),
+            "model must have 'tool_call'"
+        );
+        assert!(
+            first_model.get("limit").is_some(),
+            "model must have 'limit'"
+        );
     }
 
     #[test]
@@ -940,9 +974,16 @@ mod tests {
         let data = offline_providers();
         // Providers that should have an api field in the source data
         let providers_with_api = [
-            "deepseek", "minimax", "minimax-cn", "zhipuai",
-            "moonshotai", "moonshotai-cn", "alibaba", "alibaba-cn",
-            "openrouter", "lmstudio",
+            "deepseek",
+            "minimax",
+            "minimax-cn",
+            "zhipuai",
+            "moonshotai",
+            "moonshotai-cn",
+            "alibaba",
+            "alibaba-cn",
+            "openrouter",
+            "lmstudio",
         ];
         for pid in &providers_with_api {
             let provider = &data[pid];
@@ -956,10 +997,7 @@ mod tests {
 
     #[test]
     fn test_provider_ids_to_query_simple() {
-        assert_eq!(
-            provider_ids_to_query("openai"),
-            vec!["openai".to_string()]
-        );
+        assert_eq!(provider_ids_to_query("openai"), vec!["openai".to_string()]);
         assert_eq!(
             provider_ids_to_query("anthropic"),
             vec!["anthropic".to_string()]
@@ -1099,7 +1137,10 @@ mod tests {
         let result = resolve_provider(data, "minimax");
         assert!(result.is_some());
         let (_, models) = result.unwrap();
-        assert!(!models.is_empty(), "minimax should have models from both variants");
+        assert!(
+            !models.is_empty(),
+            "minimax should have models from both variants"
+        );
     }
 
     #[test]

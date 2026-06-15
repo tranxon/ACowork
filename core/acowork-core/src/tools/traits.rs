@@ -94,11 +94,7 @@ mod tests {
 
         // 验证 parameters 内容正确
         let params = serialized.get("parameters").unwrap();
-        assert!(params
-            .get("properties")
-            .unwrap()
-            .get("command")
-            .is_some());
+        assert!(params.get("properties").unwrap().get("command").is_some());
 
         println!(
             "Serialized JSON: {}",

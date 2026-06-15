@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use acowork_core::providers::traits::ToolCall;
-use acowork_grafeo::judge::{should_sample, JudgeConfig};
+use acowork_grafeo::judge::{JudgeConfig, should_sample};
 use acowork_grafeo::retrieval_metrics::{MetricsAlertType, OnlineRetrievalMetrics};
 
 use crate::agent::context::ContextBuilder;
@@ -73,10 +73,8 @@ impl super::loop_::AgentLoop {
             }
         }
 
-        let mut query = acowork_memory::MemoryQuery::auto_inject(
-            user_message.to_string(),
-            current_session_id,
-        );
+        let mut query =
+            acowork_memory::MemoryQuery::auto_inject(user_message.to_string(), current_session_id);
 
         // Pass embedding provider from AgentCore so retrieve() can auto-generate
         // query embeddings on-demand (Ollama local → Remote fallback chain).
@@ -232,7 +230,10 @@ impl super::loop_::AgentLoop {
                         tokio::spawn(async move {
                             let result = crate::memory::evaluate_retrieval_llm(
                                 provider.as_ref(),
-                                &JudgeConfig { model, ..judge_config },
+                                &JudgeConfig {
+                                    model,
+                                    ..judge_config
+                                },
                                 &query_text,
                                 &result_texts,
                             )
@@ -312,16 +313,14 @@ impl super::loop_::AgentLoop {
             // Detect tool failure from the result string.
             // Failure patterns: "Error:", "Tool execution error:"
             // Skip "Unknown tool:" errors (registry issue, not skill failure).
-            let is_error = result.starts_with("Error:")
-                || result.starts_with("Tool execution error:");
+            let is_error =
+                result.starts_with("Error:") || result.starts_with("Tool execution error:");
             let is_unknown = result.starts_with("Unknown tool:");
 
             if is_error && !is_unknown {
-                if let Err(e) = manager.record_procedural_from_failure(
-                    store,
-                    &tc.function.name,
-                    result,
-                ) {
+                if let Err(e) =
+                    manager.record_procedural_from_failure(store, &tc.function.name, result)
+                {
                     tracing::debug!(
                         tool_name = %tc.function.name,
                         error = %e,
@@ -401,7 +400,10 @@ impl super::loop_::AgentLoop {
         let zero_embedding_arc: std::sync::Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> =
             std::sync::Arc::new(zero_embedding);
 
-        match store.run_generalization(None, &zero_embedding_arc, &config).await {
+        match store
+            .run_generalization(None, &zero_embedding_arc, &config)
+            .await
+        {
             Ok(result) => {
                 if result.nodes_created > 0 || result.nodes_boosted > 0 {
                     tracing::info!(
@@ -582,8 +584,8 @@ impl super::loop_::AgentLoop {
             None => return,
         };
 
+        use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus, labels};
         use grafeo_common::types::Value;
-        use acowork_grafeo::types::{labels, AutobioCategory, AutobiographicalNode, NodeStatus};
 
         // Find the earliest episode in the Grafeo store.
         let db = store.db();

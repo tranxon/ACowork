@@ -3,11 +3,11 @@
 //! Upgrade flow: verify new package → check signature consistency →
 //! preserve data/ and config/ → replace rest
 
-use std::path::Path;
-use std::io::Read;
+use super::install::install_package;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
-use super::install::install_package;
+use std::io::Read;
+use std::path::Path;
 
 /// Upgrade a .agent package (signature fingerprint consistency check required)
 pub fn upgrade_package(
@@ -17,7 +17,9 @@ pub fn upgrade_package(
     state: &mut GatewayState,
 ) -> Result<(), GatewayError> {
     // Check if agent is currently installed
-    let old_info = state.installed_agents.get(agent_id)
+    let old_info = state
+        .installed_agents
+        .get(agent_id)
         .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?
         .clone();
 
@@ -49,31 +51,32 @@ pub fn upgrade_package(
     // Remove old install directory (except preserved dirs)
     if old_install_path.exists() {
         // Move preserved dirs to temp location
-        let temp_base = std::env::temp_dir().join(format!("acowork-upgrade-{}", agent_id.replace('.', "-")));
+        let temp_base =
+            std::env::temp_dir().join(format!("acowork-upgrade-{}", agent_id.replace('.', "-")));
         std::fs::create_dir_all(&temp_base).ok();
-        
+
         if data_dir.exists() {
             std::fs::rename(&data_dir, temp_base.join("data")).ok();
         }
         if config_dir.exists() {
             std::fs::rename(&config_dir, temp_base.join("config")).ok();
         }
-        
+
         // Remove old install dir
         std::fs::remove_dir_all(old_install_path)
             .map_err(|e| GatewayError::Package(format!("Failed to remove old install: {}", e)))?;
-        
+
         // Re-create and restore preserved dirs
         let new_install_path = install_dir.join(agent_id);
         std::fs::create_dir_all(&new_install_path).ok();
-        
+
         if temp_base.join("data").exists() {
             std::fs::rename(temp_base.join("data"), new_install_path.join("data")).ok();
         }
         if temp_base.join("config").exists() {
             std::fs::rename(temp_base.join("config"), new_install_path.join("config")).ok();
         }
-        
+
         // Cleanup temp
         std::fs::remove_dir_all(&temp_base).ok();
     }
@@ -84,26 +87,34 @@ pub fn upgrade_package(
     // Install new package (upgrade inherits dev_mode from caller context)
     // TODO(Phase 2): verify signing fingerprint consistency with old package
     let new_info = install_package(new_package_path, install_dir, state, true)?;
-    
-    tracing::info!("Upgraded agent: {} from v{} to v{}", 
-        agent_id, old_info.version, new_info.version);
+
+    tracing::info!(
+        "Upgraded agent: {} from v{} to v{}",
+        agent_id,
+        old_info.version,
+        new_info.version
+    );
     Ok(())
 }
 
 /// Parse manifest from ZIP without full extraction
-fn parse_manifest_from_zip(package_path: &Path) -> Result<acowork_core::AgentManifest, GatewayError> {
+fn parse_manifest_from_zip(
+    package_path: &Path,
+) -> Result<acowork_core::AgentManifest, GatewayError> {
     let file = std::fs::File::open(package_path)
         .map_err(|e| GatewayError::Package(format!("Failed to open package: {}", e)))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| GatewayError::Package(format!("Failed to read ZIP: {}", e)))?;
-    
-    let mut manifest_file = archive.by_name("manifest.toml")
+
+    let mut manifest_file = archive
+        .by_name("manifest.toml")
         .map_err(|e| GatewayError::Package(format!("manifest.toml not found: {}", e)))?;
-    
+
     let mut manifest_str = String::new();
-    manifest_file.read_to_string(&mut manifest_str)
+    manifest_file
+        .read_to_string(&mut manifest_str)
         .map_err(|e| GatewayError::Package(format!("Failed to read manifest.toml: {}", e)))?;
-    
+
     acowork_core::AgentManifest::from_toml(&manifest_str)
         .map_err(|e| GatewayError::Package(format!("Invalid manifest.toml: {}", e)))
 }
@@ -111,17 +122,18 @@ fn parse_manifest_from_zip(package_path: &Path) -> Result<acowork_core::AgentMan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::state::AgentInfo;
     use std::io::Write;
     use std::path::PathBuf;
-    use crate::gateway::state::AgentInfo;
 
     fn create_test_zip(dir: &Path, agent_id: &str, version: &str) -> PathBuf {
         let zip_path = dir.join(format!("{}-{}.agent", agent_id.replace('.', "-"), version));
         let zip_file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = zip::ZipWriter::new(zip_file);
         let options = zip::write::SimpleFileOptions::default();
-        
-        let manifest = format!(r#"
+
+        let manifest = format!(
+            r#"
             agent_id = "{}"
             version = "{}"
             name = "Test Agent"
@@ -131,8 +143,10 @@ mod tests {
             [llm]
             provider = "openai"
             model = "gpt-4"
-        "#, agent_id, version);
-        
+        "#,
+            agent_id, version
+        );
+
         zip.start_file("manifest.toml", options).unwrap();
         zip.write_all(manifest.as_bytes()).unwrap();
         zip.finish().unwrap();
@@ -161,16 +175,20 @@ mod tests {
 
     #[test]
     fn test_upgrade_agent_id_mismatch() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-upgrade-mismatch-{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "acowork-test-upgrade-mismatch-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         // Create a package with different agent_id
         let zip_path = create_test_zip(&temp_dir, "com.test.other", "2.0.0");
-        
+
         // Add old agent to state
         let vault_dir = temp_vault_dir("mismatch");
         let mut state = GatewayState::new(&vault_dir);
-        let manifest = acowork_core::AgentManifest::from_toml(r#"
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
             agent_id = "com.test.weather"
             version = "1.0.0"
             name = "Weather"
@@ -180,18 +198,29 @@ mod tests {
             [llm]
             provider = "openai"
             model = "gpt-4"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         state.add_installed(AgentInfo {
             agent_id: "com.test.weather".to_string(),
             version: "1.0.0".to_string(),
             name: "Weather".to_string(),
-            install_path: temp_dir.join("installed").join("com.test.weather").to_string_lossy().to_string(),
+            install_path: temp_dir
+                .join("installed")
+                .join("com.test.weather")
+                .to_string_lossy()
+                .to_string(),
             manifest,
         });
-        
-        let result = upgrade_package("com.test.weather", &zip_path, &temp_dir.join("installed"), &mut state);
+
+        let result = upgrade_package(
+            "com.test.weather",
+            &zip_path,
+            &temp_dir.join("installed"),
+            &mut state,
+        );
         assert!(result.is_err());
-        
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

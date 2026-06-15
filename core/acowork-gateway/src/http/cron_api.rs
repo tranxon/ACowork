@@ -6,11 +6,10 @@
 //! - DELETE /api/agents/:id/cron/:cron_id  — remove a cron entry
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    Json,
     routing::{delete, get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +76,8 @@ pub async fn list_crons(
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!(
-                "Agent not found: {}", agent_id
+                "Agent not found: {}",
+                agent_id
             )));
         }
     }
@@ -97,10 +97,7 @@ pub async fn list_crons(
             .collect()
     };
 
-    Ok(Json(CronListResponse {
-        agent_id,
-        entries,
-    }))
+    Ok(Json(CronListResponse { agent_id, entries }))
 }
 
 /// `POST /api/agents/:id/cron` — register a new cron entry
@@ -114,7 +111,8 @@ pub async fn add_cron(
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!(
-                "Agent not found: {}", agent_id
+                "Agent not found: {}",
+                agent_id
             )));
         }
     }
@@ -124,9 +122,7 @@ pub async fn add_cron(
         let mut gw = state.gateway_state.write().await;
         gw.cron_scheduler
             .register(&agent_id, &body.schedule, &body.action, body.params.clone())
-            .map_err(|e| ApiError::bad_request(&format!(
-                "Invalid cron schedule: {}", e
-            )))?
+            .map_err(|e| ApiError::bad_request(&format!("Invalid cron schedule: {}", e)))?
     };
 
     // Persist to CronStore (spawn_blocking for file I/O)
@@ -154,18 +150,28 @@ pub async fn add_cron(
                 if let Err(e) = store.insert(&entry) {
                     tracing::warn!("Failed to persist cron entry {}: {}", cron_id_clone, e);
                 }
-            }).await.ok();
+            })
+            .await
+            .ok();
         }
     }
 
     tracing::info!(
         "Cron registered via HTTP API: agent={} cron_id={} schedule={}",
-        agent_id, cron_id, body.schedule
+        agent_id,
+        cron_id,
+        body.schedule
     );
 
-    Ok((StatusCode::OK, Json(MessageResponse {
-        message: format!("Cron entry '{}' registered for agent '{}'", cron_id, agent_id),
-    })))
+    Ok((
+        StatusCode::OK,
+        Json(MessageResponse {
+            message: format!(
+                "Cron entry '{}' registered for agent '{}'",
+                cron_id, agent_id
+            ),
+        }),
+    ))
 }
 
 /// `DELETE /api/agents/:id/cron/:cron_id` — remove a cron entry
@@ -178,7 +184,8 @@ pub async fn remove_cron(
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!(
-                "Agent not found: {}", agent_id
+                "Agent not found: {}",
+                agent_id
             )));
         }
     }
@@ -191,7 +198,8 @@ pub async fn remove_cron(
 
     if !removed {
         return Err(ApiError::not_found(&format!(
-            "Cron entry not found: {}", cron_id
+            "Cron entry not found: {}",
+            cron_id
         )));
     }
 
@@ -205,15 +213,22 @@ pub async fn remove_cron(
             let cron_id_clone = cron_id.clone();
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = store.delete(&cron_id_clone) {
-                    tracing::warn!("Failed to delete cron entry {} from store: {}", cron_id_clone, e);
+                    tracing::warn!(
+                        "Failed to delete cron entry {} from store: {}",
+                        cron_id_clone,
+                        e
+                    );
                 }
-            }).await.ok();
+            })
+            .await
+            .ok();
         }
     }
 
     tracing::info!(
         "Cron removed via HTTP API: agent={} cron_id={}",
-        agent_id, cron_id
+        agent_id,
+        cron_id
     );
 
     Ok(Json(MessageResponse {
@@ -236,7 +251,8 @@ mod tests {
 
     #[test]
     fn test_add_cron_request_with_params() {
-        let json = r#"{"schedule": "*/15 * * * *", "action": "health", "params": {"type": "ping"}}"#;
+        let json =
+            r#"{"schedule": "*/15 * * * *", "action": "health", "params": {"type": "ping"}}"#;
         let req: AddCronRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.schedule, "*/15 * * * *");
         assert_eq!(req.params["type"], "ping");

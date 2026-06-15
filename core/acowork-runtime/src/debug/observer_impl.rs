@@ -15,13 +15,13 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
+use super::DebugHandles;
 use super::controller::{
     ContextSnapshot, ContextSnapshotSections, DebugController, DebugState, SectionContent,
 };
 use super::observer::ContextSnapshotRequest;
 use super::protocol::DebugPhase;
 use super::server::{DebugEvent, DebugEventSender};
-use super::DebugHandles;
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;
@@ -259,7 +259,9 @@ impl super::observer::DebugObserver for DebugObserverImpl {
     ) {
         // Read iteration from controller (avoid holding lock across send).
         let iteration = {
-            let Ok(ctrl) = self.ctrl.try_lock() else { return };
+            let Ok(ctrl) = self.ctrl.try_lock() else {
+                return;
+            };
             ctrl.iteration
         };
         let _ = self.event_tx.send(DebugEvent::Step {
@@ -432,11 +434,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
 ///
 /// Extracted into a lock-free helper so that rewind + patches + re-execute
 /// can be applied within a single lock acquisition.
-fn apply_rewind_locked(
-    ctrl: &mut DebugController,
-    session_id: &str,
-    history: &mut HistoryManager,
-) {
+fn apply_rewind_locked(ctrl: &mut DebugController, session_id: &str, history: &mut HistoryManager) {
     if let Some(target_iter) = ctrl.take_rewind_target() {
         let msg_count = ctrl
             .conversation_snapshots

@@ -6,7 +6,7 @@
 //! 3. Verifying the Ed25519 signature
 //! 4. Validating certificate identity
 
-use ed25519_dalek::{Signature, VerifyingKey, Verifier as Ed25519Verifier};
+use ed25519_dalek::{Signature, Verifier as Ed25519Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Cursor, Read};
@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::error::{Result, SignError};
 use crate::sign::create_signature_data;
-use crate::signing_block::{SigningBlock, SignerIdentity};
+use crate::signing_block::{SignerIdentity, SigningBlock};
 
 /// Verify a .agent package signature from a file path.
 ///
@@ -93,7 +93,9 @@ fn verify_package_impl(zip_data: &[u8]) -> Result<VerificationResult> {
 
     verifying_key
         .verify(&signature_data, &signature)
-        .map_err(|e| SignError::VerificationFailed(format!("Signature verification failed: {e}")))?;
+        .map_err(|e| {
+            SignError::VerificationFailed(format!("Signature verification failed: {e}"))
+        })?;
 
     // Compute fingerprint
     let mut hasher = Sha256::new();
@@ -135,8 +137,9 @@ fn extract_binary_signing_block(zip_data: &[u8]) -> Result<Option<SigningBlock>>
         &crate::signing_block::SIGNING_BLOCK_MAGIC_V2,
     ) {
         Ok(Some(block_data)) => {
-            let block = SigningBlock::from_binary(&block_data)
-                .map_err(|e| SignError::InvalidPackage(format!("Invalid binary signing block: {e}")))?;
+            let block = SigningBlock::from_binary(&block_data).map_err(|e| {
+                SignError::InvalidPackage(format!("Invalid binary signing block: {e}"))
+            })?;
             Ok(Some(block))
         }
         Ok(None) => Ok(None),
@@ -154,8 +157,9 @@ fn extract_legacy_signing_block(zip_data: &[u8]) -> Result<SigningBlock> {
         if file.name() == "META-INF/SIGNING.BLOCK" {
             let mut block_data = Vec::new();
             file.read_to_end(&mut block_data)?;
-            return SigningBlock::from_bytes(&block_data)
-                .map_err(|e| SignError::InvalidPackage(format!("Invalid legacy signing block: {e}")));
+            return SigningBlock::from_bytes(&block_data).map_err(|e| {
+                SignError::InvalidPackage(format!("Invalid legacy signing block: {e}"))
+            });
         }
     }
 
@@ -337,7 +341,8 @@ mod tests {
         let tampered_zip_data = writer.finish().unwrap().into_inner();
 
         // Re-insert the original (now stale) signing block
-        let tampered_data = crate::zip_utils::insert_block_before_cd(&tampered_zip_data, &block_data).unwrap();
+        let tampered_data =
+            crate::zip_utils::insert_block_before_cd(&tampered_zip_data, &block_data).unwrap();
 
         let tampered_path = tmp_dir.join("tampered.agent");
         fs::write(&tampered_path, tampered_data).unwrap();

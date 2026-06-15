@@ -13,8 +13,8 @@
 //! when selected. If the user selects "Other", the `answer` field contains
 //! their free-text input rather than an option label.
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -88,7 +88,7 @@ impl AskUserQuestionTool {
                 before continuing. The user can also type a custom answer via 'Other'. \
                 Do NOT use this for simple yes/no questions — just proceed with the best choice. \
                 Only use when the decision genuinely requires user input."
-                    .to_string(),
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -238,7 +238,11 @@ impl Tool for AskUserQuestionTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         // NOTE: The actual execution (waiting for user response) is handled
         // by the AgentLoop, not here. This tool's execute() is a placeholder
         // that validates params. The real flow:
@@ -322,7 +326,11 @@ mod tests {
         });
         let result = AskUserQuestionTool::validate_params(&params);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing required parameter 'question'"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Missing required parameter 'question'")
+        );
     }
 
     #[test]
@@ -332,7 +340,11 @@ mod tests {
         });
         let result = AskUserQuestionTool::validate_params(&params);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing required parameter 'options'"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Missing required parameter 'options'")
+        );
     }
 
     #[test]
@@ -387,10 +399,13 @@ mod tests {
     async fn test_execute_valid_params() {
         let tool = AskUserQuestionTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "question": "Style?",
-                "options": [{ "label": "Rust" }, { "label": "Go" }]
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "question": "Style?",
+                    "options": [{ "label": "Rust" }, { "label": "Go" }]
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -404,6 +419,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("Missing required parameter 'question'"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("Missing required parameter 'question'")
+        );
     }
 }

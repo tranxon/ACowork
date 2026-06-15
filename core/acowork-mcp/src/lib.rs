@@ -4,14 +4,14 @@
 //! to MCP tool servers. Adapted from zeroclaw's MCP implementation.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
-pub mod config;
 pub mod client;
+pub mod config;
 pub mod protocol;
 pub mod transport;
 pub mod wrapper;
 
-pub use config::{McpConfig, McpServerConfig, McpTransport};
 pub use client::{McpClient, McpConnectionFailure, McpRegistry};
-pub use protocol::{JsonRpcRequest, JsonRpcResponse, McpToolDef, MCP_PROTOCOL_VERSION};
+pub use config::{McpConfig, McpServerConfig, McpTransport};
+pub use protocol::{JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION, McpToolDef};
 pub use transport::{McpTransportConn, create_transport};
 pub use wrapper::McpToolWrapper;

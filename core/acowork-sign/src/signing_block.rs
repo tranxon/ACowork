@@ -202,9 +202,11 @@ impl SigningBlock {
 
         // Read size suffix and verify consistency
         let suffix_offset = 16 + 8 + size_prefix;
-        let size_suffix =
-            u64::from_le_bytes(data[suffix_offset..suffix_offset + 8].try_into().expect("slice has correct length"))
-                as usize;
+        let size_suffix = u64::from_le_bytes(
+            data[suffix_offset..suffix_offset + 8]
+                .try_into()
+                .expect("slice has correct length"),
+        ) as usize;
 
         if size_prefix != size_suffix {
             return Err(SigningBlockError::SizeMismatch {
@@ -429,8 +431,9 @@ fn decode_signer(body: &[u8], cursor: &mut usize) -> Result<Signer, SigningBlock
     if *cursor + attrs_len > body.len() {
         return Err(SigningBlockError::UnexpectedEof);
     }
-    let signed_attrs: SignedAttributes = serde_json::from_slice(&body[*cursor..*cursor + attrs_len])
-        .map_err(SigningBlockError::JsonParse)?;
+    let signed_attrs: SignedAttributes =
+        serde_json::from_slice(&body[*cursor..*cursor + attrs_len])
+            .map_err(SigningBlockError::JsonParse)?;
     *cursor += attrs_len;
 
     Ok(Signer {
@@ -446,7 +449,12 @@ fn read_u32(data: &[u8], cursor: &mut usize) -> Result<u32, SigningBlockError> {
     if *cursor + 4 > data.len() {
         return Err(SigningBlockError::UnexpectedEof);
     }
-    let val = u32::from_be_bytes([data[*cursor], data[*cursor + 1], data[*cursor + 2], data[*cursor + 3]]);
+    let val = u32::from_be_bytes([
+        data[*cursor],
+        data[*cursor + 1],
+        data[*cursor + 2],
+        data[*cursor + 3],
+    ]);
     *cursor += 4;
     Ok(val)
 }
@@ -523,10 +531,7 @@ mod tests {
             decoded.signers[0].certificates[0].identity,
             SignerIdentity::Developer
         );
-        assert_eq!(
-            decoded.signers[0].digest_algorithm,
-            DigestAlgorithm::Sha256
-        );
+        assert_eq!(decoded.signers[0].digest_algorithm, DigestAlgorithm::Sha256);
         assert_eq!(decoded.signers[0].digests.len(), 2);
         assert_eq!(decoded.signers[0].digests[0].section_name, "manifest");
         assert_eq!(decoded.signers[0].signature.len(), 64);
@@ -546,7 +551,12 @@ mod tests {
 
         // Last 4 bytes = size suffix
         let len = bytes.len();
-        let suffix = u32::from_be_bytes([bytes[len - 4], bytes[len - 3], bytes[len - 2], bytes[len - 1]]);
+        let suffix = u32::from_be_bytes([
+            bytes[len - 4],
+            bytes[len - 3],
+            bytes[len - 2],
+            bytes[len - 1],
+        ]);
 
         assert_eq!(prefix, suffix);
     }
@@ -621,7 +631,10 @@ mod tests {
         let bytes = block.to_bytes();
         let decoded = SigningBlock::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.signers.len(), 2);
-        assert_eq!(decoded.signers[1].certificates[0].identity, SignerIdentity::Platform);
+        assert_eq!(
+            decoded.signers[1].certificates[0].identity,
+            SignerIdentity::Platform
+        );
     }
 
     // ------------------------------------------------------------------
@@ -640,10 +653,7 @@ mod tests {
             decoded.signers[0].certificates[0].identity,
             SignerIdentity::Developer
         );
-        assert_eq!(
-            decoded.signers[0].digest_algorithm,
-            DigestAlgorithm::Sha256
-        );
+        assert_eq!(decoded.signers[0].digest_algorithm, DigestAlgorithm::Sha256);
         assert_eq!(decoded.signers[0].digests.len(), 2);
         assert_eq!(decoded.signers[0].digests[0].section_name, "manifest");
         assert_eq!(decoded.signers[0].digests[1].section_name, "prompts");
@@ -662,7 +672,10 @@ mod tests {
         // Leading magic (first 16 bytes)
         assert_eq!(&bytes[0..16], SIGNING_BLOCK_MAGIC_V2);
         // Trailing magic (last 16 bytes)
-        assert_eq!(&bytes[bytes.len() - 16..bytes.len()], SIGNING_BLOCK_MAGIC_V2);
+        assert_eq!(
+            &bytes[bytes.len() - 16..bytes.len()],
+            SIGNING_BLOCK_MAGIC_V2
+        );
     }
 
     #[test]
@@ -675,9 +688,8 @@ mod tests {
 
         // Size suffix: after content, before trailing magic
         let suffix_offset = 24 + size_prefix as usize;
-        let size_suffix = u64::from_le_bytes(
-            bytes[suffix_offset..suffix_offset + 8].try_into().unwrap(),
-        );
+        let size_suffix =
+            u64::from_le_bytes(bytes[suffix_offset..suffix_offset + 8].try_into().unwrap());
 
         assert_eq!(size_prefix, size_suffix);
     }

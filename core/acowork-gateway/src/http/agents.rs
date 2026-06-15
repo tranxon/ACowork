@@ -10,11 +10,10 @@
 //! - POST   /api/agents/:id/stop  — stop a running agent
 
 use axum::{
+    Json, Router,
     extract::{Multipart, Path, State},
     http::StatusCode,
-    Json,
     routing::{get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,9 +21,9 @@ use crate::error::GatewayError;
 use crate::http::agent_config::{self, AgentConfigResponse, UpdateAgentConfigRequest};
 use crate::http::routes::{ApiError, AppState};
 use crate::lifecycle::process::is_process_alive;
+use acowork_core::AgentManifest;
 use acowork_core::protocol::GatewayResponse;
 use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
-use acowork_core::AgentManifest;
 
 /// Build embed_config_json from GatewayState's embed_process info.
 /// Returns None if the embedding service is not running or has no active model.
@@ -33,11 +32,14 @@ async fn build_embed_config_json(state: &AppState) -> Option<String> {
     match &gw.embed_process {
         Some(eps) if eps.active_model_id.is_some() => {
             let endpoint = format!("http://127.0.0.1:{}/v1", eps.port);
-            Some(serde_json::json!({
-                "embed_endpoint": endpoint,
-                "embed_model_id": eps.active_model_id.clone().unwrap_or_default(),
-                "embed_dimension": eps.active_dimension.unwrap_or(0),
-            }).to_string())
+            Some(
+                serde_json::json!({
+                    "embed_endpoint": endpoint,
+                    "embed_model_id": eps.active_model_id.clone().unwrap_or_default(),
+                    "embed_dimension": eps.active_dimension.unwrap_or(0),
+                })
+                .to_string(),
+            )
         }
         _ => None,
     }
@@ -47,17 +49,35 @@ async fn build_embed_config_json(state: &AppState) -> Option<String> {
 pub fn agent_routes() -> Router<AppState> {
     Router::new()
         .route("/api/agents", get(list_agents))
-        .route("/api/agents/{id}", get(get_agent_detail).delete(uninstall_agent))
+        .route(
+            "/api/agents/{id}",
+            get(get_agent_detail).delete(uninstall_agent),
+        )
         .route("/api/agents/install", post(install_agent))
         .route("/api/agents/{id}/clone", post(clone_agent))
         .route("/api/agents/{id}/start", post(start_agent))
         .route("/api/agents/{id}/stop", post(stop_agent))
-        .route("/api/agents/{id}/restart-debug", post(restart_agent_in_debug))
+        .route(
+            "/api/agents/{id}/restart-debug",
+            post(restart_agent_in_debug),
+        )
         .route("/api/agents/{id}/model", get(get_agent_model))
-        .route("/api/agents/{id}/config", get(get_agent_config).put(update_agent_config))
-        .route("/api/agents/{id}/mcp-servers", get(get_agent_mcp_servers).put(update_agent_mcp_servers))
-        .route("/api/agents/{id}/search-providers", get(get_agent_search_providers))
-        .route("/api/agents/{id}/search-config", get(get_agent_search_config).put(update_agent_search_config))
+        .route(
+            "/api/agents/{id}/config",
+            get(get_agent_config).put(update_agent_config),
+        )
+        .route(
+            "/api/agents/{id}/mcp-servers",
+            get(get_agent_mcp_servers).put(update_agent_mcp_servers),
+        )
+        .route(
+            "/api/agents/{id}/search-providers",
+            get(get_agent_search_providers),
+        )
+        .route(
+            "/api/agents/{id}/search-config",
+            get(get_agent_search_config).put(update_agent_search_config),
+        )
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -107,16 +127,6 @@ pub struct AgentDetailResponse {
     pub embed_config_json: Option<String>,
 }
 
-/// Install request (kept for reference; actual install uses Multipart)
-#[derive(Deserialize)]
-pub struct InstallRequest {
-    /// Path to the .agent package file (legacy path-based install)
-    pub package_path: String,
-    /// Skip signature verification (dev mode)
-    #[serde(default)]
-    pub dev_mode: bool,
-}
-
 /// Generic message response
 #[derive(Serialize)]
 pub struct MessageResponse {
@@ -137,9 +147,7 @@ pub struct AgentModelResponse {
 // ── Handlers ──────────────────────────────────────────────────────────
 
 /// `GET /api/agents` — list all installed agents
-pub async fn list_agents(
-    State(state): State<AppState>,
-) -> Json<Vec<AgentListResponse>> {
+pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListResponse>> {
     let gw = state.gateway_state.read().await;
     let agents: Vec<AgentListResponse> = gw
         .installed_agents
@@ -172,7 +180,8 @@ pub async fn list_agents(
     if let Some(sr) = gw.running_agents.get("com.acowork.senior-engineer") {
         tracing::info!(
             "[DIAG] list_agents: senior-engineer running=true ready={} connected={}",
-            sr.ready, sr.connected
+            sr.ready,
+            sr.connected
         );
     }
     Json(agents)
@@ -184,12 +193,15 @@ pub async fn get_agent_detail(
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentDetailResponse>, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
-    let info = gw.installed_agents.get(&agent_id)
+    let info = gw
+        .installed_agents
+        .get(&agent_id)
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
 
     let running_info = gw.running_agents.get(&agent_id);
     // Verify the process is actually alive
-    let actually_running = running_info.as_ref()
+    let actually_running = running_info
+        .as_ref()
         .map(|r| is_process_alive(r.pid))
         .unwrap_or(false);
     let connected = running_info.map(|r| r.connected).unwrap_or(false);
@@ -215,82 +227,62 @@ pub async fn get_agent_detail(
     Ok(Json(resp))
 }
 
-/// `POST /api/agents/install` — install a .agent package
-///
-/// Accepts `multipart/form-data` with:
-/// - `package`: the .agent ZIP file bytes (required)
-/// - `dev_mode`: "true" or "false" (optional, defaults to Gateway config)
-///
-/// The uploaded bytes are spooled to a temp file so that [`install_package`]
-/// (which takes a `&Path`) can operate on it. The temp file is cleaned up
-/// after installation completes — whether success or failure.
+/// `POST /api/agents/install` — upload and install a .agent package.
 pub async fn install_agent(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
-    // Parse multipart fields
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut request_dev_mode: Option<bool> = None;
 
-    while let Some(field) = multipart.next_field().await
+    while let Some(field) = multipart
+        .next_field()
+        .await
         .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {}", e)))?
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
             "package" => {
-                let bytes = field.bytes().await
-                    .map_err(|e| ApiError::bad_request(&format!("Failed to read package field: {}", e)))?;
+                let bytes = field.bytes().await.map_err(|e| {
+                    ApiError::bad_request(&format!("Failed to read package field: {}", e))
+                })?;
                 package_bytes = Some(bytes.to_vec());
             }
             "dev_mode" => {
                 let text = field.text().await.unwrap_or_default();
                 request_dev_mode = Some(text == "true" || text == "1");
             }
-            _ => {} // ignore unknown fields
+            _ => {}
         }
     }
 
-    let package_bytes = package_bytes
-        .ok_or_else(|| ApiError::bad_request("Missing required field: 'package'"))?;
+    let package_bytes =
+        package_bytes.ok_or_else(|| ApiError::bad_request("Missing required field: 'package'"))?;
 
     if package_bytes.is_empty() {
         return Err(ApiError::bad_request("Package file is empty"));
     }
 
-    // Determine packages dir and dev_mode from Gateway config
-    let packages_dir = {
-        let gw = state.gateway_state.read().await;
-        gw.config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.packages_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-    };
-
+    let packages_dir = packages_dir_from_state(&state).await;
     let dev_mode = match request_dev_mode {
         Some(v) => v,
-        None => {
-            let gw = state.gateway_state.read().await;
-            gw.config.as_ref().map(|c| c.dev_mode).unwrap_or(false)
-        }
+        None => gateway_dev_mode(&state).await,
     };
 
-    // Spool uploaded bytes to a temp file, then call install_package(&Path)
     let install_result = tokio::task::spawn_blocking(move || {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!(
+        let temp_file = std::env::temp_dir().join(format!(
             "acowork-install-{}-{}.agent",
             std::process::id(),
             timestamp_nanos(),
         ));
 
-        // Write bytes to temp file (ensures install_package always has a real path)
         if let Err(e) = std::fs::write(&temp_file, &package_bytes) {
             return Err(GatewayError::Package(format!(
-                "Failed to write upload to temp file: {}", e
+                "Failed to write upload to temp file: {}",
+                e
             )));
         }
 
-        // Perform install using the original path-based API
         let result = crate::package_manager::install::install_package(
             &temp_file,
             &packages_dir,
@@ -298,27 +290,52 @@ pub async fn install_agent(
             dev_mode,
         );
 
-        // Best-effort cleanup of temp file (log but don't fail on cleanup error)
         let _ = std::fs::remove_file(&temp_file);
 
         result
-    }).await;
+    })
+    .await;
 
-    /// Simple nanosecond timestamp for unique temp filenames
-    fn timestamp_nanos() -> u128 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now().duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    }
+    install_response(install_result)
+}
 
+async fn packages_dir_from_state(state: &AppState) -> std::path::PathBuf {
+    let gw = state.gateway_state.read().await;
+    gw.config
+        .as_ref()
+        .map(|c| std::path::PathBuf::from(&c.packages_dir))
+        .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
+}
+
+async fn gateway_dev_mode(state: &AppState) -> bool {
+    let gw = state.gateway_state.read().await;
+    gw.config.as_ref().map(|c| c.dev_mode).unwrap_or(false)
+}
+
+fn install_response(
+    install_result: Result<
+        Result<crate::gateway::state::AgentInfo, GatewayError>,
+        tokio::task::JoinError,
+    >,
+) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
     match install_result {
-        Ok(Ok(info)) => Ok((StatusCode::CREATED, Json(MessageResponse {
-            message: format!("Package installed: {}", info.agent_id),
-        }))),
+        Ok(Ok(info)) => Ok((
+            StatusCode::CREATED,
+            Json(MessageResponse {
+                message: format!("Package installed: {}", info.agent_id),
+            }),
+        )),
         Ok(Err(e)) => Err(ApiError::bad_request(&format!("Install failed: {}", e))),
         Err(e) => Err(ApiError::internal(&format!("Install task failed: {}", e))),
     }
+}
+
+fn timestamp_nanos() -> u128 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 /// Clone mode: skeleton or full
@@ -377,9 +394,7 @@ pub async fn clone_agent(
     let result = tokio::task::spawn_blocking(move || {
         let mut gw = state.gateway_state.blocking_write();
         let clone_mode = match req.mode {
-            CloneModeParam::Skeleton => {
-                crate::package_manager::clone::CloneMode::Skeleton
-            }
+            CloneModeParam::Skeleton => crate::package_manager::clone::CloneMode::Skeleton,
             CloneModeParam::Full => crate::package_manager::clone::CloneMode::Full,
         };
 
@@ -420,7 +435,8 @@ pub async fn uninstall_agent(
         let gw = state.gateway_state.read().await;
         if gw.is_running(&agent_id) {
             return Err(ApiError::bad_request(&format!(
-                "Agent {} is running, stop it first", agent_id
+                "Agent {} is running, stop it first",
+                agent_id
             )));
         }
     }
@@ -438,12 +454,9 @@ pub async fn uninstall_agent(
     let agent_id_display = agent_id.clone();
     let uninstall_result = tokio::task::spawn_blocking(move || {
         let mut gw = state.gateway_state.blocking_write();
-        crate::package_manager::uninstall::uninstall_package(
-            &agent_id,
-            &packages_dir,
-            &mut gw,
-        )
-    }).await;
+        crate::package_manager::uninstall::uninstall_package(&agent_id, &packages_dir, &mut gw)
+    })
+    .await;
 
     match uninstall_result {
         Ok(Ok(_)) => Ok(Json(MessageResponse {
@@ -477,10 +490,16 @@ pub async fn start_agent(
     let mut gw = state.gateway_state.write().await;
 
     if !gw.is_installed(&agent_id) {
-        return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        return Err(ApiError::not_found(&format!(
+            "Agent not found: {}",
+            agent_id
+        )));
     }
     if gw.is_running(&agent_id) {
-        return Err(ApiError::bad_request(&format!("Agent {} is already running", agent_id)));
+        return Err(ApiError::bad_request(&format!(
+            "Agent {} is already running",
+            agent_id
+        )));
     }
 
     // Use the lifecycle manager to start the agent
@@ -489,8 +508,15 @@ pub async fn start_agent(
     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, gateway_grpc_endpoint, log_file_size_mb, log_file_count);
-    lifecycle.start_agent(&agent_id, &mut gw, req.dev_mode).await
+    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
+        idle_timeout,
+        gateway_grpc_endpoint,
+        log_file_size_mb,
+        log_file_count,
+    );
+    lifecycle
+        .start_agent(&agent_id, &mut gw, req.dev_mode)
+        .await
         .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
     drop(gw);
 
@@ -509,9 +535,15 @@ pub async fn start_agent(
         if let Some(handle) = &state.log_reload_handle {
             let new_filter = tracing_subscriber::EnvFilter::new(level);
             if let Err(e) = handle.reload(new_filter) {
-                tracing::warn!("Failed to reload Gateway tracing filter for debug mode: {}", e);
+                tracing::warn!(
+                    "Failed to reload Gateway tracing filter for debug mode: {}",
+                    e
+                );
             } else {
-                tracing::info!("Gateway log level set to {} (debug mode agent start)", level);
+                tracing::info!(
+                    "Gateway log level set to {} (debug mode agent start)",
+                    level
+                );
             }
         }
     }
@@ -530,14 +562,24 @@ pub async fn stop_agent(
     let mut gw = state.gateway_state.write().await;
 
     if !gw.is_running(&agent_id) {
-        return Err(ApiError::bad_request(&format!("Agent {} is not running", agent_id)));
+        return Err(ApiError::bad_request(&format!(
+            "Agent {} is not running",
+            agent_id
+        )));
     }
 
     let idle_timeout = 300;
     let grpc_addr = crate::grpc::server::default_grpc_addr();
     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(idle_timeout, gateway_grpc_endpoint, 10, 20);
-    lifecycle.stop_agent(&agent_id, &mut gw).await
+    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
+        idle_timeout,
+        gateway_grpc_endpoint,
+        10,
+        20,
+    );
+    lifecycle
+        .stop_agent(&agent_id, &mut gw)
+        .await
         .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
 
     Ok(Json(MessageResponse {
@@ -582,23 +624,13 @@ pub async fn restart_agent_in_debug(
         .grpc_session_mgr
         .as_ref()
         .cloned()
-        .ok_or_else(|| {
-            ApiError::internal("gRPC session manager not available")
-        })?;
+        .ok_or_else(|| ApiError::internal("gRPC session manager not available"))?;
 
     let idle_timeout = 300;
     let grpc_addr = crate::grpc::server::default_grpc_addr();
     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
-    let log_file_size_mb = gw
-        .config
-        .as_ref()
-        .map(|c| c.log_file_size_mb)
-        .unwrap_or(10);
-    let log_file_count = gw
-        .config
-        .as_ref()
-        .map(|c| c.log_file_count)
-        .unwrap_or(20);
+    let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
+    let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
     let lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
         gateway_grpc_endpoint,
@@ -626,10 +658,7 @@ pub async fn restart_agent_in_debug(
                     e
                 );
             } else {
-                tracing::info!(
-                    "Gateway log level set to {} (restart-in-debug)",
-                    level
-                );
+                tracing::info!("Gateway log level set to {} (restart-in-debug)", level);
             }
         }
     }
@@ -652,11 +681,16 @@ pub async fn get_agent_model(
 
     // Verify agent exists
     if !gw.installed_agents.contains_key(&agent_id) {
-        return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        return Err(ApiError::not_found(&format!(
+            "Agent not found: {}",
+            agent_id
+        )));
     }
 
     // Resolve provider and models from Gateway config / Vault
-    let default_provider = gw.config.as_ref()
+    let default_provider = gw
+        .config
+        .as_ref()
         .and_then(|c| c.default_provider.as_deref())
         .map(|s| s.to_string())
         .or_else(|| gw.vault.list_providers().first().cloned());
@@ -666,11 +700,12 @@ pub async fn get_agent_model(
         None => return Err(ApiError::not_found("No provider configured in Vault")),
     };
 
-    let vault_entry = gw.vault.get_provider(&provider_name)
+    let vault_entry = gw
+        .vault
+        .get_provider(&provider_name)
         .map_err(|e| ApiError::internal(&format!("Vault error: {}", e)))?;
 
-    let config_default_model = gw.config.as_ref()
-        .and_then(|c| c.default_model.as_deref());
+    let config_default_model = gw.config.as_ref().and_then(|c| c.default_model.as_deref());
 
     // Gateway-level default model (config > Vault default_model)
     let gateway_model = config_default_model
@@ -690,7 +725,10 @@ pub async fn get_agent_model(
             );
             match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
                 Some(response) => {
-                    if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) = response.payload {
+                    if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(
+                        snap,
+                    )) = response.payload
+                    {
                         (snap.model, snap.provider)
                     } else {
                         (None, None)
@@ -796,12 +834,10 @@ fn read_manifest_tools(install_path: &str) -> Vec<String> {
         return Vec::new();
     }
     match std::fs::read_to_string(&manifest_path) {
-        Ok(toml_str) => {
-            match AgentManifest::from_toml(&toml_str) {
-                Ok(manifest) => manifest.tools.iter().map(|t| t.name.clone()).collect(),
-                Err(_) => Vec::new(),
-            }
-        }
+        Ok(toml_str) => match AgentManifest::from_toml(&toml_str) {
+            Ok(manifest) => manifest.tools.iter().map(|t| t.name.clone()).collect(),
+            Err(_) => Vec::new(),
+        },
         Err(_) => Vec::new(),
     }
 }
@@ -878,19 +914,24 @@ pub async fn get_agent_config(
     let global_max_output_tokens = {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         // Guard: agent must be running and ready.
         if let Some(info) = gw.running_agents.get(&agent_id) {
             if !info.ready {
-                return Err(ApiError::service_unavailable(
-                    &format!("Agent '{}' is starting up, please wait", agent_id),
-                ));
+                return Err(ApiError::service_unavailable(&format!(
+                    "Agent '{}' is starting up, please wait",
+                    agent_id
+                )));
             }
         } else {
-            return Err(ApiError::service_unavailable(
-                &format!("Agent '{}' is not started", agent_id),
-            ));
+            return Err(ApiError::service_unavailable(&format!(
+                "Agent '{}' is not started",
+                agent_id
+            )));
         }
         gw.config
             .as_ref()
@@ -899,36 +940,51 @@ pub async fn get_agent_config(
     };
 
     // Query Runtime workspace config via IPC (QueryConfig → ConfigSnapshot roundtrip).
-    let (model, provider, max_output_tokens, max_iterations, temperature,
-         system_prompt_override, shell_approval_threshold,
-         mcp_servers, search_config_json) =
-        if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-            let query = acowork_core::proto::server_message::Payload::QueryConfig(
-                acowork_core::proto::QueryConfig {
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                },
-            );
-            match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
-                Some(response) => {
-                    if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) = response.payload {
-                        (snap.model, snap.provider,
-                         snap.max_output_tokens, snap.max_iterations, snap.temperature,
-                         snap.system_prompt_override,
-                         snap.shell_approval_threshold,
-                         snap.mcp_servers_json,
-                         snap.search_config_json)
-                    } else {
-                        (None, None, None, None, None, None, None, vec![], None)
-                    }
+    let (
+        model,
+        provider,
+        max_output_tokens,
+        max_iterations,
+        temperature,
+        system_prompt_override,
+        shell_approval_threshold,
+        mcp_servers,
+        search_config_json,
+    ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+        let query = acowork_core::proto::server_message::Payload::QueryConfig(
+            acowork_core::proto::QueryConfig {
+                request_id: uuid::Uuid::new_v4().to_string(),
+            },
+        );
+        match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
+            Some(response) => {
+                if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
+                    response.payload
+                {
+                    (
+                        snap.model,
+                        snap.provider,
+                        snap.max_output_tokens,
+                        snap.max_iterations,
+                        snap.temperature,
+                        snap.system_prompt_override,
+                        snap.shell_approval_threshold,
+                        snap.mcp_servers_json,
+                        snap.search_config_json,
+                    )
+                } else {
+                    (None, None, None, None, None, None, None, vec![], None)
                 }
-                None => (None, None, None, None, None, None, None, vec![], None),
             }
-        } else {
-            (None, None, None, None, None, None, None, vec![], None)
-        };
+            None => (None, None, None, None, None, None, None, vec![], None),
+        }
+    } else {
+        (None, None, None, None, None, None, None, vec![], None)
+    };
 
     // Build the effective config from ConfigSnapshot data
-    let active_mcp_servers: Vec<String> = mcp_servers.iter()
+    let active_mcp_servers: Vec<String> = mcp_servers
+        .iter()
         .filter_map(|j| serde_json::from_str::<McpServerConfigDef>(j).ok())
         .map(|s| s.name)
         .collect();
@@ -968,19 +1024,24 @@ pub async fn update_agent_config(
     let global_max_output_tokens = {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         // Guard: agent must be running and ready.
         if let Some(info) = gw.running_agents.get(&agent_id) {
             if !info.ready {
-                return Err(ApiError::service_unavailable(
-                    &format!("Agent '{}' is starting up, please wait", agent_id),
-                ));
+                return Err(ApiError::service_unavailable(&format!(
+                    "Agent '{}' is starting up, please wait",
+                    agent_id
+                )));
             }
         } else {
-            return Err(ApiError::service_unavailable(
-                &format!("Agent '{}' is not started", agent_id),
-            ));
+            return Err(ApiError::service_unavailable(&format!(
+                "Agent '{}' is not started",
+                agent_id
+            )));
         }
         gw.config
             .as_ref()
@@ -1007,7 +1068,8 @@ pub async fn update_agent_config(
                     max_iterations: req.max_iterations,
                     temperature: req.temperature,
                     system_prompt_override: req_system_prompt_override,
-                    shell_approval_threshold: req_shell_approval_threshold.map(|t| format!("{:?}", t).to_lowercase()),
+                    shell_approval_threshold: req_shell_approval_threshold
+                        .map(|t| format!("{:?}", t).to_lowercase()),
                     mcp_servers: req_mcp_servers,
                     model: None,
                     provider: None,
@@ -1051,7 +1113,8 @@ pub async fn update_agent_config(
         temperature: req.temperature,
         system_prompt: None,
         system_prompt_override: req.system_prompt_override,
-        shell_approval_threshold: req_shell_approval_threshold.map(|t| format!("{:?}", t).to_lowercase()),
+        shell_approval_threshold: req_shell_approval_threshold
+            .map(|t| format!("{:?}", t).to_lowercase()),
         model: None,
         provider: None,
         active_mcp_servers: vec![],
@@ -1061,7 +1124,6 @@ pub async fn update_agent_config(
 
     Ok(Json(effective))
 }
-
 
 // ── Agent MCP server activation handlers ─────────────────────────────
 
@@ -1092,18 +1154,23 @@ pub async fn get_agent_mcp_servers(
     {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if let Some(info) = gw.running_agents.get(&agent_id) {
             if !info.ready {
-                return Err(ApiError::service_unavailable(
-                    &format!("Agent '{}' is starting up, please wait", agent_id),
-                ));
+                return Err(ApiError::service_unavailable(&format!(
+                    "Agent '{}' is starting up, please wait",
+                    agent_id
+                )));
             }
         } else {
-            return Err(ApiError::service_unavailable(
-                &format!("Agent '{}' is not started", agent_id),
-            ));
+            return Err(ApiError::service_unavailable(&format!(
+                "Agent '{}' is not started",
+                agent_id
+            )));
         }
     }
 
@@ -1116,7 +1183,9 @@ pub async fn get_agent_mcp_servers(
         );
         match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
             Some(response) => {
-                if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) = response.payload {
+                if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
+                    response.payload
+                {
                     // Parse JSON strings back to server names
                     snap.mcp_servers_json
                         .into_iter()
@@ -1156,7 +1225,10 @@ pub async fn update_agent_mcp_servers(
         let gw = state.gateway_state.read().await;
 
         if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
 
         gw.config
@@ -1182,7 +1254,8 @@ pub async fn update_agent_mcp_servers(
 
     if !not_found.is_empty() {
         return Err(ApiError::bad_request(&format!(
-            "MCP servers not found in catalog: {}", not_found.join(", ")
+            "MCP servers not found in catalog: {}",
+            not_found.join(", ")
         )));
     }
 
@@ -1291,7 +1364,10 @@ pub async fn get_agent_search_providers(
     {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
     }
 
@@ -1315,18 +1391,23 @@ pub async fn get_agent_search_config(
     {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
         if let Some(info) = gw.running_agents.get(&agent_id) {
             if !info.ready {
-                return Err(ApiError::service_unavailable(
-                    &format!("Agent '{}' is starting up, please wait", agent_id),
-                ));
+                return Err(ApiError::service_unavailable(&format!(
+                    "Agent '{}' is starting up, please wait",
+                    agent_id
+                )));
             }
         } else {
-            return Err(ApiError::service_unavailable(
-                &format!("Agent '{}' is not started", agent_id),
-            ));
+            return Err(ApiError::service_unavailable(&format!(
+                "Agent '{}' is not started",
+                agent_id
+            )));
         }
     }
 
@@ -1338,11 +1419,17 @@ pub async fn get_agent_search_config(
                 request_id: uuid::Uuid::new_v4().to_string(),
             },
         );
-        if let Some(response) = crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
-            if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) = response.payload {
+        if let Some(response) =
+            crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
+        {
+            if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
+                response.payload
+            {
                 // Parse search_config_json if available
                 if let Some(ref search_json) = snap.search_config_json {
-                    if let Ok(config) = serde_json::from_str::<AgentSearchConfigResponse>(search_json) {
+                    if let Ok(config) =
+                        serde_json::from_str::<AgentSearchConfigResponse>(search_json)
+                    {
                         providers = config.providers;
                     }
                 }
@@ -1369,16 +1456,17 @@ pub async fn update_agent_search_config(
     {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
         }
     }
 
-    let providers_json = serde_json::to_string(
-        &AgentSearchConfigResponse {
-            agent_id: agent_id.clone(),
-            providers: req.providers.clone(),
-        },
-    )
+    let providers_json = serde_json::to_string(&AgentSearchConfigResponse {
+        agent_id: agent_id.clone(),
+        providers: req.providers.clone(),
+    })
     .map_err(|e| ApiError::internal(&format!("Failed to serialize search config: {}", e)))?;
 
     // Push RuntimeConfigUpdate to connected agent (Runtime persists agent_search.json)
@@ -1436,13 +1524,6 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));
         assert!(json.contains("Weather Agent"));
-    }
-
-    #[test]
-    fn test_install_request_deserialization() {
-        let json = r#"{"package_path": "/tmp/weather.agent"}"#;
-        let req: InstallRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.package_path, "/tmp/weather.agent");
     }
 
     #[test]

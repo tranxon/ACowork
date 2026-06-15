@@ -75,7 +75,10 @@ impl ToolInput {
 
     /// Get a string parameter, returning None if missing.
     pub fn get_optional(&self, key: &str) -> Option<String> {
-        self.params.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+        self.params
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     }
 
     /// Get a numeric parameter.
@@ -96,7 +99,8 @@ impl ToolInput {
 
     /// Get a raw JSON value parameter.
     pub fn get_value(&self, key: &str) -> Result<&Value, ToolError> {
-        self.params.get(key)
+        self.params
+            .get(key)
             .ok_or_else(|| ToolError::MissingParam(key.to_string()))
     }
 }
@@ -169,7 +173,10 @@ mod tests {
     fn test_tool_input_missing_param() {
         let input = ToolInput::from_json(r#"{"name": "test"}"#).unwrap();
         assert!(input.get("missing").is_err());
-        assert!(matches!(input.get("missing"), Err(ToolError::MissingParam(_))));
+        assert!(matches!(
+            input.get("missing"),
+            Err(ToolError::MissingParam(_))
+        ));
     }
 
     #[test]

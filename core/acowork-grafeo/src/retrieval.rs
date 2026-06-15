@@ -49,7 +49,9 @@ impl GrafeoStore {
         k: usize,
         ef: Option<usize>,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let results = self.db.vector_search(label, "embedding", embedding, k, ef, None)?;
+        let results = self
+            .db
+            .vector_search(label, "embedding", embedding, k, ef, None)?;
         Ok(results)
     }
 
@@ -76,15 +78,9 @@ impl GrafeoStore {
         embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let results = self.db.hybrid_search(
-            label,
-            text_prop,
-            vec_prop,
-            query,
-            Some(embedding),
-            k,
-            None,
-        )?;
+        let results =
+            self.db
+                .hybrid_search(label, text_prop, vec_prop, query, Some(embedding), k, None)?;
         Ok(results)
     }
 
@@ -103,9 +99,9 @@ impl GrafeoStore {
         k: usize,
         lambda: Option<f32>,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let results = self
-            .db
-            .mmr_search(label, "embedding", embedding, k, None, lambda, None, None)?;
+        let results =
+            self.db
+                .mmr_search(label, "embedding", embedding, k, None, lambda, None, None)?;
         Ok(results)
     }
 
@@ -131,7 +127,10 @@ impl GrafeoStore {
             max_hops
         );
         let mut params = std::collections::HashMap::new();
-        params.insert("start_id".to_string(), grafeo_common::types::Value::from(start_id.as_u64() as i64));
+        params.insert(
+            "start_id".to_string(),
+            grafeo_common::types::Value::from(start_id.as_u64() as i64),
+        );
         let result = session.execute_with_params(&gql, params)?;
 
         let mut nodes = Vec::new();
@@ -177,15 +176,9 @@ impl GrafeoStore {
         k: usize,
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let results = self.db.hybrid_search(
-            label,
-            text_prop,
-            vec_prop,
-            query,
-            Some(embedding),
-            k,
-            None,
-        )?;
+        let results =
+            self.db
+                .hybrid_search(label, text_prop, vec_prop, query, Some(embedding), k, None)?;
         let (filtered, _) = apply_min_score(results, min_score);
         Ok(filtered)
     }
@@ -203,7 +196,9 @@ impl GrafeoStore {
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
         validate_embedding_dim(embedding, self.hnsw_config.dim)?;
-        let raw = self.db.vector_search(label, "embedding", embedding, k, Some(ef_search), None)?;
+        let raw = self
+            .db
+            .vector_search(label, "embedding", embedding, k, Some(ef_search), None)?;
         // Convert distance to similarity score using shared function.
         let results: Vec<(NodeId, f64)> = raw
             .into_iter()
@@ -241,8 +236,8 @@ impl GrafeoStore {
         query: &str,
         embedding: &[f32],
         k: usize,
-        _text_weight: f32,  // Reserved for future weighted RRF implementation
-        _vector_weight: f32,  // Reserved for future weighted RRF implementation
+        _text_weight: f32,   // Reserved for future weighted RRF implementation
+        _vector_weight: f32, // Reserved for future weighted RRF implementation
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
         validate_embedding_dim(embedding, self.hnsw_config.dim)?;
@@ -278,19 +273,13 @@ impl GrafeoStore {
         query: &str,
         embedding: &[f32],
         k: usize,
-        _text_weight: f32,  // Reserved for future weighted RRF implementation
-        _vector_weight: f32,  // Reserved for future weighted RRF implementation
+        _text_weight: f32,   // Reserved for future weighted RRF implementation
+        _vector_weight: f32, // Reserved for future weighted RRF implementation
         min_score: Option<f32>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let results = self.db.hybrid_search(
-            label,
-            text_prop,
-            vec_prop,
-            query,
-            Some(embedding),
-            k,
-            None,
-        )?;
+        let results =
+            self.db
+                .hybrid_search(label, text_prop, vec_prop, query, Some(embedding), k, None)?;
 
         // Note: RRF fusion already handles ranking combination internally.
         // Weight scaling after RRF is meaningless as it doesn't change relative rankings.
@@ -356,7 +345,7 @@ impl GrafeoStore {
 mod tests {
     use super::*;
     use crate::index_config::{HnswConfig, validate_embedding_dim};
-    use crate::types::{labels, DEFAULT_EMBEDDING_DIM};
+    use crate::types::{DEFAULT_EMBEDDING_DIM, labels};
     use grafeo_common::types::Value;
 
     /// Helper: create an in-memory GrafeoStore for testing.
@@ -484,7 +473,10 @@ mod tests {
         let filtered = store
             .text_search_with_filter(labels::EPISODIC, "content", "quick fox", 5, Some(999.0))
             .unwrap();
-        assert!(filtered.is_empty(), "expected all results filtered out by high min_score");
+        assert!(
+            filtered.is_empty(),
+            "expected all results filtered out by high min_score"
+        );
     }
 
     // =====================================================================
@@ -520,16 +512,12 @@ mod tests {
         let store = test_store();
         let bad_emb = vec![0.1f32; 128];
 
-        let result = store.hybrid_search_full(
-            labels::EPISODIC,
-            "test query",
-            &bad_emb,
-            5,
-            0.5,
-            0.5,
-            None,
+        let result =
+            store.hybrid_search_full(labels::EPISODIC, "test query", &bad_emb, 5, 0.5, 0.5, None);
+        assert!(
+            result.is_err(),
+            "expected error for wrong embedding dimension"
         );
-        assert!(result.is_err(), "expected error for wrong embedding dimension");
     }
 
     // =====================================================================
@@ -596,8 +584,14 @@ mod tests {
             let store = GrafeoStore::open_with_default_config(&db_path).unwrap();
 
             // Rebuild vector index since HNSW is not persisted automatically
-            store.db().rebuild_vector_index(labels::EPISODIC, "embedding").unwrap();
-            store.db().rebuild_text_index(labels::EPISODIC, "content").unwrap();
+            store
+                .db()
+                .rebuild_vector_index(labels::EPISODIC, "embedding")
+                .unwrap();
+            store
+                .db()
+                .rebuild_text_index(labels::EPISODIC, "content")
+                .unwrap();
 
             let results = store
                 .vector_search_with_params(labels::EPISODIC, &emb, 5, 64, None)
@@ -608,7 +602,10 @@ mod tests {
             let text_results = store
                 .text_search_with_filter(labels::EPISODIC, "content", "persistent memory", 5, None)
                 .unwrap();
-            assert!(!text_results.is_empty(), "text index should recover after reopen");
+            assert!(
+                !text_results.is_empty(),
+                "text index should recover after reopen"
+            );
         }
     }
 }

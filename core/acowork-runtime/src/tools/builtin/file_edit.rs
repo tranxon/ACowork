@@ -6,15 +6,17 @@
 //!    (indentation, trailing spaces, tab/space mixing) to handle LLM-generated
 //!    old_text that doesn't exactly match file content.
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
 
 pub struct FileEditTool;
 
 impl FileEditTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
@@ -204,15 +206,29 @@ fn resolve_match(content: &str, old_string: &str) -> Result<MatchOutcome, String
 
 #[async_trait]
 impl Tool for FileEditTool {
-    fn spec(&self) -> ToolSpec { Self::spec_value() }
+    fn spec(&self) -> ToolSpec {
+        Self::spec_value()
+    }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
-        let path = params["path"].as_str().unwrap_or("").trim_start_matches('/');
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
+        let path = params["path"]
+            .as_str()
+            .unwrap_or("")
+            .trim_start_matches('/');
         let old_text = params["old_text"].as_str().unwrap_or("");
         let new_text = params["new_text"].as_str().unwrap_or("");
 
         if path.is_empty() || old_text.is_empty() {
-            return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing required parameters".to_string()), token_usage: None });
+            return Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some("Missing required parameters".to_string()),
+                token_usage: None,
+            });
         }
 
         let base = work_dir.unwrap_or(".");
@@ -235,7 +251,12 @@ impl Tool for FileEditTool {
                     error = %e,
                     "file_edit: failed to read file"
                 );
-                return Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to read file: {e}")), token_usage: None })
+                return Ok(ToolResult {
+                    ok: false,
+                    content: String::new(),
+                    error: Some(format!("Failed to read file: {e}")),
+                    token_usage: None,
+                });
             }
         };
 
@@ -291,7 +312,12 @@ impl Tool for FileEditTool {
                     error = %e,
                     "file_edit: failed to write file"
                 );
-                Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to write file: {e}")), token_usage: None })
+                Ok(ToolResult {
+                    ok: false,
+                    content: String::new(),
+                    error: Some(format!("Failed to write file: {e}")),
+                    token_usage: None,
+                })
             }
         }
     }

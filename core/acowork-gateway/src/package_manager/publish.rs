@@ -286,7 +286,11 @@ pub fn prepare_publish(
                 let has_warnings = skill_checks.iter().any(|c| c.contains("missing"));
                 checks.push(CheckItem {
                     name: "skills".to_string(),
-                    status: if has_warnings { "warning".to_string() } else { "ok".to_string() },
+                    status: if has_warnings {
+                        "warning".to_string()
+                    } else {
+                        "ok".to_string()
+                    },
                     detail: Some(skill_checks.join("; ")),
                 });
             }
@@ -321,12 +325,8 @@ pub fn prepare_publish(
                 GatewayError::Package(format!("Failed to serialize manifest: {}", e))
             })?;
             let manifest_path = install_path.join("manifest.toml");
-            std::fs::write(&manifest_path, &manifest_toml).map_err(|e| {
-                GatewayError::Package(format!(
-                    "Failed to write manifest: {}",
-                    e
-                ))
-            })?;
+            std::fs::write(&manifest_path, &manifest_toml)
+                .map_err(|e| GatewayError::Package(format!("Failed to write manifest: {}", e)))?;
             cleaned = true;
             checks.push(CheckItem {
                 name: "cleanup.dev_removed".to_string(),
@@ -411,10 +411,7 @@ pub fn build_package(
     // Create output directory if needed
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            GatewayError::Package(format!(
-                "Failed to create output directory: {}",
-                e
-            ))
+            GatewayError::Package(format!("Failed to create output directory: {}", e))
         })?;
     }
 
@@ -434,10 +431,7 @@ pub fn build_package(
             // Default: use dev key from examples/.signing-keys/
             Path::new("examples/.signing-keys")
         });
-        let signed_path = output_dir.join(format!(
-            "{}-{}-signed.agent",
-            agent_id, info.version
-        ));
+        let signed_path = output_dir.join(format!("{}-{}-signed.agent", agent_id, info.version));
 
         // Try to sign with developer key first
         match acowork_sign::sign::sign_package(
@@ -450,10 +444,7 @@ pub fn build_package(
                 // Replace unsigned with signed
                 std::fs::remove_file(&output_path).ok();
                 std::fs::rename(&signed_path, &output_path).map_err(|e| {
-                    GatewayError::Package(format!(
-                        "Failed to rename signed package: {}",
-                        e
-                    ))
+                    GatewayError::Package(format!("Failed to rename signed package: {}", e))
                 })?;
                 signed = true;
                 file_size = std::fs::metadata(&output_path)
@@ -534,8 +525,16 @@ model = "gpt-4"
             ),
         )
         .unwrap();
-        std::fs::write(install_path.join("prompts/system.md"), "# System Prompt\nYou are helpful.").unwrap();
-        std::fs::write(install_path.join("skills/search/SKILL.md"), "---\nname: search\n---\n# Search").unwrap();
+        std::fs::write(
+            install_path.join("prompts/system.md"),
+            "# System Prompt\nYou are helpful.",
+        )
+        .unwrap();
+        std::fs::write(
+            install_path.join("skills/search/SKILL.md"),
+            "---\nname: search\n---\n# Search",
+        )
+        .unwrap();
         std::fs::write(install_path.join("config/settings.toml"), "custom = true").unwrap();
 
         let manifest = acowork_core::AgentManifest::from_toml(&format!(
@@ -548,8 +547,10 @@ runtime_version = "0.1.0"
 [llm]
 provider = "openai"
 model = "gpt-4"
-"#
-        , agent_id)).unwrap();
+"#,
+            agent_id
+        ))
+        .unwrap();
 
         state.add_installed(AgentInfo {
             agent_id: agent_id.to_string(),
@@ -562,17 +563,26 @@ model = "gpt-4"
 
     #[test]
     fn test_prepare_publish_valid() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-prep-ok-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-prep-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let install_dir = temp_dir.join("installed");
         let vault_dir = temp_vault_dir("prep-ok");
         let mut state = GatewayState::new(&vault_dir);
-        create_test_agent(&mut state, "com.test.weather", &install_dir.to_string_lossy());
+        create_test_agent(
+            &mut state,
+            "com.test.weather",
+            &install_dir.to_string_lossy(),
+        );
 
         let result = prepare_publish("com.test.weather", false, &mut state).unwrap();
-        assert!(result.errors.is_empty(), "Unexpected errors: {:?}", result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "Unexpected errors: {:?}",
+            result.errors
+        );
         assert!(!result.checks.is_empty());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -580,7 +590,8 @@ model = "gpt-4"
 
     #[test]
     fn test_prepare_publish_missing_fields() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-prep-err-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-prep-err-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -597,12 +608,14 @@ author = ""
 runtime_version = "0.1.0"
 [llm]
 temperature = 0.7"#,
-        ).unwrap();
+        )
+        .unwrap();
         // Don't create prompts/ dir — should trigger warning
 
         let vault_dir = temp_vault_dir("prep-err");
         let mut state = GatewayState::new(&vault_dir);
-        let manifest = acowork_core::AgentManifest::from_toml(r#"agent_id = "com.test.invalid"
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"agent_id = "com.test.invalid"
 version = "1.0.0"
 name = "Test"
 description = ""
@@ -610,7 +623,9 @@ author = ""
 runtime_version = "0.1.0"
 [llm]
 temperature = 0.7
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         state.add_installed(AgentInfo {
             agent_id: "com.test.invalid".to_string(),
             version: "1.0.0".to_string(),
@@ -631,7 +646,8 @@ temperature = 0.7
 
     #[test]
     fn test_prepare_clean_removes_dev() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-prep-clean-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-prep-clean-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -654,11 +670,13 @@ dev = true
 provider = "openai"
 model = "gpt-4"
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let vault_dir = temp_vault_dir("prep-clean");
         let mut state = GatewayState::new(&vault_dir);
-        let manifest = acowork_core::AgentManifest::from_toml(r#"agent_id = "com.test.dev"
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"agent_id = "com.test.dev"
 version = "1.0.0"
 name = "Dev Agent"
 description = "Test"
@@ -668,7 +686,9 @@ dev = true
 [llm]
 provider = "openai"
 model = "gpt-4"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         state.add_installed(AgentInfo {
             agent_id: "com.test.dev".to_string(),
             version: "1.0.0".to_string(),
@@ -679,14 +699,18 @@ model = "gpt-4"
 
         let result = prepare_publish("com.test.dev", true, &mut state).unwrap();
         assert!(result.cleaned, "Should have performed cleanup");
-        assert!(!state.installed_agents["com.test.dev"].manifest.dev, "dev should be cleared");
+        assert!(
+            !state.installed_agents["com.test.dev"].manifest.dev,
+            "dev should be cleared"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_build_package_success() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-build-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-build-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -694,7 +718,11 @@ model = "gpt-4"
         let output_dir = temp_dir.join("output");
         let vault_dir = temp_vault_dir("build");
         let mut state = GatewayState::new(&vault_dir);
-        create_test_agent(&mut state, "com.test.weather", &install_dir.to_string_lossy());
+        create_test_agent(
+            &mut state,
+            "com.test.weather",
+            &install_dir.to_string_lossy(),
+        );
 
         let result = build_package("com.test.weather", &output_dir, false, None, &state).unwrap();
         assert!(result.output_path.ends_with(".agent"));

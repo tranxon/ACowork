@@ -8,9 +8,8 @@ use std::time::Duration;
 use acowork_core::error::Result;
 
 use crate::types::{
-    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    MemoryQuery, ProceduralNode, PurgeResult, SearchResult, StoreHealth,
-    StoreStats,
+    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode, MemoryQuery,
+    ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
 };
 
 /// MemoryStore trait — standardized interface for memory storage backends.

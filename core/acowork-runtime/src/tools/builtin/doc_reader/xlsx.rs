@@ -61,9 +61,7 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
 
     let total = sheet_names.len();
     let summary = if end - start + 1 < total {
-        format!(
-            "\n[Extracted sheets {start}-{end} of {total}]\n"
-        )
+        format!("\n[Extracted sheets {start}-{end} of {total}]\n")
     } else {
         format!("\n[{total} sheets total]\n")
     };
@@ -78,10 +76,7 @@ fn render_sheet_as_text(output: &mut String, rows: &[&[calamine::Data]]) {
 
     for row in rows.iter().take(max_rows) {
         let max_cols = (*row).len().min(MAX_COLS);
-        let cells: Vec<String> = (*row)[..max_cols]
-            .iter()
-            .map(cell_to_string)
-            .collect();
+        let cells: Vec<String> = (*row)[..max_cols].iter().map(cell_to_string).collect();
         if cells.iter().all(|s| s.is_empty()) {
             continue;
         }
@@ -112,10 +107,7 @@ fn render_sheet_as_table(output: &mut String, rows: &[&[calamine::Data]]) {
     let mut cells: Vec<Vec<String>> = Vec::new();
     for row in rows.iter().take(max_rows) {
         let max_cols = (*row).len().min(MAX_COLS);
-        let row_cells: Vec<String> = (*row)[..max_cols]
-            .iter()
-            .map(cell_to_string)
-            .collect();
+        let row_cells: Vec<String> = (*row)[..max_cols].iter().map(cell_to_string).collect();
         if !row_cells.iter().all(|s| s.is_empty()) {
             cells.push(row_cells);
         }

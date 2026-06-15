@@ -63,7 +63,6 @@ pub struct RuntimeConfig {
     pub shell_approval_threshold: String,
 
     // ── Timeout configuration ──
-
     /// LLM provider HTTP request timeout in milliseconds
     #[serde(default = "default_provider_request_timeout_ms")]
     pub provider_request_timeout_ms: u64,
@@ -190,7 +189,10 @@ impl RuntimeConfig {
             agent_id: cli.agent_id.clone(),
             package_path: cli.package_path.clone(),
             work_dir: cli.work_dir.clone(),
-            gateway_socket: cli.gateway_socket.clone().or_else(|| cli.gateway_endpoint.clone()),
+            gateway_socket: cli
+                .gateway_socket
+                .clone()
+                .or_else(|| cli.gateway_endpoint.clone()),
             manifest_path: cli.manifest_path.clone(),
             config_dir: cli.config_dir.clone(),
             dev_mode: cli.dev_mode,

@@ -4,8 +4,8 @@
 //! The HTTP server checks this flag before accepting new requests
 //! and waits for in-flight requests to complete.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Shared shutdown signal.
 pub struct Shutdown {

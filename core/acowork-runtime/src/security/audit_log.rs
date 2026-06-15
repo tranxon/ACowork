@@ -171,10 +171,7 @@ mod tests {
             .with_risk(ShellRisk::High, "Executing Downloaded file")
             .with_approval("user_confirmation")
             .with_exit_code(0)
-            .with_file_changes(
-                vec!["output.dat".to_string()],
-                vec![],
-            );
+            .with_file_changes(vec!["output.dat".to_string()], vec![]);
 
         let json = entry.to_json();
         assert!(json.contains("shell"));
@@ -185,8 +182,8 @@ mod tests {
 
     #[test]
     fn test_audit_entry_pretty_json() {
-        let entry = ShellAuditEntry::new("shell", "cat file.txt")
-            .with_risk(ShellRisk::Low, "Low-risk");
+        let entry =
+            ShellAuditEntry::new("shell", "cat file.txt").with_risk(ShellRisk::Low, "Low-risk");
 
         let pretty = entry.to_json_pretty();
         assert!(pretty.contains('\n'));
@@ -198,8 +195,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         let logger = AuditLogger::new(&dir);
-        let entry = ShellAuditEntry::new("shell", "echo hello")
-            .with_risk(ShellRisk::Low, "Low-risk");
+        let entry =
+            ShellAuditEntry::new("shell", "echo hello").with_risk(ShellRisk::Low, "Low-risk");
 
         logger.log(&entry).unwrap();
 

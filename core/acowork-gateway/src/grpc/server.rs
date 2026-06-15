@@ -21,8 +21,8 @@ use acowork_core::proto::gateway_service_server::{GatewayService, GatewayService
 use acowork_core::proto_bridge::GatewayResponseToProto;
 use acowork_core::protocol::GatewayResponse;
 
-use crate::ipc::server::SharedState;
 use crate::http::routes::{BridgeEvent, SessionPendingRequests, SharedSessionMgr};
+use crate::ipc::server::SharedState;
 
 use super::dispatch::{dispatch_grpc_request, is_stream_chunk};
 
@@ -81,7 +81,10 @@ impl GrpcSession {
     /// Used for request-response patterns where the Runtime sends a
     /// ClientMessage response with the same request_id.
     pub async fn push_request(&self, msg: proto::ServerMessage) -> bool {
-        debug_assert_ne!(msg.request_id, 0, "push_request expects non-zero request_id");
+        debug_assert_ne!(
+            msg.request_id, 0,
+            "push_request expects non-zero request_id"
+        );
         self.push_tx.send(Ok(msg)).await.is_ok()
     }
 
@@ -89,7 +92,10 @@ impl GrpcSession {
     /// Uses try_send on the bounded mpsc channel (capacity 32).
     /// Returns false if the channel is closed; rarely fails due to full buffer.
     pub fn try_push_request(&self, msg: proto::ServerMessage) -> bool {
-        debug_assert_ne!(msg.request_id, 0, "try_push_request expects non-zero request_id");
+        debug_assert_ne!(
+            msg.request_id, 0,
+            "try_push_request expects non-zero request_id"
+        );
         self.push_tx.try_send(Ok(msg)).is_ok()
     }
 }
@@ -163,9 +169,9 @@ impl GrpcSessionManager {
 
     /// Find session by agent_id (only main connections)
     pub fn find_by_agent_id(&self, agent_id: &str) -> Option<(&String, &GrpcSession)> {
-        self.sessions.iter().find(|(_, s)| {
-            s.agent_id.as_deref() == Some(agent_id) && s.connection_role == "main"
-        })
+        self.sessions
+            .iter()
+            .find(|(_, s)| s.agent_id.as_deref() == Some(agent_id) && s.connection_role == "main")
     }
 
     /// Get a mutable reference to the session for a given agent_id.
@@ -344,10 +350,7 @@ impl GatewayService for GatewayGrpcService {
         let (outbound_tx, outbound_rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(32);
 
         // Assign a connection ID
-        let conn_id = format!(
-            "grpc-{}",
-            CONN_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
-        );
+        let conn_id = format!("grpc-{}", CONN_COUNTER.fetch_add(1, Ordering::Relaxed) + 1);
 
         tracing::info!("gRPC connect: new connection {}", conn_id);
 
@@ -536,14 +539,14 @@ impl GatewayService for GatewayGrpcService {
                 gw.set_agent_connected(&agent_id, false);
                 tracing::info!(
                     "Agent {} disconnected (conn={}), connected set to false",
-                    agent_id, conn_id_clone
+                    agent_id,
+                    conn_id_clone
                 );
             }
             tracing::info!("gRPC connection {} cleaned up", conn_id_clone);
         });
 
-        let output_stream =
-            tokio_stream::wrappers::ReceiverStream::new(outbound_rx);
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(outbound_rx);
         Ok(Response::new(output_stream))
     }
 }
@@ -650,7 +653,9 @@ mod tests {
         let mut mgr = GrpcSessionManager::new();
         let (tx, _rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(8);
         mgr.create_session("grpc-1", tx);
-        mgr.get_session_mut("grpc-1").unwrap().authenticate("com.example.weather");
+        mgr.get_session_mut("grpc-1")
+            .unwrap()
+            .authenticate("com.example.weather");
 
         let result = mgr.find_by_agent_id("com.example.weather");
         assert!(result.is_some());

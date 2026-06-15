@@ -16,11 +16,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use acowork_grafeo::consolidation::{
-    ConsolidationScheduler, GeneralizationConfig, OfflineConsolidationConfig,
-    SchedulerConfig,
-};
 use acowork_grafeo::consolidation::triple_extraction::TripleExtractorLlm;
+use acowork_grafeo::consolidation::{
+    ConsolidationScheduler, GeneralizationConfig, OfflineConsolidationConfig, SchedulerConfig,
+};
 use acowork_grafeo::grafeo::GrafeoStore;
 use tokio::sync::Mutex;
 
@@ -118,15 +117,13 @@ async fn run_consolidation_loop(
             None => continue,
         };
 
-        tracing::info!(
-            ?trigger,
-            pending_count,
-            "Consolidation scheduler triggered"
-        );
+        tracing::info!(?trigger, pending_count, "Consolidation scheduler triggered");
 
         // P3 T4.4: Simple global lock — if another agent is running consolidation,
         // skip this cycle. Uses a file-based lock in the work directory.
-        let lock_path = work_dir.as_ref().map(|d| d.join("memory").join(".consolidation.lock"));
+        let lock_path = work_dir
+            .as_ref()
+            .map(|d| d.join("memory").join(".consolidation.lock"));
         let lock_held = match &lock_path {
             Some(path) => acquire_consolidation_lock(path),
             None => true, // No lock file → always allow (single-agent mode)
@@ -143,29 +140,31 @@ async fn run_consolidation_loop(
         // The consolidation API requires a synchronous closure, so we bridge
         // async → sync via Handle::current() on a blocking thread.
         let emb_provider = embedding_provider.clone();
-        let embedding_fn: Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> = Arc::new(move |text: &str| -> Vec<f32> {
-            let provider = emb_provider.clone();
-            let text_owned = text.to_string();
-            // Use the current tokio runtime handle to block_on the async embed call.
-            // This is safe because the closure is called from within a tokio task
-            // (the consolidation loop), and Handle::current() references the
-            // same runtime without creating a new one.
-            // Note: block_on inside an async context would panic, but our
-            // Grafeo consolidation pipeline calls this closure synchronously
-            // from within run_offline_consolidation, which is already async.
-            // We use tokio::task::block_in_place to safely block on the
-            // current thread without panicking.
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                match handle.block_on(provider.embed(&text_owned)) {
-                    Ok(vec) => vec,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Embedding failed in consolidation, using zero vector");
-                        vec![0.0f32; provider.dimension()]
+        let embedding_fn: Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> = Arc::new(
+            move |text: &str| -> Vec<f32> {
+                let provider = emb_provider.clone();
+                let text_owned = text.to_string();
+                // Use the current tokio runtime handle to block_on the async embed call.
+                // This is safe because the closure is called from within a tokio task
+                // (the consolidation loop), and Handle::current() references the
+                // same runtime without creating a new one.
+                // Note: block_on inside an async context would panic, but our
+                // Grafeo consolidation pipeline calls this closure synchronously
+                // from within run_offline_consolidation, which is already async.
+                // We use tokio::task::block_in_place to safely block on the
+                // current thread without panicking.
+                tokio::task::block_in_place(|| {
+                    let handle = tokio::runtime::Handle::current();
+                    match handle.block_on(provider.embed(&text_owned)) {
+                        Ok(vec) => vec,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Embedding failed in consolidation, using zero vector");
+                            vec![0.0f32; provider.dimension()]
+                        }
                     }
-                }
-            })
-        });
+                })
+            },
+        );
 
         // Run consolidation with generalization.
         let offline_config = OfflineConsolidationConfig {
@@ -367,7 +366,10 @@ mod tests {
             &self,
             texts: &[&str],
         ) -> Result<Vec<Vec<f32>>, crate::embedding::EmbeddingError> {
-            Ok(texts.iter().map(|_| vec![0.1f32; DEFAULT_EMBEDDING_DIM]).collect())
+            Ok(texts
+                .iter()
+                .map(|_| vec![0.1f32; DEFAULT_EMBEDDING_DIM])
+                .collect())
         }
         fn dimension(&self) -> usize {
             DEFAULT_EMBEDDING_DIM

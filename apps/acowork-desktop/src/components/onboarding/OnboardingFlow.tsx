@@ -13,6 +13,45 @@ import { StyledInput } from "../common/StyledInput";
 
 const TOTAL_STEPS = 5;
 
+const RECOMMENDED_AGENTS = [
+  {
+    resourceName: "software-architect-agent",
+    name: "Architect",
+    role: "Software Architect",
+    description: "System design, architecture review, technical planning, and risk assessment",
+  },
+  {
+    resourceName: "senior-engineer-agent",
+    name: "SSE",
+    role: "Senior Software Engineer",
+    description: "Code review, architecture design, debugging, refactoring, testing, and documentation",
+  },
+  {
+    resourceName: "quality-assurance-agent",
+    name: "QA",
+    role: "Quality Assurance Manager",
+    description: "Quality strategy, test planning, defect management, and release acceptance",
+  },
+  {
+    resourceName: "project-manager-agent",
+    name: "PM",
+    role: "Project Manager",
+    description: "Requirements analysis, task decomposition, progress tracking, and risk management",
+  },
+  {
+    resourceName: "product-manager-agent",
+    name: "Product",
+    role: "Product Manager",
+    description: "Product strategy, user research, PRD writing, roadmap, and launch planning",
+  },
+  {
+    resourceName: "document-manager-agent",
+    name: "Docs",
+    role: "Document Manager",
+    description: "Document collection, organization, writing, conversion, and knowledge base maintenance",
+  },
+];
+
 interface OnboardingState {
   completed: boolean;
   currentStep: number;
@@ -674,6 +713,29 @@ function IdentityStep({
 /** Step 5: Install first Agent */
 function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPrev: () => void }) {
   const [installing, setInstalling] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [selectedAgents, setSelectedAgents] = useState<string[]>(() => RECOMMENDED_AGENTS.map((agent) => agent.resourceName));
+
+  const toggleRecommendedAgent = (resourceName: string) => {
+    setSelectedAgents((prev) => prev.includes(resourceName)
+      ? prev.filter((name) => name !== resourceName)
+      : [...prev, resourceName]);
+  };
+
+  const handleInstallRecommended = async () => {
+    setInstallError(null);
+    try {
+      for (const resourceName of selectedAgents) {
+        const agent = RECOMMENDED_AGENTS.find((item) => item.resourceName === resourceName);
+        setInstalling(agent?.name ?? resourceName);
+        await invoke("install_bundled_agent", { resourceName, devMode: true });
+      }
+      setInstalling(null);
+    } catch (err) {
+      setInstalling(null);
+      setInstallError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const handleInstallFromFile = async () => {
     try {
@@ -682,31 +744,78 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         filters: [{ name: "Agent Package", extensions: ["agent"] }],
       });
       if (selected) {
+        setInstallError(null);
         setInstalling(selected);
         await invoke("install_agent", { packagePath: selected });
         setInstalling(null);
       }
-    } catch {
+    } catch (err) {
       setInstalling(null);
+      setInstallError(err instanceof Error ? err.message : String(err));
     }
   };
 
   return (
     <div>
       <h2 className="text-lg font-semibold">Install Your First Agent</h2>
+      <p className="mt-1 text-sm text-zinc-500">Choose recommended built-in agents or install a local package</p>
 
       <div className="mt-6 space-y-3">
+        <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium">Recommended Agents</h3>
+              <p className="mt-1 text-xs text-zinc-400">Select one or more built-in agents to install</p>
+            </div>
+            <button
+              onClick={() => setSelectedAgents(selectedAgents.length === RECOMMENDED_AGENTS.length ? [] : RECOMMENDED_AGENTS.map((agent) => agent.resourceName))}
+              className="text-xs text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+            >
+              {selectedAgents.length === RECOMMENDED_AGENTS.length ? "Clear" : "Select all"}
+            </button>
+          </div>
+          <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+            {RECOMMENDED_AGENTS.map((agent) => (
+              <label
+                key={agent.resourceName}
+                className="flex cursor-pointer gap-3 rounded-md border border-zinc-100 p-3 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedAgents.includes(agent.resourceName)}
+                  onChange={() => toggleRecommendedAgent(agent.resourceName)}
+                  className="mt-0.5 h-4 w-4 rounded border-zinc-300"
+                />
+                <span>
+                  <span className="block text-sm font-medium">{agent.name} · {agent.role}</span>
+                  <span className="mt-0.5 block text-xs text-zinc-400">{agent.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+          <button
+            onClick={handleInstallRecommended}
+            disabled={!!installing || selectedAgents.length === 0}
+            className="mt-4 w-full rounded-md btn-solid py-2 text-xs font-medium disabled:opacity-50"
+          >
+            {installing ? `Installing ${installing}...` : `Install selected (${selectedAgents.length})`}
+          </button>
+        </div>
+
         <button
           onClick={handleInstallFromFile}
           disabled={!!installing}
           className="w-full rounded-lg border border-zinc-200 p-4 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
-          <span className="text-sm font-medium">📁 Install from .agent file</span>
+          <span className="text-sm font-medium">Install from .agent file</span>
           <p className="mt-1 text-xs text-zinc-400">Select a .agent package from your computer</p>
         </button>
 
         {installing && (
-          <p className="text-xs text-zinc-400">Installing from: {installing}</p>
+          <p className="text-xs text-zinc-400">Installing: {installing}</p>
+        )}
+        {installError && (
+          <p className="text-xs text-red-500">{installError}</p>
         )}
       </div>
 

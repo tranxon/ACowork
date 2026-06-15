@@ -45,7 +45,13 @@ impl AgentLoop {
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
     ) {
-        self.core.apply_runtime_config(max_output_tokens, max_iterations, temperature, system_prompt_override, shell_approval_threshold);
+        self.core.apply_runtime_config(
+            max_output_tokens,
+            max_iterations,
+            temperature,
+            system_prompt_override,
+            shell_approval_threshold,
+        );
     }
 
     /// Get the context window budget for history trimming.
@@ -104,10 +110,7 @@ impl AgentLoop {
             .and_then(|pid| self.core.provider_compact_models.get(pid))
             .and_then(|cm| cm.clone());
         if let Some(ref compact_model) = compact_model {
-            if let Some(cap) = self
-                .core
-                .get_model_capabilities(compact_model)
-            {
+            if let Some(cap) = self.core.get_model_capabilities(compact_model) {
                 if cap.context_window >= estimated_tokens {
                     tracing::info!(
                         compact_model = %compact_model,
@@ -153,11 +156,7 @@ impl AgentLoop {
     ///
     /// Called after each LLM response (force=false) and on manual user trigger
     /// (force=true via `SessionMessage::CompactContext`).
-    pub(crate) async fn compact_history_if_needed(
-        &mut self,
-        model_name: &str,
-        force: bool,
-    ) {
+    pub(crate) async fn compact_history_if_needed(&mut self, model_name: &str, force: bool) {
         /// Number of conversational rounds to keep at the tail after compaction.
         /// Each round starts with a User message, so this keeps the last N user
         /// messages and everything after them.
@@ -183,20 +182,25 @@ impl AgentLoop {
 
             // Notify frontend that compaction has started (both manual and auto paths).
             if let Some(ref tx) = self.core.on_chunk {
-                let _ = tx.send(SessionChunkEvent {
-                    session_id: self.core.session_id.clone().unwrap_or_default(),
-                    event: ChunkEvent::CompactingStarted,
-                }).await;
+                let _ = tx
+                    .send(SessionChunkEvent {
+                        session_id: self.core.session_id.clone().unwrap_or_default(),
+                        event: ChunkEvent::CompactingStarted,
+                    })
+                    .await;
             }
 
             // Build combined text from history for model-aware token counting.
-            let combined_text: String = self.session.history.messages()
-                .iter()
-                .fold(String::new(), |mut acc, m| {
-                    acc.push_str(&m.content);
-                    acc.push('\n');
-                    acc
-                });
+            let combined_text: String =
+                self.session
+                    .history
+                    .messages()
+                    .iter()
+                    .fold(String::new(), |mut acc, m| {
+                        acc.push_str(&m.content);
+                        acc.push('\n');
+                        acc
+                    });
             let compact_model = self.resolve_distill_model(&combined_text);
             let system_prompt = self
                 .core
@@ -214,7 +218,10 @@ impl AgentLoop {
             {
                 Ok(summary) => {
                     let stripped = crate::episode_distill::strip_metadata_blocks(&summary);
-                    let removed = self.session.history.replace_middle_with_summary(&stripped, KEEP_LAST_ROUNDS);
+                    let removed = self
+                        .session
+                        .history
+                        .replace_middle_with_summary(&stripped, KEEP_LAST_ROUNDS);
 
                     // Write compaction summary to Grafeo
                     let session_id = self
@@ -228,7 +235,8 @@ impl AgentLoop {
                         &session_id,
                         &memory_store,
                         self.core.embedding_provider.as_deref(),
-                    ).await;
+                    )
+                    .await;
 
                     // Mark session as compacted (zero new messages since compaction)
                     self.session.is_compacted = true;
@@ -464,7 +472,9 @@ impl AgentLoop {
         let local_estimate = self.session.history.token_count();
 
         if let Some(usage) = &response.usage {
-            self.session.budget_guard.update_usage(usage.total_tokens, 0.0);
+            self.session
+                .budget_guard
+                .update_usage(usage.total_tokens, 0.0);
 
             // Diagnostic: log local token estimate vs API ground truth
             tracing::info!(
@@ -481,7 +491,9 @@ impl AgentLoop {
             // the internal token counter.
             let prompt_tokens_reliable = usage.prompt_tokens > 0;
             if prompt_tokens_reliable {
-                self.session.history.calibrate_from_usage(usage.prompt_tokens);
+                self.session
+                    .history
+                    .calibrate_from_usage(usage.prompt_tokens);
             } else {
                 tracing::warn!(
                     local_estimate,
@@ -525,8 +537,13 @@ impl AgentLoop {
                     usage_percent = ctx_usage.usage_percent,
                     "ContextUsage: sending report"
                 );
-                if !self.core.try_send_chunk(ChunkEvent::ContextUsage(ctx_usage)) {
-                    tracing::debug!("ContextUsage: on_chunk channel full/closed or session_id missing");
+                if !self
+                    .core
+                    .try_send_chunk(ChunkEvent::ContextUsage(ctx_usage))
+                {
+                    tracing::debug!(
+                        "ContextUsage: on_chunk channel full/closed or session_id missing"
+                    );
                 }
             } else {
                 let available: Vec<String> = {
@@ -541,7 +558,10 @@ impl AgentLoop {
                      Context usage display and compaction accuracy may be affected.",
                     current_model, available
                 );
-                tracing::warn!("ContextUsage: NOT sent — missing model capabilities for '{}'", current_model);
+                tracing::warn!(
+                    "ContextUsage: NOT sent — missing model capabilities for '{}'",
+                    current_model
+                );
                 let _ = self.core.try_send_chunk(ChunkEvent::Error {
                     message: msg,
                     message_id: format!("caps-missing-{}", current_model),

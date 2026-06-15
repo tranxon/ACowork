@@ -53,8 +53,10 @@ pub enum SessionStatus {
     /// A tool requires user approval before execution
     WaitingApproval { request_id: String },
     /// Iteration limit reached or debug pause — awaiting user decision
-    Paused { iteration: Option<u32>, max_iterations: Option<u32> },
-
+    Paused {
+        iteration: Option<u32>,
+        max_iterations: Option<u32>,
+    },
 }
 
 impl Default for SessionStatus {

@@ -61,8 +61,7 @@ impl AgentLoop {
         let all_indices: Vec<usize> = (0..tool_calls.len()).collect();
 
         let tool_timeout = Duration::from_millis(self.core.config.tool_timeout_ms);
-        let iteration_timeout =
-            Duration::from_millis(self.core.config.iteration_timeout_ms);
+        let iteration_timeout = Duration::from_millis(self.core.config.iteration_timeout_ms);
 
         // Channel to collect results from spawned tasks
         let (tx, mut rx) = mpsc::channel::<(usize, String)>(tool_calls.len());
@@ -153,8 +152,7 @@ impl AgentLoop {
         // Collect results with iteration-level deadline.
         // In Gateway mode, also listen for approval requests from spawned tasks.
         let mut deadline = Instant::now() + iteration_timeout;
-        let mut collected: Vec<(usize, String)> =
-            Vec::with_capacity(all_indices.len());
+        let mut collected: Vec<(usize, String)> = Vec::with_capacity(all_indices.len());
         let total = all_indices.len();
         let mut should_stop = false;
 
@@ -272,9 +270,7 @@ impl AgentLoop {
         // Build final results in original order
         let results: Vec<String> = (0..tool_calls.len())
             .map(|idx| {
-                if let Some(pos) =
-                    collected.iter().find(|(i, _)| *i == idx)
-                {
+                if let Some(pos) = collected.iter().find(|(i, _)| *i == idx) {
                     pos.1.clone()
                 } else {
                     format!(
@@ -304,7 +300,11 @@ impl AgentLoop {
 /// Execute a single tool call against the tool registry.
 ///
 /// Returns the result content string (success or error message).
-pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &ToolCall, work_dir: Option<&str>) -> String {
+pub(crate) async fn execute_single_tool(
+    tools: &[Arc<dyn Tool>],
+    tool_call: &ToolCall,
+    work_dir: Option<&str>,
+) -> String {
     let tool_name = &tool_call.function.name;
     let params_str = &tool_call.function.arguments;
 
@@ -337,9 +337,7 @@ pub(crate) async fn execute_single_tool(tools: &[Arc<dyn Tool>], tool_call: &Too
     // Detect truncated/incomplete tool calls: the streaming assembler injects a
     // special error marker when arguments are truncated. Skip actual execution
     // and return a clear error so the LLM knows to regenerate (not retry blindly).
-    if let Some("TOOL_CALL_INCOMPLETE") =
-        params.get("error").and_then(|v| v.as_str())
-    {
+    if let Some("TOOL_CALL_INCOMPLETE") = params.get("error").and_then(|v| v.as_str()) {
         return params
             .get("message")
             .and_then(|v| v.as_str())
@@ -510,7 +508,10 @@ async fn check_shell_approval_handle(
     let params: serde_json::Value = match serde_json::from_str(params_json) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!("check_shell_approval_handle: failed to parse shell params: {}", e);
+            tracing::warn!(
+                "check_shell_approval_handle: failed to parse shell params: {}",
+                e
+            );
             return None;
         }
     };
@@ -582,7 +583,7 @@ async fn check_shell_approval_handle(
 }
 
 impl AgentLoop {
-// ── Tool pipeline methods (ADR-014 Phase 8: extracted from execute_single_iteration) ──
+    // ── Tool pipeline methods (ADR-014 Phase 8: extracted from execute_single_iteration) ──
 
     /// Prepare tool calls for execution.
     ///
@@ -660,7 +661,11 @@ impl AgentLoop {
         let mut blocked_info: Vec<(usize, LoopPattern)> = Vec::new();
 
         for (idx, tc) in deduped_calls.iter().enumerate() {
-            match self.session.loop_detector.peek_check(&tc.function.name, &tc.function.arguments) {
+            match self
+                .session
+                .loop_detector
+                .peek_check(&tc.function.name, &tc.function.arguments)
+            {
                 LoopDetectionResult::NoLoop => {
                     calls_to_execute.push(tc.clone());
                 }
@@ -719,8 +724,10 @@ impl AgentLoop {
         }
 
         // Execute non-question tools in parallel
-        let calls_for_parallel: Vec<ToolCall> = parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
-        let (parallel_results, was_stopped) = self.execute_tools_parallel(&calls_for_parallel).await;
+        let calls_for_parallel: Vec<ToolCall> =
+            parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
+        let (parallel_results, was_stopped) =
+            self.execute_tools_parallel(&calls_for_parallel).await;
 
         // Merge results: ask_question + todo_write + parallel, mapped back to original indices
         let ask_result_map: std::collections::HashMap<usize, String> =
@@ -755,7 +762,9 @@ impl AgentLoop {
                          Please STOP using this tool and try a different approach \
                          (e.g., use file_read to verify results, or switch to another tool)."
                     }
-                    _ => "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach.",
+                    _ => {
+                        "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach."
+                    }
                 };
                 tool_results.push(msg.to_string());
             } else {
@@ -810,7 +819,8 @@ impl AgentLoop {
         let mut deferred_warnings: Vec<String> = Vec::new();
         let mut break_error: Option<String> = None;
 
-        for (idx, (tc, result_content)) in deduped_calls.iter().zip(tool_results.iter()).enumerate() {
+        for (idx, (tc, result_content)) in deduped_calls.iter().zip(tool_results.iter()).enumerate()
+        {
             // Skip loop detection for pre-blocked tool calls to avoid self-reinforcing
             // false positives: blocked tools return uniform error messages whose identical
             // hashes would incorrectly trigger NoProgress detection.

@@ -1,8 +1,8 @@
 //! Process spawn/kill/health-check utilities for agent processes
 
+use crate::error::GatewayError;
 use std::path::Path;
 use std::process::Stdio;
-use crate::error::GatewayError;
 
 /// Handle to a spawned agent process
 ///

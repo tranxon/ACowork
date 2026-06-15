@@ -5,7 +5,7 @@ use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, KnowledgeNode};
+use crate::types::{KnowledgeNode, labels};
 
 /// Cosine-similarity threshold for treating two facts as identical.
 const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.95;
@@ -15,7 +15,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| f64::from(*x) * f64::from(*y)).sum();
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| f64::from(*x) * f64::from(*y))
+        .sum();
     let norm_a: f64 = a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
     let norm_b: f64 = b.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
@@ -66,7 +70,10 @@ impl GrafeoStore {
 
         // No duplicate found — create a fresh node.
         let props = node.to_properties();
-        let id = self.store_node(labels::KNOWLEDGE, props.iter().map(|(k, v)| (k.as_str(), v.clone())))?;
+        let id = self.store_node(
+            labels::KNOWLEDGE,
+            props.iter().map(|(k, v)| (k.as_str(), v.clone())),
+        )?;
         Ok(id)
     }
 
@@ -129,10 +136,7 @@ impl GrafeoStore {
         })?;
 
         let props = node.to_properties();
-        self.update_node(
-            id,
-            props.iter().map(|(k, v)| (k.as_str(), v.clone())),
-        )
+        self.update_node(id, props.iter().map(|(k, v)| (k.as_str(), v.clone())))
     }
 }
 

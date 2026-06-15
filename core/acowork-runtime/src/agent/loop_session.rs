@@ -24,12 +24,15 @@ impl super::loop_::AgentLoop {
         if self.session.set_status(new_status) {
             let status = self.session.status.clone();
             // Emit chunk event to Gateway → frontend
-            if !self.core.try_send_chunk(super::loop_::ChunkEvent::SessionStateChanged {
-                status: status.clone(),
-                model: self.session.model().map(|s| s.to_string()),
-                provider: self.session.provider().map(|s| s.to_string()),
-                workspace_id: self.session.workspace_id(),
-            }) {
+            if !self
+                .core
+                .try_send_chunk(super::loop_::ChunkEvent::SessionStateChanged {
+                    status: status.clone(),
+                    model: self.session.model().map(|s| s.to_string()),
+                    provider: self.session.provider().map(|s| s.to_string()),
+                    workspace_id: self.session.workspace_id(),
+                })
+            {
                 tracing::warn!(
                     "SessionStateChanged event dropped (channel full/closed), status={:?}. Pull repair will correct frontend.",
                     status
@@ -59,7 +62,10 @@ impl super::loop_::AgentLoop {
     /// `Some(false)` if the title was already the same (no-op),
     /// or `None` if no active session exists.
     pub fn update_session_title(&mut self, title: &str) -> Option<bool> {
-        self.session.conversation.as_ref().map(|conv| conv.update_title_force(title))
+        self.session
+            .conversation
+            .as_ref()
+            .map(|conv| conv.update_title_force(title))
     }
 
     /// Persist the per-session workspace selection to the JSONL conversation file.
@@ -128,9 +134,8 @@ impl super::loop_::AgentLoop {
                 let memory_store = self.core.memory_store().cloned();
                 let emb_provider = self.core.embedding_provider.clone();
                 // Build combined text for model-aware token counting via the unified API.
-                let combined_text: String = tail_messages
-                    .iter()
-                    .fold(String::new(), |mut acc, m| {
+                let combined_text: String =
+                    tail_messages.iter().fold(String::new(), |mut acc, m| {
                         acc.push_str(&m.content);
                         acc.push('\n');
                         acc
@@ -163,7 +168,8 @@ impl super::loop_::AgentLoop {
                                 &session_id,
                                 &memory_store,
                                 emb_provider.as_deref(),
-                            ).await;
+                            )
+                            .await;
                             tracing::info!(
                                 session_id = %session_id,
                                 summary_len = summary.len(),
@@ -220,10 +226,10 @@ impl super::loop_::AgentLoop {
         tracing::info!(iteration, "Agent returned text response");
 
         // Debug: enter AppendHistory phase and push step event
-        self.core.debug_observer.on_phase_enter(
-            crate::debug::protocol::DebugPhase::AppendHistory,
-        )
-        .await;
+        self.core
+            .debug_observer
+            .on_phase_enter(crate::debug::protocol::DebugPhase::AppendHistory)
+            .await;
         self.core.debug_observer.on_phase_step(
             crate::debug::protocol::DebugPhase::Idle,
             None,
@@ -260,7 +266,9 @@ pub fn strip_think_block(content: &str) -> String {
     {
         let before = &content[..start];
         let after = &content[end + end_tag.len()..];
-        return format!("{}{}", before.trim(), after.trim()).trim().to_string();
+        return format!("{}{}", before.trim(), after.trim())
+            .trim()
+            .to_string();
     }
     content.to_string()
 }

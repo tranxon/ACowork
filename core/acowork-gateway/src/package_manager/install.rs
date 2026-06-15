@@ -6,10 +6,10 @@
 //! on [`install_package`] which takes a file path. Callers that receive bytes
 //! (e.g. multipart handlers) must spool to a temp file first.
 
-use std::io::Read;
-use std::path::Path;
 use crate::error::GatewayError;
 use crate::gateway::state::{AgentInfo, GatewayState};
+use std::io::Read;
+use std::path::Path;
 
 /// Install a .agent package from a file path.
 ///
@@ -23,11 +23,21 @@ pub fn install_package(
     dev_mode: bool,
 ) -> Result<AgentInfo, GatewayError> {
     // 1. Read and open ZIP
-    let data = std::fs::read(package_path)
-        .map_err(|e| GatewayError::Package(format!("Failed to read package '{}': {}", package_path.display(), e)))?;
+    let data = std::fs::read(package_path).map_err(|e| {
+        GatewayError::Package(format!(
+            "Failed to read package '{}': {}",
+            package_path.display(),
+            e
+        ))
+    })?;
     let reader = std::io::Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| GatewayError::Package(format!("Failed to read ZIP '{}': {}", package_path.display(), e)))?;
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
+        GatewayError::Package(format!(
+            "Failed to read ZIP '{}': {}",
+            package_path.display(),
+            e
+        ))
+    })?;
 
     // 2. Verify package signature (delegate to acowork-sign)
     // Re-read for verification (avoids keeping the full Vec alive across the verify call;
@@ -37,11 +47,16 @@ pub fn install_package(
             Ok(result) => {
                 tracing::info!(
                     "Package signature verified: signer={}, fingerprint={}, sections={}",
-                    result.signer, result.certificate_fingerprint, result.sections_count
+                    result.signer,
+                    result.certificate_fingerprint,
+                    result.sections_count
                 );
             }
             Err(e) => {
-                tracing::warn!("Package signature verification failed (dev mode, continuing): {}", e);
+                tracing::warn!(
+                    "Package signature verification failed (dev mode, continuing): {}",
+                    e
+                );
             }
         }
     } else {
@@ -49,13 +64,16 @@ pub fn install_package(
             Ok(result) => {
                 tracing::info!(
                     "Package signature verified: signer={}, fingerprint={}, sections={}",
-                    result.signer, result.certificate_fingerprint, result.sections_count
+                    result.signer,
+                    result.certificate_fingerprint,
+                    result.sections_count
                 );
             }
             Err(e) => {
                 tracing::error!("Package signature verification failed: {}", e);
                 return Err(GatewayError::Package(format!(
-                    "Signature verification failed: {}", e
+                    "Signature verification failed: {}",
+                    e
                 )));
             }
         }
@@ -79,7 +97,9 @@ pub fn install_package(
 
     // 6. Extract all files to install directory
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| GatewayError::Package(format!("ZIP read error: {}", e)))?;
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| GatewayError::Package(format!("ZIP read error: {}", e)))?;
         let outpath = match file.enclosed_name() {
             Some(path) => agent_install_dir.join(path),
             None => continue,
@@ -89,13 +109,24 @@ pub fn install_package(
             std::fs::create_dir_all(&outpath).ok();
         } else {
             if let Some(p) = outpath.parent()
-                && !p.exists() {
+                && !p.exists()
+            {
                 std::fs::create_dir_all(p).ok();
             }
-            let mut outfile = std::fs::File::create(&outpath)
-                .map_err(|e| GatewayError::Package(format!("Failed to create file '{}': {}", outpath.display(), e)))?;
-            std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| GatewayError::Package(format!("Failed to write file '{}': {}", outpath.display(), e)))?;
+            let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
+                GatewayError::Package(format!(
+                    "Failed to create file '{}': {}",
+                    outpath.display(),
+                    e
+                ))
+            })?;
+            std::io::copy(&mut file, &mut outfile).map_err(|e| {
+                GatewayError::Package(format!(
+                    "Failed to write file '{}': {}",
+                    outpath.display(),
+                    e
+                ))
+            })?;
         }
     }
 
@@ -119,11 +150,16 @@ pub fn install_package(
             if let Some(schedule) = &trigger.schedule {
                 let action = trigger.action.as_deref().unwrap_or("cron_trigger");
                 let params = trigger.params.clone().unwrap_or(serde_json::json!({}));
-                match state.cron_scheduler.register(agent_id, schedule, action, params.clone()) {
+                match state
+                    .cron_scheduler
+                    .register(agent_id, schedule, action, params.clone())
+                {
                     Ok(cron_id) => {
                         tracing::info!(
                             "Registered cron trigger: agent={} cron_id={} schedule={}",
-                            agent_id, cron_id, schedule
+                            agent_id,
+                            cron_id,
+                            schedule
                         );
                         // Persist to CronStore
                         if let Some(store) = &state.cron_store {
@@ -132,7 +168,8 @@ pub fn install_package(
                                 agent_id: agent_id.clone(),
                                 schedule: schedule.clone(),
                                 action: action.to_string(),
-                                params: serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string()),
+                                params: serde_json::to_string(&params)
+                                    .unwrap_or_else(|_| "{}".to_string()),
                                 timezone: None,
                                 retry_count: 0,
                                 retry_interval_secs: 60,
@@ -148,7 +185,9 @@ pub fn install_package(
                     Err(e) => {
                         tracing::warn!(
                             "Invalid cron schedule in manifest for agent {}: schedule={} error={}",
-                            agent_id, schedule, e
+                            agent_id,
+                            schedule,
+                            e
                         );
                     }
                 }
@@ -160,17 +199,21 @@ pub fn install_package(
 }
 
 /// Extract manifest.toml from ZIP archive
-fn extract_manifest(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<acowork_core::AgentManifest, GatewayError> {
-    let mut manifest_file = archive.by_name("manifest.toml")
+fn extract_manifest(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+) -> Result<acowork_core::AgentManifest, GatewayError> {
+    let mut manifest_file = archive
+        .by_name("manifest.toml")
         .map_err(|e| GatewayError::Package(format!("manifest.toml not found in package: {}", e)))?;
-    
+
     let mut manifest_str = String::new();
-    manifest_file.read_to_string(&mut manifest_str)
+    manifest_file
+        .read_to_string(&mut manifest_str)
         .map_err(|e| GatewayError::Package(format!("Failed to read manifest.toml: {}", e)))?;
-    
+
     let manifest = acowork_core::AgentManifest::from_toml(&manifest_str)
         .map_err(|e| GatewayError::Package(format!("Invalid manifest.toml: {}", e)))?;
-    
+
     Ok(manifest)
 }
 
@@ -185,13 +228,13 @@ mod tests {
         let zip_file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = zip::ZipWriter::new(zip_file);
         let options = zip::write::SimpleFileOptions::default();
-        
+
         zip.start_file("manifest.toml", options).unwrap();
         zip.write_all(manifest_toml.as_bytes()).unwrap();
-        
+
         zip.start_file("prompts/default.md", options).unwrap();
         zip.write_all(b"You are a weather agent.").unwrap();
-        
+
         zip.finish().unwrap();
         zip_path
     }
@@ -205,9 +248,10 @@ mod tests {
 
     #[test]
     fn test_install_package_success() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-install-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-install-{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let manifest_toml = r#"
             agent_id = "com.test.weather"
             version = "1.0.0"
@@ -219,28 +263,29 @@ mod tests {
             provider = "openai"
             model = "gpt-4"
         "#;
-        
+
         let zip_path = create_test_zip(&temp_dir, manifest_toml);
         let install_dir = temp_dir.join("installed");
         let vault_dir = temp_vault_dir("success");
         let mut state = GatewayState::new(&vault_dir);
-        
+
         let result = install_package(&zip_path, &install_dir, &mut state, true);
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.agent_id, "com.test.weather");
         assert_eq!(info.version, "1.0.0");
         assert!(state.is_installed("com.test.weather"));
-        
+
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_install_package_already_installed() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-install-dup-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-install-dup-{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let manifest_toml = r#"
             agent_id = "com.test.dup"
             version = "1.0.0"
@@ -252,28 +297,31 @@ mod tests {
             provider = "openai"
             model = "gpt-4"
         "#;
-        
+
         let zip_path = create_test_zip(&temp_dir, manifest_toml);
         let install_dir = temp_dir.join("installed");
         let vault_dir = temp_vault_dir("dup");
         let mut state = GatewayState::new(&vault_dir);
-        
+
         // First install should succeed
         install_package(&zip_path, &install_dir, &mut state, true).unwrap();
-        
+
         // Second install should fail
         let result = install_package(&zip_path, &install_dir, &mut state, true);
         assert!(result.is_err());
-        
+
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_install_package_missing_manifest() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-install-nomanifest-{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "acowork-test-install-nomanifest-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         // Create ZIP without manifest.toml
         let zip_path = temp_dir.join("no-manifest.agent");
         let zip_file = std::fs::File::create(&zip_path).unwrap();
@@ -282,14 +330,14 @@ mod tests {
         zip.start_file("prompts/default.md", options).unwrap();
         zip.write_all(b"Hello").unwrap();
         zip.finish().unwrap();
-        
+
         let install_dir = temp_dir.join("installed");
         let vault_dir = temp_vault_dir("nomanifest");
         let mut state = GatewayState::new(&vault_dir);
-        
+
         let result = install_package(&zip_path, &install_dir, &mut state, true);
         assert!(result.is_err());
-        
+
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

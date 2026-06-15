@@ -1,11 +1,7 @@
 //! Tray event handlers
 
-use tauri::{
-    tray::TrayIconEvent,
-    menu::MenuEvent,
-    AppHandle, Manager,
-};
 use crate::state::AppState;
+use tauri::{AppHandle, Manager, menu::MenuEvent, tray::TrayIconEvent};
 
 /// Handle tray menu events
 pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {

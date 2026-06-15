@@ -20,8 +20,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
-use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
 use acowork_core::protocol::ModelCapabilitiesInfo;
+use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
 use serde::{Deserialize, Serialize};
 
 use crate::embedding::EmbeddingProvider;
@@ -262,9 +262,8 @@ impl EpisodeDistiller {
         let Some(store) = memory_store else {
             return;
         };
-        let manager = crate::memory::MemoryManager::new(
-            crate::memory::MemoryManagerConfig::default(),
-        );
+        let manager =
+            crate::memory::MemoryManager::new(crate::memory::MemoryManagerConfig::default());
         let parsed = parse_compact_output(summary_text);
         let episode = DistilledEpisode {
             session_id: session_id.to_string(),
@@ -274,7 +273,10 @@ impl EpisodeDistiller {
             entities: parsed.entities,
             triples: parsed.triples,
         };
-        if let Err(e) = manager.record_distilled(store, &episode, embedding_provider).await {
+        if let Err(e) = manager
+            .record_distilled(store, &episode, embedding_provider)
+            .await
+        {
             tracing::warn!(
                 error = %e,
                 session_id = %session_id,
@@ -370,11 +372,11 @@ fn read_jsonl_content(path: &Path) -> Result<String> {
 
         // Try to parse as ConversationEntry and extract role + content
         if let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let content = entry
-                .get("content")
+            let role = entry
+                .get("role")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .unwrap_or("unknown");
+            let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
             lines_vec.push(format!("[{}]: {}", role, content));
         }
     }
@@ -399,9 +401,10 @@ async fn compact_with_llm(
         tools: None,
     };
 
-    let response = provider.chat(request).await.map_err(|e| {
-        RuntimeError::Core(e)
-    })?;
+    let response = provider
+        .chat(request)
+        .await
+        .map_err(|e| RuntimeError::Core(e))?;
 
     // Trim whitespace but keep the full response as-is.
     let summary = response.content.trim().to_string();
@@ -484,7 +487,11 @@ mod tests {
         assert!((model_cost_score(&model) - 9.0).abs() < 0.001);
     }
 
-    fn model_info(name: &str, cost: Option<(f64, f64)>, context_window: u64) -> ModelCapabilitiesInfo {
+    fn model_info(
+        name: &str,
+        cost: Option<(f64, f64)>,
+        context_window: u64,
+    ) -> ModelCapabilitiesInfo {
         ModelCapabilitiesInfo {
             context_window,
             max_output_tokens: 4096,
@@ -498,7 +505,11 @@ mod tests {
                 output_per_million: Some(output),
             }),
             modalities: None,
-            name: if name.is_empty() { None } else { Some(name.to_string()) },
+            name: if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            },
             family: None,
             knowledge_cutoff: None,
         }

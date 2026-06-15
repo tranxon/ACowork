@@ -13,11 +13,10 @@
 //! multipart upload → spool to temp file → extract ZIP to agent's skills/ dir.
 
 use axum::{
+    Json, Router,
     extract::{Multipart, Path, Query, State},
     http::StatusCode,
-    Json,
     routing::{get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,7 +31,10 @@ pub fn skills_routes() -> Router<AppState> {
     Router::new()
         .route("/api/agents/{id}/skills", get(list_skills))
         .route("/api/agents/{id}/skills/{name}", get(get_skill_detail))
-        .route("/api/agents/{id}/skills/{name}/history", get(get_skill_history))
+        .route(
+            "/api/agents/{id}/skills/{name}/history",
+            get(get_skill_history),
+        )
         .route("/api/agents/{id}/skills/import", post(import_skill))
 }
 
@@ -211,51 +213,61 @@ fn install_skill_package(
     skills_dir: &StdPath,
 ) -> Result<String, GatewayError> {
     // 1. Read and open ZIP
-    let data = std::fs::read(package_path)
-        .map_err(|e| GatewayError::Package(format!(
-            "Failed to read skill package '{}': {}", package_path.display(), e
-        )))?;
+    let data = std::fs::read(package_path).map_err(|e| {
+        GatewayError::Package(format!(
+            "Failed to read skill package '{}': {}",
+            package_path.display(),
+            e
+        ))
+    })?;
     let reader = std::io::Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| GatewayError::Package(format!(
-            "Failed to read skill ZIP '{}': {}", package_path.display(), e
-        )))?;
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
+        GatewayError::Package(format!(
+            "Failed to read skill ZIP '{}': {}",
+            package_path.display(),
+            e
+        ))
+    })?;
 
     // 2. Locate SKILL.md — it may be at root or inside a single top-level directory
     let skill_md_content = extract_skill_md(&mut archive)?;
 
     // 3. Parse SKILL.md frontmatter to extract skill name
-    let parsed = parse_skill_md(&skill_md_content)
-        .ok_or_else(|| GatewayError::Package(
-            "Invalid SKILL.md format: missing or malformed YAML frontmatter".to_string()
-        ))?;
+    let parsed = parse_skill_md(&skill_md_content).ok_or_else(|| {
+        GatewayError::Package(
+            "Invalid SKILL.md format: missing or malformed YAML frontmatter".to_string(),
+        )
+    })?;
     let skill_name = parsed.entry.name;
 
     // 4. Ensure the agent's skills directory exists
     std::fs::create_dir_all(skills_dir)
-        .map_err(|e| GatewayError::Package(format!(
-            "Failed to create skills directory: {}", e
-        )))?;
+        .map_err(|e| GatewayError::Package(format!("Failed to create skills directory: {}", e)))?;
 
     // 5. Check if a skill with the same name already exists
     let target_skill_dir = skills_dir.join(&skill_name);
     if target_skill_dir.exists() {
         return Err(GatewayError::Package(format!(
-            "Skill '{}' already exists (will not overwrite)", skill_name
+            "Skill '{}' already exists (will not overwrite)",
+            skill_name
         )));
     }
 
     // 6. Create the target skill directory
-    std::fs::create_dir_all(&target_skill_dir)
-        .map_err(|e| GatewayError::Package(format!(
-            "Failed to create skill directory '{}': {}", target_skill_dir.display(), e
-        )))?;
+    std::fs::create_dir_all(&target_skill_dir).map_err(|e| {
+        GatewayError::Package(format!(
+            "Failed to create skill directory '{}': {}",
+            target_skill_dir.display(),
+            e
+        ))
+    })?;
 
     // 7. Extract all files to the target skill directory
     //    If the ZIP has a single top-level directory prefix, strip it.
     let top_dir_name = detect_top_level_dir(&mut archive);
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)
+        let mut file = archive
+            .by_index(i)
             .map_err(|e| GatewayError::Package(format!("ZIP read error: {}", e)))?;
 
         let raw_path = match file.enclosed_name() {
@@ -290,18 +302,28 @@ fn install_skill_package(
             {
                 std::fs::create_dir_all(p).ok();
             }
-            let mut outfile = std::fs::File::create(&outpath)
-                .map_err(|e| GatewayError::Package(format!(
-                    "Failed to create file '{}': {}", outpath.display(), e
-                )))?;
-            std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| GatewayError::Package(format!(
-                    "Failed to write file '{}': {}", outpath.display(), e
-                )))?;
+            let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
+                GatewayError::Package(format!(
+                    "Failed to create file '{}': {}",
+                    outpath.display(),
+                    e
+                ))
+            })?;
+            std::io::copy(&mut file, &mut outfile).map_err(|e| {
+                GatewayError::Package(format!(
+                    "Failed to write file '{}': {}",
+                    outpath.display(),
+                    e
+                ))
+            })?;
         }
     }
 
-    tracing::info!("Skill '{}' imported to {}", skill_name, target_skill_dir.display());
+    tracing::info!(
+        "Skill '{}' imported to {}",
+        skill_name,
+        target_skill_dir.display()
+    );
     Ok(skill_name)
 }
 
@@ -332,7 +354,7 @@ fn extract_skill_md(
     }
 
     Err(GatewayError::Package(
-        "SKILL.md not found in skill package".to_string()
+        "SKILL.md not found in skill package".to_string(),
     ))
 }
 
@@ -341,9 +363,7 @@ fn extract_skill_md(
 /// Returns the top-level directory name (e.g. "my-skill") if all entries
 /// share the same single top-level directory component. Returns None if
 /// entries are at root level or there are multiple top-level directories.
-fn detect_top_level_dir(
-    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
-) -> Option<String> {
+fn detect_top_level_dir(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Option<String> {
     let mut top_dirs: Vec<String> = Vec::new();
     for i in 0..archive.len() {
         let file = archive.by_index(i).ok()?;
@@ -367,7 +387,8 @@ fn detect_top_level_dir(
 /// Simple nanosecond timestamp for unique temp filenames
 fn timestamp_nanos() -> u128 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
 }
@@ -383,7 +404,9 @@ pub async fn list_skills(
     let gw = state.gateway_state.read().await;
 
     // Verify agent exists and get install path
-    let info = gw.installed_agents.get(&agent_id)
+    let info = gw
+        .installed_agents
+        .get(&agent_id)
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
 
     let skills_dir = agent_skills_dir(&info.install_path);
@@ -429,7 +452,9 @@ pub async fn get_skill_detail(
     let gw = state.gateway_state.read().await;
 
     // Verify agent exists and get install path
-    let info = gw.installed_agents.get(&agent_id)
+    let info = gw
+        .installed_agents
+        .get(&agent_id)
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
 
     let skills_dir = agent_skills_dir(&info.install_path);
@@ -437,15 +462,15 @@ pub async fn get_skill_detail(
 
     if !skills_dir.exists() {
         return Err(ApiError::not_found(&format!(
-            "Skill not found: {}", skill_name
+            "Skill not found: {}",
+            skill_name
         )));
     }
 
     let skills = load_skills_from_dir(&skills_dir);
-    let parsed = skills.get(&skill_name)
-        .ok_or_else(|| ApiError::not_found(&format!(
-            "Skill not found: {}", skill_name
-        )))?;
+    let parsed = skills
+        .get(&skill_name)
+        .ok_or_else(|| ApiError::not_found(&format!("Skill not found: {}", skill_name)))?;
 
     Ok(Json(SkillDetailResponse {
         name: parsed.entry.name.clone(),
@@ -478,14 +503,17 @@ pub async fn import_skill(
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut overwrite: Option<bool> = None;
 
-    while let Some(field) = multipart.next_field().await
+    while let Some(field) = multipart
+        .next_field()
+        .await
         .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {}", e)))?
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
             "package" => {
-                let bytes = field.bytes().await
-                    .map_err(|e| ApiError::bad_request(&format!("Failed to read package field: {}", e)))?;
+                let bytes = field.bytes().await.map_err(|e| {
+                    ApiError::bad_request(&format!("Failed to read package field: {}", e))
+                })?;
                 package_bytes = Some(bytes.to_vec());
             }
             "overwrite" => {
@@ -496,8 +524,8 @@ pub async fn import_skill(
         }
     }
 
-    let package_bytes = package_bytes
-        .ok_or_else(|| ApiError::bad_request("Missing required field: 'package'"))?;
+    let package_bytes =
+        package_bytes.ok_or_else(|| ApiError::bad_request("Missing required field: 'package'"))?;
 
     if package_bytes.is_empty() {
         return Err(ApiError::bad_request("Package file is empty"));
@@ -506,7 +534,9 @@ pub async fn import_skill(
     // Verify agent exists and get install path
     let install_path = {
         let gw = state.gateway_state.read().await;
-        let info = gw.installed_agents.get(&agent_id)
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
             .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
         info.install_path.clone()
     };
@@ -527,7 +557,8 @@ pub async fn import_skill(
         // Write bytes to temp file
         if let Err(e) = std::fs::write(&temp_file, &package_bytes) {
             return Err(GatewayError::Package(format!(
-                "Failed to write upload to temp file: {}", e
+                "Failed to write upload to temp file: {}",
+                e
             )));
         }
 
@@ -538,19 +569,27 @@ pub async fn import_skill(
         let _ = std::fs::remove_file(&temp_file);
 
         result
-    }).await;
+    })
+    .await;
 
     match install_result {
-        Ok(Ok(skill_name)) => Ok((StatusCode::CREATED, Json(ImportSkillResponse {
-            success: true,
-            skill_name: skill_name.clone(),
-            message: format!("Skill '{}' imported successfully", skill_name),
-        }))),
+        Ok(Ok(skill_name)) => Ok((
+            StatusCode::CREATED,
+            Json(ImportSkillResponse {
+                success: true,
+                skill_name: skill_name.clone(),
+                message: format!("Skill '{}' imported successfully", skill_name),
+            }),
+        )),
         Ok(Err(GatewayError::Package(msg))) => Err(ApiError::bad_request(&format!(
-            "Skill import failed: {}", msg
+            "Skill import failed: {}",
+            msg
         ))),
         Ok(Err(e)) => Err(ApiError::internal(&format!("Skill import failed: {}", e))),
-        Err(e) => Err(ApiError::internal(&format!("Skill import task failed: {}", e))),
+        Err(e) => Err(ApiError::internal(&format!(
+            "Skill import task failed: {}",
+            e
+        ))),
     }
 }
 
@@ -566,7 +605,10 @@ pub async fn get_skill_history(
 
     // Verify agent exists
     if !gw.is_installed(&agent_id) {
-        return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        return Err(ApiError::not_found(&format!(
+            "Agent not found: {}",
+            agent_id
+        )));
     }
     drop(gw);
 
@@ -754,7 +796,8 @@ Body
         zip.start_file("my-skill/SKILL.md", options).unwrap();
         zip.write_all(b"---\nname: my-skill\ndescription: A nested skill\ntriggers:\n  - nested\n---\n\nNested skill instructions.").unwrap();
 
-        zip.start_file("my-skill/prompts/action.md", options).unwrap();
+        zip.start_file("my-skill/prompts/action.md", options)
+            .unwrap();
         zip.write_all(b"Nested action prompt.").unwrap();
 
         zip.finish().unwrap();
@@ -763,7 +806,8 @@ Body
 
     #[test]
     fn test_install_skill_package_root_level() {
-        let tmp = std::env::temp_dir().join(format!("acowork-test-skill-root-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("acowork-test-skill-root-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -778,7 +822,8 @@ Body
         assert!(skills_dir.join("root-skill/SKILL.md").exists());
         assert!(skills_dir.join("root-skill/prompts/action.md").exists());
 
-        let content = std::fs::read_to_string(skills_dir.join("root-skill/prompts/action.md")).unwrap();
+        let content =
+            std::fs::read_to_string(skills_dir.join("root-skill/prompts/action.md")).unwrap();
         assert_eq!(content, "Action prompt content.");
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -786,7 +831,8 @@ Body
 
     #[test]
     fn test_install_skill_package_nested() {
-        let tmp = std::env::temp_dir().join(format!("acowork-test-skill-nested-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("acowork-test-skill-nested-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -801,7 +847,8 @@ Body
         assert!(skills_dir.join("my-skill/SKILL.md").exists());
         assert!(skills_dir.join("my-skill/prompts/action.md").exists());
 
-        let content = std::fs::read_to_string(skills_dir.join("my-skill/prompts/action.md")).unwrap();
+        let content =
+            std::fs::read_to_string(skills_dir.join("my-skill/prompts/action.md")).unwrap();
         assert_eq!(content, "Nested action prompt.");
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -809,7 +856,8 @@ Body
 
     #[test]
     fn test_install_skill_package_duplicate() {
-        let tmp = std::env::temp_dir().join(format!("acowork-test-skill-dup-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("acowork-test-skill-dup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -829,7 +877,8 @@ Body
 
     #[test]
     fn test_install_skill_package_missing_skill_md() {
-        let tmp = std::env::temp_dir().join(format!("acowork-test-skill-nomd-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("acowork-test-skill-nomd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 

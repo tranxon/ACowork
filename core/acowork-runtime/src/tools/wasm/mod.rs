@@ -13,10 +13,10 @@
 //! - `wit` — WIT component model interface (Phase 3+)
 //! - `component` — Component model loader (Phase 3+)
 
-pub mod engine;
-pub mod instance;
-pub mod host;
-pub mod wasi_mapper;
-pub mod sandbox;
-pub mod wit;
 pub mod component;
+pub mod engine;
+pub mod host;
+pub mod instance;
+pub mod sandbox;
+pub mod wasi_mapper;
+pub mod wit;

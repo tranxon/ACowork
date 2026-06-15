@@ -53,7 +53,9 @@ pub fn load_package(package_path: &Path) -> Result<LoadedPackage> {
     );
 
     // Validate manifest
-    manifest.validate().map_err(|e| RuntimeError::Package(e.to_string()))?;
+    manifest
+        .validate()
+        .map_err(|e| RuntimeError::Package(e.to_string()))?;
 
     // Verify signature (delegated to acowork-sign)
     // Phase 1: signature verification is optional — unsigned packages are allowed
@@ -74,13 +76,11 @@ pub fn load_package(package_path: &Path) -> Result<LoadedPackage> {
 
 /// Extract ZIP package to a temporary directory
 fn extract_zip_package(zip_path: &Path) -> Result<PathBuf> {
-    let file = fs::File::open(zip_path).map_err(|e| {
-        RuntimeError::Package(format!("Failed to open ZIP file: {e}"))
-    })?;
+    let file = fs::File::open(zip_path)
+        .map_err(|e| RuntimeError::Package(format!("Failed to open ZIP file: {e}")))?;
 
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
-        RuntimeError::Package(format!("Failed to read ZIP archive: {e}"))
-    })?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| RuntimeError::Package(format!("Failed to read ZIP archive: {e}")))?;
 
     // Extract to a temp directory named after the ZIP file
     let zip_stem = zip_path
@@ -91,19 +91,17 @@ fn extract_zip_package(zip_path: &Path) -> Result<PathBuf> {
 
     // Clean up previous extraction if exists
     if extract_dir.exists() {
-        fs::remove_dir_all(&extract_dir).map_err(|e| {
-            RuntimeError::Package(format!("Failed to clean extract dir: {e}"))
-        })?;
+        fs::remove_dir_all(&extract_dir)
+            .map_err(|e| RuntimeError::Package(format!("Failed to clean extract dir: {e}")))?;
     }
 
-    fs::create_dir_all(&extract_dir).map_err(|e| {
-        RuntimeError::Package(format!("Failed to create extract dir: {e}"))
-    })?;
+    fs::create_dir_all(&extract_dir)
+        .map_err(|e| RuntimeError::Package(format!("Failed to create extract dir: {e}")))?;
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| {
-            RuntimeError::Package(format!("Failed to read ZIP entry {i}: {e}"))
-        })?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| RuntimeError::Package(format!("Failed to read ZIP entry {i}: {e}")))?;
 
         let out_path = match entry.enclosed_name() {
             Some(path) => extract_dir.join(path),
@@ -111,9 +109,8 @@ fn extract_zip_package(zip_path: &Path) -> Result<PathBuf> {
         };
 
         if entry.is_dir() {
-            fs::create_dir_all(&out_path).map_err(|e| {
-                RuntimeError::Package(format!("Failed to create dir: {e}"))
-            })?;
+            fs::create_dir_all(&out_path)
+                .map_err(|e| RuntimeError::Package(format!("Failed to create dir: {e}")))?;
         } else {
             // Create parent directory if needed
             if let Some(parent) = out_path.parent() {
@@ -122,13 +119,11 @@ fn extract_zip_package(zip_path: &Path) -> Result<PathBuf> {
                 })?;
             }
 
-            let mut outfile = fs::File::create(&out_path).map_err(|e| {
-                RuntimeError::Package(format!("Failed to create file: {e}"))
-            })?;
+            let mut outfile = fs::File::create(&out_path)
+                .map_err(|e| RuntimeError::Package(format!("Failed to create file: {e}")))?;
 
-            std::io::copy(&mut entry, &mut outfile).map_err(|e| {
-                RuntimeError::Package(format!("Failed to extract file: {e}"))
-            })?;
+            std::io::copy(&mut entry, &mut outfile)
+                .map_err(|e| RuntimeError::Package(format!("Failed to extract file: {e}")))?;
         }
     }
 
@@ -146,9 +141,8 @@ fn load_manifest(package_dir: &Path) -> Result<AgentManifest> {
         ));
     }
 
-    let toml_str = fs::read_to_string(&manifest_path).map_err(|e| {
-        RuntimeError::Package(format!("Failed to read manifest.toml: {e}"))
-    })?;
+    let toml_str = fs::read_to_string(&manifest_path)
+        .map_err(|e| RuntimeError::Package(format!("Failed to read manifest.toml: {e}")))?;
 
     AgentManifest::from_toml(&toml_str).map_err(|e| RuntimeError::Package(e.to_string()))
 }
@@ -167,14 +161,12 @@ pub fn list_prompt_files(package_dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     let mut files = Vec::new();
-    let entries = fs::read_dir(&prompts_dir).map_err(|e| {
-        RuntimeError::Package(format!("Failed to read prompts dir: {e}"))
-    })?;
+    let entries = fs::read_dir(&prompts_dir)
+        .map_err(|e| RuntimeError::Package(format!("Failed to read prompts dir: {e}")))?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            RuntimeError::Package(format!("Failed to read dir entry: {e}"))
-        })?;
+        let entry =
+            entry.map_err(|e| RuntimeError::Package(format!("Failed to read dir entry: {e}")))?;
 
         let path = entry.path();
         if path.is_file()
@@ -198,14 +190,12 @@ pub fn list_skill_files(package_dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     let mut files = Vec::new();
-    let entries = fs::read_dir(&skills_dir).map_err(|e| {
-        RuntimeError::Package(format!("Failed to read skills dir: {e}"))
-    })?;
+    let entries = fs::read_dir(&skills_dir)
+        .map_err(|e| RuntimeError::Package(format!("Failed to read skills dir: {e}")))?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            RuntimeError::Package(format!("Failed to read dir entry: {e}"))
-        })?;
+        let entry =
+            entry.map_err(|e| RuntimeError::Package(format!("Failed to read dir entry: {e}")))?;
 
         let path = entry.path();
         if path.is_dir() {
@@ -227,7 +217,11 @@ mod tests {
 
     fn create_test_package_dir() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("acowork-test-package-{}-{}", std::process::id(), COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-package-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
         fs::create_dir_all(dir.join("skills").join("greeting")).unwrap();
@@ -254,7 +248,11 @@ name = "calculator"
         .unwrap();
 
         // Write prompt files
-        fs::write(dir.join("prompts").join("system.md"), "You are a helpful assistant.").unwrap();
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a helpful assistant.",
+        )
+        .unwrap();
         fs::write(
             dir.join("prompts").join("constraints.md"),
             "Always be polite.",

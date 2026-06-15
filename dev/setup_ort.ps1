@@ -62,6 +62,16 @@ Write-Host "  Install Dir : $OrtExtractedDir" -ForegroundColor Cyan
 Write-Host "  Sources     : $($OrtUrls.Count) (mirrors + GitHub)" -ForegroundColor Cyan
 Write-Host ""
 
+$existingOrtDirs = @()
+if (Test-Path $OrtInstallDir) {
+    $existingOrtDirs = Get-ChildItem -Path $OrtInstallDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "onnxruntime-win-x64-*" }
+}
+foreach ($dir in $existingOrtDirs) {
+    if ($dir.Name -ne $OrtArchiveName) {
+        Write-Host "  Found older/different ORT: $($dir.Name)" -ForegroundColor Yellow
+    }
+}
+
 # ── Check if already installed ──────────────────────────────────────────────
 $OrtLibPath = Join-Path $OrtExtractedDir "lib\$OrtLibStatic"
 if ((Test-Path $OrtLibPath) -and -not $Reinstall) {

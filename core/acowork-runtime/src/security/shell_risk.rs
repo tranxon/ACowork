@@ -58,72 +58,175 @@ pub struct ShellRiskAssessment {
 /// Low-risk command whitelist.
 const LOW_RISK_COMMANDS: &[&str] = &[
     // Unix / bash
-    "ls", "dir", "cat", "head", "tail", "less", "more",
-    "grep", "egrep", "fgrep", "rg", "ag", "ack",
-    "find", "which", "where", "whereis", "locate",
-    "echo", "printf", "wc", "sort", "uniq", "diff", "cmp",
-    "cut", "paste", "tr", "sed", "awk", "gawk",
-    "file", "stat", "du", "df", "touch",
-    "pwd", "whoami", "hostname", "uname", "date", "env",
-    "true", "false", "test", "expr",
-    "git", "gh",
-    "tree", "tldr",
+    "ls",
+    "dir",
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
+    "ack",
+    "find",
+    "which",
+    "where",
+    "whereis",
+    "locate",
+    "echo",
+    "printf",
+    "wc",
+    "sort",
+    "uniq",
+    "diff",
+    "cmp",
+    "cut",
+    "paste",
+    "tr",
+    "sed",
+    "awk",
+    "gawk",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "touch",
+    "pwd",
+    "whoami",
+    "hostname",
+    "uname",
+    "date",
+    "env",
+    "true",
+    "false",
+    "test",
+    "expr",
+    "git",
+    "gh",
+    "tree",
+    "tldr",
     // PowerShell — file / process / system inspection
-    "get-childitem", "gci",
-    "get-content", "gc",
-    "select-string", "sls",
-    "write-output", "write-host",
-    "get-location", "gl",
-    "set-location", "sl", "cd",
+    "get-childitem",
+    "gci",
+    "get-content",
+    "gc",
+    "select-string",
+    "sls",
+    "write-output",
+    "write-host",
+    "get-location",
+    "gl",
+    "set-location",
+    "sl",
+    "cd",
     "test-path",
-    "get-item", "gi",
+    "get-item",
+    "gi",
     "measure-object",
     "sort-object",
-    "where-object", "?",
-    "foreach-object", "%",
+    "where-object",
+    "?",
+    "foreach-object",
+    "%",
     "compare-object",
-    "get-process", "gps", "ps",
-    "get-service", "gsv",
-    "copy-item", "cp", "copy", "cpi",
-    "move-item", "mv", "move", "mi",
-    "rename-item", "ren", "rni",
-    "new-item", "ni", "mkdir", "md",
-    "add-content", "ac",
-    "set-content", "sc",
-    "clear-content", "clc",
+    "get-process",
+    "gps",
+    "ps",
+    "get-service",
+    "gsv",
+    "copy-item",
+    "cp",
+    "copy",
+    "cpi",
+    "move-item",
+    "mv",
+    "move",
+    "mi",
+    "rename-item",
+    "ren",
+    "rni",
+    "new-item",
+    "ni",
+    "mkdir",
+    "md",
+    "add-content",
+    "ac",
+    "set-content",
+    "sc",
+    "clear-content",
+    "clc",
     "get-date",
-    "format-list", "fl",
-    "format-table", "ft",
-    "get-command", "gcm",
-    "get-help", "help", "man",
+    "format-list",
+    "fl",
+    "format-table",
+    "ft",
+    "get-command",
+    "gcm",
+    "get-help",
+    "help",
+    "man",
 ];
 
 /// Medium-risk commands (can download or execute code, or delete files).
 const MEDIUM_RISK_COMMANDS: &[&str] = &[
     // Unix — network download
-    "curl", "wget", "fetch",
+    "curl",
+    "wget",
+    "fetch",
     // Unix — script/bytecode interpreters
-    "python", "python3", "node", "ruby", "perl", "php",
+    "python",
+    "python3",
+    "node",
+    "ruby",
+    "perl",
+    "php",
     // Unix — shells (spawning a shell may execute arbitrary commands)
-    "bash", "sh", "zsh", "fish", "dash", "ksh", "csh",
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
     // Unix — build/package managers (can download + run code)
-    "java", "javac",
-    "docker", "podman",
-    "pip", "pip3", "npm", "yarn", "cargo",
+    "java",
+    "javac",
+    "docker",
+    "podman",
+    "pip",
+    "pip3",
+    "npm",
+    "yarn",
+    "cargo",
     // Unix — destructive file operations
-    "rm", "rmdir", "unlink",
+    "rm",
+    "rmdir",
+    "unlink",
     // PowerShell — download / execution / remote access
-    "invoke-webrequest", "iwr",
-    "invoke-restmethod", "irm",
-    "start-process", "saps", "start",
-    "invoke-command", "icm",
-    "enter-pssession", "etsn",
-    "new-pssession", "nsn",
-    "install-module", "ismo",
-    "install-package", "install-packageprovider",
+    "invoke-webrequest",
+    "iwr",
+    "invoke-restmethod",
+    "irm",
+    "start-process",
+    "saps",
+    "start",
+    "invoke-command",
+    "icm",
+    "enter-pssession",
+    "etsn",
+    "new-pssession",
+    "nsn",
+    "install-module",
+    "ismo",
+    "install-package",
+    "install-packageprovider",
     "register-scheduledtask",
     "new-scheduledtask",
-    "start-job", "sajb",
+    "start-job",
+    "sajb",
 ];
 
 /// High-risk commands — operations that can affect system integrity,
@@ -134,33 +237,59 @@ const MEDIUM_RISK_COMMANDS: &[&str] = &[
 /// (plus sudo/eval/pipe-to-shell patterns) require user confirmation.
 const HIGH_RISK_COMMANDS: &[&str] = &[
     // Unix — process termination
-    "kill", "killall", "pkill", "pkillall",
+    "kill",
+    "killall",
+    "pkill",
+    "pkillall",
     // Unix — permission / ownership changes
-    "chmod", "chown", "chgrp",
+    "chmod",
+    "chown",
+    "chgrp",
     // Unix — system power control
-    "shutdown", "reboot", "halt", "poweroff", "init",
+    "shutdown",
+    "reboot",
+    "halt",
+    "poweroff",
+    "init",
     // Unix — raw disk I/O
     "dd",
     // Unix — disk partitioning / formatting
-    "fdisk", "parted", "gdisk", "gparted",
+    "fdisk",
+    "parted",
+    "gdisk",
+    "gparted",
     // Unix — filesystem mounting
-    "mount", "umount",
+    "mount",
+    "umount",
     // Unix — user / group management
-    "useradd", "userdel", "usermod",
-    "groupadd", "groupdel", "groupmod",
-    "passwd", "visudo",
+    "useradd",
+    "userdel",
+    "usermod",
+    "groupadd",
+    "groupdel",
+    "groupmod",
+    "passwd",
+    "visudo",
     // Unix — firewall / network configuration
-    "iptables", "nft", "ip6tables",
+    "iptables",
+    "nft",
+    "ip6tables",
     // Unix — service management
-    "systemctl", "service",
+    "systemctl",
+    "service",
     // Unix — scheduled tasks
     "crontab",
     // Unix — network interface control
-    "ifconfig", "route", "ip",
+    "ifconfig",
+    "route",
+    "ip",
     // PowerShell — process termination
-    "stop-process", "spps", "kill",
+    "stop-process",
+    "spps",
+    "kill",
     // PowerShell — service control (stop/disable/restart/modify)
-    "stop-service", "spsv",
+    "stop-service",
+    "spsv",
     "restart-service",
     "set-service",
     "disable-service",
@@ -176,7 +305,8 @@ const HIGH_RISK_COMMANDS: &[&str] = &[
     "new-netfirewallrule",
     "remove-netfirewallrule",
     // PowerShell — domain join/leave
-    "add-computer", "remove-computer",
+    "add-computer",
+    "remove-computer",
 ];
 
 /// Blocked command patterns.
@@ -187,7 +317,7 @@ const BLOCKED_PATTERNS: &[&str] = &[
     "rm -rf ~",
     "rm -rf ~/*",
     "mkfs",
-    "of=/dev/",    // dd writing to device (covers both "dd of=/dev/" and "dd if=... of=/dev/")
+    "of=/dev/", // dd writing to device (covers both "dd of=/dev/" and "dd if=... of=/dev/")
     "> /etc/",
     "crontab -r",
     ":(){ :|:& };:",
@@ -319,7 +449,10 @@ pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
             if risk_ordinal(r) > risk_ordinal(max_risk) {
                 max_reason = match r {
                     ShellRisk::Low => format!("Low-risk sub-command: {}", primary_cmd),
-                    ShellRisk::Medium => format!("Medium-risk sub-command: {} (can delete/modify files)", primary_cmd),
+                    ShellRisk::Medium => format!(
+                        "Medium-risk sub-command: {} (can delete/modify files)",
+                        primary_cmd
+                    ),
                     ShellRisk::High => format!("High-risk sub-command: {}", primary_cmd),
                     ShellRisk::Blocked => format!("Blocked sub-command: {}", primary_cmd),
                 };
@@ -338,7 +471,10 @@ pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
             let (primary_cmd, _) = extract_primary_command(first.trim());
             max_reason = match max_risk {
                 ShellRisk::Low => format!("Low-risk command: {}", primary_cmd),
-                ShellRisk::Medium => format!("Medium-risk command: {} (can download/execute code)", primary_cmd),
+                ShellRisk::Medium => format!(
+                    "Medium-risk command: {} (can download/execute code)",
+                    primary_cmd
+                ),
                 ShellRisk::High => format!("High-risk command: {}", primary_cmd),
                 ShellRisk::Blocked => format!("Blocked command: {}", primary_cmd),
             };
@@ -452,7 +588,11 @@ fn classify_command(cmd: &str) -> ShellRisk {
 fn is_shell_eval_command(command: &str) -> bool {
     let lower = command.to_lowercase();
     // Unix patterns
-    if lower.contains("eval ") || lower.contains("exec ") || lower.starts_with("source ") || lower.starts_with(". ") {
+    if lower.contains("eval ")
+        || lower.contains("exec ")
+        || lower.starts_with("source ")
+        || lower.starts_with(". ")
+    {
         return true;
     }
     // PowerShell patterns: Invoke-Expression / iex (anywhere in command)
@@ -477,8 +617,16 @@ fn is_pipe_to_shell(command: &str) -> bool {
     }
     // Check if any pipe segment is a shell
     let shell_names = [
-        "sh", "bash", "zsh", "fish", "dash", "ksh", "csh",
-        "powershell", "pwsh", "iex",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "ksh",
+        "csh",
+        "powershell",
+        "pwsh",
+        "iex",
     ];
     for segment in lower.split('|') {
         let trimmed = segment.trim();
@@ -503,9 +651,7 @@ pub fn extract_executable_paths(command: &str) -> Vec<PathBuf> {
             || part.starts_with("/")
             || part.starts_with("~/")
             || part.starts_with(".\\")
-            || (part.len() >= 3
-                && part.as_bytes()[1] == b':'
-                && part.as_bytes()[2] == b'\\');
+            || (part.len() >= 3 && part.as_bytes()[1] == b':' && part.as_bytes()[2] == b'\\');
 
         if is_direct_path {
             // Strip quotes
@@ -522,8 +668,16 @@ pub fn extract_executable_paths(command: &str) -> Vec<PathBuf> {
             let interp_lower = interpreter.to_lowercase();
             let is_interpreter = matches!(
                 interp_lower.as_str(),
-                "python" | "python3" | "node" | "ruby" | "perl" | "php"
-                    | "bash" | "sh" | "powershell" | "pwsh"
+                "python"
+                    | "python3"
+                    | "node"
+                    | "ruby"
+                    | "perl"
+                    | "php"
+                    | "bash"
+                    | "sh"
+                    | "powershell"
+                    | "pwsh"
             );
             if is_interpreter && !next_arg.starts_with('-') {
                 let clean = next_arg.trim_matches(|c: char| c == '\'' || c == '"');
@@ -544,10 +698,7 @@ pub fn extract_executable_paths(command: &str) -> Vec<PathBuf> {
 /// It combines base risk assessment with FileProvenance data:
 /// - Downloaded or Unknown files being executed → elevate to High
 /// - PreExisting or CreatedByTool files → keep base risk
-pub fn assess_shell_risk<F>(
-    command: &str,
-    provenance_lookup: F,
-) -> ShellRiskAssessment
+pub fn assess_shell_risk<F>(command: &str, provenance_lookup: F) -> ShellRiskAssessment
 where
     F: Fn(&std::path::Path) -> Option<crate::security::file_provenance::FileSource>,
 {
@@ -560,12 +711,16 @@ where
         {
             let reason = match &source {
                 crate::security::file_provenance::FileSource::Downloaded { from_url, .. } => {
-                    format!("{} — executing Downloaded file (from: {})",
-                        assessment.reason, from_url)
+                    format!(
+                        "{} — executing Downloaded file (from: {})",
+                        assessment.reason, from_url
+                    )
                 }
                 crate::security::file_provenance::FileSource::Unknown => {
-                    format!("{} — executing file with Unknown provenance",
-                        assessment.reason)
+                    format!(
+                        "{} — executing file with Unknown provenance",
+                        assessment.reason
+                    )
                 }
                 _ => assessment.reason.clone(),
             };
@@ -594,10 +749,19 @@ mod tests {
 
     #[test]
     fn test_medium_risk_commands() {
-        let cmds = ["curl https://example.com", "python script.py", "node app.js"];
+        let cmds = [
+            "curl https://example.com",
+            "python script.py",
+            "node app.js",
+        ];
         for cmd in cmds {
             let assessment = assess_base_risk(cmd);
-            assert_eq!(assessment.risk, ShellRisk::Medium, "Expected Medium for: {}", cmd);
+            assert_eq!(
+                assessment.risk,
+                ShellRisk::Medium,
+                "Expected Medium for: {}",
+                cmd
+            );
         }
     }
 
@@ -632,7 +796,12 @@ mod tests {
         ];
         for cmd in cmds {
             let assessment = assess_base_risk(cmd);
-            assert_eq!(assessment.risk, ShellRisk::Blocked, "Expected Blocked for: {}", cmd);
+            assert_eq!(
+                assessment.risk,
+                ShellRisk::Blocked,
+                "Expected Blocked for: {}",
+                cmd
+            );
         }
     }
 
@@ -725,10 +894,7 @@ mod tests {
         ];
         for cmd in cmds {
             let assessment = assess_base_risk(cmd);
-            assert_eq!(
-                assessment.risk, ShellRisk::Low,
-                "Expected Low for: {}", cmd
-            );
+            assert_eq!(assessment.risk, ShellRisk::Low, "Expected Low for: {}", cmd);
         }
     }
 
@@ -748,8 +914,10 @@ mod tests {
         for cmd in cmds {
             let assessment = assess_base_risk(cmd);
             assert_eq!(
-                assessment.risk, ShellRisk::Medium,
-                "Expected Medium for: {}", cmd
+                assessment.risk,
+                ShellRisk::Medium,
+                "Expected Medium for: {}",
+                cmd
             );
         }
     }
@@ -768,8 +936,10 @@ mod tests {
         for cmd in cmds {
             let assessment = assess_base_risk(cmd);
             assert_eq!(
-                assessment.risk, ShellRisk::High,
-                "Expected High for: {}", cmd
+                assessment.risk,
+                ShellRisk::High,
+                "Expected High for: {}",
+                cmd
             );
             assert!(assessment.reason.contains("eval"));
         }
@@ -823,8 +993,10 @@ mod tests {
         for cmd in cmds {
             let assessment = assess_base_risk(cmd);
             assert_eq!(
-                assessment.risk, ShellRisk::Blocked,
-                "Expected Blocked for: {}", cmd
+                assessment.risk,
+                ShellRisk::Blocked,
+                "Expected Blocked for: {}",
+                cmd
             );
         }
     }

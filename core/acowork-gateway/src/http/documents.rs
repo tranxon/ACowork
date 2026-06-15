@@ -9,11 +9,10 @@
 //! and metadata is persisted alongside as `{filename}.meta.json`.
 
 use axum::{
+    Json, Router,
     extract::{Multipart, Path, State},
     http::StatusCode,
-    Json,
     routing::{delete, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -147,9 +146,11 @@ pub async fn upload_document(
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut original_filename: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        ApiError::bad_request(&format!("Failed to read multipart field: {e}"))
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {e}")))?
+    {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
             "file" => {
@@ -170,8 +171,8 @@ pub async fn upload_document(
         }
     }
 
-    let file_bytes = file_bytes
-        .ok_or_else(|| ApiError::bad_request("Missing required field: 'file'"))?;
+    let file_bytes =
+        file_bytes.ok_or_else(|| ApiError::bad_request("Missing required field: 'file'"))?;
 
     if file_bytes.is_empty() {
         return Err(ApiError::bad_request("File is empty"));
@@ -184,9 +185,7 @@ pub async fn upload_document(
         )));
     }
 
-    let filename = original_filename
-        .as_deref()
-        .unwrap_or("document.bin");
+    let filename = original_filename.as_deref().unwrap_or("document.bin");
 
     let safe_name = safe_filename(filename);
     let format = detect_format(&safe_name)
@@ -203,16 +202,14 @@ pub async fn upload_document(
     let docs_dir = session_docs_dir(&data_dir, &session_id);
 
     // Create the session documents directory
-    std::fs::create_dir_all(&docs_dir).map_err(|e| {
-        ApiError::internal(&format!("Failed to create documents directory: {e}"))
-    })?;
+    std::fs::create_dir_all(&docs_dir)
+        .map_err(|e| ApiError::internal(&format!("Failed to create documents directory: {e}")))?;
 
     let abs_path = docs_dir.join(&safe_name);
 
     // Write the file
-    std::fs::write(&abs_path, &file_bytes).map_err(|e| {
-        ApiError::internal(&format!("Failed to write document file: {e}"))
-    })?;
+    std::fs::write(&abs_path, &file_bytes)
+        .map_err(|e| ApiError::internal(&format!("Failed to write document file: {e}")))?;
 
     let size_bytes = file_bytes.len() as u64;
 
@@ -225,12 +222,10 @@ pub async fn upload_document(
         abs_path: abs_path.to_string_lossy().to_string(),
     };
     let meta_path = docs_dir.join(format!("{safe_name}.meta.json"));
-    let meta_json = serde_json::to_string(&meta).map_err(|e| {
-        ApiError::internal(&format!("Failed to serialize metadata: {e}"))
-    })?;
-    std::fs::write(&meta_path, meta_json).map_err(|e| {
-        ApiError::internal(&format!("Failed to write metadata file: {e}"))
-    })?;
+    let meta_json = serde_json::to_string(&meta)
+        .map_err(|e| ApiError::internal(&format!("Failed to serialize metadata: {e}")))?;
+    std::fs::write(&meta_path, meta_json)
+        .map_err(|e| ApiError::internal(&format!("Failed to write metadata file: {e}")))?;
 
     tracing::info!(
         session_id = %session_id,
@@ -268,9 +263,8 @@ pub async fn list_documents(
     }
 
     let mut documents = Vec::new();
-    let entries = std::fs::read_dir(&docs_dir).map_err(|e| {
-        ApiError::internal(&format!("Failed to read documents directory: {e}"))
-    })?;
+    let entries = std::fs::read_dir(&docs_dir)
+        .map_err(|e| ApiError::internal(&format!("Failed to read documents directory: {e}")))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -317,9 +311,8 @@ pub async fn delete_document(
 
     // Find the file matching the doc_id (stem matches, any extension)
     let mut found = false;
-    let entries = std::fs::read_dir(&docs_dir).map_err(|e| {
-        ApiError::internal(&format!("Failed to read documents directory: {e}"))
-    })?;
+    let entries = std::fs::read_dir(&docs_dir)
+        .map_err(|e| ApiError::internal(&format!("Failed to read documents directory: {e}")))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -353,5 +346,7 @@ pub async fn delete_document(
         )));
     }
 
-    Ok(Json(serde_json::json!({ "deleted": true, "document_id": doc_id })))
+    Ok(Json(
+        serde_json::json!({ "deleted": true, "document_id": doc_id }),
+    ))
 }

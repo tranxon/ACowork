@@ -135,7 +135,9 @@ impl EmbeddingProvider for RemoteEmbeddingProvider {
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         if text.is_empty() {
-            return Err(EmbeddingError::InvalidInput("Text cannot be empty".to_string()));
+            return Err(EmbeddingError::InvalidInput(
+                "Text cannot be empty".to_string(),
+            ));
         }
 
         let request = EmbeddingRequest {
@@ -169,9 +171,10 @@ impl EmbeddingProvider for RemoteEmbeddingProvider {
             return Err(EmbeddingError::Remote(message));
         }
 
-        let resp: EmbeddingResponse = response.json().await.map_err(|e| {
-            EmbeddingError::Remote(format!("Failed to parse response: {e}"))
-        })?;
+        let resp: EmbeddingResponse = response
+            .json()
+            .await
+            .map_err(|e| EmbeddingError::Remote(format!("Failed to parse response: {e}")))?;
 
         resp.data
             .into_iter()
@@ -214,9 +217,10 @@ impl EmbeddingProvider for RemoteEmbeddingProvider {
             return Err(EmbeddingError::Remote(format!("HTTP {status}: {body}")));
         }
 
-        let resp: EmbeddingResponse = response.json().await.map_err(|e| {
-            EmbeddingError::Remote(format!("Failed to parse batch response: {e}"))
-        })?;
+        let resp: EmbeddingResponse = response
+            .json()
+            .await
+            .map_err(|e| EmbeddingError::Remote(format!("Failed to parse batch response: {e}")))?;
 
         Ok(resp.data.into_iter().map(|d| d.embedding).collect())
     }

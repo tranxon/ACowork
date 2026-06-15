@@ -8,10 +8,10 @@
 //! access to host resources is possible.
 
 use std::path::Path;
-use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::DirPerms;
 use wasmtime_wasi::FilePerms;
 use wasmtime_wasi::WasiCtx;
+use wasmtime_wasi::WasiCtxBuilder;
 
 use super::wasi_mapper::{WasiCapabilities, WasiDirPermission};
 
@@ -125,12 +125,7 @@ pub fn build_wasi_ctx(config: &WasiSandboxConfig) -> WasiCtx {
         };
 
         // Use the same path for both host and guest
-        if let Err(e) = builder.preopened_dir(
-            host_path,
-            &dir_perm.path,
-            dir_perms,
-            file_perms,
-        ) {
+        if let Err(e) = builder.preopened_dir(host_path, &dir_perm.path, dir_perms, file_perms) {
             tracing::warn!(
                 "Failed to preopen WASI directory '{}': {}",
                 dir_perm.path,

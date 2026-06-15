@@ -13,11 +13,10 @@ use acowork_core::protocol::GatewayResponse;
 
 use crate::http::routes::{BridgeEvent, SessionPendingRequests};
 use crate::ipc::server::{
-    handle_agent_hello, handle_budget_query, handle_capability_query,
-    handle_context_usage_report, handle_cron_list, handle_cron_register,
-    handle_cron_unregister, handle_intent_send,
-    handle_key_release, handle_rate_acquire,
-    handle_usage_report, handle_agent_ready, SharedState,
+    SharedState, handle_agent_hello, handle_agent_ready, handle_budget_query,
+    handle_capability_query, handle_context_usage_report, handle_cron_list, handle_cron_register,
+    handle_cron_unregister, handle_intent_send, handle_key_release, handle_rate_acquire,
+    handle_usage_report,
 };
 use crate::ipc::session::SessionManager;
 
@@ -45,15 +44,13 @@ pub async fn dispatch_grpc_request(
         }
 
         Some(proto::client_message::Payload::IntentSend(req)) => {
-            let params: serde_json::Value = serde_json::from_str(&req.params_json)
-                .unwrap_or(serde_json::Value::Null);
+            let params: serde_json::Value =
+                serde_json::from_str(&req.params_json).unwrap_or(serde_json::Value::Null);
 
             // C2: Intercept tool_approval_needed from Runtime.
             // Create oneshot, send BridgeEvent to Desktop App, await user decision.
             if req.action == "tool_approval_needed" && req.target == "http-api" {
-                return handle_tool_approval_needed_grpc(
-                    &params, bridge_tx,
-                ).await;
+                return handle_tool_approval_needed_grpc(&params, bridge_tx).await;
             }
 
             // C3: Intercept ask_question from Runtime (ask_user_question tool).
@@ -61,9 +58,7 @@ pub async fn dispatch_grpc_request(
             // answer flows back via the HTTP question endpoint + gRPC push
             // (same unified push architecture as tool_approval_needed).
             if req.action == "ask_question" && req.target == "http-api" {
-                return handle_ask_question_grpc(
-                    &params, bridge_tx,
-                ).await;
+                return handle_ask_question_grpc(&params, bridge_tx).await;
             }
 
             // S1.14: Check if this is a session response from Runtime
@@ -115,8 +110,8 @@ pub async fn dispatch_grpc_request(
         }
 
         Some(proto::client_message::Payload::CronRegister(req)) => {
-            let params: serde_json::Value = serde_json::from_str(&req.params_json)
-                .unwrap_or(serde_json::Value::Null);
+            let params: serde_json::Value =
+                serde_json::from_str(&req.params_json).unwrap_or(serde_json::Value::Null);
             handle_cron_register(&req.agent_id, &req.schedule, &req.action, &params, state).await
         }
 
@@ -198,8 +193,7 @@ pub async fn dispatch_grpc_request(
             // Runtime pushes its workspace config snapshot for Gateway's in-memory cache.
             let agent_id = {
                 let mgr = session_mgr.lock().await;
-                mgr.get_session(conn_id)
-                    .and_then(|s| s.agent_id.clone())
+                mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
             };
             if let Some(ref aid) = agent_id {
                 let mut gw = state.write().await;
@@ -244,8 +238,8 @@ pub async fn dispatch_grpc_request(
                         .unwrap_or_else(|| "unknown".to_string())
                 };
 
-                let params: serde_json::Value = serde_json::from_str(&req.params_json)
-                    .unwrap_or(serde_json::Value::Null);
+                let params: serde_json::Value =
+                    serde_json::from_str(&req.params_json).unwrap_or(serde_json::Value::Null);
 
                 let event_type = crate::http::routes::BridgeEventType::from_action(&req.action)
                     .unwrap_or_else(crate::http::routes::BridgeEventType::default_for_unknown);
@@ -282,10 +276,7 @@ pub async fn dispatch_grpc_request(
         }
 
         None => {
-            tracing::warn!(
-                request_id,
-                "ClientMessage with no payload — ignoring"
-            );
+            tracing::warn!(request_id, "ClientMessage with no payload — ignoring");
             return proto::ServerMessage {
                 request_id,
                 payload: None,
@@ -365,7 +356,10 @@ async fn handle_tool_approval_needed_grpc(
 
     // Return immediately — Runtime owns approval state, receives decision via
     // approval_decision IntentReceived pushed by HTTP handler.
-    proto::ServerMessage { request_id: 0, payload: None }
+    proto::ServerMessage {
+        request_id: 0,
+        payload: None,
+    }
 }
 
 /// Handle session response from Runtime via gRPC (S1.14).
@@ -456,5 +450,8 @@ async fn handle_ask_question_grpc(
 
     // Return immediately — the answer flows back via the push path:
     // HTTP question endpoint → IntentReceived push → Runtime InboundMessage::QuestionAnswer
-    proto::ServerMessage { request_id: 0, payload: None }
+    proto::ServerMessage {
+        request_id: 0,
+        payload: None,
+    }
 }

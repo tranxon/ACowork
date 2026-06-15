@@ -163,7 +163,10 @@ mod tests {
         let resp: RagQueryResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.protocol_version, "1.0");
         assert_eq!(resp.results.len(), 1);
-        assert_eq!(resp.results[0].content, "Q3 product roadmap includes AI assistant");
+        assert_eq!(
+            resp.results[0].content,
+            "Q3 product roadmap includes AI assistant"
+        );
         assert_eq!(resp.results[0].score, 0.92);
     }
 
@@ -171,14 +174,12 @@ mod tests {
     fn test_rag_query_response_roundtrip() {
         let resp = RagQueryResponse {
             protocol_version: PROTOCOL_VERSION.to_string(),
-            results: vec![
-                RagResultItem {
-                    content: "Test content".to_string(),
-                    source_url: Some("https://example.com".to_string()),
-                    chunk_id: Some("chunk-1".to_string()),
-                    score: 0.85,
-                },
-            ],
+            results: vec![RagResultItem {
+                content: "Test content".to_string(),
+                source_url: Some("https://example.com".to_string()),
+                chunk_id: Some("chunk-1".to_string()),
+                score: 0.85,
+            }],
             extensions: None,
         };
         let json = serde_json::to_string(&resp).unwrap();

@@ -19,9 +19,7 @@ use acowork_core::providers::traits::{ChatMessage, MessageRole};
 fn get_cl100k_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
     use std::sync::OnceLock;
     static BPE: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
-    BPE.get_or_init(|| {
-        tiktoken_rs::cl100k_base().ok()
-    }).as_ref()
+    BPE.get_or_init(|| tiktoken_rs::cl100k_base().ok()).as_ref()
 }
 
 // ── Tier classification ─────────────────────────────────────────────────
@@ -108,12 +106,12 @@ impl TokenCounter {
     pub fn new() -> Self {
         let mut sampling_ratios = HashMap::new();
         // Default ratios based on empirical observations
-        sampling_ratios.insert("gpt-4".to_string(), 3.8);      // ~3.8 chars/token
+        sampling_ratios.insert("gpt-4".to_string(), 3.8); // ~3.8 chars/token
         sampling_ratios.insert("gpt-4o".to_string(), 3.8);
         sampling_ratios.insert("gpt-3.5".to_string(), 4.0);
-        sampling_ratios.insert("claude".to_string(), 3.5);     // Claude is slightly more efficient
+        sampling_ratios.insert("claude".to_string(), 3.5); // Claude is slightly more efficient
         sampling_ratios.insert("llama".to_string(), 3.6);
-        sampling_ratios.insert("qwen".to_string(), 3.2);       // CJK-optimized
+        sampling_ratios.insert("qwen".to_string(), 3.2); // CJK-optimized
         sampling_ratios.insert("mistral".to_string(), 3.7);
 
         Self {
@@ -133,9 +131,13 @@ impl TokenCounter {
         }
 
         // Tier 2: Models with known sampling ratios
-        if lower.contains("claude") || lower.contains("llama") || lower.contains("qwen")
-            || lower.contains("mistral") || lower.contains("deepseek")
-            || lower.contains("gemini") || lower.contains("minimax")
+        if lower.contains("claude")
+            || lower.contains("llama")
+            || lower.contains("qwen")
+            || lower.contains("mistral")
+            || lower.contains("deepseek")
+            || lower.contains("gemini")
+            || lower.contains("minimax")
         {
             return TokenCountTier::Tier2Approximate;
         }
@@ -294,16 +296,10 @@ impl TokenCounter {
     /// English: words × 1.3, CJK: chars × 0.6
     fn count_tier3(&self, text: &str) -> u64 {
         let _ascii_count = text.chars().filter(|c| c.is_ascii()).count();
-        let cjk_count = text
-            .chars()
-            .filter(|c| !c.is_ascii())
-            .count();
+        let cjk_count = text.chars().filter(|c| !c.is_ascii()).count();
 
         // English: split into words, each word ~1.3 tokens
-        let ascii_words = text
-            .split_whitespace()
-            .filter(|w| w.is_ascii())
-            .count();
+        let ascii_words = text.split_whitespace().filter(|w| w.is_ascii()).count();
 
         let ascii_tokens = (ascii_words as f64 * 1.3).ceil() as u64;
 
@@ -335,13 +331,34 @@ mod tests {
 
     #[test]
     fn test_tier_classification() {
-        assert_eq!(TokenCounter::tier_for_model("gpt-4"), TokenCountTier::Tier1Exact);
-        assert_eq!(TokenCounter::tier_for_model("gpt-4o"), TokenCountTier::Tier1Exact);
-        assert_eq!(TokenCounter::tier_for_model("gpt-3.5-turbo"), TokenCountTier::Tier1Exact);
-        assert_eq!(TokenCounter::tier_for_model("claude-sonnet-4"), TokenCountTier::Tier2Approximate);
-        assert_eq!(TokenCounter::tier_for_model("llama3"), TokenCountTier::Tier2Approximate);
-        assert_eq!(TokenCounter::tier_for_model("qwen3:8b"), TokenCountTier::Tier2Approximate);
-        assert_eq!(TokenCounter::tier_for_model("some-unknown-model"), TokenCountTier::Tier3Heuristic);
+        assert_eq!(
+            TokenCounter::tier_for_model("gpt-4"),
+            TokenCountTier::Tier1Exact
+        );
+        assert_eq!(
+            TokenCounter::tier_for_model("gpt-4o"),
+            TokenCountTier::Tier1Exact
+        );
+        assert_eq!(
+            TokenCounter::tier_for_model("gpt-3.5-turbo"),
+            TokenCountTier::Tier1Exact
+        );
+        assert_eq!(
+            TokenCounter::tier_for_model("claude-sonnet-4"),
+            TokenCountTier::Tier2Approximate
+        );
+        assert_eq!(
+            TokenCounter::tier_for_model("llama3"),
+            TokenCountTier::Tier2Approximate
+        );
+        assert_eq!(
+            TokenCounter::tier_for_model("qwen3:8b"),
+            TokenCountTier::Tier2Approximate
+        );
+        assert_eq!(
+            TokenCounter::tier_for_model("some-unknown-model"),
+            TokenCountTier::Tier3Heuristic
+        );
     }
 
     #[test]
@@ -358,7 +375,10 @@ mod tests {
         let counter = TokenCounter::new();
         let text = "你好世界，今天天气不错";
         let count = counter.count_text(text, "gpt-4");
-        assert!(count >= 3, "Expected at least 3 tokens for CJK text, got {count}");
+        assert!(
+            count >= 3,
+            "Expected at least 3 tokens for CJK text, got {count}"
+        );
     }
 
     #[test]
@@ -389,23 +409,32 @@ mod tests {
         };
         let count_without_name = counter.count_text("Hello", "gpt-4") + 2; // role + boundary
         let count_with_name = counter.count_message(&msg, "gpt-4", None);
-        assert!(count_with_name > count_without_name, "Named message should have more tokens");
+        assert!(
+            count_with_name > count_without_name,
+            "Named message should have more tokens"
+        );
     }
 
     #[test]
     fn test_count_message_with_tool_calls() {
         let counter = TokenCounter::new();
-        let msg = ChatMessage::assistant_with_tools("", vec![ToolCall {
-            id: "call_123".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "weather".to_string(),
-                arguments: r#"{"city":"Shanghai"}"#.to_string(),
-            },
-        }]);
+        let msg = ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "call_123".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "weather".to_string(),
+                    arguments: r#"{"city":"Shanghai"}"#.to_string(),
+                },
+            }],
+        );
         let count = counter.count_message(&msg, "gpt-4", None);
         // Tool call overhead (4) + name + arguments + role + boundary
-        assert!(count >= 6, "Expected at least 6 tokens for tool call message, got {count}");
+        assert!(
+            count >= 6,
+            "Expected at least 6 tokens for tool call message, got {count}"
+        );
     }
 
     #[test]
@@ -418,7 +447,10 @@ mod tests {
         // Second call should use cache for system prompt
         let count2 = counter.count_messages(&[system, user], "gpt-4");
         assert_eq!(count1, count2, "Cached count should be consistent");
-        assert!(!counter.system_prompt_cache.is_empty(), "Cache should be populated");
+        assert!(
+            !counter.system_prompt_cache.is_empty(),
+            "Cache should be populated"
+        );
     }
 
     #[test]
@@ -449,5 +481,4 @@ mod tests {
         let count = counter.count_text("a", "unknown-model");
         assert!(count >= 1);
     }
-
 }

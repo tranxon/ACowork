@@ -13,11 +13,10 @@
 //! - Root-level browsing returns common starting points (home, root, common paths)
 
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    Json,
     routing::get,
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +66,10 @@ fn root_entries() -> Vec<FsBrowseEntry> {
     // User home directory (cross-platform)
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
-        .or_else(|_| std::env::var("HOMEDRIVE").and_then(|d| std::env::var("HOMEPATH").map(|p| format!("{}{}", d, p))))
+        .or_else(|_| {
+            std::env::var("HOMEDRIVE")
+                .and_then(|d| std::env::var("HOMEPATH").map(|p| format!("{}{}", d, p)))
+        })
         .ok();
 
     if let Some(home_str) = &home {
@@ -78,7 +80,14 @@ fn root_entries() -> Vec<FsBrowseEntry> {
             .unwrap_or_else(|| "Home".to_string());
         let children_count = std::fs::read_dir(home_path)
             .ok()
-            .map(|rd| rd.filter(|e| e.as_ref().map(|e| !e.file_name().to_string_lossy().starts_with('.')).unwrap_or(false)).count())
+            .map(|rd| {
+                rd.filter(|e| {
+                    e.as_ref()
+                        .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                        .unwrap_or(false)
+                })
+                .count()
+            })
             .unwrap_or(0);
         entries.push(FsBrowseEntry {
             name,
@@ -180,8 +189,7 @@ pub async fn browse_fs(
     }
 
     // Validate path
-    validate_path(requested_path)
-        .map_err(|e| ApiError::bad_request(&e))?;
+    validate_path(requested_path).map_err(|e| ApiError::bad_request(&e))?;
 
     let dir_path = std::path::Path::new(requested_path);
 

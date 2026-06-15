@@ -52,8 +52,7 @@ pub async fn create_agent(
         agent_id.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-', "_"),
         nanos,
     ));
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
     // Create prompts/ directory
     let prompts_dir = temp_dir.join("prompts");
@@ -73,8 +72,8 @@ pub async fn create_agent(
         },
     };
 
-    let manifest_toml = toml::to_string(&manifest)
-        .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
+    let manifest_toml =
+        toml::to_string(&manifest).map_err(|e| format!("Failed to serialize manifest: {}", e))?;
 
     std::fs::write(temp_dir.join("manifest.toml"), &manifest_toml)
         .map_err(|e| format!("Failed to write manifest: {}", e))?;
@@ -101,11 +100,8 @@ pub async fn create_agent(
     let config_dir = temp_dir.join("config");
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
-    std::fs::write(
-        config_dir.join("settings.toml"),
-        "# Agent settings\n",
-    )
-    .map_err(|e| format!("Failed to write settings: {}", e))?;
+    std::fs::write(config_dir.join("settings.toml"), "# Agent settings\n")
+        .map_err(|e| format!("Failed to write settings: {}", e))?;
 
     // Zip the skeleton directory into a temporary .agent file
     let zip_path = temp_dir.with_extension("agent");
@@ -124,8 +120,8 @@ pub async fn create_agent(
         .map_err(|e| format!("Failed to finalize zip: {}", e))?;
 
     // Read the zip bytes
-    let package_bytes = std::fs::read(&zip_path)
-        .map_err(|e| format!("Failed to read zip: {}", e))?;
+    let package_bytes =
+        std::fs::read(&zip_path).map_err(|e| format!("Failed to read zip: {}", e))?;
 
     // Clean up temp dir
     let _ = std::fs::remove_dir_all(&temp_dir);

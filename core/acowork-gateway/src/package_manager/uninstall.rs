@@ -1,8 +1,8 @@
 //! Package uninstallation
 
-use std::path::Path;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
+use std::path::Path;
 
 /// Uninstall a .agent package
 pub fn uninstall_package(
@@ -11,7 +11,9 @@ pub fn uninstall_package(
     state: &mut GatewayState,
 ) -> Result<(), GatewayError> {
     // Check if agent is installed
-    let info = state.installed_agents.get(agent_id)
+    let info = state
+        .installed_agents
+        .get(agent_id)
         .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?
         .clone();
 
@@ -36,9 +38,14 @@ pub fn uninstall_package(
         tracing::info!("Cleaned up {} cron entries for agent {}", count, agent_id);
         // Also clean from CronStore
         if let Some(store) = &state.cron_store
-            && let Err(e) = store.delete_by_agent(agent_id) {
-                tracing::warn!("Failed to clean cron entries from store for agent {}: {}", agent_id, e);
-            }
+            && let Err(e) = store.delete_by_agent(agent_id)
+        {
+            tracing::warn!(
+                "Failed to clean cron entries from store for agent {}: {}",
+                agent_id,
+                e
+            );
+        }
     }
 
     tracing::info!("Uninstalled agent: {}", agent_id);

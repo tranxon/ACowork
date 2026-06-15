@@ -156,10 +156,7 @@ impl GrafeoStore {
                 let edge_weight = self
                     .db
                     .get_edge(edge_id)
-                    .and_then(|e| {
-                        e.get_property("weight")
-                            .and_then(|v| v.as_float64())
-                    })
+                    .and_then(|e| e.get_property("weight").and_then(|v| v.as_float64()))
                     .unwrap_or(DEFAULT_EDGE_WEIGHT);
 
                 if edge_weight < f64::from(config.min_edge_weight) {
@@ -241,13 +238,27 @@ impl GrafeoStore {
         // Vector search on Knowledge label.
         let knowledge_results = self
             .db
-            .vector_search(labels::KNOWLEDGE, "embedding", query_embedding, k, None, None)
+            .vector_search(
+                labels::KNOWLEDGE,
+                "embedding",
+                query_embedding,
+                k,
+                None,
+                None,
+            )
             .unwrap_or_default();
 
         // Vector search on Episodic label.
         let episodic_results = self
             .db
-            .vector_search(labels::EPISODIC, "embedding", query_embedding, k, None, None)
+            .vector_search(
+                labels::EPISODIC,
+                "embedding",
+                query_embedding,
+                k,
+                None,
+                None,
+            )
             .unwrap_or_default();
 
         // Combine results: convert distance to similarity score.
@@ -296,11 +307,7 @@ impl GrafeoStore {
     ///
     /// Automatically selects between full iterative PageRank (small graphs)
     /// and random-walk sampling (large graphs, >1000 nodes) for performance.
-    pub fn compute_pagerank(
-        &self,
-        iterations: usize,
-        damping: f64,
-    ) -> Result<Vec<(NodeId, f64)>> {
+    pub fn compute_pagerank(&self, iterations: usize, damping: f64) -> Result<Vec<(NodeId, f64)>> {
         // Check graph size to decide strategy
         let node_count = self.count_nodes()?;
         if node_count > PAGERANK_SAMPLING_THRESHOLD {
@@ -308,9 +315,8 @@ impl GrafeoStore {
         }
 
         let session = self.db.session();
-        let gql = format!(
-            "CALL grafeo.pagerank({{damping: {damping}, max_iterations: {iterations}}})"
-        );
+        let gql =
+            format!("CALL grafeo.pagerank({{damping: {damping}, max_iterations: {iterations}}})");
 
         match session.execute(&gql) {
             Ok(result) => {
@@ -324,9 +330,7 @@ impl GrafeoStore {
                 }
                 Ok(scores)
             }
-            Err(_) => {
-                self.compute_pagerank_fallback(iterations, damping)
-            }
+            Err(_) => self.compute_pagerank_fallback(iterations, damping),
         }
     }
 
@@ -686,8 +690,7 @@ impl GrafeoStore {
                 }
 
                 // Adopt the most common neighbor label.
-                if let Some((&best_label, _)) =
-                    label_counts.iter().max_by_key(|(_, count)| **count)
+                if let Some((&best_label, _)) = label_counts.iter().max_by_key(|(_, count)| **count)
                     && labels[&nid] != best_label
                 {
                     labels.insert(nid, best_label);
@@ -893,21 +896,29 @@ mod tests {
     #[test]
     fn test_graph_expand_basic_traversal() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
 
         // a -> b -> c
-        store.create_memory_edge(a, b, "REFERENCES", vec![]).unwrap();
-        store.create_memory_edge(b, c, "REFERENCES", vec![]).unwrap();
+        store
+            .create_memory_edge(a, b, "REFERENCES", vec![])
+            .unwrap();
+        store
+            .create_memory_edge(b, c, "REFERENCES", vec![])
+            .unwrap();
 
         let config = GraphExpandConfig::new()
             .with_max_hops(3)
             .with_early_stop_thresholds(vec![0.0, 0.0, 0.0]);
 
-        let results = store
-            .graph_expand(&[(a, 1.0)], &config)
-            .unwrap();
+        let results = store.graph_expand(&[(a, 1.0)], &config).unwrap();
 
         // Should find b (1 hop) and c (2 hops).
         assert_eq!(results.len(), 2);
@@ -923,10 +934,18 @@ mod tests {
     #[test]
     fn test_graph_expand_max_hops_limit() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
-        let d = store.store_node("Knowledge", [("k", Value::from("d"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
+        let d = store
+            .store_node("Knowledge", [("k", Value::from("d"))])
+            .unwrap();
 
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
         store.create_memory_edge(b, c, "R", vec![]).unwrap();
@@ -937,9 +956,7 @@ mod tests {
             .with_max_hops(1)
             .with_early_stop_thresholds(vec![0.0]);
 
-        let results = store
-            .graph_expand(&[(a, 1.0)], &config)
-            .unwrap();
+        let results = store.graph_expand(&[(a, 1.0)], &config).unwrap();
 
         let ids: Vec<NodeId> = results.iter().map(|n| n.node_id).collect();
         assert!(ids.contains(&b));
@@ -954,9 +971,15 @@ mod tests {
     #[test]
     fn test_graph_expand_early_stopping() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
 
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
         store.create_memory_edge(b, c, "R", vec![]).unwrap();
@@ -966,9 +989,7 @@ mod tests {
             .with_max_hops(3)
             .with_early_stop_thresholds(vec![0.9, 0.95, 0.99]);
 
-        let results = store
-            .graph_expand(&[(a, 1.0)], &config)
-            .unwrap();
+        let results = store.graph_expand(&[(a, 1.0)], &config).unwrap();
 
         // With threshold 0.9 at hop 1, accumulated_score = 1.0 * 1.0 * 0.7 = 0.7 < 0.9
         // So even b should be pruned.
@@ -982,7 +1003,9 @@ mod tests {
     #[test]
     fn test_graph_expand_max_total_nodes() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
         let mut neighbor_ids = Vec::new();
         for i in 0..10 {
             let nid = store
@@ -997,9 +1020,7 @@ mod tests {
             .with_max_total_nodes(3)
             .with_early_stop_thresholds(vec![0.0]);
 
-        let results = store
-            .graph_expand(&[(a, 1.0)], &config)
-            .unwrap();
+        let results = store.graph_expand(&[(a, 1.0)], &config).unwrap();
 
         assert!(results.len() <= 3);
     }
@@ -1016,9 +1037,7 @@ mod tests {
         let _eid = store_episode(&store, "Learning Rust today", &emb);
 
         let config = GraphExpandConfig::default();
-        let results = store
-            .cross_layer_search(&emb, 5, &config)
-            .unwrap();
+        let results = store.cross_layer_search(&emb, 5, &config).unwrap();
 
         // Should return at least the seed nodes' neighbors.
         // Since the two nodes have no edges, expansion won't find new nodes.
@@ -1035,9 +1054,15 @@ mod tests {
     #[test]
     fn test_compute_pagerank_basic() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
 
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
         store.create_memory_edge(b, c, "R", vec![]).unwrap();
@@ -1059,8 +1084,12 @@ mod tests {
     #[test]
     fn test_apply_pagerank_boost() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
 
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
 
@@ -1159,10 +1188,18 @@ mod tests {
     #[test]
     fn test_detect_communities_basic() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
-        let _d = store.store_node("Knowledge", [("k", Value::from("d"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
+        let _d = store
+            .store_node("Knowledge", [("k", Value::from("d"))])
+            .unwrap();
 
         // a-b-c community, d isolated.
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
@@ -1172,9 +1209,11 @@ mod tests {
         assert!(!communities.is_empty());
 
         // a, b, c should be in the same community.
-        if let (Some(ca), Some(cb), Some(cc)) =
-            (communities.get(&a), communities.get(&b), communities.get(&c))
-        {
+        if let (Some(ca), Some(cb), Some(cc)) = (
+            communities.get(&a),
+            communities.get(&b),
+            communities.get(&c),
+        ) {
             assert_eq!(ca, cb);
             assert_eq!(cb, cc);
         }
@@ -1223,9 +1262,15 @@ mod tests {
     #[test]
     fn test_compute_pagerank_small_graph_uses_fallback() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
         store.create_memory_edge(b, c, "R", vec![]).unwrap();
         store.create_memory_edge(c, a, "R", vec![]).unwrap();
@@ -1250,9 +1295,15 @@ mod tests {
     #[test]
     fn test_compute_pagerank_deterministic() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
-        let c = store.store_node("Knowledge", [("k", Value::from("c"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
+        let c = store
+            .store_node("Knowledge", [("k", Value::from("c"))])
+            .unwrap();
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
         store.create_memory_edge(b, c, "R", vec![]).unwrap();
         store.create_memory_edge(c, a, "R", vec![]).unwrap();
@@ -1283,8 +1334,12 @@ mod tests {
     #[test]
     fn test_pagerank_damping_factor_effect() {
         let store = test_store();
-        let a = store.store_node("Knowledge", [("k", Value::from("a"))]).unwrap();
-        let b = store.store_node("Knowledge", [("k", Value::from("b"))]).unwrap();
+        let a = store
+            .store_node("Knowledge", [("k", Value::from("a"))])
+            .unwrap();
+        let b = store
+            .store_node("Knowledge", [("k", Value::from("b"))])
+            .unwrap();
         store.create_memory_edge(a, b, "R", vec![]).unwrap();
 
         // Different damping factors should produce different score distributions.
@@ -1300,9 +1355,9 @@ mod tests {
         assert_eq!(map_high.len(), 2);
 
         // Damping must have an effect — at least one node's score must differ.
-        let any_diff = map_low.iter().any(|(id, score)| {
-            (score - map_high.get(id).unwrap_or(&0.0)).abs() > 1e-10
-        });
+        let any_diff = map_low
+            .iter()
+            .any(|(id, score)| (score - map_high.get(id).unwrap_or(&0.0)).abs() > 1e-10);
         assert!(any_diff, "damping factor must affect PageRank scores");
     }
 }

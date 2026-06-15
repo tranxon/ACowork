@@ -1,7 +1,7 @@
 //! acowork-keygen CLI
 
+use acowork_sign::keygen::{KeyType, generate_and_save};
 use clap::Parser;
-use acowork_sign::keygen::{generate_and_save, KeyType};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -28,9 +28,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Fingerprint: {}", keypair.fingerprint());
     println!();
     println!("Files created:");
-    println!("  - {}/{}.key   (secret key)", cli.output_dir.display(), cli.r#type);
-    println!("  - {}/{}.pub   (public key)", cli.output_dir.display(), cli.r#type);
-    println!("  - {}/{}.cert  (certificate)", cli.output_dir.display(), cli.r#type);
+    println!(
+        "  - {}/{}.key   (secret key)",
+        cli.output_dir.display(),
+        cli.r#type
+    );
+    println!(
+        "  - {}/{}.pub   (public key)",
+        cli.output_dir.display(),
+        cli.r#type
+    );
+    println!(
+        "  - {}/{}.cert  (certificate)",
+        cli.output_dir.display(),
+        cli.r#type
+    );
 
     Ok(())
 }

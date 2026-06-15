@@ -10,11 +10,10 @@
 //! - DELETE /api/mcp-catalog/{name}   — remove a server entry
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    Json,
     routing::{delete, get},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -26,8 +25,16 @@ use acowork_core::protocol::McpServerConfigDef;
 /// Build the MCP catalog router
 pub fn mcp_catalog_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/mcp-catalog", get(list_catalog).put(replace_catalog).post(add_catalog_entry))
-        .route("/api/mcp-catalog/{name}", delete(remove_catalog_entry).put(update_catalog_entry))
+        .route(
+            "/api/mcp-catalog",
+            get(list_catalog)
+                .put(replace_catalog)
+                .post(add_catalog_entry),
+        )
+        .route(
+            "/api/mcp-catalog/{name}",
+            delete(remove_catalog_entry).put(update_catalog_entry),
+        )
 }
 
 // ── Persistence helpers ──────────────────────────────────────────────
@@ -44,10 +51,9 @@ pub fn load_mcp_catalog(data_dir: &std::path::Path) -> Result<Vec<McpServerConfi
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read MCP catalog: {}", e))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| format!("Failed to parse MCP catalog: {}", e))
+    let raw =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read MCP catalog: {}", e))?;
+    serde_json::from_str(&raw).map_err(|e| format!("Failed to parse MCP catalog: {}", e))
 }
 
 /// Save the MCP catalog to disk.
@@ -76,7 +82,14 @@ fn mask_sensitive_env(config: &McpServerConfigDef) -> McpServerConfigDef {
         .map(|(k, v)| {
             let lower = k.to_lowercase();
             let is_sensitive = sensitive_keywords.iter().any(|kw| lower.contains(kw));
-            (k.clone(), if is_sensitive { "••••".to_string() } else { v.clone() })
+            (
+                k.clone(),
+                if is_sensitive {
+                    "••••".to_string()
+                } else {
+                    v.clone()
+                },
+            )
         })
         .collect();
 
@@ -136,8 +149,7 @@ pub async fn list_catalog(
     State(state): State<AppState>,
 ) -> Result<Json<McpCatalogResponse>, (StatusCode, Json<ApiError>)> {
     let data_dir = get_data_dir(&state).await?;
-    let catalog = load_mcp_catalog(&data_dir)
-        .map_err(|e| ApiError::internal(&e))?;
+    let catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
     let sensitive_keywords = ["key", "token", "secret", "password"];
     let servers: Vec<McpCatalogEntryResponse> = catalog
@@ -148,7 +160,10 @@ pub async fn list_catalog(
                 let lower = k.to_lowercase();
                 sensitive_keywords.iter().any(|kw| lower.contains(kw))
             });
-            McpCatalogEntryResponse { config: masked, has_secrets }
+            McpCatalogEntryResponse {
+                config: masked,
+                has_secrets,
+            }
         })
         .collect();
 
@@ -165,7 +180,8 @@ pub async fn replace_catalog(
     for entry in &new_catalog {
         if !seen.insert(entry.name.clone()) {
             return Err(ApiError::bad_request(&format!(
-                "Duplicate MCP server name: '{}'", entry.name
+                "Duplicate MCP server name: '{}'",
+                entry.name
             )));
         }
         if entry.name.is_empty() {
@@ -174,8 +190,7 @@ pub async fn replace_catalog(
     }
 
     let data_dir = get_data_dir(&state).await?;
-    save_mcp_catalog(&data_dir, &new_catalog)
-        .map_err(|e| ApiError::internal(&e))?;
+    save_mcp_catalog(&data_dir, &new_catalog).map_err(|e| ApiError::internal(&e))?;
 
     // Rebuild mcp_list cache for AgentHello diff sync.
     {
@@ -184,7 +199,9 @@ pub async fn replace_catalog(
     }
 
     // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_mcp_catalog().await;
+    }
 
     // Return masked response
     let sensitive_keywords = ["key", "token", "secret", "password"];
@@ -196,7 +213,10 @@ pub async fn replace_catalog(
                 let lower = k.to_lowercase();
                 sensitive_keywords.iter().any(|kw| lower.contains(kw))
             });
-            McpCatalogEntryResponse { config: masked, has_secrets }
+            McpCatalogEntryResponse {
+                config: masked,
+                has_secrets,
+            }
         })
         .collect();
 
@@ -213,20 +233,19 @@ pub async fn add_catalog_entry(
     }
 
     let data_dir = get_data_dir(&state).await?;
-    let mut catalog = load_mcp_catalog(&data_dir)
-        .map_err(|e| ApiError::internal(&e))?;
+    let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
     // Check for duplicate name
     if catalog.iter().any(|c| c.name == body.config.name) {
         return Err(ApiError::bad_request(&format!(
-            "MCP server '{}' already exists in catalog", body.config.name
+            "MCP server '{}' already exists in catalog",
+            body.config.name
         )));
     }
 
     let name = body.config.name.clone();
     catalog.push(body.config);
-    save_mcp_catalog(&data_dir, &catalog)
-        .map_err(|e| ApiError::internal(&e))?;
+    save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
 
     // Rebuild mcp_list cache for AgentHello diff sync.
     {
@@ -235,11 +254,16 @@ pub async fn add_catalog_entry(
     }
 
     // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_mcp_catalog().await;
+    }
 
-    Ok((StatusCode::CREATED, Json(MessageResponse {
-        message: format!("MCP server '{}' added to catalog", name),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageResponse {
+            message: format!("MCP server '{}' added to catalog", name),
+        }),
+    ))
 }
 
 /// `PUT /api/mcp-catalog/{name}` — update a single server entry
@@ -249,23 +273,22 @@ pub async fn update_catalog_entry(
     Json(body): Json<UpdateCatalogEntryRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     let data_dir = get_data_dir(&state).await?;
-    let mut catalog = load_mcp_catalog(&data_dir)
-        .map_err(|e| ApiError::internal(&e))?;
+    let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
     // If the name is being changed, check for conflicts first
     if body.config.name != name {
         if catalog.iter().any(|c| c.name == body.config.name) {
             return Err(ApiError::bad_request(&format!(
-                "MCP server '{}' already exists in catalog", body.config.name
+                "MCP server '{}' already exists in catalog",
+                body.config.name
             )));
         }
     }
 
     // Find the existing entry index
-    let idx = catalog.iter().position(|c| c.name == name)
-        .ok_or_else(|| ApiError::not_found(&format!(
-            "MCP server '{}' not found in catalog", name
-        )))?;
+    let idx = catalog.iter().position(|c| c.name == name).ok_or_else(|| {
+        ApiError::not_found(&format!("MCP server '{}' not found in catalog", name))
+    })?;
 
     // Preserve sensitive env values that were sent as "••••" (masked)
     // If the user didn't change a secret field, keep the old value
@@ -297,8 +320,7 @@ pub async fn update_catalog_entry(
         tool_timeout_secs: body.config.tool_timeout_secs,
     };
 
-    save_mcp_catalog(&data_dir, &catalog)
-        .map_err(|e| ApiError::internal(&e))?;
+    save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
 
     // Rebuild mcp_list cache for AgentHello diff sync.
     {
@@ -307,7 +329,9 @@ pub async fn update_catalog_entry(
     }
 
     // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_mcp_catalog().await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("MCP server '{}' updated in catalog", new_name),
@@ -320,19 +344,18 @@ pub async fn remove_catalog_entry(
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     let data_dir = get_data_dir(&state).await?;
-    let mut catalog = load_mcp_catalog(&data_dir)
-        .map_err(|e| ApiError::internal(&e))?;
+    let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
     let original_len = catalog.len();
     catalog.retain(|c| c.name != name);
     if catalog.len() == original_len {
         return Err(ApiError::not_found(&format!(
-            "MCP server '{}' not found in catalog", name
+            "MCP server '{}' not found in catalog",
+            name
         )));
     }
 
-    save_mcp_catalog(&data_dir, &catalog)
-        .map_err(|e| ApiError::internal(&e))?;
+    save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
 
     // Rebuild mcp_list cache for AgentHello diff sync.
     {
@@ -341,7 +364,9 @@ pub async fn remove_catalog_entry(
     }
 
     // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher { pusher.push_mcp_catalog().await; }
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_mcp_catalog().await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("MCP server '{}' removed from catalog", name),
@@ -370,34 +395,48 @@ mod tests {
             name: "github".to_string(),
             transport: acowork_core::protocol::McpTransportDef::Stdio,
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-github".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ],
             env: std::collections::HashMap::from([
-                ("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), "ghp_abc123".to_string()),
+                (
+                    "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                    "ghp_abc123".to_string(),
+                ),
                 ("SOME_OTHER_VAR".to_string(), "visible_value".to_string()),
             ]),
             ..Default::default()
         };
 
         let masked = mask_sensitive_env(&config);
-        assert_eq!(masked.env.get("GITHUB_PERSONAL_ACCESS_TOKEN"), Some(&"••••".to_string()));
-        assert_eq!(masked.env.get("SOME_OTHER_VAR"), Some(&"visible_value".to_string()));
+        assert_eq!(
+            masked.env.get("GITHUB_PERSONAL_ACCESS_TOKEN"),
+            Some(&"••••".to_string())
+        );
+        assert_eq!(
+            masked.env.get("SOME_OTHER_VAR"),
+            Some(&"visible_value".to_string())
+        );
     }
 
     #[test]
     fn test_catalog_save_load_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("acowork-test-mcp-catalog-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("acowork-test-mcp-catalog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let catalog = vec![
-            McpServerConfigDef {
-                name: "filesystem".to_string(),
-                transport: acowork_core::protocol::McpTransportDef::Stdio,
-                command: "npx".to_string(),
-                args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
-                ..Default::default()
-            },
-        ];
+        let catalog = vec![McpServerConfigDef {
+            name: "filesystem".to_string(),
+            transport: acowork_core::protocol::McpTransportDef::Stdio,
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
+            ..Default::default()
+        }];
 
         save_mcp_catalog(&dir, &catalog).unwrap();
         let loaded = load_mcp_catalog(&dir).unwrap();
@@ -409,7 +448,10 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent_catalog() {
-        let dir = std::env::temp_dir().join(format!("acowork-test-mcp-catalog-empty-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-mcp-catalog-empty-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

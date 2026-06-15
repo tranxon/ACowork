@@ -266,6 +266,9 @@ mod tests {
 
     #[test]
     fn test_component_interface_version_default() {
-        assert_eq!(ComponentInterfaceVersion::default(), ComponentInterfaceVersion::V1RawPointer);
+        assert_eq!(
+            ComponentInterfaceVersion::default(),
+            ComponentInterfaceVersion::V1RawPointer
+        );
     }
 }

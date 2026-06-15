@@ -4,11 +4,10 @@
 //! per domain (agents, vault, config, chat, etc.).
 
 use axum::{
-    Json,
+    Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -16,8 +15,8 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::grpc::SharedGrpcSessionMgr;
-use crate::ipc::global_push::GlobalResourcePusher;
 use crate::http::auth::HttpAuth;
+use crate::ipc::global_push::GlobalResourcePusher;
 use crate::ipc::session::SessionManager;
 
 /// Shared state for HTTP handlers
@@ -158,8 +157,11 @@ pub struct BridgeEvent {
 /// IntentSend with action "session_response", the IPC dispatch handler
 /// finds the pending sender and fulfills it, which unblocks the
 /// HTTP handler awaiting the oneshot receiver.
-pub type SessionPendingRequests =
-    Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
+pub type SessionPendingRequests = Arc<
+    tokio::sync::Mutex<
+        std::collections::HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>,
+    >,
+>;
 
 /// Application state available to all HTTP handlers
 #[derive(Clone)]
@@ -244,8 +246,7 @@ pub fn build_router(state: AppState) -> Router {
     // When CORS is enabled (remote Desktop ↔ Gateway scenarios),
     // allow any origin. Otherwise, restrict to localhost.
     let cors = if state.cors_enabled {
-        tower_http::cors::CorsLayer::permissive()
-            .allow_credentials(true)
+        tower_http::cors::CorsLayer::permissive().allow_credentials(true)
     } else {
         tower_http::cors::CorsLayer::new()
             .allow_origin([
@@ -287,8 +288,14 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::fs_browse::fs_routes())
         .route("/lsp/{language}", get(crate::lsp::lsp_handler))
         .route("/api/lsp/servers", get(crate::lsp::lsp_servers_list))
-        .route("/api/lsp/install/{language}", get(crate::lsp::lsp_install_script))
-        .route("/api/lsp/install/{language}", post(crate::lsp::lsp_install_run))
+        .route(
+            "/api/lsp/install/{language}",
+            get(crate::lsp::lsp_install_script),
+        )
+        .route(
+            "/api/lsp/install/{language}",
+            post(crate::lsp::lsp_install_run),
+        )
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
@@ -330,26 +337,30 @@ const MIN_DISK_SPACE_BYTES: u64 = 100 * 1024 * 1024;
 /// Checks critical dependencies and returns an aggregated status:
 /// - `"ok"` — all checks passed
 /// - `"degraded"` — some checks failed (IPC unavailable, disk low)
-pub async fn health_check(
-    State(state): State<AppState>,
-) -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     let mut checks = std::collections::HashMap::new();
     let mut has_degraded = false;
 
     // 1. IPC Session Manager check
     match &state.session_mgr {
         Some(_) => {
-            checks.insert("ipc".to_string(), CheckResult {
-                status: "ok".to_string(),
-                detail: None,
-            });
+            checks.insert(
+                "ipc".to_string(),
+                CheckResult {
+                    status: "ok".to_string(),
+                    detail: None,
+                },
+            );
         }
         None => {
             has_degraded = true;
-            checks.insert("ipc".to_string(), CheckResult {
-                status: "degraded".to_string(),
-                detail: Some("Session manager not initialized".to_string()),
-            });
+            checks.insert(
+                "ipc".to_string(),
+                CheckResult {
+                    status: "degraded".to_string(),
+                    detail: Some("Session manager not initialized".to_string()),
+                },
+            );
         }
     }
 
@@ -360,26 +371,35 @@ pub async fn health_check(
             Some(store) => {
                 match store.health_check() {
                     Ok(()) => {
-                        checks.insert("cron_store".to_string(), CheckResult {
-                            status: "ok".to_string(),
-                            detail: None,
-                        });
+                        checks.insert(
+                            "cron_store".to_string(),
+                            CheckResult {
+                                status: "ok".to_string(),
+                                detail: None,
+                            },
+                        );
                     }
                     Err(e) => {
                         has_degraded = true; // Cron is non-critical
-                        checks.insert("cron_store".to_string(), CheckResult {
-                            status: "unhealthy".to_string(),
-                            detail: Some(format!("Database error: {}", e)),
-                        });
+                        checks.insert(
+                            "cron_store".to_string(),
+                            CheckResult {
+                                status: "unhealthy".to_string(),
+                                detail: Some(format!("Database error: {}", e)),
+                            },
+                        );
                     }
                 }
             }
             None => {
                 has_degraded = true;
-                checks.insert("cron_store".to_string(), CheckResult {
-                    status: "degraded".to_string(),
-                    detail: Some("CronStore not initialized".to_string()),
-                });
+                checks.insert(
+                    "cron_store".to_string(),
+                    CheckResult {
+                        status: "degraded".to_string(),
+                        detail: Some("CronStore not initialized".to_string()),
+                    },
+                );
             }
         }
     }
@@ -388,36 +408,44 @@ pub async fn health_check(
     {
         let gw = state.gateway_state.read().await;
         // Use the data directory for disk space check
-        let data_dir = gw.config.as_ref()
+        let data_dir = gw
+            .config
+            .as_ref()
             .map(|c| std::path::PathBuf::from(&c.data_dir))
             .unwrap_or_else(|| std::path::PathBuf::from("./data"));
         match fs2::available_space(&data_dir) {
             Ok(available) => {
                 if available < MIN_DISK_SPACE_BYTES {
                     has_degraded = true;
-                    checks.insert("disk".to_string(), CheckResult {
-                        status: "degraded".to_string(),
-                        detail: Some(format!(
-                            "Low disk space: {} MB available",
-                            available / (1024 * 1024)
-                        )),
-                    });
+                    checks.insert(
+                        "disk".to_string(),
+                        CheckResult {
+                            status: "degraded".to_string(),
+                            detail: Some(format!(
+                                "Low disk space: {} MB available",
+                                available / (1024 * 1024)
+                            )),
+                        },
+                    );
                 } else {
-                    checks.insert("disk".to_string(), CheckResult {
-                        status: "ok".to_string(),
-                        detail: Some(format!(
-                            "{} MB available",
-                            available / (1024 * 1024)
-                        )),
-                    });
+                    checks.insert(
+                        "disk".to_string(),
+                        CheckResult {
+                            status: "ok".to_string(),
+                            detail: Some(format!("{} MB available", available / (1024 * 1024))),
+                        },
+                    );
                 }
             }
             Err(e) => {
                 has_degraded = true;
-                checks.insert("disk".to_string(), CheckResult {
-                    status: "degraded".to_string(),
-                    detail: Some(format!("Cannot check disk space: {}", e)),
-                });
+                checks.insert(
+                    "disk".to_string(),
+                    CheckResult {
+                        status: "degraded".to_string(),
+                        detail: Some(format!("Cannot check disk space: {}", e)),
+                    },
+                );
             }
         }
     }
@@ -450,9 +478,7 @@ pub struct SystemStatusResponse {
 }
 
 /// `GET /api/status` — system status
-pub async fn system_status(
-    State(state): State<AppState>,
-) -> Json<SystemStatusResponse> {
+pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusResponse> {
     let gw = state.gateway_state.read().await;
     Json(SystemStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -473,38 +499,53 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn not_found(msg: &str) -> (StatusCode, Json<Self>) {
-        (StatusCode::NOT_FOUND, Json(Self {
-            error: msg.to_string(),
-            code: 404,
-        }))
+        (
+            StatusCode::NOT_FOUND,
+            Json(Self {
+                error: msg.to_string(),
+                code: 404,
+            }),
+        )
     }
 
     pub fn bad_request(msg: &str) -> (StatusCode, Json<Self>) {
-        (StatusCode::BAD_REQUEST, Json(Self {
-            error: msg.to_string(),
-            code: 400,
-        }))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(Self {
+                error: msg.to_string(),
+                code: 400,
+            }),
+        )
     }
 
     pub fn internal(msg: &str) -> (StatusCode, Json<Self>) {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(Self {
-            error: msg.to_string(),
-            code: 500,
-        }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(Self {
+                error: msg.to_string(),
+                code: 500,
+            }),
+        )
     }
 
     pub fn unauthorized(msg: &str) -> (StatusCode, Json<Self>) {
-        (StatusCode::UNAUTHORIZED, Json(Self {
-            error: msg.to_string(),
-            code: 401,
-        }))
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(Self {
+                error: msg.to_string(),
+                code: 401,
+            }),
+        )
     }
 
     pub fn service_unavailable(msg: &str) -> (StatusCode, Json<Self>) {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(Self {
-            error: msg.to_string(),
-            code: 503,
-        }))
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(Self {
+                error: msg.to_string(),
+                code: 503,
+            }),
+        )
     }
 }
 
@@ -516,7 +557,11 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("acowork-test-http-routes-{}-{}", std::process::id(), unique));
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-http-routes-{}-{}",
+            std::process::id(),
+            unique
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gw_state = GatewayState::new(&dir.to_string_lossy());
@@ -556,17 +601,50 @@ mod tests {
 
     #[test]
     fn test_bridge_event_type_from_action() {
-        assert_eq!(BridgeEventType::from_action("agent_response"), Some(BridgeEventType::Done));
-        assert_eq!(BridgeEventType::from_action("agent_chunk"), Some(BridgeEventType::Chunk));
-        assert_eq!(BridgeEventType::from_action("agent_tool_call"), Some(BridgeEventType::ToolCall));
-        assert_eq!(BridgeEventType::from_action("agent_tool_result"), Some(BridgeEventType::ToolResult));
-        assert_eq!(BridgeEventType::from_action("agent_error"), Some(BridgeEventType::Error));
-        assert_eq!(BridgeEventType::from_action("agent_stopped"), Some(BridgeEventType::Stopped));
-        assert_eq!(BridgeEventType::from_action("tool_approval_needed"), Some(BridgeEventType::ToolApprovalNeeded));
-        assert_eq!(BridgeEventType::from_action("memory_updated"), Some(BridgeEventType::MemoryUpdated));
-        assert_eq!(BridgeEventType::from_action("skill_executed"), Some(BridgeEventType::SkillExecuted));
-        assert_eq!(BridgeEventType::from_action("compacting_started"), Some(BridgeEventType::CompactingStarted));
-        assert_eq!(BridgeEventType::from_action("compacting_ended"), Some(BridgeEventType::CompactingEnded));
+        assert_eq!(
+            BridgeEventType::from_action("agent_response"),
+            Some(BridgeEventType::Done)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("agent_chunk"),
+            Some(BridgeEventType::Chunk)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("agent_tool_call"),
+            Some(BridgeEventType::ToolCall)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("agent_tool_result"),
+            Some(BridgeEventType::ToolResult)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("agent_error"),
+            Some(BridgeEventType::Error)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("agent_stopped"),
+            Some(BridgeEventType::Stopped)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("tool_approval_needed"),
+            Some(BridgeEventType::ToolApprovalNeeded)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("memory_updated"),
+            Some(BridgeEventType::MemoryUpdated)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("skill_executed"),
+            Some(BridgeEventType::SkillExecuted)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("compacting_started"),
+            Some(BridgeEventType::CompactingStarted)
+        );
+        assert_eq!(
+            BridgeEventType::from_action("compacting_ended"),
+            Some(BridgeEventType::CompactingEnded)
+        );
         assert_eq!(BridgeEventType::from_action("unknown_action"), None);
     }
 
@@ -578,11 +656,20 @@ mod tests {
         assert_eq!(BridgeEventType::Stopped.as_str(), "stopped");
         assert_eq!(BridgeEventType::ToolCall.as_str(), "tool_call");
         assert_eq!(BridgeEventType::ToolResult.as_str(), "tool_result");
-        assert_eq!(BridgeEventType::ToolApprovalNeeded.as_str(), "tool_approval_needed");
+        assert_eq!(
+            BridgeEventType::ToolApprovalNeeded.as_str(),
+            "tool_approval_needed"
+        );
         assert_eq!(BridgeEventType::MemoryUpdated.as_str(), "memory_updated");
         assert_eq!(BridgeEventType::SkillExecuted.as_str(), "skill_executed");
-        assert_eq!(BridgeEventType::CompactingStarted.as_str(), "compacting_started");
-        assert_eq!(BridgeEventType::CompactingEnded.as_str(), "compacting_ended");
+        assert_eq!(
+            BridgeEventType::CompactingStarted.as_str(),
+            "compacting_started"
+        );
+        assert_eq!(
+            BridgeEventType::CompactingEnded.as_str(),
+            "compacting_ended"
+        );
         assert_eq!(BridgeEventType::Unknown.as_str(), "unknown");
     }
 
@@ -590,8 +677,14 @@ mod tests {
     fn test_default_for_unknown_is_not_done() {
         // Unknown actions must NOT be silently treated as "done" —
         // that would break streaming state in the frontend.
-        assert_ne!(BridgeEventType::default_for_unknown(), BridgeEventType::Done);
-        assert_eq!(BridgeEventType::default_for_unknown(), BridgeEventType::Unknown);
+        assert_ne!(
+            BridgeEventType::default_for_unknown(),
+            BridgeEventType::Done
+        );
+        assert_eq!(
+            BridgeEventType::default_for_unknown(),
+            BridgeEventType::Unknown
+        );
     }
 
     #[test]

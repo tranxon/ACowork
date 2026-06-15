@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::consolidation::triple_extraction::{LlmMessage, TripleExtractorLlm};
 use crate::error::{GrafeoError, Result};
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, NodeStatus, ProceduralNode};
+use crate::types::{NodeStatus, ProceduralNode, labels};
 
 // ---------------------------------------------------------------------------
 // Generalization types
@@ -64,9 +64,7 @@ impl std::str::FromStr for PatternCategory {
             "UserPreference" => Ok(PatternCategory::UserPreference),
             "Workflow" => Ok(PatternCategory::Workflow),
             "ErrorRecovery" => Ok(PatternCategory::ErrorRecovery),
-            _ => Err(GrafeoError::Memory(format!(
-                "unknown PatternCategory: {s}"
-            ))),
+            _ => Err(GrafeoError::Memory(format!("unknown PatternCategory: {s}"))),
         }
     }
 }
@@ -326,11 +324,7 @@ fn name_similarity(a: &str, b: &str) -> f32 {
     let common = trigrams_a.intersection(&trigrams_b).count() as f32;
     let total = trigrams_a.union(&trigrams_b).count() as f32;
 
-    if total == 0.0 {
-        0.0
-    } else {
-        common / total
-    }
+    if total == 0.0 { 0.0 } else { common / total }
 }
 
 /// Extract character trigrams from a string.
@@ -375,10 +369,7 @@ impl GrafeoStore {
                     .get_property("consolidated")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                let role = n
-                    .get_property("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let role = n.get_property("role").and_then(Value::as_str).unwrap_or("");
 
                 if is_consolidated || role != "assistant" {
                     continue;
@@ -531,8 +522,8 @@ impl GrafeoStore {
                     let existing_node = &existing[idx];
                     let new_confidence = (existing_node.confidence + config.confidence_boost)
                         .min(config.max_confidence);
-                    let new_success = existing_node.success_count
-                        + pattern.observation_count as u32;
+                    let new_success =
+                        existing_node.success_count + pattern.observation_count as u32;
 
                     let mut updated = existing_node.clone();
                     updated.confidence = new_confidence;
@@ -649,13 +640,11 @@ fn find_similar_procedural(
 
     // Only consider it a match if similarity is high enough
     // Use a threshold of 0.6 for procedural node name matching
-    best.and_then(|(idx, sim)| {
-        if sim >= 0.6 {
-            Some((idx, sim))
-        } else {
-            None
-        }
-    })
+    best.and_then(
+        |(idx, sim)| {
+            if sim >= 0.6 { Some((idx, sim)) } else { None }
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -734,9 +723,21 @@ mod tests {
     #[test]
     fn test_detect_simple_patterns_basic() {
         let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep2".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep3".to_string(), "weather".to_string(), "http_request".to_string()),
+            (
+                "ep1".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep3".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
         ];
 
         let patterns = detect_simple_patterns(&episodes, 3);
@@ -752,8 +753,16 @@ mod tests {
     #[test]
     fn test_detect_simple_patterns_below_threshold() {
         let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep2".to_string(), "weather".to_string(), "http_request".to_string()),
+            (
+                "ep1".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
         ];
 
         let patterns = detect_simple_patterns(&episodes, 3);
@@ -767,12 +776,36 @@ mod tests {
     #[test]
     fn test_detect_multiple_patterns() {
         let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep2".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep3".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep4".to_string(), "calendar".to_string(), "intent_send".to_string()),
-            ("ep5".to_string(), "calendar".to_string(), "intent_send".to_string()),
-            ("ep6".to_string(), "calendar".to_string(), "intent_send".to_string()),
+            (
+                "ep1".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep3".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep4".to_string(),
+                "calendar".to_string(),
+                "intent_send".to_string(),
+            ),
+            (
+                "ep5".to_string(),
+                "calendar".to_string(),
+                "intent_send".to_string(),
+            ),
+            (
+                "ep6".to_string(),
+                "calendar".to_string(),
+                "intent_send".to_string(),
+            ),
         ];
 
         let patterns = detect_simple_patterns(&episodes, 3);
@@ -845,19 +878,28 @@ mod tests {
     #[test]
     fn test_name_similarity_case_insensitive() {
         let sim = name_similarity("Weather_Lookup", "weather_lookup");
-        assert!(sim > 0.9, "case-insensitive names should be very similar, got {sim}");
+        assert!(
+            sim > 0.9,
+            "case-insensitive names should be very similar, got {sim}"
+        );
     }
 
     #[test]
     fn test_name_similarity_similar() {
         let sim = name_similarity("weather_lookup", "weather_lookup_pattern");
-        assert!(sim > 0.5, "similar names should have moderate similarity, got {sim}");
+        assert!(
+            sim > 0.5,
+            "similar names should have moderate similarity, got {sim}"
+        );
     }
 
     #[test]
     fn test_name_similarity_different() {
         let sim = name_similarity("weather_lookup", "calendar_reminder");
-        assert!(sim < 0.5, "very different names should have low similarity, got {sim}");
+        assert!(
+            sim < 0.5,
+            "very different names should have low similarity, got {sim}"
+        );
     }
 
     // =====================================================================
@@ -918,7 +960,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TripleExtractorLlm for MockPatternLlm {
-        async fn chat(&self, _messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String> {
+        async fn chat(
+            &self,
+            _messages: Vec<LlmMessage>,
+        ) -> std::result::Result<LlmResponse, String> {
             Ok(LlmResponse {
                 content: self.response.clone(),
                 usage_tokens: Some(200),
@@ -940,9 +985,11 @@ mod tests {
             response: r#"[{"name":"weather_lookup","trigger_condition":"User asks about weather","action_pattern":"Use http_request to fetch weather data","observation_count":5,"confidence":0.9,"category":"ToolUsage"}]"#.to_string(),
         };
 
-        let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-        ];
+        let episodes = vec![(
+            "ep1".to_string(),
+            "weather".to_string(),
+            "http_request".to_string(),
+        )];
 
         let patterns = discover_patterns_llm(&episodes, &llm).await.unwrap();
         assert_eq!(patterns.len(), 1);
@@ -960,9 +1007,11 @@ mod tests {
             response: r#"[{"name":"concise_output","trigger_condition":"User asks for summary","action_pattern":"Reply concisely","observation_count":4,"confidence":0.85,"category":"UserPreference"},{"name":"retry_on_timeout","trigger_condition":"API call times out","action_pattern":"Retry once","observation_count":3,"confidence":0.8,"category":"ErrorRecovery"}]"#.to_string(),
         };
 
-        let episodes = vec![
-            ("ep1".to_string(), "summary".to_string(), "text_gen".to_string()),
-        ];
+        let episodes = vec![(
+            "ep1".to_string(),
+            "summary".to_string(),
+            "text_gen".to_string(),
+        )];
 
         let patterns = discover_patterns_llm(&episodes, &llm).await.unwrap();
         assert_eq!(patterns.len(), 2);
@@ -980,9 +1029,11 @@ mod tests {
             response: r#"[{"name":"weather_lookup","trigger_condition":"User asks about weather","action_pattern":"Use http_request","observation_count":3,"confidence":0.9}]"#.to_string(),
         };
 
-        let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-        ];
+        let episodes = vec![(
+            "ep1".to_string(),
+            "weather".to_string(),
+            "http_request".to_string(),
+        )];
 
         let patterns = discover_patterns_llm(&episodes, &llm).await.unwrap();
         assert_eq!(patterns.len(), 1);
@@ -998,9 +1049,21 @@ mod tests {
         let store = GrafeoStore::new_in_memory().unwrap();
 
         let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep2".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep3".to_string(), "weather".to_string(), "http_request".to_string()),
+            (
+                "ep1".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep3".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
         ];
 
         let result = store
@@ -1061,9 +1124,21 @@ mod tests {
 
         // Run generalization with the same pattern
         let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep2".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep3".to_string(), "weather".to_string(), "http_request".to_string()),
+            (
+                "ep1".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep3".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
         ];
 
         let result = store
@@ -1079,7 +1154,10 @@ mod tests {
         // Verify the existing node was updated
         let all_procedural = store.get_all_procedural_nodes().unwrap();
         assert_eq!(all_procedural.len(), 1, "should still have only one node");
-        assert!(all_procedural[0].confidence > 0.8, "confidence should be boosted");
+        assert!(
+            all_procedural[0].confidence > 0.8,
+            "confidence should be boosted"
+        );
         assert_eq!(all_procedural[0].success_count, 6, "3 + 3 = 6");
     }
 
@@ -1112,9 +1190,21 @@ mod tests {
         store.store_procedural(&existing).unwrap();
 
         let episodes = vec![
-            ("ep1".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep2".to_string(), "weather".to_string(), "http_request".to_string()),
-            ("ep3".to_string(), "weather".to_string(), "http_request".to_string()),
+            (
+                "ep1".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep3".to_string(),
+                "weather".to_string(),
+                "http_request".to_string(),
+            ),
         ];
 
         let result = store
@@ -1138,9 +1228,21 @@ mod tests {
         let store = GrafeoStore::new_in_memory().unwrap();
 
         let episodes = vec![
-            ("ep1".to_string(), "retry_on_error".to_string(), "http_request".to_string()),
-            ("ep2".to_string(), "retry_on_error".to_string(), "http_request".to_string()),
-            ("ep3".to_string(), "retry_on_error".to_string(), "http_request".to_string()),
+            (
+                "ep1".to_string(),
+                "retry_on_error".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "retry_on_error".to_string(),
+                "http_request".to_string(),
+            ),
+            (
+                "ep3".to_string(),
+                "retry_on_error".to_string(),
+                "http_request".to_string(),
+            ),
         ];
 
         let result = store
@@ -1152,7 +1254,9 @@ mod tests {
 
         let all_procedural = store.get_all_procedural_nodes().unwrap();
         assert_eq!(all_procedural.len(), 1);
-        let category = all_procedural[0].metadata.get("category")
+        let category = all_procedural[0]
+            .metadata
+            .get("category")
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert_eq!(category, "ErrorRecovery");
@@ -1292,8 +1396,16 @@ mod tests {
         };
 
         let episodes = vec![
-            ("ep1".to_string(), "translate".to_string(), "llm_call".to_string()),
-            ("ep2".to_string(), "translate".to_string(), "llm_call".to_string()),
+            (
+                "ep1".to_string(),
+                "translate".to_string(),
+                "llm_call".to_string(),
+            ),
+            (
+                "ep2".to_string(),
+                "translate".to_string(),
+                "llm_call".to_string(),
+            ),
         ];
 
         let result = store

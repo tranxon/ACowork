@@ -11,7 +11,7 @@
 //! Security: Host functions are the ONLY way WASM tools can
 //! interact with the host. No direct memory access is possible.
 
-use wasmtime::{FuncType, ValType, Engine};
+use wasmtime::{Engine, FuncType, ValType};
 
 /// Host function registry for WASM instances.
 ///
@@ -82,8 +82,8 @@ pub struct HostIoBridge {
 impl Default for HostIoBridge {
     fn default() -> Self {
         Self {
-            max_input_size: 1024 * 1024,      // 1MB
-            max_output_size: 1024 * 1024,      // 1MB
+            max_input_size: 1024 * 1024,  // 1MB
+            max_output_size: 1024 * 1024, // 1MB
         }
     }
 }

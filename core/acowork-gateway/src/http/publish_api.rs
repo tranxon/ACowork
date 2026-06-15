@@ -6,11 +6,10 @@
 //! S4.3a: CLI Package command wired through Gateway
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    Json,
     routing::post,
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -174,7 +173,10 @@ pub async fn install_locally(
             "Install-locally failed: {}",
             e
         ))),
-        Err(e) => Err(ApiError::internal(&format!("Install-locally task failed: {}", e))),
+        Err(e) => Err(ApiError::internal(&format!(
+            "Install-locally task failed: {}",
+            e
+        ))),
     }
 }
 

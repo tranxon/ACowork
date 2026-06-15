@@ -8,8 +8,8 @@ use futures_core::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use std::time::Duration;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use acowork_core::providers::traits::{
     ChatMessage, ChatRequest, ChatResponse, FunctionCall, MessageRole, Provider, StreamEvent,
@@ -30,11 +30,7 @@ impl OllamaProvider {
 
     /// Create provider with custom base URL and default timeouts
     pub fn with_base_url(base_url: Option<&str>) -> Self {
-        Self::with_base_url_and_timeouts(
-            base_url,
-            Duration::from_secs(300),
-            Duration::from_secs(5),
-        )
+        Self::with_base_url_and_timeouts(base_url, Duration::from_secs(300), Duration::from_secs(5))
     }
 
     /// Create provider with fully configurable timeouts
@@ -165,16 +161,19 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<OllamaMessage> {
 fn parse_response(msg: OllamaResponseMessage, resp: &OllamaChatResponse) -> ChatResponse {
     let content = msg.content.unwrap_or_default();
 
-    let tool_calls = msg.tool_calls.unwrap_or_default().into_iter().map(|tc| {
-        ToolCall {
+    let tool_calls = msg
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tc| ToolCall {
             id: uuid::Uuid::new_v4().to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {
                 name: tc.function.name,
                 arguments: serde_json::to_string(&tc.function.arguments).unwrap_or_default(),
             },
-        }
-    }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
 
     let usage = UsageInfo {
         prompt_tokens: resp.prompt_eval_count.unwrap_or(0),
@@ -185,7 +184,11 @@ fn parse_response(msg: OllamaResponseMessage, resp: &OllamaChatResponse) -> Chat
 
     ChatResponse {
         content,
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
         usage: Some(usage),
         ..Default::default()
     }
@@ -199,10 +202,7 @@ impl Provider for OllamaProvider {
         "ollama"
     }
 
-    async fn chat(
-        &self,
-        request: ChatRequest,
-    ) -> acowork_core::error::Result<ChatResponse> {
+    async fn chat(&self, request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
         let ollama_request = OllamaChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
@@ -223,28 +223,40 @@ impl Provider for OllamaProvider {
             .send()
             .await
             .map_err(|e| {
-                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!("Ollama request failed: {e}")))
+                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!(
+                    "Ollama request failed: {e}"
+                )))
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(acowork_core::AcoworkError::Provider(acowork_core::ProviderError::from_status_code(
-                status.as_u16(),
-                format!("Ollama API error: {status} — {body}"),
-            )));
+            return Err(acowork_core::AcoworkError::Provider(
+                acowork_core::ProviderError::from_status_code(
+                    status.as_u16(),
+                    format!("Ollama API error: {status} — {body}"),
+                ),
+            ));
         }
 
         let ollama_resp: OllamaChatResponse = response.json().await.map_err(|e| {
-            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(format!("Failed to parse Ollama response: {e}")))
+            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(format!(
+                "Failed to parse Ollama response: {e}"
+            )))
         })?;
 
         let msg = ollama_resp.message;
         let prompt_eval = ollama_resp.prompt_eval_count;
         let eval = ollama_resp.eval_count;
         let dummy_resp = OllamaChatResponse {
-            message: OllamaResponseMessage { role: String::new(), content: None, tool_calls: None },
-            total_duration: None, eval_count: eval, prompt_eval_count: prompt_eval,
+            message: OllamaResponseMessage {
+                role: String::new(),
+                content: None,
+                tool_calls: None,
+            },
+            total_duration: None,
+            eval_count: eval,
+            prompt_eval_count: prompt_eval,
         };
         Ok(parse_response(msg, &dummy_resp))
     }
@@ -255,13 +267,12 @@ impl Provider for OllamaProvider {
     ) -> acowork_core::error::Result<Box<dyn Stream<Item = StreamEvent> + Send>> {
         // Ollama streaming not yet implemented — fall back to non-streaming
         let response = self.chat(request).await?;
-        Ok(Box::new(OnceStream { event: Some(StreamEvent::Finished(response)) }))
+        Ok(Box::new(OnceStream {
+            event: Some(StreamEvent::Finished(response)),
+        }))
     }
 
-    async fn chat_token_count(
-        &self,
-        messages: &[ChatMessage],
-    ) -> acowork_core::error::Result<u64> {
+    async fn chat_token_count(&self, messages: &[ChatMessage]) -> acowork_core::error::Result<u64> {
         let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
         Ok((total_chars as f64 / 4.0).ceil() as u64)
     }
@@ -299,17 +310,15 @@ mod tests {
 
     #[test]
     fn test_convert_messages() {
-        let messages = vec![
-            ChatMessage {
-                role: MessageRole::User,
-                content: "Hello".to_string(),
-                content_parts: None,
-                reasoning_content: None,
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-        ];
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: "Hello".to_string(),
+            content_parts: None,
+            reasoning_content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
         let ollama_msgs = convert_messages(&messages);
         assert_eq!(ollama_msgs.len(), 1);
         assert_eq!(ollama_msgs[0].role, "user");

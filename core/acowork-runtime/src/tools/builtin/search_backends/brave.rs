@@ -74,10 +74,7 @@ impl SearchBackend for BraveBackend {
         let resp = self
             .client
             .get(&url)
-            .query(&[
-                ("q", query),
-                ("count", &count.min(10).to_string()),
-            ])
+            .query(&[("q", query), ("count", &count.min(10).to_string())])
             .header("Accept", "application/json")
             .header("Accept-Encoding", "gzip")
             .header("X-Subscription-Token", api_key)

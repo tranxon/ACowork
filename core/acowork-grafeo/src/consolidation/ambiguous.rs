@@ -10,7 +10,7 @@ use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, KnowledgeNode, NodeStatus};
+use crate::types::{KnowledgeNode, NodeStatus, labels};
 
 /// An ambiguous conflict waiting for user confirmation.
 #[derive(Debug, Clone)]
@@ -46,8 +46,10 @@ impl GrafeoStore {
                     .collect();
 
                 if let Ok(kn) = KnowledgeNode::from_properties(id, &props)
-                    && let Some(group_id) =
-                        kn.metadata.get("conflict_group_id").and_then(|v| v.as_str())
+                    && let Some(group_id) = kn
+                        .metadata
+                        .get("conflict_group_id")
+                        .and_then(|v| v.as_str())
                 {
                     groups
                         .entry(group_id.to_string())
@@ -119,11 +121,7 @@ impl GrafeoStore {
     ///
     /// Marks the chosen node as `Active` and demotes the other to `Dormant`,
     /// clearing the `conflict_group_id` metadata from both.
-    pub fn resolve_ambiguous(
-        &self,
-        conflict_group_id: &str,
-        keep_node_id: NodeId,
-    ) -> Result<()> {
+    pub fn resolve_ambiguous(&self, conflict_group_id: &str, keep_node_id: NodeId) -> Result<()> {
         let conflicts = self.get_pending_ambiguous_conflicts()?;
         let conflict = conflicts
             .into_iter()
@@ -168,7 +166,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KnowledgeNode, KnowledgeSubType, DEFAULT_EMBEDDING_DIM};
+    use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeNode, KnowledgeSubType};
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
@@ -298,7 +296,10 @@ mod tests {
                 updated_at: Utc::now(),
                 metadata: {
                     let mut m = std::collections::HashMap::new();
-                    m.insert("conflict_group_id".to_string(), serde_json::Value::String(group_id.clone()));
+                    m.insert(
+                        "conflict_group_id".to_string(),
+                        serde_json::Value::String(group_id.clone()),
+                    );
                     m
                 },
             };
@@ -316,7 +317,10 @@ mod tests {
                 updated_at: Utc::now(),
                 metadata: {
                     let mut m = std::collections::HashMap::new();
-                    m.insert("conflict_group_id".to_string(), serde_json::Value::String(group_id));
+                    m.insert(
+                        "conflict_group_id".to_string(),
+                        serde_json::Value::String(group_id),
+                    );
                     m
                 },
             };

@@ -83,8 +83,7 @@ impl Permission {
             if data.len() < 5 + val_len {
                 return Err("truncated value".to_string());
             }
-            Some(String::from_utf8(data[5..5 + val_len].to_vec())
-                .map_err(|e| e.to_string())?)
+            Some(String::from_utf8(data[5..5 + val_len].to_vec()).map_err(|e| e.to_string())?)
         } else {
             None
         };
@@ -195,13 +194,23 @@ impl PermissionParseError {
 
     /// Create an error for a missing component (e.g., no access type after category).
     fn missing_component(input: &str, expected: &str) -> Self {
-        Self::new(input, &format!("missing '{}'. Expected format: {}", expected, Self::expected_format(input)))
+        Self::new(
+            input,
+            &format!(
+                "missing '{}'. Expected format: {}",
+                expected,
+                Self::expected_format(input)
+            ),
+        )
     }
 
     /// Create an error for an invalid sub-component value.
     #[allow(dead_code)]
     fn invalid_value(input: &str, component: &str, valid: &str) -> Self {
-        Self::new(input, &format!("invalid {} '{}'. Valid values: {}", component, input, valid))
+        Self::new(
+            input,
+            &format!("invalid {} '{}'. Valid values: {}", component, input, valid),
+        )
     }
 
     /// Determine the expected format hint based on the input prefix.
@@ -255,34 +264,60 @@ impl Permission {
             "network" => Ok(Permission::Network(Some(rest.to_string()))),
             "filesystem" => {
                 // Split rest on first colon: "read:~/Documents" or "write:~/workdir"
-                let (access, path) = rest.split_once(':')
+                let (access, path) = rest
+                    .split_once(':')
                     .ok_or_else(|| PermissionParseError::missing_component(s, "access:path"))?;
                 let path = Some(path.to_string());
                 match access {
                     "read" => Ok(Permission::FilesystemRead(path)),
                     "write" => Ok(Permission::FilesystemWrite(path)),
-                    other => Err(PermissionParseError::new(s, &format!("invalid filesystem access '{}'. Expected 'read' or 'write'", other))),
+                    other => Err(PermissionParseError::new(
+                        s,
+                        &format!(
+                            "invalid filesystem access '{}'. Expected 'read' or 'write'",
+                            other
+                        ),
+                    )),
                 }
             }
             "memory" => match rest {
                 "read" => Ok(Permission::MemoryRead),
                 "write" => Ok(Permission::MemoryWrite),
-                other => Err(PermissionParseError::new(s, &format!("invalid memory operation '{}'. Expected 'read' or 'write'", other))),
+                other => Err(PermissionParseError::new(
+                    s,
+                    &format!(
+                        "invalid memory operation '{}'. Expected 'read' or 'write'",
+                        other
+                    ),
+                )),
             },
             "intent" => {
-                let (direction, target) = rest.split_once(':')
-                    .ok_or_else(|| PermissionParseError::missing_component(s, "direction:target"))?;
+                let (direction, target) = rest.split_once(':').ok_or_else(|| {
+                    PermissionParseError::missing_component(s, "direction:target")
+                })?;
                 let target = Some(target.to_string());
                 match direction {
                     "send" => Ok(Permission::IntentSend(target)),
                     "receive" => Ok(Permission::IntentReceive(target)),
-                    other => Err(PermissionParseError::new(s, &format!("invalid intent direction '{}'. Expected 'send' or 'receive'", other))),
+                    other => Err(PermissionParseError::new(
+                        s,
+                        &format!(
+                            "invalid intent direction '{}'. Expected 'send' or 'receive'",
+                            other
+                        ),
+                    )),
                 }
             }
             "identity" => match rest {
                 "read" => Ok(Permission::IdentityRead),
                 "write" => Ok(Permission::IdentityWrite),
-                other => Err(PermissionParseError::new(s, &format!("invalid identity operation '{}'. Expected 'read' or 'write'", other))),
+                other => Err(PermissionParseError::new(
+                    s,
+                    &format!(
+                        "invalid identity operation '{}'. Expected 'read' or 'write'",
+                        other
+                    ),
+                )),
             },
             "rag" => match rest {
                 "query" => Ok(Permission::RagQuery(None)),
@@ -291,7 +326,13 @@ impl Permission {
                     if let Some(url) = query_part.strip_prefix("query:") {
                         Ok(Permission::RagQuery(Some(url.to_string())))
                     } else {
-                        Err(PermissionParseError::new(s, &format!("invalid rag operation '{}'. Expected 'query' or 'query:<url>'", query_part)))
+                        Err(PermissionParseError::new(
+                            s,
+                            &format!(
+                                "invalid rag operation '{}'. Expected 'query' or 'query:<url>'",
+                                query_part
+                            ),
+                        ))
                     }
                 }
             },
@@ -642,14 +683,21 @@ mod tests {
         assert_eq!(p, Permission::RagQuery(None));
 
         let p2 = Permission::parse("rag:query:https://rag.corp.example.com").unwrap();
-        assert_eq!(p2, Permission::RagQuery(Some("https://rag.corp.example.com".into())));
+        assert_eq!(
+            p2,
+            Permission::RagQuery(Some("https://rag.corp.example.com".into()))
+        );
     }
 
     #[test]
     fn test_rag_query_permission_string() {
-        assert_eq!(Permission::RagQuery(None).to_permission_string(), "rag:query");
         assert_eq!(
-            Permission::RagQuery(Some("https://rag.corp.example.com".into())).to_permission_string(),
+            Permission::RagQuery(None).to_permission_string(),
+            "rag:query"
+        );
+        assert_eq!(
+            Permission::RagQuery(Some("https://rag.corp.example.com".into()))
+                .to_permission_string(),
             "rag:query:https://rag.corp.example.com"
         );
     }

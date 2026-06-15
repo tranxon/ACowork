@@ -1,7 +1,7 @@
 //! acowork-verify CLI
 
-use clap::Parser;
 use acowork_sign::verify::verify_package;
+use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]

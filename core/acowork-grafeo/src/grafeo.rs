@@ -8,20 +8,19 @@ use grafeo_engine::GrafeoDB;
 
 use crate::types::labels;
 use crate::types::{
-    AutobiographicalNode as GrafeoAutobiographicalNode, Episode as GrafeoEpisode,
-    KnowledgeNode as GrafeoKnowledgeNode, KnowledgeSubType as GrafeoKnowledgeSubType,
+    AutobioCategory as GrafeoAutobioCategory, AutobiographicalNode as GrafeoAutobiographicalNode,
+    Episode as GrafeoEpisode, GrafeoConfig, KnowledgeNode as GrafeoKnowledgeNode,
+    KnowledgeSubType as GrafeoKnowledgeSubType, NodeStatus as GrafeoNodeStatus,
     ProceduralNode as GrafeoProceduralNode,
-    AutobioCategory as GrafeoAutobioCategory, NodeStatus as GrafeoNodeStatus,
-    GrafeoConfig,
 };
 use acowork_memory::types::{ResultSource, SearchResult};
 use acowork_memory::{
-    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    MemoryQuery, ProceduralNode, PurgeResult, StoreHealth, StoreStats,
+    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode, MemoryQuery,
+    ProceduralNode, PurgeResult, StoreHealth, StoreStats,
 };
 
 use crate::error::Result;
-use crate::index_config::{HnswConfig, EPISODIC_TEXT_FIELDS, KNOWLEDGE_TEXT_FIELDS, VECTOR_METRIC};
+use crate::index_config::{EPISODIC_TEXT_FIELDS, HnswConfig, KNOWLEDGE_TEXT_FIELDS, VECTOR_METRIC};
 
 /// Statistics returned by [`GrafeoStore::rebuild_embeddings`].
 #[derive(Debug, Clone, Default)]
@@ -96,7 +95,10 @@ impl GrafeoStore {
         let engine_config = grafeo_engine::Config::persistent(path)
             .with_checkpoint_interval(DEFAULT_CHECKPOINT_INTERVAL);
         let db = GrafeoDB::with_config(engine_config)?;
-        let store = Self { db, hnsw_config: config };
+        let store = Self {
+            db,
+            hnsw_config: config,
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -111,7 +113,10 @@ impl GrafeoStore {
     /// Create a new in-memory Grafeo database with custom HNSW config.
     pub fn new_in_memory_with_config(config: HnswConfig) -> Result<Self> {
         let db = GrafeoDB::new_in_memory();
-        let store = Self { db, hnsw_config: config };
+        let store = Self {
+            db,
+            hnsw_config: config,
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -164,7 +169,8 @@ impl GrafeoStore {
         self.db.create_text_index(labels::PROCEDURAL, "content")?;
 
         // BM25 text indexes for Autobiographical content (computed from key/value).
-        self.db.create_text_index(labels::AUTOBIOGRAPHICAL, "content")?;
+        self.db
+            .create_text_index(labels::AUTOBIOGRAPHICAL, "content")?;
 
         // Also add content text index for Knowledge (computed from subject/predicate/object).
         self.db.create_text_index(labels::KNOWLEDGE, "content")?;
@@ -245,10 +251,8 @@ impl GrafeoStore {
                     .into_iter()
                     .map(|(k, v)| (k.as_str().to_string(), v))
                     .collect();
-                let prop_map: std::collections::HashMap<&str, &Value> = props
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v))
-                    .collect();
+                let prop_map: std::collections::HashMap<&str, &Value> =
+                    props.iter().map(|(k, v)| (k.as_str(), v)).collect();
 
                 // Skip nodes without an existing embedding (they may have been
                 // created without an embedding provider).
@@ -277,7 +281,8 @@ impl GrafeoStore {
                             // Wrong dimension from embed_fn — update anyway,
                             // caller should handle dimension mismatch.
                         }
-                        let emb_value = Value::Vector(std::sync::Arc::from(new_embedding.as_slice()));
+                        let emb_value =
+                            Value::Vector(std::sync::Arc::from(new_embedding.as_slice()));
                         self.db.set_node_property(node_id, "embedding", emb_value);
                         stats.rebuilt += 1;
                     }
@@ -317,14 +322,17 @@ impl MemoryStore for GrafeoStore {
             .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))
     }
 
-    fn search_episodes(&self, query: &MemoryQuery) -> acowork_core::error::Result<Vec<SearchResult>> {
+    fn search_episodes(
+        &self,
+        query: &MemoryQuery,
+    ) -> acowork_core::error::Result<Vec<SearchResult>> {
         // Bridge to episodic search methods based on query type
         if let Some(ref embedding) = query.embedding {
             // Vector search with embedding
             let episodes = self
                 .search_episodes_by_embedding(embedding, query.limit)
                 .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))?;
-            
+
             Ok(episodes
                 .into_iter()
                 .map(|(ep, score)| SearchResult {
@@ -342,7 +350,7 @@ impl MemoryStore for GrafeoStore {
             let episodes = self
                 .search_episodes_by_keyword(&query.query_text, query.limit)
                 .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))?;
-            
+
             Ok(episodes
                 .into_iter()
                 .map(|(ep, score)| SearchResult {
@@ -460,7 +468,10 @@ impl MemoryStore for GrafeoStore {
             .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))
     }
 
-    fn store_autobiographical(&self, node: &AutobiographicalNode) -> acowork_core::error::Result<()> {
+    fn store_autobiographical(
+        &self,
+        node: &AutobiographicalNode,
+    ) -> acowork_core::error::Result<()> {
         let grafeo_node = GrafeoAutobiographicalNode {
             id: None,
             category: match node.category {
@@ -469,7 +480,9 @@ impl MemoryStore for GrafeoStore {
                 acowork_memory::AutobioCategory::Limitation => GrafeoAutobioCategory::Limitation,
                 acowork_memory::AutobioCategory::Preference => GrafeoAutobioCategory::Preference,
                 acowork_memory::AutobioCategory::History => GrafeoAutobioCategory::History,
-                acowork_memory::AutobioCategory::Relationship => GrafeoAutobioCategory::Relationship,
+                acowork_memory::AutobioCategory::Relationship => {
+                    GrafeoAutobioCategory::Relationship
+                }
             },
             key: node.key.clone(),
             value: node.value.clone(),
@@ -504,8 +517,15 @@ impl MemoryStore for GrafeoStore {
             let embedding = query.embedding.as_deref().unwrap_or(&[]);
             let search_results = if !embedding.is_empty() && !query.query_text.is_empty() {
                 // Hybrid search with both text and vector
-                self.hybrid_search(label, "content", "embedding", &query.query_text, embedding, query.limit)
-                    .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))?
+                self.hybrid_search(
+                    label,
+                    "content",
+                    "embedding",
+                    &query.query_text,
+                    embedding,
+                    query.limit,
+                )
+                .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))?
             } else if !embedding.is_empty() {
                 // Vector search only
                 self.vector_search(label, embedding, query.limit, None)
@@ -547,7 +567,11 @@ impl MemoryStore for GrafeoStore {
         Ok(all_results)
     }
 
-    fn graph_expand(&self, seeds: &[SearchResult], hops: u8) -> acowork_core::error::Result<Vec<SearchResult>> {
+    fn graph_expand(
+        &self,
+        seeds: &[SearchResult],
+        hops: u8,
+    ) -> acowork_core::error::Result<Vec<SearchResult>> {
         // Convert SearchResult to (NodeId, f64) format for native method
         let seed_nodes: Vec<(grafeo_common::NodeId, f64)> = seeds
             .iter()
@@ -608,7 +632,7 @@ impl MemoryStore for GrafeoStore {
     fn purge_expired(&self, max_dormant_age: Duration) -> acowork_core::error::Result<PurgeResult> {
         // Convert Duration to days for native method
         let max_days = (max_dormant_age.as_secs() / 86400) as u32;
-        
+
         // Use purge_expired_dormant from purge_log module
         let purged_entries = self
             .purge_expired_dormant(max_days)
@@ -623,7 +647,7 @@ impl MemoryStore for GrafeoStore {
     fn health_check(&self) -> acowork_core::error::Result<StoreHealth> {
         // Basic health check: verify database is accessible
         let is_healthy = true; // GrafeoDB session() doesn't return Result
-        
+
         Ok(StoreHealth {
             is_healthy,
             latency_ms: 0,
@@ -641,16 +665,19 @@ impl MemoryStore for GrafeoStore {
         let episode_count = *memory_stats.label_counts.get("Episodic").unwrap_or(&0) as u64;
         let knowledge_count = *memory_stats.label_counts.get("Knowledge").unwrap_or(&0) as u64;
         let procedural_count = *memory_stats.label_counts.get("Procedural").unwrap_or(&0) as u64;
-        let autobio_count = *memory_stats.label_counts.get("Autobiographical").unwrap_or(&0) as u64;
+        let autobio_count = *memory_stats
+            .label_counts
+            .get("Autobiographical")
+            .unwrap_or(&0) as u64;
 
         Ok(StoreStats {
             episode_count,
             node_count: knowledge_count + procedural_count + autobio_count,
             active_node_count: 0, // Native stats doesn't provide this breakdown
             dormant_node_count: memory_stats.dormant_count as u64,
-            edge_count: 0, // Native stats doesn't provide this
+            edge_count: 0,         // Native stats doesn't provide this
             storage_size_bytes: 0, // Native stats doesn't provide this
-            index_count: 0, // Native stats doesn't provide this
+            index_count: 0,        // Native stats doesn't provide this
         })
     }
 

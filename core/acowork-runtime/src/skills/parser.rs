@@ -227,8 +227,7 @@ impl SkillRegistry {
             return Ok(registry);
         }
 
-        let entries = std::fs::read_dir(skills_dir)
-            .map_err(SkillParseError::Io)?;
+        let entries = std::fs::read_dir(skills_dir).map_err(SkillParseError::Io)?;
 
         for entry in entries {
             let entry = entry.map_err(SkillParseError::Io)?;
@@ -239,19 +238,11 @@ impl SkillRegistry {
                 if skill_md.exists() {
                     match load_skill_md(&skill_md) {
                         Ok(skill) => {
-                            tracing::info!(
-                                "Loaded skill '{}' from {:?}",
-                                skill.name,
-                                skill_md
-                            );
+                            tracing::info!("Loaded skill '{}' from {:?}", skill.name, skill_md);
                             registry.skills.insert(skill.name.clone(), skill);
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "Failed to parse skill from {:?}: {}",
-                                skill_md,
-                                e
-                            );
+                            tracing::warn!("Failed to parse skill from {:?}: {}", skill_md, e);
                             // Continue loading other skills rather than failing entirely
                         }
                     }
@@ -278,7 +269,10 @@ impl SkillRegistry {
         self.skills
             .values()
             .filter(|skill| {
-                skill.triggers.iter().any(|t| t.to_lowercase() == trigger_lower)
+                skill
+                    .triggers
+                    .iter()
+                    .any(|t| t.to_lowercase() == trigger_lower)
             })
             .collect()
     }
@@ -430,7 +424,10 @@ tested_models:
         assert_eq!(skill.tested_models[0].model, "gpt-4o");
         assert_eq!(skill.tested_models[0].rating, Some("excellent".to_string()));
         assert_eq!(skill.tested_models[1].provider, "ollama");
-        assert_eq!(skill.tested_models[1].note, Some("需要扁平化指令适配".to_string()));
+        assert_eq!(
+            skill.tested_models[1].note,
+            Some("需要扁平化指令适配".to_string())
+        );
     }
 
     #[test]

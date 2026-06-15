@@ -103,11 +103,16 @@ impl ProviderEntry {
     }
 
     fn is_degraded(&self, threshold: u32) -> bool {
-        self.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed) >= threshold
+        self.consecutive_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= threshold
     }
 
     fn record_failure(&self, threshold: u32) {
-        let failures = self.consecutive_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let failures = self
+            .consecutive_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         if failures == threshold {
             tracing::warn!(
                 provider = self.provider.name(),
@@ -119,7 +124,8 @@ impl ProviderEntry {
     }
 
     fn record_success(&self) {
-        self.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -220,7 +226,8 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        let mut last_error = EmbeddingError::Unavailable("All embedding providers failed".to_string());
+        let mut last_error =
+            EmbeddingError::Unavailable("All embedding providers failed".to_string());
 
         for entry in &self.providers {
             // Skip degraded providers
@@ -272,7 +279,8 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
 
         for chunk in texts.chunks(self.config.max_batch_size) {
             let mut chunk_ok = false;
-            let mut last_err = EmbeddingError::Unavailable("All embedding providers failed".to_string());
+            let mut last_err =
+                EmbeddingError::Unavailable("All embedding providers failed".to_string());
 
             for entry in &self.providers {
                 // Skip degraded providers

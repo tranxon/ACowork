@@ -43,7 +43,6 @@ fn main() {
             std::fs::copy(&src, &dst).unwrap_or_else(|e| {
                 panic!("Failed to copy {}: {}", src.display(), e);
             });
-            println!("cargo:warning=Copied {name} ({profile}) to bin/");
         } else {
             println!(
                 "cargo:warning=Binary not found: {} (run `cd core && cargo build -p {name}` first)",
@@ -61,11 +60,6 @@ fn main() {
                 panic!("Failed to copy onnxruntime.dll: {}", e);
             });
             println!("cargo:warning=Copied onnxruntime.dll to bin/");
-        } else {
-            println!(
-                "cargo:warning=onnxruntime.dll not found in {} (will be downloaded by ort crate on first build)",
-                target_dir.display()
-            );
         }
     } else if cfg!(target_os = "macos") {
         for lib_name in &["libonnxruntime.dylib"] {

@@ -21,6 +21,7 @@
                 "fp16": "onnx/model_fp16.onnx",
                 "int8": "onnx/model_quantized.onnx"
             },
+            "external_data_files": {},
             "bundled": false,
             "recommended": true
         },
@@ -43,6 +44,7 @@
                 "fp32": "onnx/model.onnx",
                 "fp16": "onnx/model_fp16.onnx"
             },
+            "external_data_files": {},
             "bundled": false,
             "recommended": false
         },
@@ -67,6 +69,7 @@
             "onnx_variants": {
                 "fp32": "model.onnx"
             },
+            "external_data_files": {},
             "bundled": false,
             "recommended": false
         },
@@ -88,6 +91,7 @@
                 "fp32": "onnx/model.onnx",
                 "fp16": "onnx/model_fp16.onnx"
             },
+            "external_data_files": {},
             "bundled": false,
             "recommended": false
         }

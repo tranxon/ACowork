@@ -50,6 +50,7 @@ pub fn run() {
             commands::agent::list_agents,
             commands::agent::get_agent_detail,
             commands::agent::install_agent,
+            commands::agent::install_bundled_agent,
             commands::agent::uninstall_agent,
             commands::agent::start_agent,
             commands::agent::stop_agent,

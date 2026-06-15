@@ -6,9 +6,8 @@
 //! via gRPC (pure relay — Runtime owns the approval state).
 
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,14 +74,14 @@ async fn handle_approval(
             if let Some(ref sid) = req.session_id {
                 params["session_id"] = serde_json::json!(sid);
             }
-            let pushed = session.push_message(
-                GatewayResponse::IntentReceived {
+            let pushed = session
+                .push_message(GatewayResponse::IntentReceived {
                     from: "http-api".to_string(),
                     action: "approval_decision".to_string(),
                     params,
                     command: None,
-                },
-            ).await;
+                })
+                .await;
             if !pushed {
                 tracing::warn!(
                     agent_id = %agent_id,
@@ -144,27 +143,33 @@ async fn handle_approval(
 
 /// Build the approval routes for the HTTP router.
 pub fn approval_routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/agents/{agent_id}/approval", axum::routing::post(handle_approval))
+    Router::new().route(
+        "/api/agents/{agent_id}/approval",
+        axum::routing::post(handle_approval),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
     use crate::http::routes::AppState;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
     use tower::ServiceExt;
 
     fn test_app_state() -> AppState {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("acowork-test-approval-{}-{}", std::process::id(), unique));
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-approval-{}-{}",
+            std::process::id(),
+            unique
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gw_state = GatewayState::new(&dir.to_string_lossy());
@@ -213,7 +218,10 @@ mod tests {
     #[tokio::test]
     async fn test_handle_approval_no_grpc_session_mgr() {
         let state = test_app_state();
-        assert!(state.grpc_session_mgr.is_none(), "test state must have no grpc_session_mgr");
+        assert!(
+            state.grpc_session_mgr.is_none(),
+            "test state must have no grpc_session_mgr"
+        );
 
         let app = approval_routes().with_state(state);
 

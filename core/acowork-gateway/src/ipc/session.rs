@@ -4,9 +4,9 @@
 //! budget state, message correlation, and a server-push channel
 //! for delivering Intent messages and Capability updates.
 
+use acowork_core::protocol::GatewayResponse;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use acowork_core::protocol::GatewayResponse;
 
 /// Server-push channel sender for a connection.
 /// When the Gateway needs to push a message to an Agent
@@ -108,13 +108,13 @@ impl SessionManager {
 
     /// Create a new session for a connection
     pub fn create_session(&mut self, conn_id: &str) -> &mut Session {
-        self.sessions.entry(conn_id.to_string())
-            .or_default()
+        self.sessions.entry(conn_id.to_string()).or_default()
     }
 
     /// Create a new session with a server-push channel
     pub fn create_session_with_push(&mut self, conn_id: &str, push_tx: PushSender) -> &mut Session {
-        self.sessions.entry(conn_id.to_string())
+        self.sessions
+            .entry(conn_id.to_string())
             .or_insert_with(|| Session::with_push_channel(push_tx))
     }
 
@@ -149,9 +149,9 @@ impl SessionManager {
     /// only the main connection should receive IntentReceived messages.
     /// chunk-relay connections only send StreamChunk messages.
     pub fn find_by_agent_id(&self, agent_id: &str) -> Option<(&String, &Session)> {
-        self.sessions.iter().find(|(_, s)| {
-            s.agent_id.as_deref() == Some(agent_id) && s.connection_role == "main"
-        })
+        self.sessions
+            .iter()
+            .find(|(_, s)| s.agent_id.as_deref() == Some(agent_id) && s.connection_role == "main")
     }
 }
 
@@ -201,7 +201,7 @@ mod tests {
         mgr.create_session("conn-1");
         let session = mgr.get_session_mut("conn-1").unwrap();
         session.authenticate("com.example.weather");
-        
+
         assert_eq!(mgr.authenticated_count(), 1);
     }
 
@@ -217,11 +217,13 @@ mod tests {
     fn test_session_manager_find_by_agent_id() {
         let mut mgr = SessionManager::new();
         mgr.create_session("conn-1");
-        mgr.get_session_mut("conn-1").unwrap().authenticate("com.example.weather");
-        
+        mgr.get_session_mut("conn-1")
+            .unwrap()
+            .authenticate("com.example.weather");
+
         let result = mgr.find_by_agent_id("com.example.weather");
         assert!(result.is_some());
-        
+
         let not_found = mgr.find_by_agent_id("com.example.unknown");
         assert!(not_found.is_none());
     }

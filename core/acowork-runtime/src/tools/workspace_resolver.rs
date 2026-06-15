@@ -181,7 +181,9 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
         last_active: bool,
     }
 
-    let config_path = Path::new(work_dir).join("config").join("agent_workspaces.json");
+    let config_path = Path::new(work_dir)
+        .join("config")
+        .join("agent_workspaces.json");
 
     if !config_path.exists() {
         tracing::warn!(
@@ -357,7 +359,12 @@ pub fn format_workspace_context_for_session(
     // Determine current directory path
     let (current_path, current_alias, current_access, is_agent_home) =
         if current_ws_id == "__agent_home__" {
-            (resolver.agent_home().to_string(), None::<String>, None, true)
+            (
+                resolver.agent_home().to_string(),
+                None::<String>,
+                None,
+                true,
+            )
         } else {
             match resolver.find_by_id(current_ws_id) {
                 Some(dir) => (
@@ -366,12 +373,7 @@ pub fn format_workspace_context_for_session(
                     Some(dir.access.clone()),
                     false,
                 ),
-                None => (
-                    resolver.agent_home().to_string(),
-                    None,
-                    None,
-                    true,
-                ),
+                None => (resolver.agent_home().to_string(), None, None, true),
             }
         };
 
@@ -429,11 +431,17 @@ pub fn format_workspace_context_for_session(
         }
     }
 
-    buf.push_str("\nIMPORTANT: When performing file operations or running shell commands, ALWAYS use the\n");
+    buf.push_str(
+        "\nIMPORTANT: When performing file operations or running shell commands, ALWAYS use the\n",
+    );
     buf.push_str("Current Working Directory path shown above as your starting directory.\n");
-    buf.push_str("Do NOT use the Agent Home Directory for project work — it contains the agent's own\n");
+    buf.push_str(
+        "Do NOT use the Agent Home Directory for project work — it contains the agent's own\n",
+    );
     buf.push_str("configuration files, not your project code.\n");
-    buf.push_str("All listed directories are authorized for access at the indicated permission level.\n");
+    buf.push_str(
+        "All listed directories are authorized for access at the indicated permission level.\n",
+    );
 
     buf
 }
@@ -458,7 +466,10 @@ fn escape_md(s: &str) -> String {
 }
 
 /// Legacy: format workspace context with the old `last_active` logic.
-fn format_workspace_context_full_legacy(workspaces: &[WorkspaceDirFull], install_path: &str) -> String {
+fn format_workspace_context_full_legacy(
+    workspaces: &[WorkspaceDirFull],
+    install_path: &str,
+) -> String {
     let mut buf = String::new();
     buf.push_str("## Workspace Environment\n\n");
 
@@ -498,7 +509,11 @@ fn format_workspace_context_full_legacy(workspaces: &[WorkspaceDirFull], install
         let active_marker = if ws.last_active { "*" } else { "" };
         buf.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
-            i + 1, alias, escape_md(&ws.path), ws.access, active_marker,
+            i + 1,
+            alias,
+            escape_md(&ws.path),
+            ws.access,
+            active_marker,
         ));
     }
     buf
@@ -555,7 +570,11 @@ mod tests {
             ]
         }"#;
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
-        std::fs::write(dir.path().join("config").join("agent_workspaces.json"), config).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            config,
+        )
+        .unwrap();
 
         let resolver = WorkspaceResolver::new(dir.path().to_str().unwrap());
         assert_eq!(resolver.agent_home(), dir.path().to_str().unwrap());
@@ -588,7 +607,11 @@ mod tests {
             ]
         }"#;
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
-        std::fs::write(dir.path().join("config").join("agent_workspaces.json"), config).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            config,
+        )
+        .unwrap();
 
         let resolver = WorkspaceResolver::new(dir.path().to_str().unwrap());
 

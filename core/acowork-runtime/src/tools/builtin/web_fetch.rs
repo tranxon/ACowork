@@ -1,13 +1,15 @@
 //! Web fetch tool — fetch webpage and convert to plain text
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Duration;
 
 use crate::config::DEFAULT_TOOL_HTTP_TIMEOUT;
 
-pub struct WebFetchTool { client: reqwest::Client }
+pub struct WebFetchTool {
+    client: reqwest::Client,
+}
 
 impl WebFetchTool {
     pub fn new() -> Self {
@@ -25,21 +27,39 @@ impl WebFetchTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "web_fetch".to_string(),
-            description: "Fetch a webpage and extract its text content, stripping HTML tags.".to_string(),
+            description: "Fetch a webpage and extract its text content, stripping HTML tags."
+                .to_string(),
             input_schema: serde_json::json!({ "type": "object", "properties": { "url": { "type": "string", "description": "URL to fetch" } }, "required": ["url"] }),
         }
     }
 }
 
-impl Default for WebFetchTool { fn default() -> Self { Self::new() } }
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    fn spec(&self) -> ToolSpec { Self::spec_value() }
+    fn spec(&self) -> ToolSpec {
+        Self::spec_value()
+    }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let url = params["url"].as_str().unwrap_or("");
-        if url.is_empty() { return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing 'url'".to_string()), token_usage: None }); }
+        if url.is_empty() {
+            return Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some("Missing 'url'".to_string()),
+                token_usage: None,
+            });
+        }
 
         match self.client.get(url).send().await {
             Ok(resp) => {
@@ -47,9 +67,19 @@ impl Tool for WebFetchTool {
                 // Simple HTML-to-text: strip tags
                 let text = strip_html_tags(&html);
                 let truncated: String = text.chars().take(10000).collect();
-                Ok(ToolResult { ok: true, content: truncated, error: None, token_usage: None })
+                Ok(ToolResult {
+                    ok: true,
+                    content: truncated,
+                    error: None,
+                    token_usage: None,
+                })
             }
-            Err(e) => Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Fetch failed: {e}")), token_usage: None }),
+            Err(e) => Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some(format!("Fetch failed: {e}")),
+                token_usage: None,
+            }),
         }
     }
 }
@@ -62,12 +92,18 @@ fn strip_html_tags(html: &str) -> String {
         match ch {
             '<' => {
                 in_tag = true;
-                if !result.is_empty() && !result.ends_with(' ') && !result.ends_with('\n') { result.push(' '); }
+                if !result.is_empty() && !result.ends_with(' ') && !result.ends_with('\n') {
+                    result.push(' ');
+                }
             }
             '>' => {
                 in_tag = false;
                 // Skip script/style content
-                if result.to_lowercase().ends_with("<script") || result.to_lowercase().ends_with("<style") { in_script = true; }
+                if result.to_lowercase().ends_with("<script")
+                    || result.to_lowercase().ends_with("<style")
+                {
+                    in_script = true;
+                }
             }
             _ if in_tag => {}
             _ if in_script => {}

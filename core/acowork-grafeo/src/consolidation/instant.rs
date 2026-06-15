@@ -4,14 +4,16 @@
 //! this module handles the full lifecycle: embedding-based dedup, three-layer
 //! conflict detection, and status assignment (Active / Pending).
 
+use acowork_memory::ConflictSignal;
 use chrono::Utc;
 use grafeo_common::types::NodeId;
-use acowork_memory::ConflictSignal;
 
-use crate::conflict::{self, FACT_THRESHOLD, PREFERENCE_THRESHOLD, RELATION_THRESHOLD, PROCEDURE_THRESHOLD};
+use crate::conflict::{
+    self, FACT_THRESHOLD, PREFERENCE_THRESHOLD, PROCEDURE_THRESHOLD, RELATION_THRESHOLD,
+};
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, KnowledgeNode, KnowledgeSubType, NodeStatus, ProceduralNode};
+use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, ProceduralNode, labels};
 use grafeo_common::types::Value;
 
 // ---------------------------------------------------------------------------
@@ -23,7 +25,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| f64::from(*x) * f64::from(*y)).sum();
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| f64::from(*x) * f64::from(*y))
+        .sum();
     let norm_a: f64 = a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
     let norm_b: f64 = b.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
@@ -156,14 +162,15 @@ impl GrafeoStore {
         // matching. If (subject, predicate) matches but object differs, it's
         // a knowledge update (handled by conflict detection in Step 2), not dedup.
         if let Some(ref embedding) = input.embedding
-            && self.is_duplicate_knowledge(
-                embedding,
-                DEDUP_THRESHOLD,
-                input.subject.as_deref(),
-                input.predicate.as_deref(),
-                input.object.as_deref(),
-            )?
-            .is_some()
+            && self
+                .is_duplicate_knowledge(
+                    embedding,
+                    DEDUP_THRESHOLD,
+                    input.subject.as_deref(),
+                    input.predicate.as_deref(),
+                    input.object.as_deref(),
+                )?
+                .is_some()
         {
             return Ok(None);
         }
@@ -179,12 +186,12 @@ impl GrafeoStore {
         };
 
         // Step 4: Create the new knowledge node.
-        let subject = input
-            .subject
-            .clone()
-            .unwrap_or_else(|| "user".to_string());
+        let subject = input.subject.clone().unwrap_or_else(|| "user".to_string());
         let predicate = input.predicate.clone().unwrap_or_default();
-        let object = input.object.clone().unwrap_or_else(|| input.content.clone());
+        let object = input
+            .object
+            .clone()
+            .unwrap_or_else(|| input.content.clone());
 
         let mut new_node = KnowledgeNode {
             id: None,
@@ -214,21 +221,26 @@ impl GrafeoStore {
         // reclassifies and may demote old nodes to Dormant later.
         let mut conflict_resolutions = Vec::new();
         for conflict in &conflicts {
-            let resolution = crate::conflict::resolve_conflict(&conflict.conflict_signal, conflict.existing_node_id);
+            let resolution = crate::conflict::resolve_conflict(
+                &conflict.conflict_signal,
+                conflict.existing_node_id,
+            );
 
             // Tag both the existing and new node with the same conflict_group_id.
             let group_id = format!("cg_{}", new_id.as_u64());
             if let Some(mut old_node) = self.get_knowledge(conflict.existing_node_id)? {
-                old_node
-                    .metadata
-                    .insert("conflict_group_id".to_string(), serde_json::Value::String(group_id.clone()));
+                old_node.metadata.insert(
+                    "conflict_group_id".to_string(),
+                    serde_json::Value::String(group_id.clone()),
+                );
                 old_node.updated_at = Utc::now();
                 self.update_knowledge(&old_node)?;
             }
             let mut updated_new = new_node.clone();
-            updated_new
-                .metadata
-                .insert("conflict_group_id".to_string(), serde_json::Value::String(group_id));
+            updated_new.metadata.insert(
+                "conflict_group_id".to_string(),
+                serde_json::Value::String(group_id),
+            );
             updated_new.updated_at = Utc::now();
             self.update_knowledge(&updated_new)?;
 
@@ -255,10 +267,16 @@ impl GrafeoStore {
     ///    with facts/preferences — they live on a different Label).
     /// 3. Parse content into (trigger_condition, action_pattern).
     /// 4. Create ProceduralNode with status based on confidence.
-    fn process_procedure(&self, input: &MemoryStoreInput, confidence: f32) -> Result<Option<ProcessResult>> {
+    fn process_procedure(
+        &self,
+        input: &MemoryStoreInput,
+        confidence: f32,
+    ) -> Result<Option<ProcessResult>> {
         // Step 1: Dedup check (only if embedding is available).
         if let Some(ref embedding) = input.embedding {
-            if let Some(existing_id) = self.find_duplicate_procedure(embedding, PROCEDURE_DEDUP_THRESHOLD)? {
+            if let Some(existing_id) =
+                self.find_duplicate_procedure(embedding, PROCEDURE_DEDUP_THRESHOLD)?
+            {
                 // Reinforce the existing node: boost confidence.
                 if let Some(mut existing) = self.get_procedural(existing_id)? {
                     let _old_confidence = existing.confidence;
@@ -324,7 +342,11 @@ impl GrafeoStore {
     ///
     /// Returns the ID of the most similar existing ProceduralNode if
     /// cosine similarity > `threshold`, or `None` if no match.
-    fn find_duplicate_procedure(&self, embedding: &[f32], threshold: f32) -> Result<Option<NodeId>> {
+    fn find_duplicate_procedure(
+        &self,
+        embedding: &[f32],
+        threshold: f32,
+    ) -> Result<Option<NodeId>> {
         let graph = self.db.graph_store();
         let node_ids = graph.nodes_by_label(labels::PROCEDURAL);
 
@@ -485,19 +507,18 @@ impl GrafeoStore {
                     .get_property("created_at")
                     .and_then(|v| v.as_timestamp())
                     .map(|ts| {
-                        let existing_created = chrono::DateTime::from_timestamp_micros(ts.as_micros())
-                            .unwrap_or_else(Utc::now);
+                        let existing_created =
+                            chrono::DateTime::from_timestamp_micros(ts.as_micros())
+                                .unwrap_or_else(Utc::now);
                         let diff = Utc::now() - existing_created;
                         diff.num_seconds() as f64 / 3600.0
                     })
                     .unwrap_or(0.0);
 
                 // Run heuristic conflict detection.
-                if let Some(signal) = conflict::detect_conflict(
-                    semantic_score,
-                    threshold,
-                    time_diff_hours,
-                ) {
+                if let Some(signal) =
+                    conflict::detect_conflict(semantic_score, threshold, time_diff_hours)
+                {
                     candidates.push(ConflictCandidate {
                         existing_node_id: id,
                         conflict_signal: signal,
@@ -527,7 +548,13 @@ fn parse_procedure_content(content: &str) -> (String, String) {
     // Arrow separator: "when X → do Y" or "when X -> do Y"
     if let Some(pos) = content.find("→").or_else(|| content.find("->")) {
         let trigger = content[..pos].trim();
-        let action = content[pos + if content.contains("→") { '→'.len_utf8() } else { 2 }..].trim();
+        let action = content[pos
+            + if content.contains("→") {
+                '→'.len_utf8()
+            } else {
+                2
+            }..]
+            .trim();
         if !trigger.is_empty() && !action.is_empty() {
             return (trigger.to_string(), action.to_string());
         }
@@ -541,7 +568,8 @@ fn parse_procedure_content(content: &str) -> (String, String) {
             // Find the comma that separates trigger from action
             if let Some(comma_pos) = rest.find(',') {
                 let trigger = rest[..comma_pos].trim();
-                let action = rest[comma_pos + 1..].trim()
+                let action = rest[comma_pos + 1..]
+                    .trim()
                     .trim_start_matches("do ")
                     .trim_start_matches("then ")
                     .trim_start_matches("prefer ")
@@ -762,7 +790,10 @@ mod tests {
         };
         let id2 = store.process_memory_store(&input2).unwrap();
         // T4.5: Should NOT be None — it's a knowledge update, not a duplicate.
-        assert!(id2.is_some(), "same (subject, predicate) + different object should go through conflict detection");
+        assert!(
+            id2.is_some(),
+            "same (subject, predicate) + different object should go through conflict detection"
+        );
     }
 
     #[test]
@@ -796,7 +827,10 @@ mod tests {
             embedding: Some(const_emb(1.0)),
         };
         let id2 = store.process_memory_store(&input2).unwrap();
-        assert!(id2.is_none(), "identical (subject, predicate, object) + same embedding should be deduplicated");
+        assert!(
+            id2.is_none(),
+            "identical (subject, predicate, object) + same embedding should be deduplicated"
+        );
     }
 
     // =====================================================================
@@ -819,7 +853,10 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let node = store.get_knowledge(result.unwrap().node_id).unwrap().unwrap();
+        let node = store
+            .get_knowledge(result.unwrap().node_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(node.status, NodeStatus::Active);
         assert!(node.embedding.is_none());
     }
@@ -966,12 +1003,34 @@ mod tests {
 
         // Same direction → cosine sim = 1.0 > 0.95.
         // Same subject+predicate+object → true duplicate.
-        let is_dup = store.is_duplicate_knowledge(&const_emb(1.0), 0.95, Some("user"), Some("name"), Some("Alice")).unwrap();
-        assert!(is_dup.is_some(), "identical embedding + same (subject, predicate, object) should be duplicate");
+        let is_dup = store
+            .is_duplicate_knowledge(
+                &const_emb(1.0),
+                0.95,
+                Some("user"),
+                Some("name"),
+                Some("Alice"),
+            )
+            .unwrap();
+        assert!(
+            is_dup.is_some(),
+            "identical embedding + same (subject, predicate, object) should be duplicate"
+        );
 
         // Same direction but different object → knowledge update, NOT duplicate.
-        let is_dup = store.is_duplicate_knowledge(&const_emb(1.0), 0.95, Some("user"), Some("name"), Some("Bob")).unwrap();
-        assert!(is_dup.is_none(), "same (subject, predicate) but different object should NOT be duplicate");
+        let is_dup = store
+            .is_duplicate_knowledge(
+                &const_emb(1.0),
+                0.95,
+                Some("user"),
+                Some("name"),
+                Some("Bob"),
+            )
+            .unwrap();
+        assert!(
+            is_dup.is_none(),
+            "same (subject, predicate) but different object should NOT be duplicate"
+        );
     }
 
     // =====================================================================
@@ -999,8 +1058,19 @@ mod tests {
         store.store_knowledge(&node).unwrap();
 
         // Different direction (flip 40 → cos ≈ 0.792 < 0.95) → not duplicate.
-        let is_dup = store.is_duplicate_knowledge(&flipped_emb(40), 0.95, Some("user"), Some("name"), Some("Alice")).unwrap();
-        assert!(is_dup.is_none(), "different embedding should not be duplicate");
+        let is_dup = store
+            .is_duplicate_knowledge(
+                &flipped_emb(40),
+                0.95,
+                Some("user"),
+                Some("name"),
+                Some("Alice"),
+            )
+            .unwrap();
+        assert!(
+            is_dup.is_none(),
+            "different embedding should not be duplicate"
+        );
     }
 
     // =====================================================================
@@ -1040,7 +1110,10 @@ mod tests {
         };
 
         let conflicts = store.detect_knowledge_conflicts(&input).unwrap();
-        assert!(!conflicts.is_empty(), "should detect conflict with similar node");
+        assert!(
+            !conflicts.is_empty(),
+            "should detect conflict with similar node"
+        );
     }
 
     // =====================================================================
@@ -1084,7 +1157,10 @@ mod tests {
         };
 
         let result = store.process_memory_store(&input).unwrap();
-        let node = store.get_knowledge(result.unwrap().node_id).unwrap().unwrap();
+        let node = store
+            .get_knowledge(result.unwrap().node_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(node.object, "User prefers concise answers");
     }
 
@@ -1181,14 +1257,17 @@ mod tests {
 
         // No auto CORRECTS or EVOLUTION_FROM edges — Phase 3 LLM creates them.
         let edges = store.get_edges(new_id, grafeo_core::graph::Direction::Outgoing);
-        let has_corrects = edges.iter().any(|e| {
-            e.edge_type == "CORRECTS" && e.dst == existing_id
-        });
-        let has_evolution = edges.iter().any(|e| {
-            e.edge_type == "EVOLUTION_FROM" && e.dst == existing_id
-        });
+        let has_corrects = edges
+            .iter()
+            .any(|e| e.edge_type == "CORRECTS" && e.dst == existing_id);
+        let has_evolution = edges
+            .iter()
+            .any(|e| e.edge_type == "EVOLUTION_FROM" && e.dst == existing_id);
         assert!(!has_corrects, "CORRECTS edge should NOT be auto-created");
-        assert!(!has_evolution, "EVOLUTION_FROM edge should NOT be auto-created");
+        assert!(
+            !has_evolution,
+            "EVOLUTION_FROM edge should NOT be auto-created"
+        );
     }
 
     // =====================================================================
@@ -1253,7 +1332,8 @@ mod tests {
 
     #[test]
     fn test_parse_procedure_content_arrow() {
-        let (trigger, action) = parse_procedure_content("when output too long → give concise summary");
+        let (trigger, action) =
+            parse_procedure_content("when output too long → give concise summary");
         assert_eq!(trigger, "when output too long");
         assert_eq!(action, "give concise summary");
 
@@ -1268,7 +1348,8 @@ mod tests {
 
     #[test]
     fn test_parse_procedure_content_when_pattern() {
-        let (trigger, action) = parse_procedure_content("when user asks for summary, do reply concisely");
+        let (trigger, action) =
+            parse_procedure_content("when user asks for summary, do reply concisely");
         assert_eq!(trigger, "user asks for summary");
         assert_eq!(action, "reply concisely");
 

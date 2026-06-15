@@ -9,8 +9,7 @@ pub const PROMPT_BUILDER_FALLBACK: &str = "You are a helpful AI assistant.";
 /// System prompt used for context compaction via LLM.
 /// Replaces the agent's full system prompt during compaction to ensure
 /// the LLM focuses on summarization rather than tool usage.
-pub const COMPACTION_SYSTEM_PROMPT: &str =
-    "You are an AI assistant that summarizes conversations.";
+pub const COMPACTION_SYSTEM_PROMPT: &str = "You are an AI assistant that summarizes conversations.";
 
 /// System prompt for the Perplexity (Sonar) web search integration.
 pub const SEARCH_SYSTEM_PROMPT: &str =

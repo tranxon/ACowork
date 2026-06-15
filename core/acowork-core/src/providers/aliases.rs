@@ -89,7 +89,10 @@ mod tests {
 
     #[test]
     fn test_unknown_id_passthrough() {
-        assert_eq!(canonical_provider_id("some-new-provider"), "some-new-provider");
+        assert_eq!(
+            canonical_provider_id("some-new-provider"),
+            "some-new-provider"
+        );
     }
 
     #[test]

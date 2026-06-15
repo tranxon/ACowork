@@ -1,7 +1,7 @@
 //! File read tool — reads files within the workspace
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
 
@@ -36,12 +36,26 @@ impl FileReadTool {
 
 #[async_trait]
 impl Tool for FileReadTool {
-    fn spec(&self) -> ToolSpec { Self::spec_value() }
+    fn spec(&self) -> ToolSpec {
+        Self::spec_value()
+    }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
-        let path = params["path"].as_str().unwrap_or("").trim_start_matches('/');
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
+        let path = params["path"]
+            .as_str()
+            .unwrap_or("")
+            .trim_start_matches('/');
         if path.is_empty() {
-            return Ok(ToolResult { ok: false, content: String::new(), error: Some("Missing 'path' parameter".to_string()), token_usage: None });
+            return Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some("Missing 'path' parameter".to_string()),
+                token_usage: None,
+            });
         }
 
         let base = work_dir.unwrap_or(".");
@@ -85,14 +99,21 @@ impl Tool for FileReadTool {
                 let total = lines.len();
 
                 if total == 0 {
-                    return Ok(ToolResult { ok: true, content: String::new(), error: None, token_usage: None });
+                    return Ok(ToolResult {
+                        ok: true,
+                        content: String::new(),
+                        error: None,
+                        token_usage: None,
+                    });
                 }
 
-                let s = params["start_line"].as_u64()
+                let s = params["start_line"]
+                    .as_u64()
                     .map(|v| (v.max(1) as usize).saturating_sub(1))
                     .unwrap_or(0)
                     .min(total);
-                let e = params["end_line"].as_u64()
+                let e = params["end_line"]
+                    .as_u64()
                     .map(|v| (v as usize).min(total))
                     .unwrap_or(total);
 
@@ -140,7 +161,12 @@ impl Tool for FileReadTool {
                     error = %e,
                     "file_read: failed to read file"
                 );
-                Ok(ToolResult { ok: false, content: String::new(), error: Some(format!("Failed to read file: {e}")), token_usage: None })
+                Ok(ToolResult {
+                    ok: false,
+                    content: String::new(),
+                    error: Some(format!("Failed to read file: {e}")),
+                    token_usage: None,
+                })
             }
         }
     }

@@ -6,8 +6,8 @@
 //! [`McpConfigNotifier`](crate::mcp_notify::McpConfigNotifier) that the
 //! config has changed, triggering MCP server reconnection.
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::agent_config::{load_agent_mcp_config, save_agent_mcp_config};
@@ -37,7 +37,8 @@ impl McpUninstallTool {
                 Only local (agent-installed) MCPs can be uninstalled. \
                 Catalog MCPs (managed by Gateway) cannot be removed — use \
                 Gateway settings instead. After uninstall, the MCP tools will \
-                be removed after the next config reload.".to_string(),
+                be removed after the next config reload."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -58,7 +59,10 @@ impl McpUninstallTool {
     /// MCP configs are per-agent — they must always be written to the
     /// agent's home directory, not the session's project workspace.
     pub fn new(notifier: McpNotifyRef, agent_home: String) -> Self {
-        Self { notifier, agent_home }
+        Self {
+            notifier,
+            agent_home,
+        }
     }
 }
 

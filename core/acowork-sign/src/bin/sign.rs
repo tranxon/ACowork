@@ -1,8 +1,8 @@
 //! acowork-sign CLI
 
-use clap::Parser;
 use acowork_sign::keygen::KeyType;
 use acowork_sign::sign::sign_package;
+use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]

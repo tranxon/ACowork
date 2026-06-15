@@ -6,10 +6,9 @@
 //! (unified push architecture, same as approval_decision).
 
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -72,14 +71,14 @@ async fn handle_question_answer(
             if let Some(ref sid) = req.session_id {
                 params["session_id"] = serde_json::json!(sid);
             }
-            let pushed = session.push_message(
-                GatewayResponse::IntentReceived {
+            let pushed = session
+                .push_message(GatewayResponse::IntentReceived {
                     from: "http-api".to_string(),
                     action: "question_answer".to_string(),
                     params,
                     command: None,
-                },
-            ).await;
+                })
+                .await;
             if !pushed {
                 tracing::warn!(
                     agent_id = %agent_id,
@@ -116,19 +115,15 @@ async fn handle_question_answer(
 
 /// Build the question routes for the HTTP router.
 pub fn question_routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/agents/{agent_id}/question", axum::routing::post(handle_question_answer))
+    Router::new().route(
+        "/api/agents/{agent_id}/question",
+        axum::routing::post(handle_question_answer),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::{Mutex, RwLock};
-    use crate::gateway::state::GatewayState;
-    use crate::http::auth::HttpAuth;
-    use crate::http::routes::AppState;
-
     // Note: Full integration tests require a running gRPC session.
     // The question_answer endpoint pushes to Runtime via gRPC,
     // which requires a connected agent. Unit tests here verify

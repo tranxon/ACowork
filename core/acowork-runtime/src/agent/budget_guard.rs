@@ -44,7 +44,8 @@ impl BudgetGuard {
     pub fn check(&self, estimated_tokens: u64) -> BudgetCheckResult {
         // Check daily token limit
         if let Some(daily_limit) = self.budget.daily_tokens
-            && self.session_tokens + estimated_tokens > daily_limit {
+            && self.session_tokens + estimated_tokens > daily_limit
+        {
             return BudgetCheckResult::Exceeded {
                 reason: format!(
                     "Daily token limit: used {} + estimated {} > limit {}",
@@ -56,7 +57,8 @@ impl BudgetGuard {
 
         // Check monthly token limit
         if let Some(monthly_limit) = self.budget.monthly_tokens
-            && self.session_tokens + estimated_tokens > monthly_limit {
+            && self.session_tokens + estimated_tokens > monthly_limit
+        {
             return BudgetCheckResult::Exceeded {
                 reason: format!(
                     "Monthly token limit: used {} + estimated {} > limit {}",
@@ -68,7 +70,8 @@ impl BudgetGuard {
 
         // Check daily cost limit
         if let Some(daily_cost) = self.budget.daily_cost_usd
-            && self.session_cost_usd >= daily_cost {
+            && self.session_cost_usd >= daily_cost
+        {
             return BudgetCheckResult::Exceeded {
                 reason: format!(
                     "Daily cost limit: ${:.4} >= ${:.4}",

@@ -54,7 +54,8 @@ fn spawn_mcp_command(
 ) -> Result<Child> {
     let build_cmd = |cmd: &str| -> std::io::Result<Child> {
         let mut c = Command::new(cmd);
-        c.args(args).envs(env)
+        c.args(args)
+            .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -170,7 +171,9 @@ impl McpTransportConn for StdioTransport {
                 .with_context(|| format!("invalid JSON-RPC response: {}", resp_line))?;
             if resp.id.is_none() {
                 // Server-sent notification — skip and keep waiting
-                tracing::debug!("MCP stdio: skipping server notification while waiting for response");
+                tracing::debug!(
+                    "MCP stdio: skipping server notification while waiting for response"
+                );
                 continue;
             }
             return Ok(resp);
@@ -389,7 +392,8 @@ async fn read_first_jsonrpc_from_sse_response(
             let data = cur_data.join("\n");
             cur_data.clear();
 
-            if event.eq_ignore_ascii_case("endpoint") || event.eq_ignore_ascii_case("mcp-endpoint") {
+            if event.eq_ignore_ascii_case("endpoint") || event.eq_ignore_ascii_case("mcp-endpoint")
+            {
                 continue;
             }
             if !event.eq_ignore_ascii_case("message") {

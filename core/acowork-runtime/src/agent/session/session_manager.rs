@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use acowork_core::Budget;
 use acowork_core::protocol::ProtocolType;
 use acowork_core::protocol::{SearchKeyEntry, SearchProviderListItem};
 use acowork_core::tools::traits::Tool;
-use acowork_core::Budget;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::agent_core::AgentCore;
@@ -24,11 +24,11 @@ use crate::agent::session_state::{SessionState, SessionStatus};
 use crate::conversation::ConversationSession;
 use crate::debug::controller::DebugController;
 use crate::error::{Result, RuntimeError};
-use crate::tools::mcp_manager::McpManager;
 use crate::tools::mcp_manager::McpConnectionFailure;
+use crate::tools::mcp_manager::McpManager;
+use crate::tools::workspace_resolver::{WorkspaceResolver, format_workspace_context_for_session};
 use acowork_mcp::client::McpRegistry;
 use acowork_mcp::wrapper::McpToolWrapper;
-use crate::tools::workspace_resolver::{WorkspaceResolver, format_workspace_context_for_session};
 
 /// Configuration for SessionManager.
 #[derive(Debug, Clone)]
@@ -255,7 +255,8 @@ impl SessionManager {
     ///
     /// Useful for testing or when the session ID needs to be deterministic.
     pub async fn create_session_with_id(&mut self, session_id: String) -> Result<String> {
-        self.create_session_with_id_and_conversation(session_id, None).await
+        self.create_session_with_id_and_conversation(session_id, None)
+            .await
     }
 
     /// Create a new session with a specific ID and optional conversation session.
@@ -278,15 +279,10 @@ impl SessionManager {
         // ADR-012: Read persisted model/provider from JSONL metadata.
         // The frontend is responsible for always providing an initial model;
         // we do NOT fall back to manifest fields.
-        let initial_model = conversation
-            .as_ref()
-            .and_then(|c| c.model());
-        let initial_provider = conversation
-            .as_ref()
-            .and_then(|c| c.provider());
+        let initial_model = conversation.as_ref().and_then(|c| c.model());
+        let initial_provider = conversation.as_ref().and_then(|c| c.provider());
 
-        let (inbound_tx, inbound_rx) =
-            mpsc::channel(self.config.inbound_channel_capacity);
+        let (inbound_tx, inbound_rx) = mpsc::channel(self.config.inbound_channel_capacity);
 
         let mut session_state = SessionState::new(
             self.config.history_max_tokens,
@@ -448,9 +444,10 @@ impl SessionManager {
     /// Triggers distillation but preserves the JSONL history file.
     /// Returns an error if the session does not exist.
     pub async fn close_session(&mut self, session_id: &str) -> Result<()> {
-        let handle = self.sessions.remove(session_id).ok_or_else(|| {
-            RuntimeError::Config(format!("Session not found: {}", session_id))
-        })?;
+        let handle = self
+            .sessions
+            .remove(session_id)
+            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
 
         // Send Close signal; ignore errors (session may have already stopped)
         let _ = handle.inbound_tx.send(SessionMessage::Close).await;
@@ -470,14 +467,11 @@ impl SessionManager {
     /// When the channel is closed (e.g. the SessionTask panicked or was evicted
     /// without cleanup), the dead handle is auto-removed so subsequent calls
     /// get a clean "Session not found" instead of "channel closed".
-    pub fn send_to_session(
-        &mut self,
-        session_id: &str,
-        msg: SessionMessage,
-    ) -> Result<()> {
-        let handle = self.sessions.get(session_id).ok_or_else(|| {
-            RuntimeError::Config(format!("Session not found: {}", session_id))
-        })?;
+    pub fn send_to_session(&mut self, session_id: &str, msg: SessionMessage) -> Result<()> {
+        let handle = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
 
         if let Err(_send_err) = handle.send(msg) {
             // Channel closed — the SessionTask has died (panic / eviction race).
@@ -628,11 +622,7 @@ impl SessionManager {
             .unwrap_or(0);
         tracing::info!(
             server_count,
-            tool_count = self
-                .mcp_tools
-                .as_ref()
-                .map(|t| t.len())
-                .unwrap_or(0),
+            tool_count = self.mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0),
             failure_count = failures.len(),
             "SessionManager: MCP servers applied (async background connect)"
         );
@@ -821,9 +811,7 @@ After installation, ask the user to re-enable the MCP server.",
             "SessionManager: caching workspace context"
         );
         self.workspace_context = Some(context_text.clone());
-        self.broadcast(SessionMessage::UpdateWorkspaceContext {
-            context_text,
-        })
+        self.broadcast(SessionMessage::UpdateWorkspaceContext { context_text })
     }
 
     /// Route a model switch to a specific session (ADR-012: per-session model).
@@ -843,10 +831,7 @@ After installation, ask the user to re-enable the MCP server.",
             provider = ?provider,
             "SessionManager: routing model_switch to session (ADR-012: per-session)"
         );
-        self.send_to_session(
-            session_id,
-            SessionMessage::ModelSwitch { model, provider },
-        )
+        self.send_to_session(session_id, SessionMessage::ModelSwitch { model, provider })
     }
 
     /// Update web search config from Gateway SearchConfigDelivery hot-push.
@@ -870,10 +855,7 @@ After installation, ask the user to re-enable the MCP server.",
     ///
     /// Formats the `UserProfile` into an `identity_context` text block
     /// and broadcasts it to all active sessions via their ContextBuilder.
-    pub fn update_user_identity(
-        &mut self,
-        profile: Option<acowork_core::protocol::UserProfile>,
-    ) {
+    pub fn update_user_identity(&mut self, profile: Option<acowork_core::protocol::UserProfile>) {
         let identity_context = profile.as_ref().map(|p| format_user_profile_context(p));
         tracing::info!(
             has_profile = profile.is_some(),
@@ -919,11 +901,14 @@ After installation, ask the user to re-enable the MCP server.",
         // Broadcast to all existing sessions so they rebuild their
         // embedding provider in-place (same pattern as UpdateProvider).
         for (sid, handle) in &self.sessions {
-            if handle.send(SessionMessage::UpdateEmbedConfig {
-                embed_endpoint: embed_endpoint.clone(),
-                embed_model_id: embed_model_id.clone(),
-                embed_dimension,
-            }).is_err() {
+            if handle
+                .send(SessionMessage::UpdateEmbedConfig {
+                    embed_endpoint: embed_endpoint.clone(),
+                    embed_model_id: embed_model_id.clone(),
+                    embed_dimension,
+                })
+                .is_err()
+            {
                 tracing::warn!(
                     session_id = %sid,
                     "Failed to send UpdateEmbedConfig to session (channel closed)"
@@ -1137,7 +1122,11 @@ After installation, ask the user to re-enable the MCP server.",
 
     /// Get the current working directory path for a session.
     /// Returns `(path, is_agent_home)`.
-    pub fn current_dir_for(&self, session_id: &str, resolver: &WorkspaceResolver) -> (String, bool) {
+    pub fn current_dir_for(
+        &self,
+        session_id: &str,
+        resolver: &WorkspaceResolver,
+    ) -> (String, bool) {
         let ws_id = self.session_workspace_id(session_id);
         if ws_id == "__agent_home__" {
             return (resolver.agent_home().to_string(), true);
@@ -1164,9 +1153,7 @@ After installation, ask the user to re-enable the MCP server.",
         let ws_id = self.session_workspace_id(session_id);
         let context_text = format_workspace_context_for_session(resolver, ws_id);
         if let Some(handle) = self.sessions.get(session_id) {
-            let _ = handle.send(SessionMessage::UpdateWorkspaceContext {
-                context_text,
-            });
+            let _ = handle.send(SessionMessage::UpdateWorkspaceContext { context_text });
             tracing::info!(
                 session_id = %session_id,
                 workspace_id = %ws_id,
@@ -1205,8 +1192,10 @@ After installation, ask the user to re-enable the MCP server.",
             }
         }
         for (sid, old_ws_id) in changes {
-            self.pending_workspaces.insert(sid.clone(), old_ws_id.clone());
-            self.session_workspaces.insert(sid.clone(), "__agent_home__".to_string());
+            self.pending_workspaces
+                .insert(sid.clone(), old_ws_id.clone());
+            self.session_workspaces
+                .insert(sid.clone(), "__agent_home__".to_string());
             tracing::info!(
                 session_id = %sid,
                 old_workspace_id = %old_ws_id,
@@ -1245,7 +1234,10 @@ After installation, ask the user to re-enable the MCP server.",
         for urgent in self.urgent_stops.values() {
             urgent.notify_waiters();
         }
-        tracing::info!(session_count = count, "SessionManager: urgent_stop fired (all sessions)");
+        tracing::info!(
+            session_count = count,
+            "SessionManager: urgent_stop fired (all sessions)"
+        );
     }
 
     /// Initialize debug mode at runtime (called when Gateway pushes EnableDebugMode).
@@ -1265,10 +1257,8 @@ After installation, ask the user to re-enable the MCP server.",
         }
 
         let port = debug_port as u16;
-        let debug_server = crate::debug::server::DebugProtocolServer::new(
-            port,
-            self.debug_controllers.clone(),
-        );
+        let debug_server =
+            crate::debug::server::DebugProtocolServer::new(port, self.debug_controllers.clone());
         let debug_event_tx = debug_server.start().await;
 
         // Create debug controllers for ALL existing sessions and register

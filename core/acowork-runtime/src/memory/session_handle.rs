@@ -56,17 +56,20 @@ impl MemorySessionHandle {
     /// Called by `AgentCore` when memory initialization completes.
     /// Panics if a store is already set (store is set exactly once).
     pub fn set_store(&self, store: Arc<GrafeoStore>) {
-        let mut guard = self.store.write().expect("MemorySessionHandle store lock poisoned");
-        assert!(guard.is_none(), "MemorySessionHandle store already initialized");
+        let mut guard = self
+            .store
+            .write()
+            .expect("MemorySessionHandle store lock poisoned");
+        assert!(
+            guard.is_none(),
+            "MemorySessionHandle store already initialized"
+        );
         *guard = Some(store);
     }
 
     /// Read a clone of the store, if initialized.
     pub fn store(&self) -> Option<Arc<GrafeoStore>> {
-        self.store
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.store.read().ok().and_then(|guard| guard.clone())
     }
 
     /// Set the current session ID.

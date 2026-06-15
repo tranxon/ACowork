@@ -110,10 +110,7 @@ impl SearchBackend for FirecrawlBackend {
             .into_iter()
             .take(count as usize)
             .map(|r| {
-                let snippet = r
-                    .markdown
-                    .or(r.description)
-                    .unwrap_or_default();
+                let snippet = r.markdown.or(r.description).unwrap_or_default();
                 SearchResult {
                     title: r.title.unwrap_or_default(),
                     url: r.url.unwrap_or_default(),

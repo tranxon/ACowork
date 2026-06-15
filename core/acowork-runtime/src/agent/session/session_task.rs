@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use acowork_core::providers::traits::ChatMessage;
 use acowork_core::tools::traits::Tool;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use crate::agent::agent_core::AgentCore;
 use crate::agent::context::ContextBuilder;
@@ -20,7 +20,7 @@ use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session_state::SessionState;
 use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
-use crate::tools::builtin::doc_reader::{self, detect_format, ExtractOptions};
+use crate::tools::builtin::doc_reader::{self, ExtractOptions, detect_format};
 
 /// Messages that can be sent to a SessionTask.
 #[derive(Clone)]
@@ -51,7 +51,10 @@ pub enum SessionMessage {
     /// When `provider` is set, the SessionTask rebuilds the LLM Provider
     /// instance from `AgentCore.build_provider_for(provider_id)`, using
     /// the global provider list + key vault populated at startup.
-    ModelSwitch { model: String, provider: Option<String> },
+    ModelSwitch {
+        model: String,
+        provider: Option<String>,
+    },
     /// Apply runtime config overrides from Gateway
     UpdateRuntimeConfig {
         max_output_tokens: Option<u64>,
@@ -105,18 +108,38 @@ pub enum SessionMessage {
 impl std::fmt::Debug for SessionMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionMessage::ChatMessage { content, message_id, skill_instructions, documents, content_parts, attached_context } => f
+            SessionMessage::ChatMessage {
+                content,
+                message_id,
+                skill_instructions,
+                documents,
+                content_parts,
+                attached_context,
+            } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
                 .field("message_id", message_id)
                 .field("has_skill", &skill_instructions.is_some())
                 .field("has_docs", &documents.is_some())
                 .field("has_content_parts", &content_parts.is_some())
-                .field("attached_count", &attached_context.as_ref().map(|c| c.len()).unwrap_or(0))
+                .field(
+                    "attached_count",
+                    &attached_context.as_ref().map(|c| c.len()).unwrap_or(0),
+                )
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
-            SessionMessage::ModelSwitch { model, provider } => f.debug_struct("ModelSwitch").field("model", model).field("provider", provider).finish(),
-            SessionMessage::UpdateRuntimeConfig { max_output_tokens, max_iterations, temperature, system_prompt_override, shell_approval_threshold } => f
+            SessionMessage::ModelSwitch { model, provider } => f
+                .debug_struct("ModelSwitch")
+                .field("model", model)
+                .field("provider", provider)
+                .finish(),
+            SessionMessage::UpdateRuntimeConfig {
+                max_output_tokens,
+                max_iterations,
+                temperature,
+                system_prompt_override,
+                shell_approval_threshold,
+            } => f
                 .debug_struct("UpdateRuntimeConfig")
                 .field("max_output_tokens", max_output_tokens)
                 .field("max_iterations", max_iterations)
@@ -130,7 +153,10 @@ impl std::fmt::Debug for SessionMessage {
                 .finish(),
             SessionMessage::UpdateMcpTools { mcp_tools } => f
                 .debug_struct("UpdateMcpTools")
-                .field("mcp_tool_count", &mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0))
+                .field(
+                    "mcp_tool_count",
+                    &mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0),
+                )
                 .finish(),
             SessionMessage::UpdateSessionTitle { title } => f
                 .debug_struct("UpdateSessionTitle")
@@ -140,22 +166,24 @@ impl std::fmt::Debug for SessionMessage {
                 .debug_struct("SetWorkspaceId")
                 .field("workspace_id", workspace_id)
                 .finish(),
-            SessionMessage::SetWorkDir { path } => f
-                .debug_struct("SetWorkDir")
-                .field("path", path)
-                .finish(),
+            SessionMessage::SetWorkDir { path } => {
+                f.debug_struct("SetWorkDir").field("path", path).finish()
+            }
             SessionMessage::UpdateIdentityContext { identity_context } => f
                 .debug_struct("UpdateIdentityContext")
                 .field("has_identity", &identity_context.is_some())
                 .finish(),
-            SessionMessage::Stop { reason } => f
-                .debug_struct("Stop")
-                .field("reason", reason)
-                .finish(),
+            SessionMessage::Stop { reason } => {
+                f.debug_struct("Stop").field("reason", reason).finish()
+            }
             SessionMessage::EnableDebugMode(_) => f.debug_tuple("EnableDebugMode").finish(),
             SessionMessage::Close => f.debug_tuple("Close").finish(),
             SessionMessage::CompactContext => f.debug_tuple("CompactContext").finish(),
-            SessionMessage::UpdateEmbedConfig { embed_endpoint, embed_model_id, embed_dimension } => f
+            SessionMessage::UpdateEmbedConfig {
+                embed_endpoint,
+                embed_model_id,
+                embed_dimension,
+            } => f
                 .debug_struct("UpdateEmbedConfig")
                 .field("embed_endpoint", embed_endpoint)
                 .field("embed_model_id", embed_model_id)
@@ -210,15 +238,14 @@ pub(crate) struct SessionTask {
 /// Delegates to the doc_reader format-specific extractors in a `spawn_blocking`
 /// worker so that PDF rendering never blocks the async runtime.
 async fn extract_document_text(path: &std::path::Path) -> Result<String, String> {
-    let format = detect_format(path)
-        .ok_or_else(|| {
-            format!(
-                "Unsupported document format: {}",
-                path.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("(none)")
-            )
-        })?;
+    let format = detect_format(path).ok_or_else(|| {
+        format!(
+            "Unsupported document format: {}",
+            path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("(none)")
+        )
+    })?;
 
     let opts = ExtractOptions {
         start_page: None,
@@ -229,14 +256,12 @@ async fn extract_document_text(path: &std::path::Path) -> Result<String, String>
     let path_clone = path.to_path_buf();
     let opts_clone = opts.clone();
 
-    tokio::task::spawn_blocking(move || {
-        match format {
-            "pdf" => doc_reader::pdf::extract_text(&path_clone, &opts_clone),
-            "docx" => doc_reader::docx::extract_text(&path_clone, &opts_clone),
-            "pptx" => doc_reader::pptx::extract_text(&path_clone, &opts_clone),
-            "xlsx" => doc_reader::xlsx::extract_text(&path_clone, &opts_clone),
-            _ => unreachable!(),
-        }
+    tokio::task::spawn_blocking(move || match format {
+        "pdf" => doc_reader::pdf::extract_text(&path_clone, &opts_clone),
+        "docx" => doc_reader::docx::extract_text(&path_clone, &opts_clone),
+        "pptx" => doc_reader::pptx::extract_text(&path_clone, &opts_clone),
+        "xlsx" => doc_reader::xlsx::extract_text(&path_clone, &opts_clone),
+        _ => unreachable!(),
     })
     .await
     .map_err(|e| format!("Document extraction error: {e}"))
@@ -345,7 +370,10 @@ impl SessionTask {
 
     /// Set the status watch sender (ADR-014).
     /// Called by SessionManager after creating the SessionTask, before spawning.
-    pub(crate) fn set_status_tx(&mut self, tx: tokio::sync::watch::Sender<crate::agent::session_state::SessionStatus>) {
+    pub(crate) fn set_status_tx(
+        &mut self,
+        tx: tokio::sync::watch::Sender<crate::agent::session_state::SessionStatus>,
+    ) {
         self.agent_loop.core.status_tx = Some(tx);
     }
 
@@ -384,7 +412,10 @@ impl SessionTask {
         }
 
         // Set protocol type for image token estimation in HistoryManager.
-        agent_loop.session.history_mut().set_protocol_type(protocol_type.clone());
+        agent_loop
+            .session
+            .history_mut()
+            .set_protocol_type(protocol_type.clone());
 
         // Saved user message for debug resume re-execution.
         // When the user presses resume after the agent loop has exited
@@ -396,8 +427,13 @@ impl SessionTask {
             // Use tokio::select! to await inbound messages, rewind
             // notifications, and resume notifications — all sourced
             // from the debug observer slot (ADR-013).
-            let msg = if let Some(rewind) = agent_loop.core.debug_observer.rewind_notify().cloned() {
-                let resume = agent_loop.core.debug_observer.resume_notify().cloned()
+            let msg = if let Some(rewind) = agent_loop.core.debug_observer.rewind_notify().cloned()
+            {
+                let resume = agent_loop
+                    .core
+                    .debug_observer
+                    .resume_notify()
+                    .cloned()
                     .expect("resume_notify must be set when rewind_notify is set");
                 tokio::select! {
                     msg = inbound_rx.recv() => msg,
@@ -493,11 +529,22 @@ impl SessionTask {
             // Note: msg is now Option<SessionMessage> directly (no
             // Ok/Err wrapper from the old timeout pattern).
             match msg {
-                Some(SessionMessage::ChatMessage { content, message_id, skill_instructions, documents, content_parts, attached_context }) => {
+                Some(SessionMessage::ChatMessage {
+                    content,
+                    message_id,
+                    skill_instructions,
+                    documents,
+                    content_parts,
+                    attached_context,
+                }) => {
                     let has_documents = documents.as_ref().map_or(false, |d| !d.is_empty());
                     let has_content_parts = content_parts.as_ref().map_or(false, |p| !p.is_empty());
                     let has_attached = attached_context.as_ref().map_or(false, |a| !a.is_empty());
-                    if content.trim().is_empty() && !has_documents && !has_content_parts && !has_attached {
+                    if content.trim().is_empty()
+                        && !has_documents
+                        && !has_content_parts
+                        && !has_attached
+                    {
                         tracing::warn!(
                             session_id = %session_id,
                             "SessionTask received empty chat message, ignoring"
@@ -539,12 +586,19 @@ impl SessionTask {
                             );
                             let mut doc_blocks: Vec<String> = Vec::new();
                             for doc in docs {
-                                let abs_path = doc.get("abs_path").and_then(|v| v.as_str()).unwrap_or("");
-                                let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("document");
+                                let abs_path =
+                                    doc.get("abs_path").and_then(|v| v.as_str()).unwrap_or("");
+                                let filename = doc
+                                    .get("filename")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("document");
                                 if abs_path.is_empty() {
                                     continue;
                                 }
-                                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                let format = doc
+                                    .get("format")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
                                 tracing::info!(
                                     session_id = %session_id,
                                     filename = %filename,
@@ -609,7 +663,9 @@ impl SessionTask {
                     // using the workspace read_file tool.
                     if let Some(ref att_ctx) = attached_context {
                         if !att_ctx.is_empty() {
-                            let workspace_root = agent_loop.core.current_work_dir
+                            let workspace_root = agent_loop
+                                .core
+                                .current_work_dir
                                 .as_ref()
                                 .map(|s| std::path::PathBuf::from(s))
                                 .unwrap_or_else(|| {
@@ -695,7 +751,8 @@ impl SessionTask {
                                     let end = item
                                         .end_line
                                         .unwrap_or(lines.len() as u32)
-                                        .min(lines.len() as u32) as usize;
+                                        .min(lines.len() as u32)
+                                        as usize;
                                     if start >= lines.len() {
                                         file_content
                                     } else {
@@ -725,11 +782,7 @@ impl SessionTask {
                                     (Some(s), _) => format!(" (L{})", s),
                                     _ => String::new(),
                                 };
-                                let trunc_label = if truncated {
-                                    " [truncated]"
-                                } else {
-                                    ""
-                                };
+                                let trunc_label = if truncated { " [truncated]" } else { "" };
                                 if is_document_format {
                                     // Document text already has page/slide markers —
                                     // render without a code fence.
@@ -740,7 +793,11 @@ impl SessionTask {
                                 } else {
                                     file_blocks.push(format!(
                                         "## `{}{}`{}\n```{}\n{}\n```",
-                                        item.rel_path, line_label, trunc_label, ext, display_content
+                                        item.rel_path,
+                                        line_label,
+                                        trunc_label,
+                                        ext,
+                                        display_content
                                     ));
                                 }
                             }
@@ -785,12 +842,15 @@ impl SessionTask {
                     }
 
                     // ── Debug mode: apply rewind/patches before running agent loop ──
-                    agent_loop.core.debug_observer.apply_rewind_and_patches(
-                        &session_id,
-                        &mut agent_loop.session.history,
-                        &mut context_builder,
-                    )
-                    .await;
+                    agent_loop
+                        .core
+                        .debug_observer
+                        .apply_rewind_and_patches(
+                            &session_id,
+                            &mut agent_loop.session.history,
+                            &mut context_builder,
+                        )
+                        .await;
 
                     // ── Debug mode: auto-resume if paused/stepping ──
                     // When the user sends a chat message, they expect a response.
@@ -813,17 +873,21 @@ impl SessionTask {
                                     "Debug: auto-resuming on chat_message"
                                 );
                                 // Notify the debug frontend so it updates the UI
-                                if let Some(event_tx) = agent_loop.core.debug_observer.debug_event_tx() {
+                                if let Some(event_tx) =
+                                    agent_loop.core.debug_observer.debug_event_tx()
+                                {
                                     let _ = event_tx.send(
                                         crate::debug::server::DebugEvent::ExecutionStateChanged {
-                                            new_state: crate::debug::controller::DebugState::Running,
+                                            new_state:
+                                                crate::debug::controller::DebugState::Running,
                                             iteration,
                                         },
                                     );
                                 }
                                 // Wake the agent loop's await_resume() if it's
                                 // currently blocking on the resume notify.
-                                if let Some(notify) = agent_loop.core.debug_observer.resume_notify() {
+                                if let Some(notify) = agent_loop.core.debug_observer.resume_notify()
+                                {
                                     notify.notify_one();
                                 }
                             }
@@ -835,7 +899,10 @@ impl SessionTask {
                     // loop run (safety net for idle sessions).
                     agent_loop.core.debug_observer.check_pending_injection();
 
-                    match agent_loop.run(&enriched_content, &mut context_builder, content_parts).await {
+                    match agent_loop
+                        .run(&enriched_content, &mut context_builder, content_parts)
+                        .await
+                    {
                         Ok(response) => {
                             tracing::info!(
                                 session_id = %session_id,
@@ -887,9 +954,11 @@ impl SessionTask {
                         session_id = %session_id,
                         "SessionTask: ContinueExecution received"
                     );
-                    let _ = agent_inbound_tx.send(crate::agent::inbound::InboundMessage::ContinueExecution {
-                        reason: "user_requested".to_string(),
-                    }).await;
+                    let _ = agent_inbound_tx
+                        .send(crate::agent::inbound::InboundMessage::ContinueExecution {
+                            reason: "user_requested".to_string(),
+                        })
+                        .await;
                 }
                 Some(SessionMessage::ModelSwitch { model, provider }) => {
                     tracing::info!(
@@ -911,8 +980,13 @@ impl SessionTask {
                     // instance from the shared global cache (set by
                     // ProviderListUpdate / AgentHello). No per-session vault.
                     if let Some(ref provider_id) = provider {
-                        if let Some(new_provider) = agent_loop.core.build_provider_for(provider_id) {
-                            agent_loop.update_provider(new_provider, model.clone(), Some(provider_id.clone()));
+                        if let Some(new_provider) = agent_loop.core.build_provider_for(provider_id)
+                        {
+                            agent_loop.update_provider(
+                                new_provider,
+                                model.clone(),
+                                Some(provider_id.clone()),
+                            );
                         } else {
                             tracing::warn!(
                                 session_id = %session_id,
@@ -1000,7 +1074,9 @@ impl SessionTask {
                         reason = %reason,
                         "SessionTask: forwarding stop signal"
                     );
-                    let _ = agent_inbound_tx.send(crate::agent::inbound::InboundMessage::Stop { reason }).await;
+                    let _ = agent_inbound_tx
+                        .send(crate::agent::inbound::InboundMessage::Stop { reason })
+                        .await;
                 }
                 Some(SessionMessage::EnableDebugMode(handles)) => {
                     tracing::info!(
@@ -1025,9 +1101,15 @@ impl SessionTask {
                         "SessionTask: manual compact_context triggered"
                     );
                     let model_name = agent_loop.session.model().unwrap_or("default").to_string();
-                    agent_loop.compact_history_if_needed(&model_name, true).await;
+                    agent_loop
+                        .compact_history_if_needed(&model_name, true)
+                        .await;
                 }
-                Some(SessionMessage::UpdateEmbedConfig { embed_endpoint, embed_model_id, embed_dimension }) => {
+                Some(SessionMessage::UpdateEmbedConfig {
+                    embed_endpoint,
+                    embed_model_id,
+                    embed_dimension,
+                }) => {
                     tracing::info!(
                         session_id = %session_id,
                         endpoint = %embed_endpoint,
@@ -1038,34 +1120,43 @@ impl SessionTask {
                     // Build a new ONNX provider pointing at the updated embed service.
                     // Same pattern as ModelSwitch for LLM provider rebuild:
                     // create a new provider instance and replace in AgentCore.
-                    let new_onnx_provider = crate::embedding::remote::RemoteEmbeddingProvider::with_config(
-                        &embed_endpoint,
-                        None, // No API key needed for local embed service
-                        &embed_model_id,
-                        embed_dimension,
-                    );
+                    let new_onnx_provider =
+                        crate::embedding::remote::RemoteEmbeddingProvider::with_config(
+                            &embed_endpoint,
+                            None, // No API key needed for local embed service
+                            &embed_model_id,
+                            embed_dimension,
+                        );
                     // Wrap as FallbackEmbeddingProvider with ONNX as primary,
                     // keeping the existing provider chain as fallback (if available).
-                    let new_emb: Arc<dyn crate::embedding::EmbeddingProvider> =
-                        if let Some(ref old_provider) = agent_loop.core.embedding_provider {
-                            // Insert ONNX as primary, old provider chain as fallback.
-                            // ArcDelegateEmbeddingProvider wraps Arc<dyn> → Box<dyn>.
-                            Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
-                                vec![
-                                    (Box::new(new_onnx_provider), 500),
-                                    (Box::new(crate::embedding::ArcDelegateEmbeddingProvider::from_arc(old_provider.clone())), 5000),
-                                ],
-                                crate::embedding::EmbeddingConfig::default(),
-                            ))
-                        } else {
-                            // No previous provider — ONNX becomes the sole provider
-                            Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
-                                vec![
-                                    (Box::new(new_onnx_provider), 500),
-                                ],
-                                crate::embedding::EmbeddingConfig::default(),
-                            ))
-                        };
+                    let new_emb: Arc<dyn crate::embedding::EmbeddingProvider> = if let Some(
+                        ref old_provider,
+                    ) =
+                        agent_loop.core.embedding_provider
+                    {
+                        // Insert ONNX as primary, old provider chain as fallback.
+                        // ArcDelegateEmbeddingProvider wraps Arc<dyn> → Box<dyn>.
+                        Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
+                            vec![
+                                (Box::new(new_onnx_provider), 500),
+                                (
+                                    Box::new(
+                                        crate::embedding::ArcDelegateEmbeddingProvider::from_arc(
+                                            old_provider.clone(),
+                                        ),
+                                    ),
+                                    5000,
+                                ),
+                            ],
+                            crate::embedding::EmbeddingConfig::default(),
+                        ))
+                    } else {
+                        // No previous provider — ONNX becomes the sole provider
+                        Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
+                            vec![(Box::new(new_onnx_provider), 500)],
+                            crate::embedding::EmbeddingConfig::default(),
+                        ))
+                    };
                     agent_loop.core.update_embedding_provider(new_emb);
                 }
                 Some(SessionMessage::SystemNotification { content }) => {
@@ -1084,9 +1175,12 @@ impl SessionTask {
                         content_len = content.len(),
                         "SessionTask: injecting system notification into history"
                     );
-                    agent_loop.session.history_mut().append(
-                        ChatMessage::user(format!("[System Notification] {content}")),
-                    );
+                    agent_loop
+                        .session
+                        .history_mut()
+                        .append(ChatMessage::user(format!(
+                            "[System Notification] {content}"
+                        )));
                 }
                 None => {
                     tracing::info!(

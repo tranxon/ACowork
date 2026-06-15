@@ -64,11 +64,19 @@ impl ApprovalHandle {
         let (tx, rx) = oneshot::channel();
         if self.request_tx.send((req, tx)).await.is_err() {
             tracing::warn!("ApprovalHandle: request channel closed, auto-rejecting");
-            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
+            return ApprovalDecision {
+                approved: false,
+                allow_all_session: false,
+                reason: None,
+            };
         }
         rx.await.unwrap_or_else(|_| {
             tracing::warn!("ApprovalHandle: oneshot sender dropped, auto-rejecting");
-            ApprovalDecision { approved: false, allow_all_session: false, reason: None }
+            ApprovalDecision {
+                approved: false,
+                allow_all_session: false,
+                reason: None,
+            }
         })
     }
 }
@@ -188,78 +196,82 @@ impl AgentLoop {
     /// Non-matching messages are buffered in `session.deferred_inbound`.
     /// Also processes concurrent approval requests from `approval_rx`.
     /// Returns the user's answer string, or a cancellation/timeout message.
-    pub(crate) async fn await_question_answer(&mut self, request_id: &str, timeout_seconds: Option<u32>) -> String {
+    pub(crate) async fn await_question_answer(
+        &mut self,
+        request_id: &str,
+        timeout_seconds: Option<u32>,
+    ) -> String {
         let timeout_duration = std::time::Duration::from_secs(
-            timeout_seconds.unwrap_or(APPROVAL_TIMEOUT_SECS as u32) as u64
+            timeout_seconds.unwrap_or(APPROVAL_TIMEOUT_SECS as u32) as u64,
         );
 
         let timeout_future = tokio::time::timeout(timeout_duration, async {
             loop {
                 tokio::select! {
-                    msg = self.inbound_rx.recv() => {
-                        match msg {
-                        Some(InboundMessage::QuestionAnswer {
-                            request_id: rid,
-                            answer,
-                        }) if rid == request_id => {
-                            return answer;
-                        }
-                        Some(InboundMessage::QuestionAnswer {
-                            request_id: rid,
-                            answer,
-                        }) => {
-                            // Answer for a different question — buffer it
-                            tracing::debug!(
-                                expected = %request_id,
-                                got = %rid,
-                                "Buffering question answer for different request"
-                            );
-                            self.session.deferred_inbound.push(InboundMessage::QuestionAnswer {
+                        msg = self.inbound_rx.recv() => {
+                            match msg {
+                            Some(InboundMessage::QuestionAnswer {
                                 request_id: rid,
                                 answer,
-                            });
-                        }
-                        Some(InboundMessage::Stop { reason }) => {
-                            tracing::info!(
-                                reason = %reason,
-                                request_id = %request_id,
-                                "Question wait stopped, returning cancelled"
-                            );
-                            return "[Cancelled: user stopped]".to_string();
-                        }
-                        Some(other) => {
-                            tracing::debug!(
-                                ?other,
-                                "Buffering non-question message during question wait"
-                            );
-                            self.session.deferred_inbound.push(other);
-                        }
-                        None => {
-                            tracing::warn!(
-                                request_id = %request_id,
-                                "Inbound channel closed during question wait, returning cancelled"
-                            );
-                            return "[Cancelled: channel closed]".to_string();
+                            }) if rid == request_id => {
+                                return answer;
+                            }
+                            Some(InboundMessage::QuestionAnswer {
+                                request_id: rid,
+                                answer,
+                            }) => {
+                                // Answer for a different question — buffer it
+                                tracing::debug!(
+                                    expected = %request_id,
+                                    got = %rid,
+                                    "Buffering question answer for different request"
+                                );
+                                self.session.deferred_inbound.push(InboundMessage::QuestionAnswer {
+                                    request_id: rid,
+                                    answer,
+                                });
+                            }
+                            Some(InboundMessage::Stop { reason }) => {
+                                tracing::info!(
+                                    reason = %reason,
+                                    request_id = %request_id,
+                                    "Question wait stopped, returning cancelled"
+                                );
+                                return "[Cancelled: user stopped]".to_string();
+                            }
+                            Some(other) => {
+                                tracing::debug!(
+                                    ?other,
+                                    "Buffering non-question message during question wait"
+                                );
+                                self.session.deferred_inbound.push(other);
+                            }
+                            None => {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    "Inbound channel closed during question wait, returning cancelled"
+                                );
+                                return "[Cancelled: channel closed]".to_string();
+                            }
                         }
                     }
-                }
-                // Also process concurrent approval requests
-                approval_req = self.approval_rx.recv() => {
-                    match approval_req {
-                        Some((req, decision_tx)) => {
-                            tracing::info!(
-                                "Queuing concurrent approval request while waiting for question answer"
-                            );
-                            self.handle_approval_request(req, decision_tx).await;
-                        }
-                        None => {
-                            tracing::warn!("Approval channel closed during question wait");
+                    // Also process concurrent approval requests
+                    approval_req = self.approval_rx.recv() => {
+                        match approval_req {
+                            Some((req, decision_tx)) => {
+                                tracing::info!(
+                                    "Queuing concurrent approval request while waiting for question answer"
+                                );
+                                self.handle_approval_request(req, decision_tx).await;
+                            }
+                            None => {
+                                tracing::warn!("Approval channel closed during question wait");
+                            }
                         }
                     }
                 }
             }
-        }
-    });
+        });
         let result = timeout_future.await;
 
         match result {

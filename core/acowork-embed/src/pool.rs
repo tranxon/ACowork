@@ -16,8 +16,8 @@ use crate::registry::PoolingStrategy;
 /// # Returns
 /// Pooled embedding vector of size [hidden_dim]
 pub fn apply_pooling(
-    hidden_state: &[Vec<f32>],   // [seq_len, hidden_dim]
-    attention_mask: &[i64],      // [seq_len]
+    hidden_state: &[Vec<f32>], // [seq_len, hidden_dim]
+    attention_mask: &[i64],    // [seq_len]
     strategy: &PoolingStrategy,
 ) -> Vec<f32> {
     match strategy {
@@ -39,10 +39,7 @@ fn cls_pooling(hidden_state: &[Vec<f32>]) -> Vec<f32> {
 /// Mean pooling: average all token embeddings weighted by attention_mask.
 /// Used by sentence-transformers models like MiniLM.
 fn mean_pooling(hidden_state: &[Vec<f32>], attention_mask: &[i64]) -> Vec<f32> {
-    let dim = hidden_state
-        .first()
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let dim = hidden_state.first().map(|v| v.len()).unwrap_or(0);
     if dim == 0 {
         return Vec::new();
     }

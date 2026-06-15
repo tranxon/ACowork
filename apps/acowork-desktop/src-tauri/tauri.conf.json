@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "node ../../dev/ort_env.js cargo build --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed && npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "cargo build --release --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed && npm run build",
+    "beforeBuildCommand": "node ../../dev/ort_env.js cargo build --release --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -41,7 +41,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../../examples/system-agent": "system-agent",
+      "../../../examples/agent-packages": "agent-packages",
       "../../../assets/offline_providers.json": "offline_providers.json",
       "../../../assets/lsp_servers.json": "lsp_servers.json",
       "../../../assets/lsp_install": "lsp_install",

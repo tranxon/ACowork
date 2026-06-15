@@ -1,4 +1,4 @@
-﻿//! OpenAI Compatible Provider
+//! OpenAI Compatible Provider
 //!
 //! Supports OpenAI API and compatible endpoints (e.g., Azure OpenAI,
 //! Together AI, Groq, DeepSeek, etc.) via configurable base_url.
@@ -14,12 +14,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::sync::mpsc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 use acowork_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall,
-    MessageRole, Provider, StreamEvent, ToolCall, UsageInfo,
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageRole, Provider,
+    StreamEvent, ToolCall, UsageInfo,
 };
 
 /// Default per-chunk read timeout (45s) — used by backwards-compatible constructors.
@@ -287,7 +287,11 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                 let tool_call_id = m.tool_call_id.clone().or_else(|| {
                     serde_json::from_str::<serde_json::Value>(&m.content)
                         .ok()
-                        .and_then(|v| v.get("tool_call_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .and_then(|v| {
+                            v.get("tool_call_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
                 });
                 let content = if m.tool_call_id.is_some() {
                     // tool_call_id is a separate field — content is the actual result
@@ -295,7 +299,11 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
                 } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
                     // Legacy format: content JSON contains tool_call_id and content
                     Some(serde_json::Value::String(
-                        value.get("content").and_then(serde_json::Value::as_str).unwrap_or("").to_string()
+                        value
+                            .get("content")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                     ))
                 } else {
                     Some(serde_json::Value::String(m.content.clone()))
@@ -311,7 +319,8 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
 
             // Handle assistant messages with tool_calls
             if matches!(m.role, MessageRole::Assistant)
-                && let Some(ref tool_calls) = m.tool_calls {
+                && let Some(ref tool_calls) = m.tool_calls
+            {
                 let native_calls: Vec<NativeToolCall> = tool_calls
                     .iter()
                     .map(|tc| NativeToolCall {
@@ -398,25 +407,30 @@ fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<NativeToolSp
 
 fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> ChatResponse {
     let content = msg.content.unwrap_or_default();
-    let tool_calls = msg.tool_calls.unwrap_or_default().into_iter().map(|tc| {
-        ToolCall {
+    let tool_calls = msg
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tc| ToolCall {
             id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             call_type: "function".to_string(),
             function: FunctionCall {
                 name: tc.function.name,
                 arguments: tc.function.arguments,
             },
-        }
-    }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
 
     let usage_info = usage.map(|u| {
         let prompt = u.prompt_tokens.unwrap_or(0);
         let completion = u.completion_tokens.unwrap_or(0);
-        let cache_read = u.prompt_tokens_details
+        let cache_read = u
+            .prompt_tokens_details
             .as_ref()
             .and_then(|d| d.cached_tokens)
             .unwrap_or(0);
-        let reasoning = u.completion_tokens_details
+        let reasoning = u
+            .completion_tokens_details
             .as_ref()
             .and_then(|d| d.reasoning_tokens)
             .unwrap_or(0);
@@ -433,7 +447,11 @@ fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> Cha
     ChatResponse {
         content,
         reasoning_content: msg.reasoning_content,
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
         usage: usage_info,
         reasoning_started_at: None,
         reasoning_finished_at: None,
@@ -479,7 +497,11 @@ impl Provider for OpenAIProvider {
             .json(&native_request)
             .send()
             .await
-            .map_err(|e| acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!("OpenAI request failed: {e}"))))?;
+            .map_err(|e| {
+                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!(
+                    "OpenAI request failed: {e}"
+                )))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -496,7 +518,10 @@ impl Provider for OpenAIProvider {
                 );
                 if body.contains("invalid function arguments") {
                     // Log the last assistant message's tool_calls for diagnosis
-                    if let Some(last_assistant) = native_request.messages.iter().rev()
+                    if let Some(last_assistant) = native_request
+                        .messages
+                        .iter()
+                        .rev()
                         .find(|m| m.role == "assistant")
                     {
                         tracing::error!(
@@ -507,19 +532,25 @@ impl Provider for OpenAIProvider {
                 }
             }
 
-            return Err(acowork_core::AcoworkError::Provider(acowork_core::ProviderError::from_status_code(status.as_u16(), format!("OpenAI API error: {status} — {body}"))));
+            return Err(acowork_core::AcoworkError::Provider(
+                acowork_core::ProviderError::from_status_code(
+                    status.as_u16(),
+                    format!("OpenAI API error: {status} — {body}"),
+                ),
+            ));
         }
 
-        let native_resp: NativeChatResponse = response
-            .json()
-            .await
-            .map_err(|e| acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(format!("Failed to parse OpenAI response: {e}"))))?;
+        let native_resp: NativeChatResponse = response.json().await.map_err(|e| {
+            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(format!(
+                "Failed to parse OpenAI response: {e}"
+            )))
+        })?;
 
-        let choice = native_resp
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown("No choices in OpenAI response".to_string())))?;
+        let choice = native_resp.choices.into_iter().next().ok_or_else(|| {
+            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(
+                "No choices in OpenAI response".to_string(),
+            ))
+        })?;
 
         Ok(parse_response(choice.message, native_resp.usage))
     }
@@ -535,7 +566,9 @@ impl Provider for OpenAIProvider {
             max_tokens: request.max_tokens,
             tools: convert_tools(request.tools.as_deref()),
             stream: Some(true),
-            stream_options: Some(StreamOptions { include_usage: true }),
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
         };
 
         // Log request payload for debugging tool definitions
@@ -569,8 +602,7 @@ impl Provider for OpenAIProvider {
 
             // Fallback: if the error is caused by stream_options (some OpenAI-compatible
             // APIs don't support this field), retry without it.
-            if (status.as_u16() == 422 || status.as_u16() == 400)
-                && body.contains("stream_options")
+            if (status.as_u16() == 422 || status.as_u16() == 400) && body.contains("stream_options")
             {
                 tracing::warn!(
                     status = %status,
@@ -590,10 +622,16 @@ impl Provider for OpenAIProvider {
                     let s = retry_response.status();
                     let b = retry_response.text().await.unwrap_or_default();
                     return Err(acowork_core::AcoworkError::Provider(
-                        acowork_core::ProviderError::from_status_code(s.as_u16(), format!("OpenAI API error: {s} - {b}"))
+                        acowork_core::ProviderError::from_status_code(
+                            s.as_u16(),
+                            format!("OpenAI API error: {s} - {b}"),
+                        ),
                     ));
                 }
-                return Ok(Self::sse_to_stream(retry_response, self.stream_read_timeout));
+                return Ok(Self::sse_to_stream(
+                    retry_response,
+                    self.stream_read_timeout,
+                ));
             }
 
             // Detailed diagnostics for 400 Bad Request errors
@@ -606,7 +644,10 @@ impl Provider for OpenAIProvider {
                     "LLM returned 400 Bad Request - detailed diagnostics"
                 );
                 if body.contains("invalid function arguments")
-                    && let Some(last_assistant) = native_request.messages.iter().rev()
+                    && let Some(last_assistant) = native_request
+                        .messages
+                        .iter()
+                        .rev()
                         .find(|m| m.role == "assistant")
                 {
                     tracing::error!(
@@ -617,7 +658,10 @@ impl Provider for OpenAIProvider {
             }
 
             return Err(acowork_core::AcoworkError::Provider(
-                acowork_core::ProviderError::from_status_code(status.as_u16(), format!("OpenAI API error: {status} - {body}"))
+                acowork_core::ProviderError::from_status_code(
+                    status.as_u16(),
+                    format!("OpenAI API error: {status} - {body}"),
+                ),
             ));
         }
 
@@ -645,13 +689,11 @@ impl OpenAIProvider {
         if let Some(ref api_key) = self.api_key {
             req_builder = req_builder.bearer_auth(api_key);
         }
-        req_builder
-            .json(native_request)
-            .send()
-            .await
-            .map_err(|e| acowork_core::AcoworkError::Provider(
-                acowork_core::ProviderError::network(format!("OpenAI streaming request failed: {e}"))
-            ))
+        req_builder.json(native_request).send().await.map_err(|e| {
+            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!(
+                "OpenAI streaming request failed: {e}"
+            )))
+        })
     }
 
     /// Convert an HTTP SSE response into a Stream of StreamEvent.
@@ -686,9 +728,9 @@ impl OpenAIProvider {
                         }
                     }
                     Ok(Some(Err(e))) => {
-                        let stream_err = acowork_core::providers::classify_stream_error(
-                            &format!("Stream error: {e}"),
-                        );
+                        let stream_err = acowork_core::providers::classify_stream_error(&format!(
+                            "Stream error: {e}"
+                        ));
                         let _ = tx.send(Some(StreamEvent::Error(stream_err))).await;
                         return;
                     }
@@ -702,11 +744,13 @@ impl OpenAIProvider {
                             timeout_secs = stream_read_timeout.as_secs(),
                             "Stream silence detected, no data received within timeout"
                         );
-                        let _ = tx.send(Some(StreamEvent::Error(
-                            acowork_core::providers::StreamError::stream_timeout(
-                                stream_read_timeout.as_secs(),
-                            ),
-                        ))).await;
+                        let _ = tx
+                            .send(Some(StreamEvent::Error(
+                                acowork_core::providers::StreamError::stream_timeout(
+                                    stream_read_timeout.as_secs(),
+                                ),
+                            )))
+                            .await;
                         return;
                     }
                 }
@@ -768,11 +812,13 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
     if let Some(usage) = chunk.usage {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let completion = usage.completion_tokens.unwrap_or(0);
-        let cache_read = usage.prompt_tokens_details
+        let cache_read = usage
+            .prompt_tokens_details
             .as_ref()
             .and_then(|d| d.cached_tokens)
             .unwrap_or(0);
-        let reasoning = usage.completion_tokens_details
+        let reasoning = usage
+            .completion_tokens_details
             .as_ref()
             .and_then(|d| d.reasoning_tokens)
             .unwrap_or(0);
@@ -868,7 +914,10 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
                         );
                         if let Some(args) = func.arguments {
                             let idx = tc_delta.index.unwrap_or(0);
-                            events.push(StreamEvent::ToolCallChunk { index: idx, arguments: args });
+                            events.push(StreamEvent::ToolCallChunk {
+                                index: idx,
+                                arguments: args,
+                            });
                         }
                     }
                 }
@@ -942,10 +991,8 @@ mod tests {
         assert_eq!(provider.name(), "openai");
         assert_eq!(provider.base_url, "https://api.openai.com/v1");
 
-        let custom = OpenAIProvider::with_base_url(
-            Some("https://api.deepseek.com/v1"),
-            Some("sk-test"),
-        );
+        let custom =
+            OpenAIProvider::with_base_url(Some("https://api.deepseek.com/v1"), Some("sk-test"));
         assert_eq!(custom.base_url, "https://api.deepseek.com/v1");
     }
 
@@ -972,12 +1019,15 @@ mod tests {
                 },
             }]),
         };
-        let resp = parse_response(msg_with_tc, Some(NativeUsage {
-            prompt_tokens: Some(10),
-            completion_tokens: Some(5),
-            prompt_tokens_details: None,
-            completion_tokens_details: None,
-        }));
+        let resp = parse_response(
+            msg_with_tc,
+            Some(NativeUsage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(5),
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+        );
         assert!(resp.tool_calls.is_some());
         assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
     }
@@ -1020,7 +1070,10 @@ mod tests {
         assert!(function.get("parameters").is_some());
         assert!(function.get("name").is_some());
 
-        println!("Serialized NativeToolSpec: {}", serde_json::to_string_pretty(&serialized).unwrap());
+        println!(
+            "Serialized NativeToolSpec: {}",
+            serde_json::to_string_pretty(&serialized).unwrap()
+        );
     }
 
     #[test]

@@ -39,6 +39,8 @@ pub struct EmbeddingModelEntry {
     pub tokenizer_file: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onnx_variants: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub external_data_files: HashMap<String, Vec<String>>,
     pub bundled: bool,
     pub recommended: bool,
 }
@@ -130,6 +132,7 @@ pub struct ModelInfo {
 }
 
 /// The model registry, loaded from embedding_models.json.
+#[derive(Clone)]
 pub struct ModelRegistry {
     models: Vec<EmbeddingModelEntry>,
     /// Map from model ID to index in the models vec.
@@ -152,25 +155,23 @@ impl ModelRegistry {
         for path in &candidates {
             if path.exists() {
                 match std::fs::read_to_string(path) {
-                    Ok(content) => {
-                        match serde_json::from_str::<EmbeddingModelsFile>(&content) {
-                            Ok(reg) => {
-                                tracing::info!(
-                                    path = %path.display(),
-                                    count = reg.models.len(),
-                                    "Loaded embedding model registry"
-                                );
-                                return Self::from_models(reg.models);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    path = %path.display(),
-                                    error = %e,
-                                    "Failed to parse embedding_models.json"
-                                );
-                            }
+                    Ok(content) => match serde_json::from_str::<EmbeddingModelsFile>(&content) {
+                        Ok(reg) => {
+                            tracing::info!(
+                                path = %path.display(),
+                                count = reg.models.len(),
+                                "Loaded embedding model registry"
+                            );
+                            return Self::from_models(reg.models);
                         }
-                    }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "Failed to parse embedding_models.json"
+                            );
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             path = %path.display(),
@@ -241,6 +242,13 @@ impl ModelRegistry {
         }
         // Fallback to the default onnx_file
         Some(model.onnx_file.clone())
+    }
+
+    pub fn external_data_paths(&self, model_id: &str, variant: &str) -> Vec<String> {
+        self.get(model_id)
+            .and_then(|model| model.external_data_files.get(variant))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Check if a model is downloaded (its directory exists on disk).
@@ -343,7 +351,8 @@ mod tests {
     fn test_pooling_strategy_deserialize() {
         let json = r#"{"pooling_strategy": "mean"}"#;
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
-        let strategy: PoolingStrategy = serde_json::from_value(v["pooling_strategy"].clone()).unwrap();
+        let strategy: PoolingStrategy =
+            serde_json::from_value(v["pooling_strategy"].clone()).unwrap();
         assert_eq!(strategy, PoolingStrategy::Mean);
     }
 }

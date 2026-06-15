@@ -27,23 +27,13 @@ pub enum State {
     /// Process is starting up, no model loaded yet.
     Starting,
     /// Downloading the recommended model on first launch.
-    DownloadingRecommended {
-        model_id: String,
-        progress: u8,
-    },
+    DownloadingRecommended { model_id: String, progress: u8 },
     /// Loading a model from disk into ONNX Runtime.
-    Loading {
-        model_id: String,
-    },
+    Loading { model_id: String },
     /// A model is loaded and serving inference requests.
-    Ready {
-        model_id: String,
-        dimension: usize,
-    },
+    Ready { model_id: String, dimension: usize },
     /// Fatal error — no model is loaded and we cannot recover.
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// Event flowing over the bus. Both kinds carry a `seq` for
@@ -52,14 +42,9 @@ pub enum State {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     /// Periodic liveness signal.
-    Heartbeat {
-        seq: u64,
-    },
+    Heartbeat { seq: u64 },
     /// High-level state transition.
-    State {
-        seq: u64,
-        state: State,
-    },
+    State { seq: u64, state: State },
 }
 
 /// Bus for broadcasting events to all subscribers.

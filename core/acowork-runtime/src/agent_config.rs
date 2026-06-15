@@ -48,8 +48,7 @@ impl AgentMcpConfig {
 
     /// Check whether a name exists in either catalog or local.
     pub fn contains_name(&self, name: &str) -> bool {
-        self.catalog.iter().any(|c| c.name == name)
-            || self.local.iter().any(|l| l.name == name)
+        self.catalog.iter().any(|c| c.name == name) || self.local.iter().any(|l| l.name == name)
     }
 
     /// Check whether a name exists in catalog only.
@@ -139,8 +138,13 @@ pub fn load_agent_config(work_dir: &Path) -> Result<Option<AgentConfig>, String>
 /// Uses atomic write-tmp-rename to prevent corruption on crash.
 pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), String> {
     let config_dir = work_dir.join("config");
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| format!("Failed to create config dir {}: {}", config_dir.display(), e))?;
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        format!(
+            "Failed to create config dir {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
 
     let path = config_path(work_dir);
     let tmp_path = path.with_extension("tmp");
@@ -151,8 +155,14 @@ pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), Strin
     std::fs::write(&tmp_path, &json)
         .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
 
-    std::fs::rename(&tmp_path, &path)
-        .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        )
+    })?;
 
     tracing::info!(
         work_dir = %work_dir.display(),
@@ -221,13 +231,15 @@ pub fn load_agent_mcp_config(work_dir: &Path) -> Result<Option<AgentMcpConfig>, 
 /// Save full per-agent MCP config to workspace/config/agent_mcp.json.
 ///
 /// Uses atomic write-tmp-rename to prevent corruption on crash.
-pub fn save_agent_mcp_config(
-    work_dir: &Path,
-    cfg: &AgentMcpConfig,
-) -> Result<(), String> {
+pub fn save_agent_mcp_config(work_dir: &Path, cfg: &AgentMcpConfig) -> Result<(), String> {
     let config_dir = work_dir.join("config");
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| format!("Failed to create config dir {}: {}", config_dir.display(), e))?;
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        format!(
+            "Failed to create config dir {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
 
     let path = mcp_config_path(work_dir);
     let tmp_path = path.with_extension("tmp");
@@ -238,15 +250,14 @@ pub fn save_agent_mcp_config(
     std::fs::write(&tmp_path, &json)
         .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
 
-    std::fs::rename(&tmp_path, &path)
-        .map_err(|e| {
-            format!(
-                "Failed to rename {} -> {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            )
-        })?;
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        )
+    })?;
 
     tracing::info!(
         work_dir = %work_dir.display(),
@@ -329,13 +340,15 @@ pub fn load_agent_search_config(work_dir: &Path) -> Result<Option<AgentSearchCon
 /// Save per-agent search config to workspace/config/agent_search.json.
 ///
 /// Uses atomic write-tmp-rename to prevent corruption on crash.
-pub fn save_agent_search_config(
-    work_dir: &Path,
-    cfg: &AgentSearchConfig,
-) -> Result<(), String> {
+pub fn save_agent_search_config(work_dir: &Path, cfg: &AgentSearchConfig) -> Result<(), String> {
     let config_dir = work_dir.join("config");
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| format!("Failed to create config dir {}: {}", config_dir.display(), e))?;
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        format!(
+            "Failed to create config dir {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
 
     let path = search_config_path(work_dir);
     let tmp_path = path.with_extension("tmp");
@@ -346,15 +359,14 @@ pub fn save_agent_search_config(
     std::fs::write(&tmp_path, &json)
         .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
 
-    std::fs::rename(&tmp_path, &path)
-        .map_err(|e| {
-            format!(
-                "Failed to rename {} -> {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            )
-        })?;
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        )
+    })?;
 
     tracing::info!(
         work_dir = %work_dir.display(),

@@ -314,14 +314,26 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    fn make_entry(id: &str, agent_id: &str, schedule: &str, action: &str, params: &str) -> StoredCronEntry {
+    fn make_entry(
+        id: &str,
+        agent_id: &str,
+        schedule: &str,
+        action: &str,
+        params: &str,
+    ) -> StoredCronEntry {
         StoredCronEntry::simple(id, agent_id, schedule, action, params)
     }
 
     #[test]
     fn test_cron_store_insert_and_list() {
         let store = CronStore::open_in_memory().unwrap();
-        let entry = make_entry("cron-1", "com.example.weather", "0 * * * *", "hourly_check", "{}");
+        let entry = make_entry(
+            "cron-1",
+            "com.example.weather",
+            "0 * * * *",
+            "hourly_check",
+            "{}",
+        );
         store.insert(&entry).unwrap();
 
         let entries = store.list_by_agent("com.example.weather").unwrap();
@@ -333,7 +345,13 @@ mod tests {
     #[test]
     fn test_cron_store_delete() {
         let store = CronStore::open_in_memory().unwrap();
-        let entry = make_entry("cron-2", "com.example.weather", "0 9 * * *", "morning_report", "{}");
+        let entry = make_entry(
+            "cron-2",
+            "com.example.weather",
+            "0 9 * * *",
+            "morning_report",
+            "{}",
+        );
         store.insert(&entry).unwrap();
         assert!(store.delete("cron-2").unwrap());
         assert!(!store.delete("cron-2").unwrap());
@@ -366,7 +384,13 @@ mod tests {
     #[test]
     fn test_cron_store_get() {
         let store = CronStore::open_in_memory().unwrap();
-        let entry = make_entry("cron-10", "com.example.test", "*/15 * * * *", "health_check", r#"{"type":"ping"}"#);
+        let entry = make_entry(
+            "cron-10",
+            "com.example.test",
+            "*/15 * * * *",
+            "health_check",
+            r#"{"type":"ping"}"#,
+        );
         store.insert(&entry).unwrap();
 
         let got = store.get("cron-10").unwrap().unwrap();

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::consolidation::MemoryStoreInput;
 use crate::grafeo::GrafeoStore;
-use crate::types::{KnowledgeSubType, DEFAULT_EMBEDDING_DIM};
+use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeSubType};
 
 /// LongMemEval dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -162,13 +162,7 @@ fn eval_information_extraction() -> f32 {
             sub_type: KnowledgeSubType::Fact,
             subject: Some("user".to_string()),
             predicate: Some(predicate.to_string()),
-            object: Some(
-                content
-                    .split_whitespace()
-                    .last()
-                    .unwrap_or("")
-                    .to_string(),
-            ),
+            object: Some(content.split_whitespace().last().unwrap_or("").to_string()),
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb.clone()),
@@ -183,13 +177,7 @@ fn eval_information_extraction() -> f32 {
     let total = test_cases.len();
 
     for (_, query, _, should_find) in &test_cases {
-        let results = store.text_search_with_filter(
-            "Knowledge",
-            "content",
-            query,
-            5,
-            None,
-        );
+        let results = store.text_search_with_filter("Knowledge", "content", query, 5, None);
 
         match results {
             Ok(found) => {
@@ -280,13 +268,7 @@ fn eval_abstraction() -> f32 {
 
     if store.process_memory_store(&proc_input).is_ok() {
         // Verify it can be found via search.
-        let found = store.text_search_with_filter(
-            "Knowledge",
-            "content",
-            "type hints",
-            5,
-            None,
-        );
+        let found = store.text_search_with_filter("Knowledge", "content", "type hints", 5, None);
         if found.ok().map_or(false, |r| !r.is_empty()) {
             correct += 1;
         }
@@ -415,11 +397,25 @@ mod tests {
         // P3-5: Real IE+Abs scores may not pass all thresholds in unit test
         // (text search quality depends on Grafeo indexing). Just verify
         // the framework runs and produces reasonable scores.
-        assert!(result.overall_score > 0.0, "Overall score should be positive");
-        assert!(!result.dimension_scores.is_empty(), "Should have dimension scores");
+        assert!(
+            result.overall_score > 0.0,
+            "Overall score should be positive"
+        );
+        assert!(
+            !result.dimension_scores.is_empty(),
+            "Should have dimension scores"
+        );
         // IE and Abs should produce actual (non-zero) scores.
-        let ie = result.dimension_scores.get(&EvalDimension::IE).copied().unwrap_or(0.0);
-        let abs = result.dimension_scores.get(&EvalDimension::Abs).copied().unwrap_or(0.0);
+        let ie = result
+            .dimension_scores
+            .get(&EvalDimension::IE)
+            .copied()
+            .unwrap_or(0.0);
+        let abs = result
+            .dimension_scores
+            .get(&EvalDimension::Abs)
+            .copied()
+            .unwrap_or(0.0);
         assert!(ie > 0.0, "IE score should be positive, got {}", ie);
         assert!(abs > 0.0, "Abs score should be positive, got {}", abs);
     }

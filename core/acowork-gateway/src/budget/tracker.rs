@@ -108,14 +108,9 @@ impl BudgetTracker {
     /// Record usage for an agent+provider pair
     ///
     /// S4.3.2: Updates cumulative usage in the store
-    pub fn record_usage(
-        &mut self,
-        agent_id: &str,
-        provider: &str,
-        tokens: u64,
-        cost_usd: f64,
-    ) {
-        self.store.record_usage(agent_id, provider, tokens, cost_usd);
+    pub fn record_usage(&mut self, agent_id: &str, provider: &str, tokens: u64, cost_usd: f64) {
+        self.store
+            .record_usage(agent_id, provider, tokens, cost_usd);
     }
 
     /// Check remaining tokens for a provider
@@ -130,11 +125,13 @@ impl BudgetTracker {
         let daily_used = self.store.total_today_tokens(provider);
         let monthly_used = self.store.total_month_tokens(provider);
 
-        let daily_remaining = budget.daily_tokens
+        let daily_remaining = budget
+            .daily_tokens
             .map(|limit| limit.saturating_sub(daily_used))
             .unwrap_or(u64::MAX);
 
-        let monthly_remaining = budget.monthly_tokens
+        let monthly_remaining = budget
+            .monthly_tokens
             .map(|limit| limit.saturating_sub(monthly_used))
             .unwrap_or(u64::MAX);
 
@@ -153,11 +150,13 @@ impl BudgetTracker {
         let daily_used = self.store.total_today_cost_usd(provider);
         let monthly_used = self.store.total_month_cost_usd(provider);
 
-        let daily_remaining = budget.daily_cost_usd
+        let daily_remaining = budget
+            .daily_cost_usd
             .map(|limit| (limit - daily_used).max(0.0))
             .unwrap_or(f64::MAX);
 
-        let monthly_remaining = budget.monthly_cost_usd
+        let monthly_remaining = budget
+            .monthly_cost_usd
             .map(|limit| (limit - monthly_used).max(0.0))
             .unwrap_or(f64::MAX);
 
@@ -176,9 +175,13 @@ impl BudgetTracker {
         let monthly_cost_used = self.store.total_month_cost_usd(provider);
 
         let exceeded = budget.daily_tokens.is_some_and(|l| daily_tokens_used >= l)
-            || budget.monthly_tokens.is_some_and(|l| monthly_tokens_used >= l)
+            || budget
+                .monthly_tokens
+                .is_some_and(|l| monthly_tokens_used >= l)
             || budget.daily_cost_usd.is_some_and(|l| daily_cost_used >= l)
-            || budget.monthly_cost_usd.is_some_and(|l| monthly_cost_used >= l);
+            || budget
+                .monthly_cost_usd
+                .is_some_and(|l| monthly_cost_used >= l);
 
         if exceeded {
             Some(parse_exceeded_action(&budget.exceeded_action))

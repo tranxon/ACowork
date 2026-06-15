@@ -108,7 +108,11 @@ pub fn map_permissions_to_wasi(permissions: &[Permission]) -> WasiCapabilities {
 
             // Merge networks
             for net in perm_caps.networks {
-                if !caps.networks.iter().any(|n| n.url_pattern == net.url_pattern) {
+                if !caps
+                    .networks
+                    .iter()
+                    .any(|n| n.url_pattern == net.url_pattern)
+                {
                     caps.networks.push(net);
                 }
             }

@@ -6,11 +6,10 @@
 //! - POST /api/users/{user_id}/activate — switch active user
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    Json,
     routing::{get, post, put},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -155,7 +154,10 @@ pub async fn create_user(
             u.is_active = false;
         }
         // Add new active user
-        gw.resource_cache.user_profile_list.users.push(profile.clone());
+        gw.resource_cache
+            .user_profile_list
+            .users
+            .push(profile.clone());
     }
 
     // Bump version, save to disk
@@ -181,10 +183,13 @@ pub async fn create_user(
         "User profile created"
     );
 
-    Ok((StatusCode::CREATED, Json(UserResponse {
-        user: profile,
-        version,
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(UserResponse {
+            user: profile,
+            version,
+        }),
+    ))
 }
 
 /// `PUT /api/users/{user_id}` — update a user profile

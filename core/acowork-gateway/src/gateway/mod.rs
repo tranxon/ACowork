@@ -38,10 +38,12 @@ impl Gateway {
         let data_dir = config.data_dir.clone();
 
         // Ensure data directory exists before opening the database
-        std::fs::create_dir_all(&data_dir)
-            .map_err(|e| GatewayError::Config(format!(
-                "Failed to create data directory '{}': {}", data_dir, e
-            )))?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| {
+            GatewayError::Config(format!(
+                "Failed to create data directory '{}': {}",
+                data_dir, e
+            ))
+        })?;
 
         // Build the gRPC endpoint URL that Runtime processes will use to connect.
         // Runtime expects an HTTP URL like "http://127.0.0.1:19877".
@@ -51,7 +53,12 @@ impl Gateway {
         Ok(Self {
             config,
             state: GatewayState::new(&vault_dir),
-            lifecycle: LifecycleManager::new(idle_timeout, gateway_grpc_endpoint, log_file_size_mb, log_file_count),
+            lifecycle: LifecycleManager::new(
+                idle_timeout,
+                gateway_grpc_endpoint,
+                log_file_size_mb,
+                log_file_count,
+            ),
         })
     }
 
@@ -96,7 +103,10 @@ impl Gateway {
         }
 
         // Install the system agent
-        tracing::info!("Auto-installing bundled System Agent from {:?}", system_agent_src);
+        tracing::info!(
+            "Auto-installing bundled System Agent from {:?}",
+            system_agent_src
+        );
         match self.install_agent_from_dir(&system_agent_src).await {
             Ok(agent_id) => {
                 tracing::info!("Successfully auto-installed bundled agent: {}", agent_id);
@@ -134,7 +144,10 @@ impl Gateway {
     }
 
     /// Install an agent from a source directory.
-    async fn install_agent_from_dir(&mut self, src_dir: &std::path::Path) -> Result<String, GatewayError> {
+    async fn install_agent_from_dir(
+        &mut self,
+        src_dir: &std::path::Path,
+    ) -> Result<String, GatewayError> {
         use acowork_core::AgentManifest;
 
         // Read and parse manifest
@@ -220,36 +233,40 @@ impl Gateway {
             }
 
             match std::fs::read_to_string(&manifest_path) {
-                Ok(content) => {
-                    match toml::from_str::<acowork_core::AgentManifest>(&content) {
-                        Ok(manifest) => {
-                            let info = crate::gateway::state::AgentInfo {
-                                agent_id: manifest.agent_id.clone(),
-                                version: manifest.version.clone(),
-                                name: manifest.name.clone(),
-                                install_path: agent_dir.to_string_lossy().to_string(),
-                                manifest,
-                            };
-                            let agent_id = info.agent_id.clone();
-                            self.state.add_installed(info);
-                            tracing::info!(
-                                "Restored installed agent: {} v{}",
-                                agent_id,
-                                self.state.installed_agents.get(&agent_id).map(|i| i.version.as_str()).unwrap_or("?")
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to parse manifest at '{}': {}",
-                                manifest_path.display(), e
-                            );
-                        }
+                Ok(content) => match toml::from_str::<acowork_core::AgentManifest>(&content) {
+                    Ok(manifest) => {
+                        let info = crate::gateway::state::AgentInfo {
+                            agent_id: manifest.agent_id.clone(),
+                            version: manifest.version.clone(),
+                            name: manifest.name.clone(),
+                            install_path: agent_dir.to_string_lossy().to_string(),
+                            manifest,
+                        };
+                        let agent_id = info.agent_id.clone();
+                        self.state.add_installed(info);
+                        tracing::info!(
+                            "Restored installed agent: {} v{}",
+                            agent_id,
+                            self.state
+                                .installed_agents
+                                .get(&agent_id)
+                                .map(|i| i.version.as_str())
+                                .unwrap_or("?")
+                        );
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse manifest at '{}': {}",
+                            manifest_path.display(),
+                            e
+                        );
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         "Failed to read manifest at '{}': {}",
-                        manifest_path.display(), e
+                        manifest_path.display(),
+                        e
                     );
                 }
             }
@@ -371,7 +388,11 @@ impl Gateway {
         self.auto_install_bundled_agents().await;
 
         // Auto-start the System Agent if installed
-        if let Err(e) = self.lifecycle.auto_start_system_agent(&mut self.state).await {
+        if let Err(e) = self
+            .lifecycle
+            .auto_start_system_agent(&mut self.state)
+            .await
+        {
             tracing::warn!("Failed to auto-start System Agent: {}", e);
         }
 
@@ -381,7 +402,9 @@ impl Gateway {
         // The embed process state is stored in GatewayState for the
         // HTTP embedding API to reference.
         let mut embed_child = None;
-        let mut embed_supervisor_cfg: Option<crate::lifecycle::embed_supervisor::EmbedSupervisorConfig> = None;
+        let mut embed_supervisor_cfg: Option<
+            crate::lifecycle::embed_supervisor::EmbedSupervisorConfig,
+        > = None;
         {
             let data_dir = std::path::PathBuf::from(&self.config.data_dir);
             let models_dir = data_dir.join("models");
@@ -389,38 +412,59 @@ impl Gateway {
             let hf_mirrors = self.config.hf_mirrors.clone();
             let onnx_variant = "onnx"; // Default ONNX variant
 
-            match crate::lifecycle::embed::spawn_embed_process(
-                &data_dir,
-                &models_dir,
-                embed_port,
-                &hf_mirrors,
-                onnx_variant,
-            ).await {
-                Ok((embed_state, child)) => {
-                    tracing::info!(
-                        pid = embed_state.pid,
-                        port = embed_state.port,
-                        "Embedding service process spawned"
-                    );
-                    self.state.embed_process = Some(embed_state);
-                    embed_child = Some(child);
-                    // Capture the same args so the supervisor can re-spawn
-                    // with identical settings on detected failure.
-                    embed_supervisor_cfg = Some(
-                        crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
-                            data_dir,
-                            models_dir,
-                            port: embed_port,
-                            hf_mirrors,
-                            onnx_variant: onnx_variant.to_string(),
-                        },
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to spawn embedding service (local ONNX embedding unavailable, will use remote fallback)"
-                    );
+            let existing_health = crate::lifecycle::embed::check_embed_health(embed_port).await;
+            if existing_health.is_some() {
+                let embed_state = crate::lifecycle::embed::attach_existing_embed_process(
+                    embed_port,
+                    existing_health,
+                );
+                tracing::info!(
+                    port = embed_state.port,
+                    ready = embed_state.ready,
+                    "Reusing existing embedding service"
+                );
+                self.state.embed_process = Some(embed_state);
+                embed_supervisor_cfg =
+                    Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
+                        data_dir,
+                        models_dir,
+                        port: embed_port,
+                        hf_mirrors,
+                        onnx_variant: onnx_variant.to_string(),
+                    });
+            } else {
+                match crate::lifecycle::embed::spawn_embed_process(
+                    &data_dir,
+                    &models_dir,
+                    embed_port,
+                    &hf_mirrors,
+                    onnx_variant,
+                )
+                .await
+                {
+                    Ok((embed_state, child)) => {
+                        tracing::info!(
+                            pid = embed_state.pid,
+                            port = embed_state.port,
+                            "Embedding service process spawned"
+                        );
+                        self.state.embed_process = Some(embed_state);
+                        embed_child = Some(child);
+                        embed_supervisor_cfg =
+                            Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
+                                data_dir,
+                                models_dir,
+                                port: embed_port,
+                                hf_mirrors,
+                                onnx_variant: onnx_variant.to_string(),
+                            });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to spawn embedding service (local ONNX embedding unavailable, will use remote fallback)"
+                        );
+                    }
                 }
             }
         }
@@ -430,12 +474,10 @@ impl Gateway {
         let cache_dir = std::path::PathBuf::from(&self.config.data_dir);
         self.state.resource_cache = crate::resource_cache::load_resource_cache(&cache_dir);
 
-
         // Wrap state in Arc<RwLock> for concurrent access in multi-connection mode.
         // std::mem::take replaces self.state with Default so the Arc takes ownership.
         // This is safe because run() is the terminal daemon method that blocks forever.
-        let shared_state: SharedState =
-            Arc::new(RwLock::new(std::mem::take(&mut self.state)));
+        let shared_state: SharedState = Arc::new(RwLock::new(std::mem::take(&mut self.state)));
 
         // Spawn embed process reaper — clears state when the child exits.
         // This is the single source of truth for embed process lifecycle:
@@ -509,9 +551,8 @@ impl Gateway {
         let idle_timeout = self.config.idle_timeout_secs;
         let _idle_handle = tokio::spawn(async move {
             if idle_timeout > 0 {
-                let mut interval = tokio::time::interval(
-                    std::time::Duration::from_secs(idle_timeout.min(60))
-                );
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(idle_timeout.min(60)));
                 loop {
                     interval.tick().await;
                     // Phase 2: check idle timeouts and stop idle agents
@@ -527,8 +568,9 @@ impl Gateway {
         let data_dir_path = std::path::PathBuf::from(&self.config.data_dir);
 
         // Create shared session manager for both IPC and HTTP
-        let session_mgr: crate::http::routes::SharedSessionMgr =
-            Arc::new(tokio::sync::Mutex::new(crate::ipc::session::SessionManager::new()));
+        let session_mgr: crate::http::routes::SharedSessionMgr = Arc::new(tokio::sync::Mutex::new(
+            crate::ipc::session::SessionManager::new(),
+        ));
         let http_session_mgr = Some(session_mgr.clone());
 
         // Store session manager in shared state so HTTP API can access it
@@ -545,10 +587,7 @@ impl Gateway {
         // This also prevents version rollback when cache files are lost between restarts.
         {
             let mut gw = shared_state.write().await;
-            crate::resource_cache::rebuild_and_save_provider_cache(
-                &mut gw,
-                &data_dir_path,
-            ).await;
+            crate::resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir_path).await;
             if let Ok(catalog) = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir_path) {
                 crate::resource_cache::rebuild_and_save_mcp_cache(
                     &mut gw,
@@ -557,10 +596,7 @@ impl Gateway {
                 );
             }
             // Rebuild search_list cache from Vault search keys at startup
-            crate::resource_cache::rebuild_and_save_search_cache(
-                &mut gw,
-                &data_dir_path,
-            );
+            crate::resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir_path);
         }
 
         // S3.1: Start cron scheduler tick loop
@@ -579,15 +615,12 @@ impl Gateway {
         let cron_session_mgr = session_mgr.clone();
         let cron_gw_state = shared_state.clone();
         let _cron_handle = tokio::spawn(async move {
-            crate::cron::run_cron_scheduler(
-                cron_scheduler,
-                cron_session_mgr,
-                cron_gw_state,
-            ).await;
+            crate::cron::run_cron_scheduler(cron_scheduler, cron_session_mgr, cron_gw_state).await;
         });
 
         // Create bridge channel for HTTP ↔ IPC message forwarding
-        let (bridge_tx, _) = tokio::sync::broadcast::channel::<crate::http::routes::BridgeEvent>(256);
+        let (bridge_tx, _) =
+            tokio::sync::broadcast::channel::<crate::http::routes::BridgeEvent>(256);
         let http_bridge_tx = Some(bridge_tx.clone());
 
         // S1.14 / Task #12: Create shared session_pending for HTTP ↔ gRPC bridge.
@@ -600,23 +633,22 @@ impl Gateway {
 
         // Task #12: Create shared gRPC session manager for Gateway→Runtime request-response.
         // Both the gRPC server and HTTP server share this instance.
-        let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr =
-            Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
+        let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr = Arc::new(
+            tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()),
+        );
         let http_grpc_session_mgr = Some(grpc_session_mgr.clone());
 
         // Start HTTP server in a separate tokio task (parallel with IPC)
         let http_state = shared_state.clone();
         let http_socket_path = socket_path.clone();
-        
+
         // Create unified global resource pusher for hot-push of provider_list,
         // search_config, MCP catalog, and user profile changes to running agents.
-        let pusher: Option<Arc<GlobalResourcePusher>> = Some(Arc::new(
-            GlobalResourcePusher::new(
-                http_grpc_session_mgr.clone(),
-                http_state.clone(),
-                data_dir_path.clone(),
-            ),
-        ));
+        let pusher: Option<Arc<GlobalResourcePusher>> = Some(Arc::new(GlobalResourcePusher::new(
+            http_grpc_session_mgr.clone(),
+            http_state.clone(),
+            data_dir_path.clone(),
+        )));
 
         // Start the embed supervisor. It watches the embed's SSE event
         // stream, updates `shared_state.embed_process.{active_model_id,
@@ -625,10 +657,9 @@ impl Gateway {
         // loss (with exponential backoff and a 5-attempts/5-min cap).
         // The HTTP API and IPC pushers read the same `shared_state` via
         // a separate Arc clone, so updates are visible immediately.
-        if let (Some(sup_cfg), Some(shared_arc)) = (
-            embed_supervisor_cfg.take(),
-            Some(shared_state.clone()),
-        ) {
+        if let (Some(sup_cfg), Some(shared_arc)) =
+            (embed_supervisor_cfg.take(), Some(shared_state.clone()))
+        {
             let supervisor_pusher = pusher.clone();
             crate::lifecycle::embed_supervisor::start_embed_supervisor(
                 sup_cfg,
@@ -649,7 +680,9 @@ impl Gateway {
                 http_session_pending,
                 log_reload_handle,
                 pusher,
-            ).await {
+            )
+            .await
+            {
                 tracing::error!("HTTP server failed: {}", e);
             }
         });
@@ -659,7 +692,8 @@ impl Gateway {
         // so HTTP handlers find gRPC-connected agents via the same path.
         let grpc_state = shared_state.clone();
         let grpc_bridge_tx = Some(bridge_tx.clone());
-        let (capability_tx, _) = tokio::sync::broadcast::channel::<acowork_core::protocol::GatewayResponse>(64);
+        let (capability_tx, _) =
+            tokio::sync::broadcast::channel::<acowork_core::protocol::GatewayResponse>(64);
         let grpc_handle = tokio::spawn(async move {
             let grpc_addr = crate::grpc::server::default_grpc_addr();
             if let Err(e) = crate::grpc::server::start_grpc_server(
@@ -670,7 +704,9 @@ impl Gateway {
                 capability_tx,
                 grpc_bridge_tx,
                 grpc_session_pending,
-            ).await {
+            )
+            .await
+            {
                 tracing::error!("gRPC server failed: {}", e);
             }
         });
@@ -690,7 +726,9 @@ impl Gateway {
                 // This prevents acowork-embed from becoming an orphan process.
                 {
                     let gw = shared_state.read().await;
-                    if let Some(ref embed_state) = gw.embed_process {
+                    if let Some(ref embed_state) = gw.embed_process
+                        && embed_state.pid != 0
+                    {
                         tracing::info!(pid = embed_state.pid, "Shutting down embedding service");
                         if let Err(e) = crate::lifecycle::embed::kill_embed_process(embed_state.pid).await {
                             tracing::warn!(error = %e, "Failed to kill embedding service process");
@@ -728,11 +766,7 @@ impl Gateway {
     /// Uninstall an agent
     pub fn uninstall_package(&mut self, agent_id: &str) -> Result<String, GatewayError> {
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        uninstall::uninstall_package(
-            agent_id,
-            packages_dir,
-            &mut self.state,
-        )?;
+        uninstall::uninstall_package(agent_id, packages_dir, &mut self.state)?;
         Ok(format!("Agent uninstalled: {}", agent_id))
     }
 
@@ -754,7 +788,9 @@ impl Gateway {
 
     /// Start an agent
     pub async fn start_agent(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        self.lifecycle.start_agent(agent_id, &mut self.state, false).await?;
+        self.lifecycle
+            .start_agent(agent_id, &mut self.state, false)
+            .await?;
         Ok(format!("Agent started: {}", agent_id))
     }
 
@@ -807,9 +843,14 @@ impl Gateway {
 
     /// Ensure all required directories exist
     fn ensure_dirs(&self) -> Result<(), GatewayError> {
-        for dir in &[&self.config.vault_dir, &self.config.packages_dir, &self.config.data_dir] {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| GatewayError::Config(format!("Failed to create directory '{}': {}", dir, e)))?;
+        for dir in &[
+            &self.config.vault_dir,
+            &self.config.packages_dir,
+            &self.config.data_dir,
+        ] {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                GatewayError::Config(format!("Failed to create directory '{}': {}", dir, e))
+            })?;
         }
         Ok(())
     }
@@ -827,7 +868,11 @@ pub struct AgentListEntry {
 impl std::fmt::Display for AgentListEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let status = if self.running { "running" } else { "stopped" };
-        write!(f, "{} ({}) v{} [{}]", self.name, self.agent_id, self.version, status)
+        write!(
+            f,
+            "{} ({}) v{} [{}]",
+            self.name, self.agent_id, self.version, status
+        )
     }
 }
 
@@ -840,9 +885,18 @@ mod tests {
         GatewayConfig {
             config_source_path: None,
             socket_path: "/tmp/test-gateway.sock".to_string(),
-            vault_dir: std::env::temp_dir().join("acowork-test-vault").to_string_lossy().to_string(),
-            packages_dir: std::env::temp_dir().join("acowork-test-packages").to_string_lossy().to_string(),
-            data_dir: std::env::temp_dir().join("acowork-test-data").to_string_lossy().to_string(),
+            vault_dir: std::env::temp_dir()
+                .join("acowork-test-vault")
+                .to_string_lossy()
+                .to_string(),
+            packages_dir: std::env::temp_dir()
+                .join("acowork-test-packages")
+                .to_string_lossy()
+                .to_string(),
+            data_dir: std::env::temp_dir()
+                .join("acowork-test-data")
+                .to_string_lossy()
+                .to_string(),
             log_level: "info".to_string(),
             log_file_size_mb: 10,
             log_file_count: 20,

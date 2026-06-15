@@ -6,8 +6,8 @@
 //! with permission-level granularity via Permission enum.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 /// HTTP request tool — perform HTTP requests with method selection
@@ -72,7 +72,12 @@ impl HttpRequestTool {
 
     /// Parse the HTTP method from params, defaulting to GET
     fn parse_method(params: &Value) -> reqwest::Method {
-        match params["method"].as_str().unwrap_or("GET").to_uppercase().as_str() {
+        match params["method"]
+            .as_str()
+            .unwrap_or("GET")
+            .to_uppercase()
+            .as_str()
+        {
             "POST" => reqwest::Method::POST,
             "PUT" => reqwest::Method::PUT,
             "DELETE" => reqwest::Method::DELETE,
@@ -108,7 +113,8 @@ impl HttpRequestTool {
             }
             "raw" => {
                 if let Some(raw) = body.and_then(|b| b.as_str()) {
-                    req.header("Content-Type", "text/plain").body(raw.to_string())
+                    req.header("Content-Type", "text/plain")
+                        .body(raw.to_string())
                 } else {
                     req
                 }
@@ -196,7 +202,11 @@ impl Tool for HttpRequestTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let url = params["url"].as_str().unwrap_or("");
         if url.is_empty() {
             return Ok(ToolResult {
@@ -277,7 +287,10 @@ mod tests {
 
     #[test]
     fn test_parse_method_default() {
-        assert_eq!(HttpRequestTool::parse_method(&serde_json::json!({})), reqwest::Method::GET);
+        assert_eq!(
+            HttpRequestTool::parse_method(&serde_json::json!({})),
+            reqwest::Method::GET
+        );
     }
 
     #[test]

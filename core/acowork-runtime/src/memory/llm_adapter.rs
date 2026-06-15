@@ -8,7 +8,9 @@
 //! expects, using a low-temperature non-streaming call.
 
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
-use acowork_grafeo::consolidation::triple_extraction::{LlmMessage, LlmResponse, TripleExtractorLlm};
+use acowork_grafeo::consolidation::triple_extraction::{
+    LlmMessage, LlmResponse, TripleExtractorLlm,
+};
 
 // ---------------------------------------------------------------------------
 // Adapter
@@ -32,10 +34,7 @@ impl ProviderLlmAdapter {
 
 #[async_trait::async_trait]
 impl TripleExtractorLlm for ProviderLlmAdapter {
-    async fn chat(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> std::result::Result<LlmResponse, String> {
+    async fn chat(&self, messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String> {
         // Convert grafeo LlmMessage → acowork-core ChatMessage.
         let chat_messages: Vec<ChatMessage> = messages
             .iter()

@@ -86,10 +86,15 @@ impl GrafeoStore {
     ///
     /// Returns an error if the database is in-memory, checkpoint fails,
     /// or the file copy fails.
-    pub fn create_backup(&self, config: &BackupConfig, backup_type: BackupType) -> Result<BackupMetadata> {
-        let db_path = self.db.path().ok_or_else(|| {
-            GrafeoError::Memory("Cannot backup in-memory database".to_string())
-        })?;
+    pub fn create_backup(
+        &self,
+        config: &BackupConfig,
+        backup_type: BackupType,
+    ) -> Result<BackupMetadata> {
+        let db_path = self
+            .db
+            .path()
+            .ok_or_else(|| GrafeoError::Memory("Cannot backup in-memory database".to_string()))?;
 
         // Checkpoint to ensure on-disk consistency before copying.
         self.db.wal_checkpoint()?;
@@ -180,9 +185,10 @@ impl GrafeoStore {
             )));
         }
 
-        let db_path = self.db.path().ok_or_else(|| {
-            GrafeoError::Memory("Cannot restore in-memory database".to_string())
-        })?;
+        let db_path = self
+            .db
+            .path()
+            .ok_or_else(|| GrafeoError::Memory("Cannot restore in-memory database".to_string()))?;
 
         // Close the database to release file handles.
         self.db.close()?;

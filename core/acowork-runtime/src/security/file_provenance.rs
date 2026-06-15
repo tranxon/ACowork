@@ -8,7 +8,7 @@
 //! Design: `docs/08-security.md` §11.2
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -16,15 +16,9 @@ use std::sync::Mutex;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileSource {
     /// Agent created the file via a tool (file_write, etc.)
-    CreatedByTool {
-        tool: String,
-        at: DateTime<Utc>,
-    },
+    CreatedByTool { tool: String, at: DateTime<Utc> },
     /// File was downloaded from a URL (network_fetch, web_fetch)
-    Downloaded {
-        from_url: String,
-        at: DateTime<Utc>,
-    },
+    Downloaded { from_url: String, at: DateTime<Utc> },
     /// File existed before the agent started
     PreExisting,
     /// Source unknown (e.g. created by a shell subprocess)
@@ -35,27 +29,19 @@ impl FileSource {
     /// Serialize to a (type_key, detail, timestamp) triple for DB storage.
     fn to_db_row(&self) -> (&'static str, Option<String>, Option<String>) {
         match self {
-            FileSource::CreatedByTool { tool, at } => (
-                "created_by_tool",
-                Some(tool.clone()),
-                Some(at.to_rfc3339()),
-            ),
-            FileSource::Downloaded { from_url, at } => (
-                "downloaded",
-                Some(from_url.clone()),
-                Some(at.to_rfc3339()),
-            ),
+            FileSource::CreatedByTool { tool, at } => {
+                ("created_by_tool", Some(tool.clone()), Some(at.to_rfc3339()))
+            }
+            FileSource::Downloaded { from_url, at } => {
+                ("downloaded", Some(from_url.clone()), Some(at.to_rfc3339()))
+            }
             FileSource::PreExisting => ("pre_existing", None, None),
             FileSource::Unknown => ("unknown", None, None),
         }
     }
 
     /// Deserialize from DB columns.
-    fn from_db_row(
-        type_key: &str,
-        detail: Option<String>,
-        timestamp: Option<String>,
-    ) -> Self {
+    fn from_db_row(type_key: &str, detail: Option<String>, timestamp: Option<String>) -> Self {
         match type_key {
             "created_by_tool" => FileSource::CreatedByTool {
                 tool: detail.unwrap_or_default(),
@@ -90,8 +76,7 @@ pub struct FileProvenanceStore {
 impl FileProvenanceStore {
     /// Open (or create) the provenance database at the given path.
     pub fn open(path: &Path) -> Result<Self, ProvenanceError> {
-        let conn = Connection::open(path)
-            .map_err(|e| ProvenanceError::Database(e.to_string()))?;
+        let conn = Connection::open(path).map_err(|e| ProvenanceError::Database(e.to_string()))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -101,8 +86,8 @@ impl FileProvenanceStore {
 
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> Result<Self, ProvenanceError> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| ProvenanceError::Database(e.to_string()))?;
+        let conn =
+            Connection::open_in_memory().map_err(|e| ProvenanceError::Database(e.to_string()))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -111,8 +96,11 @@ impl FileProvenanceStore {
     }
 
     fn init_schema(&self) -> Result<(), ProvenanceError> {
-        self.conn.lock().unwrap().execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version (
+        self.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
             INSERT OR IGNORE INTO schema_version (version) VALUES (1);
@@ -127,31 +115,37 @@ impl FileProvenanceStore {
 
             CREATE INDEX IF NOT EXISTS idx_provenance_source_type
                 ON file_provenance (source_type);
-            "
-        ).map_err(|e| ProvenanceError::Database(e.to_string()))?;
+            ",
+            )
+            .map_err(|e| ProvenanceError::Database(e.to_string()))?;
         Ok(())
     }
 
     /// Record or update the provenance of a single file.
     pub fn record(&self, path: &Path, source: &FileSource) -> Result<(), ProvenanceError> {
         let (source_type, detail, timestamp) = source.to_db_row();
-        self.conn.lock().unwrap().execute(
-            "INSERT INTO file_provenance (path, source_type, detail, timestamp)
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO file_provenance (path, source_type, detail, timestamp)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path) DO UPDATE SET
                 source_type = excluded.source_type,
                 detail = excluded.detail,
                 timestamp = excluded.timestamp,
                 updated_at = datetime('now')",
-            params![path.to_string_lossy(), source_type, detail, timestamp],
-        ).map_err(|e| ProvenanceError::Database(e.to_string()))?;
+                params![path.to_string_lossy(), source_type, detail, timestamp],
+            )
+            .map_err(|e| ProvenanceError::Database(e.to_string()))?;
         Ok(())
     }
 
     /// Batch-record provenance for multiple files.
     pub fn record_batch(&self, entries: &[(PathBuf, FileSource)]) -> Result<(), ProvenanceError> {
         let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction()
+        let tx = conn
+            .unchecked_transaction()
             .map_err(|e| ProvenanceError::Database(e.to_string()))?;
         {
             for (path, source) in entries {
@@ -165,10 +159,12 @@ impl FileProvenanceStore {
                         timestamp = excluded.timestamp,
                         updated_at = datetime('now')",
                     params![path.to_string_lossy(), source_type, detail, timestamp],
-                ).map_err(|e| ProvenanceError::Database(e.to_string()))?;
+                )
+                .map_err(|e| ProvenanceError::Database(e.to_string()))?;
             }
         }
-        tx.commit().map_err(|e| ProvenanceError::Database(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| ProvenanceError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -190,15 +186,22 @@ impl FileProvenanceStore {
 
     /// Remove provenance record for a file.
     pub fn remove(&self, path: &Path) -> Result<(), ProvenanceError> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM file_provenance WHERE path = ?1",
-            params![path.to_string_lossy()],
-        ).map_err(|e| ProvenanceError::Database(e.to_string()))?;
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM file_provenance WHERE path = ?1",
+                params![path.to_string_lossy()],
+            )
+            .map_err(|e| ProvenanceError::Database(e.to_string()))?;
         Ok(())
     }
 
     /// List all files with a given source type.
-    pub fn list_by_source(&self, source_type: &str) -> Result<Vec<(PathBuf, FileSource)>, ProvenanceError> {
+    pub fn list_by_source(
+        &self,
+        source_type: &str,
+    ) -> Result<Vec<(PathBuf, FileSource)>, ProvenanceError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT path, source_type, detail, timestamp FROM file_provenance WHERE source_type = ?1")
@@ -209,7 +212,10 @@ impl FileProvenanceStore {
                 let st: String = row.get(1)?;
                 let detail: Option<String> = row.get(2)?;
                 let ts: Option<String> = row.get(3)?;
-                Ok((PathBuf::from(path), FileSource::from_db_row(&st, detail, ts)))
+                Ok((
+                    PathBuf::from(path),
+                    FileSource::from_db_row(&st, detail, ts),
+                ))
             })
             .map_err(|e| ProvenanceError::Database(e.to_string()))?;
 
@@ -230,10 +236,13 @@ impl FileProvenanceStore {
 
     /// Scan a directory and mark all existing files as PreExisting.
     /// Called at agent startup to establish baseline provenance.
-    pub fn scan_and_mark_preexisting(&self, workspace_dir: &Path) -> Result<usize, ProvenanceError> {
+    pub fn scan_and_mark_preexisting(
+        &self,
+        workspace_dir: &Path,
+    ) -> Result<usize, ProvenanceError> {
         let mut count = 0;
-        let entries = std::fs::read_dir(workspace_dir)
-            .map_err(|e| ProvenanceError::Io(e.to_string()))?;
+        let entries =
+            std::fs::read_dir(workspace_dir).map_err(|e| ProvenanceError::Io(e.to_string()))?;
 
         let mut batch = Vec::new();
         for entry in entries {
@@ -253,11 +262,7 @@ impl FileProvenanceStore {
         Ok(count)
     }
 
-    fn scan_dir_recursive(
-        &self,
-        dir: &Path,
-        batch: &mut Vec<(PathBuf, FileSource)>,
-    ) -> usize {
+    fn scan_dir_recursive(&self, dir: &Path, batch: &mut Vec<(PathBuf, FileSource)>) -> usize {
         let mut count = 0;
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -277,10 +282,11 @@ impl FileProvenanceStore {
 
     /// Clear all provenance records.
     pub fn clear(&self) -> Result<(), ProvenanceError> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM file_provenance",
-            [],
-        ).map_err(|e| ProvenanceError::Database(e.to_string()))?;
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM file_provenance", [])
+            .map_err(|e| ProvenanceError::Database(e.to_string()))?;
         Ok(())
     }
 }
@@ -325,18 +331,24 @@ impl FileProvenance {
 
     /// Record that a file was created by a tool.
     pub fn record_tool_created(&self, path: &Path, tool_name: &str) -> Result<(), ProvenanceError> {
-        self.store.record(path, &FileSource::CreatedByTool {
-            tool: tool_name.to_string(),
-            at: Utc::now(),
-        })
+        self.store.record(
+            path,
+            &FileSource::CreatedByTool {
+                tool: tool_name.to_string(),
+                at: Utc::now(),
+            },
+        )
     }
 
     /// Record that a file was downloaded from a URL.
     pub fn record_downloaded(&self, path: &Path, url: &str) -> Result<(), ProvenanceError> {
-        self.store.record(path, &FileSource::Downloaded {
-            from_url: url.to_string(),
-            at: Utc::now(),
-        })
+        self.store.record(
+            path,
+            &FileSource::Downloaded {
+                from_url: url.to_string(),
+                at: Utc::now(),
+            },
+        )
     }
 
     /// Record that a file has unknown provenance (e.g. shell subprocess created).
@@ -376,9 +388,9 @@ impl FileProvenance {
         if !file_name.is_empty() {
             for src_type in &["downloaded", "unknown", "created_by_tool", "pre_existing"] {
                 if let Ok(list) = self.store.list_by_source(src_type)
-                    && let Some((_, source)) = list.iter().find(|(p, _)| {
-                        p.file_name().and_then(|n| n.to_str()) == Some(file_name)
-                    })
+                    && let Some((_, source)) = list
+                        .iter()
+                        .find(|(p, _)| p.file_name().and_then(|n| n.to_str()) == Some(file_name))
                 {
                     return Some(source.clone());
                 }
@@ -444,10 +456,15 @@ mod tests {
         let store = FileProvenanceStore::open_in_memory().unwrap();
         let path = PathBuf::from("/workspace/data.csv");
 
-        store.record(&path, &FileSource::CreatedByTool {
-            tool: "file_write".to_string(),
-            at: Utc::now(),
-        }).unwrap();
+        store
+            .record(
+                &path,
+                &FileSource::CreatedByTool {
+                    tool: "file_write".to_string(),
+                    at: Utc::now(),
+                },
+            )
+            .unwrap();
 
         let result = store.get(&path).unwrap().unwrap();
         assert!(matches!(result, FileSource::CreatedByTool { tool, .. } if tool == "file_write"));
@@ -459,10 +476,15 @@ mod tests {
         let path = PathBuf::from("/workspace/data.csv");
 
         store.record(&path, &FileSource::PreExisting).unwrap();
-        store.record(&path, &FileSource::Downloaded {
-            from_url: "https://example.com/data.csv".to_string(),
-            at: Utc::now(),
-        }).unwrap();
+        store
+            .record(
+                &path,
+                &FileSource::Downloaded {
+                    from_url: "https://example.com/data.csv".to_string(),
+                    at: Utc::now(),
+                },
+            )
+            .unwrap();
 
         let result = store.get(&path).unwrap().unwrap();
         assert!(matches!(result, FileSource::Downloaded { .. }));
@@ -493,10 +515,13 @@ mod tests {
         let entries = vec![
             (PathBuf::from("/workspace/a.txt"), FileSource::PreExisting),
             (PathBuf::from("/workspace/b.txt"), FileSource::Unknown),
-            (PathBuf::from("/workspace/c.txt"), FileSource::CreatedByTool {
-                tool: "file_write".to_string(),
-                at: Utc::now(),
-            }),
+            (
+                PathBuf::from("/workspace/c.txt"),
+                FileSource::CreatedByTool {
+                    tool: "file_write".to_string(),
+                    at: Utc::now(),
+                },
+            ),
         ];
 
         store.record_batch(&entries).unwrap();
@@ -510,12 +535,21 @@ mod tests {
     fn test_store_list_high_risk() {
         let store = FileProvenanceStore::open_in_memory().unwrap();
 
-        store.record(Path::new("/workspace/safe.txt"), &FileSource::PreExisting).unwrap();
-        store.record(Path::new("/workspace/downloaded.sh"), &FileSource::Downloaded {
-            from_url: "https://evil.com/payload.sh".to_string(),
-            at: Utc::now(),
-        }).unwrap();
-        store.record(Path::new("/workspace/unknown.bin"), &FileSource::Unknown).unwrap();
+        store
+            .record(Path::new("/workspace/safe.txt"), &FileSource::PreExisting)
+            .unwrap();
+        store
+            .record(
+                Path::new("/workspace/downloaded.sh"),
+                &FileSource::Downloaded {
+                    from_url: "https://evil.com/payload.sh".to_string(),
+                    at: Utc::now(),
+                },
+            )
+            .unwrap();
+        store
+            .record(Path::new("/workspace/unknown.bin"), &FileSource::Unknown)
+            .unwrap();
 
         let high_risk = store.list_high_risk_files().unwrap();
         assert_eq!(high_risk.len(), 2);
@@ -539,7 +573,9 @@ mod tests {
         let provenance = FileProvenance::new_in_memory(&dir).unwrap();
 
         let abs_path = Path::new("/workspace/script.sh");
-        provenance.record_downloaded(abs_path, "https://evil.com/script.sh").unwrap();
+        provenance
+            .record_downloaded(abs_path, "https://evil.com/script.sh")
+            .unwrap();
 
         // Exact match
         let source = provenance.lookup(abs_path);
@@ -554,7 +590,9 @@ mod tests {
 
         // Store with absolute path
         let abs_path = Path::new("/workspace/script.sh");
-        provenance.record_downloaded(abs_path, "https://evil.com/script.sh").unwrap();
+        provenance
+            .record_downloaded(abs_path, "https://evil.com/script.sh")
+            .unwrap();
 
         // Lookup with relative path
         let rel_path = Path::new("./script.sh");
@@ -570,7 +608,9 @@ mod tests {
 
         // Store with deeply nested absolute path
         let abs_path = Path::new("/workspace/subdir/deep/payload.sh");
-        provenance.record_downloaded(abs_path, "https://evil.com/payload.sh").unwrap();
+        provenance
+            .record_downloaded(abs_path, "https://evil.com/payload.sh")
+            .unwrap();
 
         // Lookup by filename only
         let query = Path::new("payload.sh");

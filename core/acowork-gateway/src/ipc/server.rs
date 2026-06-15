@@ -5,11 +5,11 @@
 //! and can be used by any transport layer.
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 
-use acowork_core::protocol::GatewayResponse;
 use crate::gateway::state::GatewayState;
 use crate::ipc::session::SessionManager;
+use acowork_core::protocol::GatewayResponse;
 
 /// Shared state type: Arc<RwLock<GatewayState>> for concurrent read/write access.
 /// RwLock chosen because handlers are predominantly read-heavy (key lookup,
@@ -40,11 +40,7 @@ pub async fn handle_key_release(
             let state_guard = state.read().await;
             match state_guard.vault.get_key(provider) {
                 Ok(api_key) => {
-                    tracing::info!(
-                        "KeyRelease for agent={}, provider={}",
-                        id,
-                        provider
-                    );
+                    tracing::info!("KeyRelease for agent={}, provider={}", id, provider);
                     GatewayResponse::KeyReleaseResult {
                         api_key: Some(api_key),
                         error: None,
@@ -65,10 +61,7 @@ pub async fn handle_key_release(
             }
         }
         None => {
-            tracing::warn!(
-                "KeyRelease from unauthenticated session {}",
-                conn_id
-            );
+            tracing::warn!("KeyRelease from unauthenticated session {}", conn_id);
             GatewayResponse::KeyReleaseResult {
                 api_key: None,
                 error: Some("unauthenticated session".into()),
@@ -124,7 +117,9 @@ pub async fn handle_intent_send(
     if target == "http-api" || target == "http-ws" {
         tracing::info!(
             "IntentSend to HTTP client: from={} action={} msg={}",
-            from, action, message_id
+            from,
+            action,
+            message_id
         );
 
         if let Some(tx) = bridge_tx {
@@ -171,7 +166,8 @@ pub async fn handle_intent_send(
     if params_size > INTENT_PARAMS_MAX_SIZE_BYTES {
         tracing::warn!(
             "IntentSend rejected: params too large ({} bytes, max {} bytes)",
-            params_size, INTENT_PARAMS_MAX_SIZE_BYTES
+            params_size,
+            INTENT_PARAMS_MAX_SIZE_BYTES
         );
         return GatewayResponse::IntentDelivered {
             message_id: format!("error:params-too-large:{}bytes", params_size),
@@ -186,7 +182,8 @@ pub async fn handle_intent_send(
     if !capability_match {
         tracing::warn!(
             "IntentSend rejected: target '{}' does not declare action '{}'",
-            target, action
+            target,
+            action
         );
         return GatewayResponse::IntentDelivered {
             message_id: format!("error:capability-not-found:{}:{}", target, action),
@@ -216,12 +213,16 @@ pub async fn handle_intent_send(
     if !target_running {
         // S4.1.2: Target not running — need auto-spawn
         // This is coordinated by the Gateway layer (LifecycleManager)
-        tracing::info!("IntentSend: target '{}' not running, auto-spawn needed", target);
+        tracing::info!(
+            "IntentSend: target '{}' not running, auto-spawn needed",
+            target
+        );
     } else {
         // S4.1.3: Target is running — push IntentReceived to target Agent
         let target_conn_id = {
             let mgr = session_mgr.lock().await;
-            mgr.find_by_agent_id(target).map(|(conn_id, _)| conn_id.clone())
+            mgr.find_by_agent_id(target)
+                .map(|(conn_id, _)| conn_id.clone())
         };
 
         if let Some(target_conn) = target_conn_id {
@@ -243,12 +244,16 @@ pub async fn handle_intent_send(
             if pushed {
                 tracing::info!(
                     "Intent forwarded: from={} to={} action={} via conn={}",
-                    from, target, action, target_conn
+                    from,
+                    target,
+                    action,
+                    target_conn
                 );
             } else {
                 tracing::warn!(
                     "Intent push failed: target {} conn {} channel closed",
-                    target, target_conn
+                    target,
+                    target_conn
                 );
             }
         } else {
@@ -275,7 +280,9 @@ pub async fn handle_budget_query(provider: &str, state: &SharedState) -> Gateway
         let remaining_cost = tracker.remaining_cost_usd(provider);
         tracing::info!(
             "BudgetQuery: provider={} remaining_tokens={} remaining_cost={}",
-            provider, remaining, remaining_cost
+            provider,
+            remaining,
+            remaining_cost
         );
         GatewayResponse::BudgetInfo {
             remaining_tokens: remaining,
@@ -297,7 +304,10 @@ pub async fn handle_usage_report(
 ) -> GatewayResponse {
     tracing::info!(
         "UsageReport: agent={} provider={} tokens={} cost={:.4}",
-        report.agent_id, report.provider, report.tokens_used, report.cost_usd
+        report.agent_id,
+        report.provider,
+        report.tokens_used,
+        report.cost_usd
     );
 
     let mut guard = state.write().await;
@@ -320,7 +330,9 @@ pub async fn handle_rate_acquire(provider: &str, state: &SharedState) -> Gateway
         let result = limiter.try_acquire_for(provider, "default");
         tracing::info!(
             "RateAcquire: provider={} granted={} retry_after={:?}",
-            provider, result.granted, result.retry_after_ms
+            provider,
+            result.granted,
+            result.retry_after_ms
         );
         GatewayResponse::RateToken {
             granted: result.granted,
@@ -359,7 +371,10 @@ pub async fn handle_capability_query(
             }
         }
         None => {
-            tracing::info!("CapabilityQuery: all agents, count={}", overview.by_agent.len());
+            tracing::info!(
+                "CapabilityQuery: all agents, count={}",
+                overview.by_agent.len()
+            );
             GatewayResponse::CapabilityOverview {
                 capabilities: overview.by_agent,
             }
@@ -378,13 +393,21 @@ pub async fn handle_cron_register(
 ) -> GatewayResponse {
     let (cron_id, store_clone) = {
         let mut guard = state.write().await;
-        match guard.cron_scheduler.register(agent_id, schedule, action, params.clone()) {
+        match guard
+            .cron_scheduler
+            .register(agent_id, schedule, action, params.clone())
+        {
             Ok(id) => {
                 let store = guard.cron_store.clone();
                 (id, store)
             }
             Err(e) => {
-                tracing::warn!("Cron register failed: agent={} schedule={} error={}", agent_id, schedule, e);
+                tracing::warn!(
+                    "Cron register failed: agent={} schedule={} error={}",
+                    agent_id,
+                    schedule,
+                    e
+                );
                 return GatewayResponse::CronRegisterResult {
                     cron_id: None,
                     error: Some(e),
@@ -413,12 +436,16 @@ pub async fn handle_cron_register(
             if let Err(e) = store.insert(&entry) {
                 tracing::warn!("Failed to persist cron entry {}: {}", cron_id_clone, e);
             }
-        }).await;
+        })
+        .await;
     }
 
     tracing::info!(
         "Cron registered via IPC: agent={} cron_id={} schedule={} action={}",
-        agent_id, cron_id, schedule, action
+        agent_id,
+        cron_id,
+        schedule,
+        action
     );
     GatewayResponse::CronRegisterResult {
         cron_id: Some(cron_id),
@@ -426,10 +453,7 @@ pub async fn handle_cron_register(
     }
 }
 
-pub async fn handle_cron_unregister(
-    cron_id: &str,
-    state: &SharedState,
-) -> GatewayResponse {
+pub async fn handle_cron_unregister(cron_id: &str, state: &SharedState) -> GatewayResponse {
     let (removed, store_clone) = {
         let mut guard = state.write().await;
         let removed = guard.cron_scheduler.unregister(cron_id);
@@ -438,15 +462,18 @@ pub async fn handle_cron_unregister(
     };
 
     // P1-9 fix: Use spawn_blocking for file I/O in CronStore
-    if removed
-        && let Some(store) = store_clone
-    {
+    if removed && let Some(store) = store_clone {
         let cron_id_clone = cron_id.to_string();
         let _ = tokio::task::spawn_blocking(move || {
             if let Err(e) = store.delete(&cron_id_clone) {
-                tracing::warn!("Failed to delete cron entry {} from store: {}", cron_id_clone, e);
+                tracing::warn!(
+                    "Failed to delete cron entry {} from store: {}",
+                    cron_id_clone,
+                    e
+                );
             }
-        }).await;
+        })
+        .await;
     }
 
     tracing::info!("Cron unregister: cron_id={} removed={}", cron_id, removed);
@@ -472,7 +499,8 @@ pub async fn handle_cron_list(
     };
 
     let guard = state.read().await;
-    let entries = guard.cron_scheduler
+    let entries = guard
+        .cron_scheduler
         .entries_for_agent(&agent_id)
         .into_iter()
         .map(|e| acowork_core::protocol::CronEntryInfo {
@@ -517,7 +545,9 @@ pub async fn handle_context_usage_report(
             payload: serde_json::to_value(context).unwrap_or_default(),
         };
         match tx.send(event) {
-            Ok(count) => tracing::info!(agent = %agent_id, receivers = count, "ContextUsage broadcast to WS bridge"),
+            Ok(count) => {
+                tracing::info!(agent = %agent_id, receivers = count, "ContextUsage broadcast to WS bridge")
+            }
             Err(e) => tracing::warn!("Failed to forward context_usage to bridge: {}", e),
         }
     } else {
@@ -552,14 +582,25 @@ pub async fn handle_agent_hello(
 ) -> GatewayResponse {
     tracing::info!(
         "AgentHello received: agent_id={} version={} conn={} role={} prov_ver={} mcp_ver={} user_ver={}",
-        agent_id, version, conn_id, connection_role, provider_list_version, mcp_list_version, user_profile_version
+        agent_id,
+        version,
+        conn_id,
+        connection_role,
+        provider_list_version,
+        mcp_list_version,
+        user_profile_version
     );
 
     let mut mgr = session_mgr.lock().await;
     if let Some(session) = mgr.get_session_mut(conn_id) {
         session.authenticate(agent_id);
         session.connection_role = connection_role.to_string();
-        tracing::info!("Session {} authenticated as agent {} (role={})", conn_id, agent_id, connection_role);
+        tracing::info!(
+            "Session {} authenticated as agent {} (role={})",
+            conn_id,
+            agent_id,
+            connection_role
+        );
 
         // Mark the agent as connected in GatewayState
         {
@@ -570,14 +611,15 @@ pub async fn handle_agent_hello(
         // ── Build resource lists from in-memory cache ─────────────────
         let gw = state.read().await;
 
-        let (provider_list, gw_provider_version) = if provider_list_version < gw.resource_cache.provider_list.version {
-            (
-                Some(gw.resource_cache.provider_list.providers.clone()),
-                gw.resource_cache.provider_list.version,
-            )
-        } else {
-            (None, gw.resource_cache.provider_list.version)
-        };
+        let (provider_list, gw_provider_version) =
+            if provider_list_version < gw.resource_cache.provider_list.version {
+                (
+                    Some(gw.resource_cache.provider_list.providers.clone()),
+                    gw.resource_cache.provider_list.version,
+                )
+            } else {
+                (None, gw.resource_cache.provider_list.version)
+            };
 
         let (mcp_list, gw_mcp_version) = if mcp_list_version < gw.resource_cache.mcp_list.version {
             (
@@ -588,14 +630,15 @@ pub async fn handle_agent_hello(
             (None, gw.resource_cache.mcp_list.version)
         };
 
-        let (search_list, gw_search_version) = if search_list_version < gw.resource_cache.search_list.version {
-            (
-                Some(gw.resource_cache.search_list.providers.clone()),
-                gw.resource_cache.search_list.version,
-            )
-        } else {
-            (None, gw.resource_cache.search_list.version)
-        };
+        let (search_list, gw_search_version) =
+            if search_list_version < gw.resource_cache.search_list.version {
+                (
+                    Some(gw.resource_cache.search_list.providers.clone()),
+                    gw.resource_cache.search_list.version,
+                )
+            } else {
+                (None, gw.resource_cache.search_list.version)
+            };
 
         // ── Key vaults (always full, from Vault + MCP catalog) ─────
         let provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry> = gw
@@ -627,18 +670,28 @@ pub async fn handle_agent_hello(
         let search_key_vault = crate::resource_cache::build_search_key_vault(&gw);
 
         // ── Embedding service info (from embed_process state) ──
-        let embed_endpoint = gw.embed_process.as_ref().map(|eps| {
-            format!("http://127.0.0.1:{}/v1", eps.port)
-        });
-        let embed_model_id = gw.embed_process.as_ref().and_then(|eps| eps.active_model_id.clone());
-        let embed_dimension = gw.embed_process.as_ref().and_then(|eps| eps.active_dimension);
+        let embed_endpoint = gw
+            .embed_process
+            .as_ref()
+            .map(|eps| format!("http://127.0.0.1:{}/v1", eps.port));
+        let embed_model_id = gw
+            .embed_process
+            .as_ref()
+            .and_then(|eps| eps.active_model_id.clone());
+        let embed_dimension = gw
+            .embed_process
+            .as_ref()
+            .and_then(|eps| eps.active_dimension);
 
         drop(gw);
 
         // ── User identity (version-driven diff sync) ──
         let (user_identity, gw_user_version) = {
             let gw = state.read().await;
-            let active_user = gw.resource_cache.user_profile_list.users
+            let active_user = gw
+                .resource_cache
+                .user_profile_list
+                .users
                 .iter()
                 .find(|u| u.is_active)
                 .cloned();
@@ -691,10 +744,7 @@ pub async fn handle_agent_hello(
 /// Called by Runtime after SessionTask initialization is complete.
 /// This enables the Desktop App to know when it's safe to open WebSocket
 /// connections for chat streaming.
-pub async fn handle_agent_ready(
-    agent_id: &str,
-    state: &SharedState,
-) -> GatewayResponse {
+pub async fn handle_agent_ready(agent_id: &str, state: &SharedState) -> GatewayResponse {
     tracing::info!("AgentReady: agent_id={}", agent_id);
 
     let mut gw = state.write().await;
@@ -737,11 +787,15 @@ pub async fn resolve_llm_config_for_agent(
     let state_guard = state.read().await;
 
     // Try default_provider from Gateway config first
-    let default_provider = state_guard.config.as_ref()
+    let default_provider = state_guard
+        .config
+        .as_ref()
         .and_then(|c| c.default_provider.as_deref());
 
     // Try default_model from Gateway config
-    let config_default_model = state_guard.config.as_ref()
+    let config_default_model = state_guard
+        .config
+        .as_ref()
         .and_then(|c| c.default_model.as_deref());
 
     // Determine which provider to use
@@ -767,7 +821,8 @@ pub async fn resolve_llm_config_for_agent(
             // 1. Per-agent model preference is owned by the Agent Runtime
             //    (workspace/config/agent_model.json). The Gateway will query it via
             //    QueryConfig IPC when the Runtime is connected.
-            let (per_agent_model, per_agent_provider): (Option<String>, Option<String>) = (None, None);
+            let (per_agent_model, per_agent_provider): (Option<String>, Option<String>) =
+                (None, None);
 
             // 2. Cross-provider resolution: if the per-agent preference
             //    specifies a DIFFERENT provider than the default, look up
@@ -801,14 +856,26 @@ pub async fn resolve_llm_config_for_agent(
                                     per_agent_provider = %ap,
                                     "Per-agent provider not found in Vault, falling back to default"
                                 );
-                                (default_entry.clone(), default_entry.models.clone(), default_provider_name)
+                                (
+                                    default_entry.clone(),
+                                    default_entry.models.clone(),
+                                    default_provider_name,
+                                )
                             }
                         }
                     } else {
-                        (default_entry.clone(), default_entry.models.clone(), default_provider_name)
+                        (
+                            default_entry.clone(),
+                            default_entry.models.clone(),
+                            default_provider_name,
+                        )
                     }
                 } else {
-                    (default_entry.clone(), default_entry.models.clone(), default_provider_name)
+                    (
+                        default_entry.clone(),
+                        default_entry.models.clone(),
+                        default_provider_name,
+                    )
                 };
 
             // 3. Validate per-agent model against effective provider's models
@@ -831,7 +898,11 @@ pub async fn resolve_llm_config_for_agent(
             })
         }
         Err(e) => {
-            tracing::warn!("Failed to get provider '{}' from Vault: {}", provider_name, e);
+            tracing::warn!(
+                "Failed to get provider '{}' from Vault: {}",
+                provider_name,
+                e
+            );
             None
         }
     }
@@ -865,7 +936,10 @@ mod tests {
     async fn test_handle_budget_query() {
         let state = test_shared_state("budget-query");
         let response = handle_budget_query("openai", &state).await;
-        if let GatewayResponse::BudgetInfo { remaining_tokens, .. } = response {
+        if let GatewayResponse::BudgetInfo {
+            remaining_tokens, ..
+        } = response
+        {
             // No budget tracker configured → unlimited
             assert_eq!(remaining_tokens, u64::MAX);
         } else {
@@ -913,8 +987,7 @@ mod tests {
     #[tokio::test]
     async fn test_gateway_state_concurrent_access() {
         let dir = temp_vault_dir("concurrent_rw");
-        let state: SharedState =
-            Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
 
         let mut handles = Vec::new();
 
@@ -943,17 +1016,14 @@ mod tests {
                     provider = "openai"
                     model = "gpt-4"
                 "#;
-                let manifest =
-                    acowork_core::AgentManifest::from_toml(toml_str).unwrap();
-                guard.add_installed(
-                    crate::gateway::state::AgentInfo {
-                        agent_id: format!("com.test.{}", i),
-                        version: "1.0.0".to_string(),
-                        name: format!("Test Agent {}", i),
-                        install_path: "/tmp/test".to_string(),
-                        manifest,
-                    },
-                );
+                let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
+                guard.add_installed(crate::gateway::state::AgentInfo {
+                    agent_id: format!("com.test.{}", i),
+                    version: "1.0.0".to_string(),
+                    name: format!("Test Agent {}", i),
+                    install_path: "/tmp/test".to_string(),
+                    manifest,
+                });
             }));
         }
 
@@ -975,8 +1045,7 @@ mod tests {
     #[tokio::test]
     async fn test_intent_push_to_target_session() {
         let dir = temp_vault_dir("intent_push");
-        let state: SharedState =
-            Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
         let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
 
         // Register target's capability
@@ -1069,13 +1138,11 @@ mod tests {
         }
 
         // Verify the target received IntentReceived via push channel
-        let pushed_msg = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            push_rx.recv(),
-        )
-        .await
-        .expect("Timeout waiting for push message")
-        .expect("Push channel closed");
+        let pushed_msg =
+            tokio::time::timeout(std::time::Duration::from_millis(500), push_rx.recv())
+                .await
+                .expect("Timeout waiting for push message")
+                .expect("Push channel closed");
 
         match &pushed_msg {
             GatewayResponse::IntentReceived {
@@ -1098,8 +1165,7 @@ mod tests {
     #[tokio::test]
     async fn test_intent_send_capability_mismatch() {
         let dir = temp_vault_dir("intent_no_cap");
-        let state: SharedState =
-            Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
         let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
 
         // Install target (but don't register any capability)
@@ -1164,8 +1230,7 @@ mod tests {
     #[tokio::test]
     async fn test_intent_send_params_too_large() {
         let dir = temp_vault_dir("intent_large_params");
-        let state: SharedState =
-            Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
         let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
 
         // Install target with capability
@@ -1240,8 +1305,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_capability_broadcast_to_sessions() {
-        let (capability_tx, mut cap_rx1) =
-            tokio::sync::broadcast::channel::<GatewayResponse>(64);
+        let (capability_tx, mut cap_rx1) = tokio::sync::broadcast::channel::<GatewayResponse>(64);
         let mut cap_rx2 = capability_tx.subscribe();
 
         // Simulate an install event — broadcast CapabilityUpdate
@@ -1253,25 +1317,23 @@ mod tests {
         capability_tx.send(update.clone()).unwrap();
 
         // Both subscribers should receive the update
-        let msg1 = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            cap_rx1.recv(),
-        )
-        .await
-        .expect("Timeout waiting for broadcast on subscriber 1")
-        .expect("Channel closed");
+        let msg1 = tokio::time::timeout(std::time::Duration::from_millis(500), cap_rx1.recv())
+            .await
+            .expect("Timeout waiting for broadcast on subscriber 1")
+            .expect("Channel closed");
 
-        let msg2 = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            cap_rx2.recv(),
-        )
-        .await
-        .expect("Timeout waiting for broadcast on subscriber 2")
-        .expect("Channel closed");
+        let msg2 = tokio::time::timeout(std::time::Duration::from_millis(500), cap_rx2.recv())
+            .await
+            .expect("Timeout waiting for broadcast on subscriber 2")
+            .expect("Channel closed");
 
         match (&msg1, &msg2) {
             (
-                GatewayResponse::CapabilityUpdate { agent_id, actions, removed },
+                GatewayResponse::CapabilityUpdate {
+                    agent_id,
+                    actions,
+                    removed,
+                },
                 GatewayResponse::CapabilityUpdate { .. },
             ) => {
                 assert_eq!(agent_id, "com.example.weather");
@@ -1289,16 +1351,17 @@ mod tests {
         };
         capability_tx.send(remove_update.clone()).unwrap();
 
-        let msg3 = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            cap_rx1.recv(),
-        )
-        .await
-        .expect("Timeout waiting for uninstall broadcast")
-        .expect("Channel closed");
+        let msg3 = tokio::time::timeout(std::time::Duration::from_millis(500), cap_rx1.recv())
+            .await
+            .expect("Timeout waiting for uninstall broadcast")
+            .expect("Channel closed");
 
         match &msg3 {
-            GatewayResponse::CapabilityUpdate { agent_id, actions, removed } => {
+            GatewayResponse::CapabilityUpdate {
+                agent_id,
+                actions,
+                removed,
+            } => {
                 assert_eq!(agent_id, "com.example.weather");
                 assert!(actions.is_empty());
                 assert!(*removed);

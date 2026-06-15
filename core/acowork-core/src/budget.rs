@@ -1,7 +1,7 @@
 //! Budget and usage report types
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Budget configuration for an Agent
 #[derive(Debug, Clone, Serialize, Deserialize)]

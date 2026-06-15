@@ -4,7 +4,7 @@
 //! Full X.509 certificate support will be added in Phase 2+ for the Agent Store.
 
 use crate::error::{Result, SignError};
-use crate::keygen::{SelfSignedCert, KeyType};
+use crate::keygen::{KeyType, SelfSignedCert};
 
 /// Parse a self-signed certificate from JSON
 pub fn parse_certificate(data: &[u8]) -> Result<CertificateInfo> {

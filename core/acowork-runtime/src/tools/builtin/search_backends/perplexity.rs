@@ -142,8 +142,7 @@ impl SearchBackend for PerplexityBackend {
             .map(|c| c.message.content.as_str())
             .unwrap_or("");
 
-        let link_re =
-            regex::Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
+        let link_re = regex::Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
         let results: Vec<SearchResult> = link_re
             .captures_iter(content)
             .take(limit)

@@ -7,11 +7,10 @@
 //! - POST   /api/agents/{id}/memory/consolidate     — trigger memory consolidation
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
     routing::{delete, get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +22,14 @@ pub fn memory_routes() -> Router<AppState> {
     Router::new()
         .route("/api/agents/{id}/memory/nodes", get(list_memory_nodes))
         .route("/api/agents/{id}/memory/stats", get(get_memory_stats))
-        .route("/api/agents/{id}/memory/nodes/{node_id}", delete(delete_memory_node))
-        .route("/api/agents/{id}/memory/consolidate", post(trigger_consolidate))
+        .route(
+            "/api/agents/{id}/memory/nodes/{node_id}",
+            delete(delete_memory_node),
+        )
+        .route(
+            "/api/agents/{id}/memory/consolidate",
+            post(trigger_consolidate),
+        )
 }
 
 // ── Query parameters ──────────────────────────────────────────────────
@@ -179,7 +184,8 @@ pub async fn list_memory_nodes(
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!(
-                "Agent not found: {}", agent_id
+                "Agent not found: {}",
+                agent_id
             )));
         }
     }
@@ -197,7 +203,9 @@ pub async fn list_memory_nodes(
         );
 
         if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
-            if let Some(acowork_core::proto::client_message::Payload::MemoryNodesResult(result)) = response.payload {
+            if let Some(acowork_core::proto::client_message::Payload::MemoryNodesResult(result)) =
+                response.payload
+            {
                 let node_count = result.nodes.len();
                 tracing::info!(
                     agent_id = %agent_id,
@@ -205,17 +213,21 @@ pub async fn list_memory_nodes(
                     node_count,
                     "Memory API: list_memory_nodes response"
                 );
-                let nodes = result.nodes.into_iter().map(|n| MemoryNodeResponse {
-                    node_id: n.node_id,
-                    node_type: n.node_type,
-                    content: n.content,
-                    confidence: n.confidence,
-                    decay_score: n.decay_score,
-                    created_at: n.created_at,
-                    last_accessed_at: n.last_accessed_at,
-                    access_count: n.access_count,
-                    status: n.status,
-                }).collect();
+                let nodes = result
+                    .nodes
+                    .into_iter()
+                    .map(|n| MemoryNodeResponse {
+                        node_id: n.node_id,
+                        node_type: n.node_type,
+                        content: n.content,
+                        confidence: n.confidence,
+                        decay_score: n.decay_score,
+                        created_at: n.created_at,
+                        last_accessed_at: n.last_accessed_at,
+                        access_count: n.access_count,
+                        status: n.status,
+                    })
+                    .collect();
                 return Ok(Json(MemoryNodesListResponse {
                     total: result.total,
                     page: result.page,
@@ -258,7 +270,8 @@ pub async fn get_memory_stats(
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!(
-                "Agent not found: {}", agent_id
+                "Agent not found: {}",
+                agent_id
             )));
         }
     }
@@ -270,7 +283,9 @@ pub async fn get_memory_stats(
         );
 
         if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
-            if let Some(acowork_core::proto::client_message::Payload::MemoryStatsResult(result)) = response.payload {
+            if let Some(acowork_core::proto::client_message::Payload::MemoryStatsResult(result)) =
+                response.payload
+            {
                 return Ok(Json(MemoryStatsResponse {
                     total_nodes: result.total_nodes,
                     storage_bytes: result.storage_bytes,
@@ -304,7 +319,8 @@ pub async fn delete_memory_node(
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!(
-                "Agent not found: {}", agent_id
+                "Agent not found: {}",
+                agent_id
             )));
         }
     }
@@ -316,7 +332,9 @@ pub async fn delete_memory_node(
         );
 
         if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
-            if let Some(acowork_core::proto::client_message::Payload::MemoryDeleteResult(result)) = response.payload {
+            if let Some(acowork_core::proto::client_message::Payload::MemoryDeleteResult(result)) =
+                response.payload
+            {
                 return Ok(Json(DeleteNodeResponse {
                     node_id: result.node_id,
                     deleted: result.deleted,
@@ -327,7 +345,9 @@ pub async fn delete_memory_node(
     }
 
     // No gRPC connection — return error
-    Err(ApiError::service_unavailable("Agent not connected via gRPC"))
+    Err(ApiError::service_unavailable(
+        "Agent not connected via gRPC",
+    ))
 }
 
 /// `POST /api/agents/{id}/memory/consolidate` — trigger memory consolidation
@@ -341,7 +361,8 @@ pub async fn trigger_consolidate(
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
             return Err(ApiError::not_found(&format!(
-                "Agent not found: {}", agent_id
+                "Agent not found: {}",
+                agent_id
             )));
         }
     }
@@ -356,7 +377,10 @@ pub async fn trigger_consolidate(
         );
 
         if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
-            if let Some(acowork_core::proto::client_message::Payload::MemoryConsolidateResult(result)) = response.payload {
+            if let Some(acowork_core::proto::client_message::Payload::MemoryConsolidateResult(
+                result,
+            )) = response.payload
+            {
                 return Ok(Json(ConsolidateResponse {
                     started: result.started,
                     duration_ms: result.duration_ms,
@@ -369,7 +393,9 @@ pub async fn trigger_consolidate(
     }
 
     // No gRPC connection — return error
-    Err(ApiError::service_unavailable("Agent not connected via gRPC"))
+    Err(ApiError::service_unavailable(
+        "Agent not connected via gRPC",
+    ))
 }
 
 #[cfg(test)]

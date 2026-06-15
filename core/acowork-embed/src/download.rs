@@ -100,6 +100,14 @@ pub struct DownloadResult {
     pub downloaded_files: Vec<String>,
 }
 
+pub struct DownloadSpec<'a> {
+    pub model_id: &'a str,
+    pub hf_repo: &'a str,
+    pub onnx_file: &'a str,
+    pub tokenizer_file: &'a str,
+    pub external_data_files: &'a [String],
+}
+
 /// Progress callback type: `(downloaded_bytes, total_bytes)`.
 pub type ProgressCb = dyn Fn(u64, u64) + Send + Sync;
 
@@ -114,6 +122,8 @@ pub struct DownloadProgress {
     pub bytes_downloaded: AtomicU64,
     /// Total bytes of the current file (0 if unknown).
     pub total_bytes: AtomicU64,
+    /// Progress floor used for post-download finalization phases.
+    progress_floor: std::sync::atomic::AtomicU8,
     /// Name of the file currently being downloaded (e.g., "model.onnx").
     pub current_file: std::sync::Mutex<String>,
 }
@@ -124,19 +134,26 @@ impl DownloadProgress {
         Self {
             bytes_downloaded: AtomicU64::new(0),
             total_bytes: AtomicU64::new(0),
+            progress_floor: std::sync::atomic::AtomicU8::new(0),
             current_file: std::sync::Mutex::new(String::new()),
         }
+    }
+
+    pub fn set_progress_floor(&self, pct: u8) {
+        self.progress_floor
+            .store(pct.min(100), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Return progress as `(percentage 0-100, bytes_downloaded, total_bytes)`.
     pub fn snapshot(&self) -> (u8, u64, u64) {
         let downloaded = self.bytes_downloaded.load(Ordering::Relaxed);
         let total = self.total_bytes.load(Ordering::Relaxed);
-        let pct = if total > 0 {
+        let byte_pct = if total > 0 {
             ((downloaded as f64 / total as f64) * 100.0).min(100.0) as u8
         } else {
             0
         };
+        let pct = byte_pct.max(self.progress_floor.load(Ordering::Relaxed));
         (pct, downloaded, total)
     }
 }
@@ -209,21 +226,16 @@ impl Downloader {
     /// progress — suitable for exposing to the UI via polling.
     ///
     /// # Arguments
-    /// * `model_id` - Model identifier (used as directory name).
-    /// * `hf_repo` - HuggingFace repository (e.g., "onnx-community/bge-small-zh-v1.5-ONNX").
-    /// * `onnx_file` - Path within the repo to the ONNX file (e.g., "onnx/model_fp16.onnx").
-    /// * `tokenizer_file` - Path within the repo to the tokenizer (e.g., "tokenizer.json").
+    /// * `spec` - Model files and HuggingFace repository metadata.
     /// * `progress` - Shared progress tracker updated by the winning racer.
     /// * `cancel` - Cancellation flag (if true, abort download).
     pub async fn download_model(
         &self,
-        model_id: &str,
-        hf_repo: &str,
-        onnx_file: &str,
-        tokenizer_file: &str,
+        spec: DownloadSpec<'_>,
         progress: &DownloadProgress,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<DownloadResult, DownloadError> {
+        let model_id = spec.model_id;
         let model_dir = self.models_dir.join(model_id);
         let tmp_dir = self.models_dir.join(format!("{model_id}.downloading"));
 
@@ -248,8 +260,8 @@ impl Downloader {
         // The ONNX file is always saved as "model.onnx" for consistent loading.
         // The tokenizer is always saved as "tokenizer.json".
         let files_to_download = [
-            (onnx_file, "model.onnx"),
-            (tokenizer_file, "tokenizer.json"),
+            (spec.onnx_file, "model.onnx"),
+            (spec.tokenizer_file, "tokenizer.json"),
         ];
 
         let sources = self.sources();
@@ -284,73 +296,55 @@ impl Downloader {
             }
             download_file_race(
                 &self.http_client,
-                hf_repo,
+                spec.hf_repo,
                 remote_path,
                 &local_path,
                 &sources,
                 progress,
-            ).await?;
+            )
+            .await?;
 
             downloaded_files.push(local_name.to_string());
         }
 
-        // Download ONNX external data file if present.
-        // Many ONNX models use external data (e.g., model_fp16.onnx_data) where
-        // the ONNX file contains the graph structure and the actual weights are
-        // in a companion file. The external data filename is referenced inside
-        // the ONNX file (e.g., "model_fp16.onnx_data"), so we must preserve
-        // the original filename from the HF repo but strip the directory prefix.
-        // ONNX Runtime resolves external data relative to the directory containing
-        // model.onnx, using the bare filename stored in the protobuf.
-        let onnx_ext_data_remote = format!("{}_data", onnx_file);
-        let onnx_ext_data_local = Path::new(&onnx_ext_data_remote)
-            .file_name()
-            .expect("onnx_ext_data_remote should have a filename")
-            .to_str()
-            .expect("filename should be valid UTF-8")
-            .to_string();
-        let ext_data_path = tmp_dir.join(&onnx_ext_data_local);
+        progress.set_progress_floor(100);
 
-        if ext_data_path.exists() && ext_data_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            tracing::info!(%onnx_ext_data_local, "External data file already downloaded, skipping");
-            downloaded_files.push(onnx_ext_data_local);
-        } else {
+        for remote_path in spec.external_data_files {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return Err(DownloadError::Cancelled);
+            }
+
+            let local_name = Path::new(remote_path)
+                .file_name()
+                .expect("external data path should have a filename")
+                .to_str()
+                .expect("filename should be valid UTF-8");
             if let Ok(mut name) = progress.current_file.lock() {
-                *name = onnx_ext_data_local.to_string();
+                *name = local_name.to_string();
             }
-            // External data is optional — try up to 3 times from the
-            // primary source, but skip the multi-source race and stop
-            // immediately on a permanent error (404).
-            let ext_url = hf_file_url(hf_repo, &onnx_ext_data_remote, &sources[0]);
-            let mut ext_err = None;
-            for attempt in 1..=3u32 {
-                match download_single(&self.http_client, &ext_url, &ext_data_path, 0, progress).await {
-                    Ok(()) => {
-                        downloaded_files.push(onnx_ext_data_local.clone());
-                        ext_err = None;
-                        break;
-                    }
-                    Err(e) => {
-                        ext_err = Some(e);
-                        let is_retryable = match &ext_err {
-                            Some(DownloadError::Http(req_err)) => {
-                                req_err.is_timeout() || req_err.is_connect()
-                                    || req_err.status().is_some_and(|s| s.is_server_error())
-                            }
-                            _ => false,
-                        };
-                        if !is_retryable || attempt == 3 {
-                            break;
-                        }
-                        tracing::warn!(attempt, error = %ext_err.as_ref().unwrap(), "Retrying external data download");
-                        tokio::time::sleep(std::time::Duration::from_secs(attempt as u64 * 2)).await;
-                    }
-                }
+            let local_path = tmp_dir.join(local_name);
+            if local_path.exists() && local_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                tracing::info!(
+                    local_name,
+                    "External data file already downloaded, skipping"
+                );
+                downloaded_files.push(local_name.to_string());
+                continue;
             }
-            if let Some(e) = ext_err {
-                tracing::info!(path = %onnx_ext_data_remote, error = %e, "External data file not found (model may have embedded weights)");
-            }
-        } // else: external data file already exists
+            download_file_race(
+                &self.http_client,
+                spec.hf_repo,
+                remote_path,
+                &local_path,
+                &sources,
+                progress,
+            )
+            .await?;
+            downloaded_files.push(local_name.to_string());
+        }
+
+        progress.set_progress_floor(100);
 
         // Atomic rename: tmp_dir → model_dir (cross-platform)
         rename_or_replace(&tmp_dir, &model_dir)?;
@@ -470,17 +464,17 @@ async fn download_file_race(
                 if join_err.is_cancelled() && last_err.is_none() {
                     last_err = Some(DownloadError::Cancelled);
                 } else if last_err.is_none() {
-                    last_err = Some(DownloadError::InvalidUrl(
-                        format!("Download task panicked: {}", join_err),
-                    ));
+                    last_err = Some(DownloadError::InvalidUrl(format!(
+                        "Download task panicked: {}",
+                        join_err
+                    )));
                 }
             }
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        DownloadError::InvalidUrl("No download sources available".to_string())
-    }))
+    Err(last_err
+        .unwrap_or_else(|| DownloadError::InvalidUrl("No download sources available".to_string())))
 }
 
 /// Download a single file with retry logic (used inside race tasks).
@@ -586,15 +580,28 @@ async fn download_single(
             .last()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-        progress.total_bytes.fetch_max(resume_offset + total_from_range, Ordering::Relaxed);
-        progress.bytes_downloaded.fetch_max(resume_offset, Ordering::Relaxed);
-        tracing::info!(source = idx + 1, resumed = resume_offset, total = total_from_range, "Resume accepted");
+        progress
+            .total_bytes
+            .fetch_max(resume_offset + total_from_range, Ordering::Relaxed);
+        progress
+            .bytes_downloaded
+            .fetch_max(resume_offset, Ordering::Relaxed);
+        tracing::info!(
+            source = idx + 1,
+            resumed = resume_offset,
+            total = total_from_range,
+            "Resume accepted"
+        );
         resume_offset
     } else {
         // Full download — either no resume needed, or server ignored
         // the Range request. Remove any stale partial first.
         if resume {
-            tracing::info!(url, status, "Range request not honored; downloading full file");
+            tracing::info!(
+                url,
+                status,
+                "Range request not honored; downloading full file"
+            );
             let _ = std::fs::remove_file(&tmp_path);
         }
         let total = response.content_length().unwrap_or(0);
@@ -618,7 +625,9 @@ async fn download_single(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(DownloadError::Http)?;
         downloaded += chunk.len() as u64;
-        progress.bytes_downloaded.fetch_max(downloaded, Ordering::Relaxed);
+        progress
+            .bytes_downloaded
+            .fetch_max(downloaded, Ordering::Relaxed);
         tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk).await?;
     }
     tokio::io::AsyncWriteExt::flush(&mut writer).await?;

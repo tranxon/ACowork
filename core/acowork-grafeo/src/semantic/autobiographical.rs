@@ -9,7 +9,7 @@ use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, AutobioCategory, AutobiographicalNode, NodeStatus};
+use crate::types::{AutobioCategory, AutobiographicalNode, NodeStatus, labels};
 
 impl GrafeoStore {
     /// Store an autobiographical node.
@@ -64,10 +64,7 @@ impl GrafeoStore {
     }
 
     /// Find an autobiographical node by its `key` (e.g. "name", "location").
-    pub fn find_autobiographical_by_key(
-        &self,
-        key: &str,
-    ) -> Result<Option<AutobiographicalNode>> {
+    pub fn find_autobiographical_by_key(&self, key: &str) -> Result<Option<AutobiographicalNode>> {
         let graph = self.db.graph_store();
         let node_ids = graph.nodes_by_label(labels::AUTOBIOGRAPHICAL);
 
@@ -115,10 +112,7 @@ impl GrafeoStore {
         node.updated_at = Utc::now();
 
         let props = node.to_properties();
-        self.update_node(
-            id,
-            props.iter().map(|(k, v)| (k.as_str(), v.clone())),
-        )
+        self.update_node(id, props.iter().map(|(k, v)| (k.as_str(), v.clone())))
     }
 }
 
@@ -157,7 +151,10 @@ mod tests {
         let id = store.store_autobiographical(&node).unwrap();
 
         let fetched = store.db.get_node(id).unwrap();
-        let status = fetched.get_property("status").and_then(Value::as_str).unwrap();
+        let status = fetched
+            .get_property("status")
+            .and_then(Value::as_str)
+            .unwrap();
         assert_eq!(status, "Active");
     }
 
@@ -217,10 +214,16 @@ mod tests {
         store.update_autobiographical(&updated).unwrap();
 
         let fetched = store.db.get_node(id).unwrap();
-        let value = fetched.get_property("value").and_then(Value::as_str).unwrap();
+        let value = fetched
+            .get_property("value")
+            .and_then(Value::as_str)
+            .unwrap();
         assert_eq!(value, "second_release");
 
-        let status = fetched.get_property("status").and_then(Value::as_str).unwrap();
+        let status = fetched
+            .get_property("status")
+            .and_then(Value::as_str)
+            .unwrap();
         assert_eq!(status, "Active");
     }
 
@@ -242,7 +245,13 @@ mod tests {
         store.update_autobiographical(&dormant).unwrap();
 
         let fetched = store.db.get_node(id).unwrap();
-        let status = fetched.get_property("status").and_then(Value::as_str).unwrap();
-        assert_eq!(status, "Dormant", "Dormant status should be respected for History compression");
+        let status = fetched
+            .get_property("status")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(
+            status, "Dormant",
+            "Dormant status should be respected for History compression"
+        );
     }
 }

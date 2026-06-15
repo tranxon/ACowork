@@ -13,11 +13,11 @@
 //! - **Protocol buffer types**: strongly-typed messages replace ad-hoc JSON frames
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
@@ -26,7 +26,9 @@ use acowork_core::error::AcoworkError;
 use acowork_core::proto;
 use acowork_core::proto::server_message::Payload as ServerPayload;
 use acowork_core::proto_bridge::GatewayRequestToProto;
-use acowork_core::protocol::{GatewayRequest, GatewayResponse, McpKeyEntry, McpListItem, ProviderKeyEntry, ProviderListItem};
+use acowork_core::protocol::{
+    GatewayRequest, GatewayResponse, McpKeyEntry, McpListItem, ProviderKeyEntry, ProviderListItem,
+};
 
 /// Configuration delivered by Gateway in the AgentHelloResult handshake.
 ///
@@ -60,7 +62,6 @@ pub struct AgentHelloConfig {
     pub embed_model_id: Option<String>,
     /// Embedding dimension of the active model (e.g. 512).
     pub embed_dimension: Option<usize>,
-
     // ── Runtime Config Overrides (removed Phase 5) ──
     // Per-agent config is now loaded from workspace/config/agent_config.json.
     // AgentHelloResult no longer carries runtime_* fields.
@@ -119,8 +120,7 @@ impl GatewayGrpcClient {
             .await
             .map_err(|e| AcoworkError::Ipc(format!("gRPC connection failed: {}", e)))?;
 
-        let mut client =
-            proto::gateway_service_client::GatewayServiceClient::new(channel);
+        let mut client = proto::gateway_service_client::GatewayServiceClient::new(channel);
 
         // Outbound channel: Runtime → Gateway
         let (outbound_tx, outbound_rx) = mpsc::channel::<proto::ClientMessage>(256);
@@ -134,14 +134,14 @@ impl GatewayGrpcClient {
         let mut inbound = response.into_inner();
 
         // Internal state
-        let pending = Arc::new(Mutex::new(
-            HashMap::<u64, oneshot::Sender<proto::ServerMessage>>::new(),
-        ));
+        let pending = Arc::new(Mutex::new(HashMap::<
+            u64,
+            oneshot::Sender<proto::ServerMessage>,
+        >::new()));
         let next_request_id = Arc::new(AtomicU64::new(1));
         let (push_tx, push_rx) = mpsc::unbounded_channel();
         let (gateway_query_tx, gateway_query_rx) = mpsc::unbounded_channel();
         let connected = Arc::new(AtomicBool::new(true));
-
 
         // Spawn inbound receive loop.
         // When this task exits, push_tx is dropped, causing push_rx.recv() to
@@ -271,7 +271,17 @@ impl GatewayGrpcClient {
         cached_search_version: u64,
         cached_user_profile_version: u64,
     ) -> Result<(Self, AgentHelloConfig), AcoworkError> {
-        Self::connect_and_register_with_role(endpoint, agent_id, version, "main", cached_provider_version, cached_mcp_version, cached_search_version, cached_user_profile_version).await
+        Self::connect_and_register_with_role(
+            endpoint,
+            agent_id,
+            version,
+            "main",
+            cached_provider_version,
+            cached_mcp_version,
+            cached_search_version,
+            cached_user_profile_version,
+        )
+        .await
     }
 
     /// Convenience: connect with a specific connection role and send AgentHello.
@@ -289,7 +299,15 @@ impl GatewayGrpcClient {
     ) -> Result<(Self, AgentHelloConfig), AcoworkError> {
         let client = Self::connect(endpoint).await?;
         let config = client
-            .send_agent_hello(agent_id, version, connection_role, cached_provider_version, cached_mcp_version, cached_search_version, cached_user_profile_version)
+            .send_agent_hello(
+                agent_id,
+                version,
+                connection_role,
+                cached_provider_version,
+                cached_mcp_version,
+                cached_search_version,
+                cached_user_profile_version,
+            )
             .await?;
         Ok((client, config))
     }
@@ -319,7 +337,9 @@ impl GatewayGrpcClient {
         // On reconnect, request full resource sync (versions = 0) since
         // in-memory state was lost. Resource cache file versions are
         // reloaded by the caller when the Runtime restarts.
-        let _config = self.send_agent_hello(agent_id, version, "main", 0, 0, 0, 0).await?;
+        let _config = self
+            .send_agent_hello(agent_id, version, "main", 0, 0, 0, 0)
+            .await?;
         self.flush_pending_reports().await?;
         Ok(())
     }
@@ -460,10 +480,7 @@ impl GatewayGrpcClient {
             Some(ServerPayload::AgentHelloResult(result)) => {
                 if result.success {
                     if !result.error.is_empty() {
-                        tracing::warn!(
-                            "AgentHello succeeded but with error: {}",
-                            result.error
-                        );
+                        tracing::warn!("AgentHello succeeded but with error: {}", result.error);
                     }
                     tracing::info!(agent_id = %agent_id, "Gateway registered agent via gRPC");
 
@@ -489,7 +506,8 @@ impl GatewayGrpcClient {
                         provider_key_vault: if result.provider_key_vault_json.is_empty() {
                             vec![]
                         } else {
-                            serde_json::from_str(&result.provider_key_vault_json).unwrap_or_default()
+                            serde_json::from_str(&result.provider_key_vault_json)
+                                .unwrap_or_default()
                         },
                         mcp_key_vault: if result.mcp_key_vault_json.is_empty() {
                             vec![]
@@ -538,9 +556,7 @@ impl GatewayGrpcClient {
                 "Unexpected AgentHello response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty AgentHello response".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty AgentHello response".to_string())),
         }
     }
 
@@ -559,9 +575,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -587,9 +601,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -643,9 +655,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -653,10 +663,7 @@ impl GatewayGrpcClient {
     ///
     /// S4.5.2: If disconnected, the report is buffered and
     /// will be sent on reconnect via `flush_pending_reports`.
-    pub async fn report_usage(
-        &self,
-        report: budget::UsageReport,
-    ) -> Result<(), AcoworkError> {
+    pub async fn report_usage(&self, report: budget::UsageReport) -> Result<(), AcoworkError> {
         if !self.is_connected() {
             // S4.5.2: Buffer for later delivery
             let mut guard = self.pending_reports.lock().await;
@@ -679,9 +686,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -740,9 +745,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -764,9 +767,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -781,20 +782,16 @@ impl GatewayGrpcClient {
 
         let resp = self.send_gateway_request(request).await?;
         match resp.payload {
-            Some(ServerPayload::CapabilityOverview(overview)) => {
-                Ok(overview
-                    .capabilities
-                    .into_iter()
-                    .map(|(k, v)| (k, v.items))
-                    .collect())
-            }
+            Some(ServerPayload::CapabilityOverview(overview)) => Ok(overview
+                .capabilities
+                .into_iter()
+                .map(|(k, v)| (k, v.items))
+                .collect()),
             Some(other) => Err(AcoworkError::Ipc(format!(
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -833,9 +830,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -852,9 +847,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -873,9 +866,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -894,9 +885,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -937,9 +926,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 
@@ -954,9 +941,7 @@ impl GatewayGrpcClient {
                 "Unexpected response: {:?}",
                 other
             ))),
-            None => Err(AcoworkError::Ipc(
-                "Empty response payload".to_string(),
-            )),
+            None => Err(AcoworkError::Ipc("Empty response payload".to_string())),
         }
     }
 }
@@ -971,13 +956,17 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
     match msg.payload {
         // Push messages (request_id == 0)
         Some(ServerPayload::IntentReceived(ir)) => {
-            let params: serde_json::Value = serde_json::from_str(&ir.params_json)
-                .unwrap_or(serde_json::Value::Null);
+            let params: serde_json::Value =
+                serde_json::from_str(&ir.params_json).unwrap_or(serde_json::Value::Null);
             GatewayResponse::IntentReceived {
                 from: ir.from,
                 action: ir.action,
                 params,
-                command: if ir.command.is_empty() { None } else { Some(ir.command) },
+                command: if ir.command.is_empty() {
+                    None
+                } else {
+                    Some(ir.command)
+                },
             }
         }
         Some(ServerPayload::CapabilityUpdate(cu)) => GatewayResponse::CapabilityUpdate {
@@ -998,24 +987,18 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 serde_json::from_str(&plu.provider_key_vault_json).unwrap_or_default()
             },
         },
-        Some(ServerPayload::WorkspaceConfigUpdate(wcu)) => {
-            GatewayResponse::WorkspaceConfigUpdate {
-                config_json: wcu.config_json,
-            }
-        }
-        Some(ServerPayload::SetSessionWorkspace(ssw)) => {
-            GatewayResponse::SetSessionWorkspace {
-                session_id: ssw.session_id,
-                workspace_id: ssw.workspace_id,
-            }
-        }
-        Some(ServerPayload::IterationLimitPaused(ilp)) => {
-            GatewayResponse::IterationLimitPaused {
-                iteration: ilp.iteration,
-                max_iterations: ilp.max_iterations,
-                message: ilp.message,
-            }
-        }
+        Some(ServerPayload::WorkspaceConfigUpdate(wcu)) => GatewayResponse::WorkspaceConfigUpdate {
+            config_json: wcu.config_json,
+        },
+        Some(ServerPayload::SetSessionWorkspace(ssw)) => GatewayResponse::SetSessionWorkspace {
+            session_id: ssw.session_id,
+            workspace_id: ssw.workspace_id,
+        },
+        Some(ServerPayload::IterationLimitPaused(ilp)) => GatewayResponse::IterationLimitPaused {
+            iteration: ilp.iteration,
+            max_iterations: ilp.max_iterations,
+            message: ilp.message,
+        },
         Some(ServerPayload::RuntimeConfigUpdate(rcu)) => {
             // When the sender explicitly sets a field (indicated by the *_set flags),
             // we must preserve the empty value (Some(Vec::new()) / Some("")) rather
@@ -1080,7 +1063,8 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             } else {
                 serde_json::from_str(&r.mcp_list_json).ok()
             };
-            let provider_key_vault: Vec<ProviderKeyEntry> = if r.provider_key_vault_json.is_empty() {
+            let provider_key_vault: Vec<ProviderKeyEntry> = if r.provider_key_vault_json.is_empty()
+            {
                 vec![]
             } else {
                 serde_json::from_str(&r.provider_key_vault_json).unwrap_or_default()
@@ -1104,7 +1088,11 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 };
             GatewayResponse::AgentHelloResult {
                 success: r.success,
-                error: if r.error.is_empty() { None } else { Some(r.error) },
+                error: if r.error.is_empty() {
+                    None
+                } else {
+                    Some(r.error)
+                },
                 provider_list,
                 provider_list_version: r.provider_list_version,
                 mcp_list,
@@ -1116,11 +1104,11 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 search_key_vault,
                 user_identity: None,
                 user_profile_version: r.user_profile_version,
-                embed_endpoint: None,  // TODO: add to proto definition
+                embed_endpoint: None, // TODO: add to proto definition
                 embed_model_id: None,
                 embed_dimension: None,
             }
-        },
+        }
         Some(ServerPayload::KeyReleaseResult(r)) => GatewayResponse::KeyReleaseResult {
             api_key: if r.api_key.is_empty() {
                 None
@@ -1169,9 +1157,9 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 Some(r.error)
             },
         },
-        Some(ServerPayload::CronUnregisterResult(r)) => GatewayResponse::CronUnregisterResult {
-            removed: r.removed,
-        },
+        Some(ServerPayload::CronUnregisterResult(r)) => {
+            GatewayResponse::CronUnregisterResult { removed: r.removed }
+        }
         Some(ServerPayload::CronListResult(r)) => GatewayResponse::CronListResult {
             entries: r.entries.into_iter().map(|e| e.into()).collect(),
         },
@@ -1204,30 +1192,30 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
         Some(ServerPayload::LogRotate(_)) => GatewayResponse::LogRotate,
 
         Some(ServerPayload::UserProfileUpdate(update)) => {
-            let user_identity = update.user_identity.map(|u| acowork_core::protocol::UserProfile {
-                user_id: u.user_id,
-                display_name: u.display_name,
-                language: u.language,
-                timezone: u.timezone,
-                city: u.city,
-                country: u.country,
-                occupation: u.occupation,
-                communication_style: u.communication_style,
-                custom: u.custom,
-                created_at: u.created_at,
-                updated_at: u.updated_at,
-                is_active: u.is_active,
-            });
+            let user_identity = update
+                .user_identity
+                .map(|u| acowork_core::protocol::UserProfile {
+                    user_id: u.user_id,
+                    display_name: u.display_name,
+                    language: u.language,
+                    timezone: u.timezone,
+                    city: u.city,
+                    country: u.country,
+                    occupation: u.occupation,
+                    communication_style: u.communication_style,
+                    custom: u.custom,
+                    created_at: u.created_at,
+                    updated_at: u.updated_at,
+                    is_active: u.is_active,
+                });
             GatewayResponse::UserProfileUpdate {
                 user_identity,
                 version: update.version,
             }
         }
-        Some(ServerPayload::EnableDebugMode(edm)) => {
-            GatewayResponse::EnableDebugMode {
-                debug_port: edm.debug_port,
-            }
-        }
+        Some(ServerPayload::EnableDebugMode(edm)) => GatewayResponse::EnableDebugMode {
+            debug_port: edm.debug_port,
+        },
 
         None => {
             tracing::warn!("Received ServerMessage with empty payload");
@@ -1237,9 +1225,7 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
         // Memory API query variants — handled by the agent loop via
         // dedicated GatewayResponse variants, not proto_to_gateway_response.
         _ => {
-            tracing::warn!(
-                "Received unrecognized ServerMessage payload variant"
-            );
+            tracing::warn!("Received unrecognized ServerMessage payload variant");
             GatewayResponse::Unknown {}
         }
     }
@@ -1306,7 +1292,12 @@ mod tests {
         };
         let resp = proto_to_gateway_response(msg);
         match resp {
-            GatewayResponse::IntentReceived { from, action, params, command: _ } => {
+            GatewayResponse::IntentReceived {
+                from,
+                action,
+                params,
+                command: _,
+            } => {
                 assert_eq!(from, "com.test.agent");
                 assert_eq!(action, "chat_message");
                 assert_eq!(params["content"], "hello");

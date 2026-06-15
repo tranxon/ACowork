@@ -2,4 +2,4 @@
 
 pub mod registry;
 
-pub use registry::{CapabilityRegistry, CapabilityOverview, RegisteredCapability};
+pub use registry::{CapabilityOverview, CapabilityRegistry, RegisteredCapability};

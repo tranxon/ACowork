@@ -13,9 +13,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 
 use crate::config::McpServerConfig;
-use crate::protocol::{
-    JsonRpcRequest, MCP_PROTOCOL_VERSION, McpToolDef, McpToolsListResult,
-};
+use crate::protocol::{JsonRpcRequest, MCP_PROTOCOL_VERSION, McpToolDef, McpToolsListResult};
 use crate::transport::{McpTransportConn, create_transport};
 
 /// Timeout for receiving a response from an MCP server during init/list.
@@ -166,7 +164,9 @@ impl McpClient {
 
         Ok(Self {
             meta: Arc::new(inner),
-            transport: Arc::new(Mutex::new(McpTransportState { transport: Some(transport) })),
+            transport: Arc::new(Mutex::new(McpTransportState {
+                transport: Some(transport),
+            })),
             next_id: Arc::new(AtomicU64::new(3)), // IDs 1 and 2 were used for init + list
             is_alive: Arc::new(AtomicBool::new(true)),
         })
@@ -183,7 +183,11 @@ impl McpClient {
         let mut state = self.transport.lock().await;
         if let Some(mut transport) = state.transport.take() {
             if let Err(e) = transport.close().await {
-                tracing::warn!("Error closing MCP server `{}`: {:#}", self.meta.config.name, e);
+                tracing::warn!(
+                    "Error closing MCP server `{}`: {:#}",
+                    self.meta.config.name,
+                    e
+                );
             }
         }
     }
@@ -212,7 +216,9 @@ impl McpClient {
             let mut new_state = new_client.transport.lock().await;
             let mut state = self.transport.lock().await;
             // New client always has Some(transport) after successful connect
-            let new_transport = new_state.transport.take()
+            let new_transport = new_state
+                .transport
+                .take()
                 .expect("new client must have a transport after connect");
             if let Some(mut old) = state.replace(new_transport) {
                 let _ = old.close().await;
@@ -520,7 +526,11 @@ mod tests {
         assert_eq!(registry.tool_count(), 0);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].server_name, "bad");
-        assert!(failures[0].error_message.contains("failed to create transport"));
+        assert!(
+            failures[0]
+                .error_message
+                .contains("failed to create transport")
+        );
     }
 
     #[tokio::test]

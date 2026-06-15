@@ -1,8 +1,8 @@
 //! Content search tool — regex search in file contents using ripgrep's ignore crate
 
+use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use ignore::WalkBuilder;
-use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
@@ -82,7 +82,11 @@ impl Tool for ContentSearchTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let resolver_ref = self.resolver.read().unwrap();
         let effective_work_dir = work_dir.unwrap_or(resolver_ref.agent_home());
         let pattern = params["pattern"].as_str().unwrap_or("");
@@ -95,9 +99,7 @@ impl Tool for ContentSearchTool {
             });
         }
 
-        let output_mode = params["output_mode"]
-            .as_str()
-            .unwrap_or("content");
+        let output_mode = params["output_mode"].as_str().unwrap_or("content");
         if !matches!(output_mode, "content" | "files_with_matches" | "count") {
             return Ok(ToolResult {
                 ok: false,
@@ -124,7 +126,10 @@ impl Tool for ContentSearchTool {
                 }
             }
         } else {
-            match regex::RegexBuilder::new(pattern).case_insensitive(true).build() {
+            match regex::RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+            {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(ToolResult {
@@ -137,12 +142,8 @@ impl Tool for ContentSearchTool {
             }
         };
 
-        let context_before = params["context_before"]
-            .as_u64()
-            .unwrap_or(0) as usize;
-        let context_after = params["context_after"]
-            .as_u64()
-            .unwrap_or(0) as usize;
+        let context_before = params["context_before"].as_u64().unwrap_or(0) as usize;
+        let context_after = params["context_after"].as_u64().unwrap_or(0) as usize;
 
         let max_results = params["max_results"]
             .as_u64()
@@ -180,7 +181,8 @@ impl Tool for ContentSearchTool {
                 vec![resolved]
             } else {
                 // Fallback: try resolving against each search_dir
-                resolver_ref.search_dirs()
+                resolver_ref
+                    .search_dirs()
                     .iter()
                     .map(|d| Path::new(d).join(p))
                     .filter(|p| p.exists())
@@ -243,7 +245,8 @@ impl Tool for ContentSearchTool {
 
                 let path = entry.path();
                 // Compute relative path from this search root
-                let rel_str = path_utils::normalize_separators(&path_utils::relative_path(path, search_root));
+                let rel_str =
+                    path_utils::normalize_separators(&path_utils::relative_path(path, search_root));
                 files_scanned += 1;
 
                 // Apply file filter if specified
@@ -251,7 +254,8 @@ impl Tool for ContentSearchTool {
                 // This way `include="*.rs"` matches `src/main.rs` — users mean
                 // "any .rs file", not ".rs files in the root only".
                 if let Some(ref filter) = file_filter {
-                    let file_name = path.file_name()
+                    let file_name = path
+                        .file_name()
                         .map(|n| n.to_string_lossy())
                         .unwrap_or(std::borrow::Cow::Borrowed(""));
                     if !filter.is_match(file_name.as_ref()) {
@@ -358,10 +362,17 @@ impl Tool for ContentSearchTool {
                             }
 
                             // Add separator between non-adjacent match blocks in the same file
-                            let next_idx = match_indexes.iter().position(|&x| x == match_line)
-                                .map(|pos| match_indexes.get(pos + 1).copied().unwrap_or(usize::MAX));
+                            let next_idx =
+                                match_indexes
+                                    .iter()
+                                    .position(|&x| x == match_line)
+                                    .map(|pos| {
+                                        match_indexes.get(pos + 1).copied().unwrap_or(usize::MAX)
+                                    });
                             if let Some(next) = next_idx {
-                                if next != usize::MAX && next > match_line + context_after + context_before + 1 {
+                                if next != usize::MAX
+                                    && next > match_line + context_after + context_before + 1
+                                {
                                     if results.len() < max_results {
                                         results.push("--".to_string());
                                     }

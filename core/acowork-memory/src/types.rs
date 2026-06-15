@@ -111,10 +111,7 @@ impl MemoryQuery {
     ///
     /// Lightweight background context: searches Autobiographical + Episodic
     /// labels, excludes current-session nodes, no graph expansion, low limit.
-    pub fn auto_inject(
-        query_text: String,
-        exclude_session_id: Option<String>,
-    ) -> Self {
+    pub fn auto_inject(query_text: String, exclude_session_id: Option<String>) -> Self {
         Self {
             query_text,
             embedding: None,
@@ -134,10 +131,7 @@ impl MemoryQuery {
     ///
     /// Comprehensive retrieval: searches all four labels, enables graph
     /// expansion, no score filtering — lets the LLM decide relevance.
-    pub fn deep_recall(
-        query_text: String,
-        exclude_session_id: Option<String>,
-    ) -> Self {
+    pub fn deep_recall(query_text: String, exclude_session_id: Option<String>) -> Self {
         Self {
             query_text,
             embedding: None,

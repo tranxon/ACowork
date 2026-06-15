@@ -46,6 +46,29 @@ export function EmbeddingModelTab() {
         }
     }, [status, loadModels]);
 
+    useEffect(() => {
+        const downloading = models.filter((model) => model.status === "downloading");
+        const downloadingSet = new Set(downloading.map((model) => model.id));
+
+        setDownloadingIds((prev) => {
+            const next = new Set(prev);
+            for (const model of downloading) next.add(model.id);
+            return next;
+        });
+        setDownloadProgress((prev) => {
+            const next = { ...prev };
+            for (const model of downloading) {
+                if (next[model.id] == null) next[model.id] = 0;
+            }
+            for (const model of models) {
+                if (model.status !== "downloading" && !downloadingSet.has(model.id)) {
+                    delete next[model.id];
+                }
+            }
+            return next;
+        });
+    }, [models]);
+
     const handleDownload = useCallback(async (modelId: string, variant?: string) => {
         setDownloadingIds((prev) => new Set(prev).add(modelId));
         setDownloadProgress((prev) => ({ ...prev, [modelId]: 0 }));

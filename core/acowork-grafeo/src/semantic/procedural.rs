@@ -4,7 +4,7 @@ use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, ProceduralNode};
+use crate::types::{ProceduralNode, labels};
 
 impl GrafeoStore {
     /// Store a procedural memory node.
@@ -14,7 +14,10 @@ impl GrafeoStore {
         }
 
         let props = node.to_properties();
-        let id = self.store_node(labels::PROCEDURAL, props.iter().map(|(k, v)| (k.as_str(), v.clone())))?;
+        let id = self.store_node(
+            labels::PROCEDURAL,
+            props.iter().map(|(k, v)| (k.as_str(), v.clone())),
+        )?;
         Ok(id)
     }
 
@@ -85,10 +88,7 @@ impl GrafeoStore {
         })?;
 
         let props = node.to_properties();
-        self.update_node(
-            id,
-            props.iter().map(|(k, v)| (k.as_str(), v.clone())),
-        )
+        self.update_node(id, props.iter().map(|(k, v)| (k.as_str(), v.clone())))
     }
 }
 
@@ -192,7 +192,10 @@ mod tests {
         store.update_procedural(&updated).unwrap();
 
         let n = store.db.get_node(id).unwrap();
-        let success = n.get_property("success_count").and_then(Value::as_int64).unwrap();
+        let success = n
+            .get_property("success_count")
+            .and_then(Value::as_int64)
+            .unwrap();
         assert_eq!(success, 4);
     }
 }

@@ -8,12 +8,12 @@
 //! (e.g. user uninstalled Git) and returns an LLM-actionable error pointing to
 //! the fallback tool instead of a cryptic "command not found".
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tools::output;
 
@@ -149,9 +149,11 @@ impl ShellTool {
         match self.tool_name.as_str() {
             "bash" => "If this tool returns an error about 'bash' not found, \
                        use the 'powershell' tool instead — Git Bash may have \
-                       been uninstalled or moved.".to_string(),
+                       been uninstalled or moved."
+                .to_string(),
             "powershell" => "If this tool returns an error about 'powershell' not found, \
-                             try the 'bash' tool if available.".to_string(),
+                             try the 'bash' tool if available."
+                .to_string(),
             _ => String::new(),
         }
     }
@@ -187,7 +189,11 @@ impl Tool for ShellTool {
         self.build_spec()
     }
 
-    async fn execute(&self, params: Value, work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let command = params["command"].as_str().unwrap_or("");
 
         if command.is_empty() {
@@ -258,35 +264,36 @@ impl Tool for ShellTool {
         let work_dir_owned = effective_work_dir.to_string();
         let tool_name = self.tool_name.clone();
 
-        let output = tokio::task::spawn_blocking(move || -> std::io::Result<std::process::Output> {
-            // Use shell_path (fully-resolved path) instead of shell_binary
-            // (just "bash") to avoid PATH resolution finding WSL bash
-            // instead of Git Bash on Windows.
-            let mut cmd = std::process::Command::new(&shell_path);
-            cmd.arg(&shell_arg)
-                .arg(&command_owned)
-                .current_dir(&work_dir_owned)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
+        let output =
+            tokio::task::spawn_blocking(move || -> std::io::Result<std::process::Output> {
+                // Use shell_path (fully-resolved path) instead of shell_binary
+                // (just "bash") to avoid PATH resolution finding WSL bash
+                // instead of Git Bash on Windows.
+                let mut cmd = std::process::Command::new(&shell_path);
+                cmd.arg(&shell_arg)
+                    .arg(&command_owned)
+                    .current_dir(&work_dir_owned)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
 
-            // Ensure MSYS2 environment is properly initialized for Git Bash
-            // so drive letter mounts (/c/, /d/) and Unix paths work correctly.
-            if tool_name == "bash" {
-                cmd.env("MSYSTEM", "MINGW64");
-                cmd.env("CHERE_INVOKING", "1");
-            }
+                // Ensure MSYS2 environment is properly initialized for Git Bash
+                // so drive letter mounts (/c/, /d/) and Unix paths work correctly.
+                if tool_name == "bash" {
+                    cmd.env("MSYSTEM", "MINGW64");
+                    cmd.env("CHERE_INVOKING", "1");
+                }
 
-            let child = cmd.spawn()?;
+                let child = cmd.spawn()?;
 
-            // ProcessGuard kills the child on drop — covers timeout,
-            // abort, and interrupt scenarios uniformly.
-            let guard = ProcessGuard::new(child);
-            // Normal path: take() marks guard as completed, then we
-            // wait for the child. Drop is now a no-op.
-            let output = guard.take().unwrap().wait_with_output()?;
-            Ok(output)
-        })
-        .await;
+                // ProcessGuard kills the child on drop — covers timeout,
+                // abort, and interrupt scenarios uniformly.
+                let guard = ProcessGuard::new(child);
+                // Normal path: take() marks guard as completed, then we
+                // wait for the child. Drop is now a no-op.
+                let output = guard.take().unwrap().wait_with_output()?;
+                Ok(output)
+            })
+            .await;
 
         match output {
             Ok(Ok(output)) => {
@@ -310,10 +317,7 @@ impl Tool for ShellTool {
                     error: if output.status.success() {
                         None
                     } else {
-                        Some(format!(
-                            "Exit code: {}",
-                            output.status.code().unwrap_or(-1)
-                        ))
+                        Some(format!("Exit code: {}", output.status.code().unwrap_or(-1)))
                     },
                     token_usage: None,
                 })
@@ -340,9 +344,7 @@ impl Tool for ShellTool {
                 Ok(ToolResult {
                     ok: false,
                     content: String::new(),
-                    error: Some(format!(
-                        "Internal error: shell task panicked: {join_err}"
-                    )),
+                    error: Some(format!("Internal error: shell task panicked: {join_err}")),
                     token_usage: None,
                 })
             }
@@ -369,7 +371,10 @@ mod tests {
     #[tokio::test]
     async fn test_empty_command_parameter() {
         let tool = make_tool("bash", "bash");
-        let result = tool.execute(serde_json::json!({"command": ""}), None).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"command": ""}), None)
+            .await
+            .unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("Missing 'command'"));
     }
@@ -390,16 +395,29 @@ mod tests {
             .unwrap();
         assert!(!result.ok);
         let err = result.error.unwrap();
-        assert!(err.contains("not found"), "Error should mention binary not found: {}", err);
-        assert!(err.contains("powershell"), "Error should hint at fallback tool: {}", err);
-        assert!(err.contains("NOT executed"), "Error should state command was not executed: {}", err);
+        assert!(
+            err.contains("not found"),
+            "Error should mention binary not found: {}",
+            err
+        );
+        assert!(
+            err.contains("powershell"),
+            "Error should hint at fallback tool: {}",
+            err
+        );
+        assert!(
+            err.contains("NOT executed"),
+            "Error should state command was not executed: {}",
+            err
+        );
     }
 
     #[tokio::test]
     async fn test_valid_command_executes() {
         // Use detected_shells() which provides the fully-resolved path
         let shells = crate::platform::detected_shells();
-        let primary = shells.first()
+        let primary = shells
+            .first()
             .expect("Should have at least one available shell");
 
         let tool = ShellTool::new(
@@ -410,7 +428,10 @@ mod tests {
             &primary.arg,
         );
         let result = tool
-            .execute(serde_json::json!({"command": "echo hello_agentcowork"}), Some("."))
+            .execute(
+                serde_json::json!({"command": "echo hello_agentcowork"}),
+                Some("."),
+            )
             .await
             .unwrap();
         assert!(result.ok, "echo should succeed: {:?}", result.error);

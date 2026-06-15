@@ -52,7 +52,9 @@ pub fn decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     }
 
     if data.len() < NONCE_LEN {
-        return Err(VaultError::DecryptionFailed("Data too short to contain nonce".into()));
+        return Err(VaultError::DecryptionFailed(
+            "Data too short to contain nonce".into(),
+        ));
     }
 
     let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
@@ -61,9 +63,9 @@ pub fn decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     let key = Key::from_slice(key);
     let cipher = ChaCha20Poly1305::new(key);
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| VaultError::DecryptionFailed("Decryption failed (wrong key or tampered data)".into()))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        VaultError::DecryptionFailed("Decryption failed (wrong key or tampered data)".into())
+    })?;
 
     Ok(plaintext)
 }

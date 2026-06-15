@@ -79,13 +79,13 @@ impl GrafeoStore {
         let procedural_count = graph.nodes_by_label(labels::PROCEDURAL).len();
         let autobiographical_count = graph.nodes_by_label(labels::AUTOBIOGRAPHICAL).len();
 
-        let total_nodes = episode_count + knowledge_count + procedural_count + autobiographical_count;
+        let total_nodes =
+            episode_count + knowledge_count + procedural_count + autobiographical_count;
 
         // Estimate size: episode_count * bytes_per_episode + other nodes * half that.
-        let estimated_size_bytes =
-            (episode_count * config.estimated_episode_bytes) as u64 +
-            ((knowledge_count + procedural_count + autobiographical_count) *
-                (config.estimated_episode_bytes / 2)) as u64;
+        let estimated_size_bytes = (episode_count * config.estimated_episode_bytes) as u64
+            + ((knowledge_count + procedural_count + autobiographical_count)
+                * (config.estimated_episode_bytes / 2)) as u64;
 
         // Pressure is the max of episode pressure and knowledge pressure.
         let episode_pressure = if config.max_episodes > 0 {
@@ -315,7 +315,10 @@ mod tests {
             store
                 .store_node(
                     labels::EPISODIC,
-                    [("content", grafeo_common::types::Value::from(format!("episode {i}")))],
+                    [(
+                        "content",
+                        grafeo_common::types::Value::from(format!("episode {i}")),
+                    )],
                 )
                 .unwrap();
         }
@@ -323,7 +326,10 @@ mod tests {
             store
                 .store_node(
                     labels::KNOWLEDGE,
-                    [("subject", grafeo_common::types::Value::from(format!("fact {i}")))],
+                    [(
+                        "subject",
+                        grafeo_common::types::Value::from(format!("fact {i}")),
+                    )],
                 )
                 .unwrap();
         }
@@ -357,7 +363,10 @@ mod tests {
             store
                 .store_node(
                     labels::EPISODIC,
-                    [("content", grafeo_common::types::Value::from(format!("e{i}")))],
+                    [(
+                        "content",
+                        grafeo_common::types::Value::from(format!("e{i}")),
+                    )],
                 )
                 .unwrap();
         }
@@ -408,7 +417,10 @@ mod tests {
             store
                 .store_node(
                     labels::EPISODIC,
-                    [("content", grafeo_common::types::Value::from(format!("e{i}")))],
+                    [(
+                        "content",
+                        grafeo_common::types::Value::from(format!("e{i}")),
+                    )],
                 )
                 .unwrap();
         }
@@ -446,7 +458,10 @@ mod tests {
         if !result.is_healthy {
             // Allow some minor issues on in-memory stores.
             assert!(
-                result.issues.iter().all(|i| !i.contains("GQL execution failed")),
+                result
+                    .issues
+                    .iter()
+                    .all(|i| !i.contains("GQL execution failed")),
                 "GQL should not fail on fresh store"
             );
         }

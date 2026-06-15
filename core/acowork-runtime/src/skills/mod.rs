@@ -8,6 +8,6 @@
 pub mod parser;
 
 pub use parser::{
-    parse_skill_md, load_skill_md, SkillDefinition, SkillRegistry,
-    SkillParseError, PlatformCompat, TestedModel,
+    PlatformCompat, SkillDefinition, SkillParseError, SkillRegistry, TestedModel, load_skill_md,
+    parse_skill_md,
 };

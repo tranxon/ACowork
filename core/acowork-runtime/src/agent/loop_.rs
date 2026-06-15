@@ -7,13 +7,11 @@
 //! S1.6: InboundQueue for external message injection
 //! S1.7: Parallel tool execution with per-tool timeout
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
-use acowork_core::providers::traits::{
-    ChatMessage, Provider,
-};
 use acowork_core::protocol::ModelCapabilitiesInfo;
+use acowork_core::providers::traits::{ChatMessage, Provider};
 use acowork_core::tools::traits::Tool;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -22,11 +20,11 @@ use crate::agent::agent_core::AgentCore;
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
+use crate::agent::loop_approval::{ApprovalDecision, ApprovalHandle};
 use crate::agent::session_state::SessionState;
 use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
-use crate::agent::loop_approval::{ApprovalDecision, ApprovalHandle};
 use crate::security::approval_gate::ApprovalRequest;
 use crate::tools::builtin::ask_user_question::QuestionOption;
 
@@ -83,10 +81,7 @@ pub enum ChunkEvent {
         tool_call_id: String,
     },
     /// Iteration limit reached — agent loop paused
-    IterationLimitPaused {
-        iteration: u32,
-        max_iterations: u32,
-    },
+    IterationLimitPaused { iteration: u32, max_iterations: u32 },
     /// Tool execution requires user approval (shell command risk check).
     /// The Desktop App displays a confirmation dialog; the Runtime pauses
     /// until Gateway delivers an InboundMessage::ApprovalDecision.
@@ -107,20 +102,12 @@ pub enum ChunkEvent {
         approval_timeout_secs: u64,
     },
     /// Agent response interrupted by user stop signal
-    Stopped {
-        content: String,
-    },
+    Stopped { content: String },
     /// Agent response complete (routed through chunk channel for ordering guarantee
     /// with preceding content chunks)
-    Done {
-        content: String,
-        message_id: String,
-    },
+    Done { content: String, message_id: String },
     /// Agent error (routed through chunk channel for ordering guarantee)
-    Error {
-        message: String,
-        message_id: String,
-    },
+    Error { message: String, message_id: String },
     /// LLM asks the user a question with pre-defined options.
     /// The Desktop App renders an AskQuestionCard with options + "Other" textarea;
     /// the Runtime pauses until Gateway delivers an InboundMessage::QuestionAnswer.
@@ -212,11 +199,14 @@ impl AgentLoop {
         observer: crate::debug::DebugObserverSlot,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
-        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
+        let (approval_tx, approval_rx) =
+            mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
         let max_tokens = config.history_max_tokens;
         let approval_handle = ApprovalHandle::new(approval_tx);
         let mut loop_ = Self {
-            core: AgentCore::new_with_observer(config, manifest, provider, tools, on_chunk, observer),
+            core: AgentCore::new_with_observer(
+                config, manifest, provider, tools, on_chunk, observer,
+            ),
             session: SessionState::new(max_tokens, budget, conversation),
             inbound_rx,
             approval_rx,
@@ -250,7 +240,13 @@ impl AgentLoop {
         conversation: Option<ConversationSession>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         Self::new_with_observer(
-            config, manifest, provider, tools, budget, on_chunk, conversation,
+            config,
+            manifest,
+            provider,
+            tools,
+            budget,
+            on_chunk,
+            conversation,
             crate::debug::DebugObserverSlot::production(),
         )
     }
@@ -270,9 +266,17 @@ impl AgentLoop {
         session: SessionState,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
-        let (approval_tx, approval_rx) = mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
+        let (approval_tx, approval_rx) =
+            mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
         let approval_handle = ApprovalHandle::new(approval_tx);
-        let mut session_loop = Self { core, session, inbound_rx, approval_rx, approval_handle: approval_handle.clone(), approval_next_id: AtomicU64::new(0) };
+        let mut session_loop = Self {
+            core,
+            session,
+            inbound_rx,
+            approval_rx,
+            approval_handle: approval_handle.clone(),
+            approval_next_id: AtomicU64::new(0),
+        };
         // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
         session_loop.core.approval_handle = Some(approval_handle);
         (session_loop, inbound_tx)
@@ -303,7 +307,10 @@ impl AgentLoop {
             .find(|t| t.spec().name == name)
             .ok_or_else(|| format!("Tool not found: {}", name))?;
 
-        match tool.execute(params, self.core.current_work_dir.as_deref()).await {
+        match tool
+            .execute(params, self.core.current_work_dir.as_deref())
+            .await
+        {
             Ok(result) if result.ok => Ok(result.content),
             Ok(result) => Err(result
                 .error
@@ -327,28 +334,43 @@ impl AgentLoop {
             .unwrap_or_default()
     }
 
-
-
-
     /// Run the agent loop for a single user message.
     ///
     /// When `replay` is true, the user message is NOT appended to history
     /// or persisted to JSONL (it is assumed to already be present, e.g.
     /// after a debug rewind + resume).  Memory retrieval is still performed
     /// in case the context builder has been modified by pending patches.
-    pub async fn run(&mut self, user_message: &str, context_builder: &mut ContextBuilder, content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>) -> Result<String> {
-        self.run_inner(user_message, context_builder, false, content_parts).await
+    pub async fn run(
+        &mut self,
+        user_message: &str,
+        context_builder: &mut ContextBuilder,
+        content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+    ) -> Result<String> {
+        self.run_inner(user_message, context_builder, false, content_parts)
+            .await
     }
 
     /// Re-run the agent loop after a debug resume (user message already in history).
     ///
     /// Same as [`run`] but skips the user-message append and JSONL persist steps.
-    pub async fn replay(&mut self, user_message: &str, context_builder: &mut ContextBuilder, content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>) -> Result<String> {
-        self.run_inner(user_message, context_builder, true, content_parts).await
+    pub async fn replay(
+        &mut self,
+        user_message: &str,
+        context_builder: &mut ContextBuilder,
+        content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+    ) -> Result<String> {
+        self.run_inner(user_message, context_builder, true, content_parts)
+            .await
     }
 
     /// Core agent loop shared by [`run`] and [`replay`].
-    async fn run_inner(&mut self, user_message: &str, context_builder: &mut ContextBuilder, replay: bool, content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>) -> Result<String> {
+    async fn run_inner(
+        &mut self,
+        user_message: &str,
+        context_builder: &mut ContextBuilder,
+        replay: bool,
+        content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+    ) -> Result<String> {
         // ADR-014: Idle → Streaming
         self.transition_status(SessionStatus::Streaming { message_id: None });
 
@@ -357,7 +379,9 @@ impl AgentLoop {
             // ADR-011: reset compaction flag — new user input means new content since last compaction
             self.session.is_compacted = false;
             if let Some(parts) = content_parts {
-                self.session.history.append(ChatMessage::user_multimodal(user_message, parts));
+                self.session
+                    .history
+                    .append(ChatMessage::user_multimodal(user_message, parts));
             } else {
                 self.session.history.append(ChatMessage::user(user_message));
             }
@@ -372,7 +396,9 @@ impl AgentLoop {
 
         // Retrieve relevant long-term memories and inject into context
         // P2-4 fix: capture memory node IDs for later traceability in record_turn_to_memory
-        let retrieved_memory_ids = self.retrieve_and_inject_memories(user_message, context_builder).await;
+        let retrieved_memory_ids = self
+            .retrieve_and_inject_memories(user_message, context_builder)
+            .await;
 
         // P3: Notify consolidation scheduler that agent is active —
         // resets idle timer so consolidation doesn't run during active use.
@@ -424,10 +450,10 @@ impl AgentLoop {
                             // ADR-014: Paused → Streaming
                             self.transition_status(SessionStatus::Streaming { message_id: None });
                             iteration = 0; // Reset counter
-                            
+
                             // Trim history before resuming to avoid context window overflow
                             self.trim_history_to_budget(&current_model);
-                            
+
                             break; // Resume main loop
                         }
                         Some(InboundMessage::Stop { reason }) => {
@@ -443,7 +469,9 @@ impl AgentLoop {
                                         reason = %reason,
                                         "UserOp: continue loop via fast channel"
                                     );
-                                    self.transition_status(SessionStatus::Streaming { message_id: None });
+                                    self.transition_status(SessionStatus::Streaming {
+                                        message_id: None,
+                                    });
                                     iteration = 0;
                                     self.trim_history_to_budget(&current_model);
                                     break;
@@ -469,7 +497,9 @@ impl AgentLoop {
                         }
                         None => {
                             // Channel closed — treat as stop
-                            tracing::warn!("Inbound channel closed during iteration limit pause, stopping");
+                            tracing::warn!(
+                                "Inbound channel closed during iteration limit pause, stopping"
+                            );
                             return Ok(String::new());
                         }
                     }
@@ -489,11 +519,24 @@ impl AgentLoop {
             const MAX_ITERATION_RETRIES: u32 = 2;
             let mut iteration_retries = 0u32;
             let iteration_result = loop {
-                match self.execute_single_iteration(iteration, context_builder, user_message, &retrieved_memory_ids, &current_model).await {
+                match self
+                    .execute_single_iteration(
+                        iteration,
+                        context_builder,
+                        user_message,
+                        &retrieved_memory_ids,
+                        &current_model,
+                    )
+                    .await
+                {
                     Ok(result) => break result,
-                    Err(RuntimeError::StreamError(ref err)) if err.retryable && iteration_retries < MAX_ITERATION_RETRIES => {
+                    Err(RuntimeError::StreamError(ref err))
+                        if err.retryable && iteration_retries < MAX_ITERATION_RETRIES =>
+                    {
                         iteration_retries += 1;
-                        let backoff = std::time::Duration::from_millis(1000 * 2u64.pow(iteration_retries - 1));
+                        let backoff = std::time::Duration::from_millis(
+                            1000 * 2u64.pow(iteration_retries - 1),
+                        );
                         let backoff = backoff.min(std::time::Duration::from_secs(10));
                         tracing::warn!(
                             iteration,
@@ -658,36 +701,42 @@ impl AgentLoop {
     ) -> Result<IterationResult> {
         // ── ① Debug observer hooks + resume ──
         self.core.debug_observer.check_pending_injection();
-        let debug_iter = self.core.debug_observer.on_iteration_start(
-            self.session.history.len(),
-        );
+        let debug_iter = self
+            .core
+            .debug_observer
+            .on_iteration_start(self.session.history.len());
         if let Some(result) = self.await_debug_resume().await {
             return Ok(result);
         }
-        self.core.debug_observer.apply_pending_patches(context_builder);
+        self.core
+            .debug_observer
+            .apply_pending_patches(context_builder);
         self.core.debug_observer.take_re_execute_pending();
 
         // ── ② Budget + context build ──
-        self.core.debug_observer.on_phase_enter(
-            crate::debug::protocol::DebugPhase::BudgetCheck,
-        ).await;
+        self.core
+            .debug_observer
+            .on_phase_enter(crate::debug::protocol::DebugPhase::BudgetCheck)
+            .await;
         self.check_budget_and_warn()?;
         self.trim_history_to_budget(&current_model);
         let mut chat_request = self.build_chat_request(context_builder, &current_model);
         if self.check_context_overflow_and_trim(&current_model) {
             chat_request = self.build_chat_request(context_builder, &current_model);
         }
-        self.core.debug_observer.on_phase_enter(
-            crate::debug::protocol::DebugPhase::BuildContext,
-        ).await;
-        self.core.debug_observer.on_context_built(
-            crate::debug::observer::ContextSnapshotRequest {
+        self.core
+            .debug_observer
+            .on_phase_enter(crate::debug::protocol::DebugPhase::BuildContext)
+            .await;
+        self.core
+            .debug_observer
+            .on_context_built(crate::debug::observer::ContextSnapshotRequest {
                 context_builder,
                 iteration: debug_iter,
                 model: &current_model,
                 all_tools: &self.core.all_tools,
-            },
-        ).await;
+            })
+            .await;
 
         // ── ②.7 Context depletion guard ──
         // After aggressive trimming, the chat request may contain only a
@@ -695,7 +744,9 @@ impl AgentLoop {
         // providers extract the system message into a separate `system` field,
         // leaving `messages` empty — causing a 400 "messages must not be empty"
         // API error. Detect this early and return a clear error instead.
-        let has_non_system = chat_request.messages.iter()
+        let has_non_system = chat_request
+            .messages
+            .iter()
             .any(|m| !matches!(m.role, acowork_core::providers::traits::MessageRole::System));
         if !has_non_system {
             tracing::error!(
@@ -705,20 +756,26 @@ impl AgentLoop {
             );
             return Err(RuntimeError::ContextOverflow(
                 "Context window exceeded: all conversation history was trimmed. \
-                 Please start a new conversation or reduce attached files.".to_string()
+                 Please start a new conversation or reduce attached files."
+                    .to_string(),
             ));
         }
 
         // ── ③ Call LLM + parse + usage ──
-        let response = self.call_llm_streaming(&chat_request, context_builder).await?;
-        self.core.debug_observer.on_phase_enter(
-            crate::debug::protocol::DebugPhase::LlmCall,
-        ).await;
+        let response = self
+            .call_llm_streaming(&chat_request, context_builder)
+            .await?;
+        self.core
+            .debug_observer
+            .on_phase_enter(crate::debug::protocol::DebugPhase::LlmCall)
+            .await;
         let has_tool_calls = response.tool_calls.is_some();
-        self.core.debug_observer.on_phase_enter(
-            crate::debug::protocol::DebugPhase::ParseResponse,
-        ).await;
-        self.process_llm_response_usage(&response, &current_model).await;
+        self.core
+            .debug_observer
+            .on_phase_enter(crate::debug::protocol::DebugPhase::ParseResponse)
+            .await;
+        self.process_llm_response_usage(&response, &current_model)
+            .await;
 
         // ── ④ Text response → early return ──
         if !has_tool_calls {
@@ -736,12 +793,18 @@ impl AgentLoop {
         }
 
         // ── ⑦ Dispatch + merge tool results ──
-        self.core.debug_observer.on_phase_enter(
-            crate::debug::protocol::DebugPhase::ToolExecution,
-        ).await;
-        let (tool_results, was_stopped) = self.dispatch_and_merge_tools(
-            calls_to_execute, &deduped_calls, &blocked_info, context_builder,
-        ).await;
+        self.core
+            .debug_observer
+            .on_phase_enter(crate::debug::protocol::DebugPhase::ToolExecution)
+            .await;
+        let (tool_results, was_stopped) = self
+            .dispatch_and_merge_tools(
+                calls_to_execute,
+                &deduped_calls,
+                &blocked_info,
+                context_builder,
+            )
+            .await;
 
         // ── ⑧ Persist + emit + append + pre-trim tool results ──
         self.persist_and_emit_tool_results(&deduped_calls, &tool_results);
@@ -770,11 +833,14 @@ impl AgentLoop {
 
         // ── ⑪ Debug phase completion ──
         tracing::debug!(iteration, "Loop iteration complete");
-        self.core.debug_observer.on_phase_enter(
-            crate::debug::protocol::DebugPhase::AppendHistory,
-        ).await;
+        self.core
+            .debug_observer
+            .on_phase_enter(crate::debug::protocol::DebugPhase::AppendHistory)
+            .await;
         self.core.debug_observer.on_phase_step(
-            crate::debug::protocol::DebugPhase::Idle, None, None,
+            crate::debug::protocol::DebugPhase::Idle,
+            None,
+            None,
         );
         self.core.debug_observer.on_phase_step_done().await;
 
@@ -853,8 +919,15 @@ mod tests {
                 }),
             }
         }
-        async fn execute(&self, params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
-            let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("no message");
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            let message = params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no message");
             Ok(acowork_core::tools::traits::ToolResult {
                 ok: true,
                 content: format!("Echo: {message}"),
@@ -903,9 +976,14 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("ok"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (_agent_loop, _inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         // Verify inbound sender works
-        assert!(_inbound_tx.try_send(InboundMessage::UserMessage("test".to_string())).is_ok());
+        assert!(
+            _inbound_tx
+                .try_send(InboundMessage::UserMessage("test".to_string()))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -915,9 +993,14 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("ok"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (_agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (_agent_loop, _inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         // Just verify construction works
-        assert!(_inbound_tx.try_send(InboundMessage::UserMessage("test".to_string())).is_ok());
+        assert!(
+            _inbound_tx
+                .try_send(InboundMessage::UserMessage("test".to_string()))
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -927,7 +1010,8 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("Hello from standalone!"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
@@ -945,7 +1029,8 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("Accumulated content here"));
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
@@ -963,7 +1048,8 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
@@ -977,7 +1063,8 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
@@ -997,14 +1084,19 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_err());
         // Error from chat_stream propagates as Core(AcoworkError::Provider(...))
         // because Provider trait returns acowork_core::AcoworkError
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("rate limit"), "Error should mention rate limit: {}", err_msg);
+        assert!(
+            err_msg.contains("rate limit"),
+            "Error should mention rate limit: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]
@@ -1019,7 +1111,8 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
@@ -1033,7 +1126,8 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
@@ -1048,12 +1142,14 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
         let _ = agent_loop.run("Hi", &mut context_builder, None).await;
         let messages = agent_loop.history().messages();
         // Should have: user message + assistant message
-        let assistant_msgs: Vec<_> = messages.iter()
+        let assistant_msgs: Vec<_> = messages
+            .iter()
             .filter(|m| matches!(m.role, MessageRole::Assistant))
             .collect();
         assert_eq!(assistant_msgs.len(), 1);
@@ -1067,7 +1163,8 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
         let _ = agent_loop.run("Hi", &mut context_builder, None).await;
         // Budget guard should have been updated with usage from the stream
@@ -1084,20 +1181,27 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         // Inject a user message before running
-        inbound_tx.try_send(InboundMessage::UserMessage("Injected question".to_string())).unwrap();
+        inbound_tx
+            .try_send(InboundMessage::UserMessage("Injected question".to_string()))
+            .unwrap();
 
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         // Verify the injected message appeared in history
         let messages = agent_loop.history().messages();
-        let injected: Vec<_> = messages.iter()
+        let injected: Vec<_> = messages
+            .iter()
             .filter(|m| m.content.contains("Injected question"))
             .collect();
-        assert!(!injected.is_empty(), "Injected user message should appear in history");
+        assert!(
+            !injected.is_empty(),
+            "Injected user message should appear in history"
+        );
     }
 
     #[tokio::test]
@@ -1107,21 +1211,28 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        inbound_tx.try_send(InboundMessage::SystemNotification {
-            notification_type: "identity_update".to_string(),
-            data: serde_json::json!({"key": "new_value"}),
-        }).unwrap();
+        inbound_tx
+            .try_send(InboundMessage::SystemNotification {
+                notification_type: "identity_update".to_string(),
+                data: serde_json::json!({"key": "new_value"}),
+            })
+            .unwrap();
 
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
-        let notif: Vec<_> = messages.iter()
+        let notif: Vec<_> = messages
+            .iter()
             .filter(|m| m.content.contains("[system:identity_update]"))
             .collect();
-        assert!(!notif.is_empty(), "System notification should appear in history");
+        assert!(
+            !notif.is_empty(),
+            "System notification should appear in history"
+        );
     }
 
     #[tokio::test]
@@ -1131,22 +1242,29 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        inbound_tx.try_send(InboundMessage::IntentMessage {
-            from: "com.acowork.system".to_string(),
-            action: "ping".to_string(),
-            params: serde_json::json!({}),
-        }).unwrap();
+        inbound_tx
+            .try_send(InboundMessage::IntentMessage {
+                from: "com.acowork.system".to_string(),
+                action: "ping".to_string(),
+                params: serde_json::json!({}),
+            })
+            .unwrap();
 
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
-        let intent: Vec<_> = messages.iter()
+        let intent: Vec<_> = messages
+            .iter()
             .filter(|m| m.content.contains("[intent:com.acowork.system:ping]"))
             .collect();
-        assert!(!intent.is_empty(), "Intent message should appear in history");
+        assert!(
+            !intent.is_empty(),
+            "Intent message should appear in history"
+        );
     }
 
     #[tokio::test]
@@ -1156,21 +1274,29 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         // Inject 10 messages concurrently
         for i in 0..10 {
-            inbound_tx.try_send(InboundMessage::UserMessage(format!("Message {i}"))).unwrap();
+            inbound_tx
+                .try_send(InboundMessage::UserMessage(format!("Message {i}")))
+                .unwrap();
         }
 
         let result = agent_loop.run("Hi", &mut context_builder, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
-        let injected: Vec<_> = messages.iter()
+        let injected: Vec<_> = messages
+            .iter()
             .filter(|m| m.content.starts_with("Message "))
             .collect();
-        assert_eq!(injected.len(), 10, "All 10 injected messages should appear in history");
+        assert_eq!(
+            injected.len(),
+            10,
+            "All 10 injected messages should appear in history"
+        );
     }
 
     #[tokio::test]
@@ -1180,11 +1306,16 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (agent_loop, inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (agent_loop, inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
 
         // Fill the channel (capacity 64)
         for i in 0..64 {
-            assert!(inbound_tx.try_send(InboundMessage::UserMessage(format!("Msg {i}"))).is_ok());
+            assert!(
+                inbound_tx
+                    .try_send(InboundMessage::UserMessage(format!("Msg {i}")))
+                    .is_ok()
+            );
         }
         // The 65th message should fail (backpressure) — but no panic
         let result = inbound_tx.try_send(InboundMessage::UserMessage("overflow".to_string()));
@@ -1200,7 +1331,8 @@ mod tests {
         let manifest = test_manifest();
         let budget = test_budget();
         let tools: Vec<Arc<dyn Tool>> = vec![];
-        let (mut agent_loop, _inbound_tx) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         // Run without any inbound messages — drain should return immediately
@@ -1210,7 +1342,11 @@ mod tests {
         assert!(result.is_ok());
         // Drain should not block — core path is sub-100ms, but allow up to 2s
         // for CI variance and debug-build overhead of the async runtime.
-        assert!(elapsed < std::time::Duration::from_secs(2), "Drain should be non-blocking, but took {:?}", elapsed);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "Drain should be non-blocking, but took {:?}",
+            elapsed
+        );
     }
 
     // ── S1.7: Parallel tool execution tests ───────────────────────────
@@ -1234,7 +1370,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
                 Ok(acowork_core::tools::traits::ToolResult {
                     ok: true,
@@ -1266,8 +1406,14 @@ mod tests {
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(SlowTool { name: "slow_a".to_string(), delay_ms: 100 }),
-            Arc::new(SlowTool { name: "slow_b".to_string(), delay_ms: 100 }),
+            Arc::new(SlowTool {
+                name: "slow_a".to_string(),
+                delay_ms: 100,
+            }),
+            Arc::new(SlowTool {
+                name: "slow_b".to_string(),
+                delay_ms: 100,
+            }),
         ];
 
         let provider = Arc::new(MockProvider::new(vec![
@@ -1299,18 +1445,28 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Run parallel", &mut context_builder, None).await;
+        let result = agent_loop
+            .run("Run parallel", &mut context_builder, None)
+            .await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_ok(), "Parallel execution should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Parallel execution should succeed: {:?}",
+            result
+        );
         // Parallel: ~100ms total. Serial would be ~200ms.
         // Allow generous margin (300ms) to avoid flaky tests
-        assert!(elapsed < std::time::Duration::from_millis(300),
-            "Parallel execution should be faster than serial: {:?}", elapsed);
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "Parallel execution should be faster than serial: {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]
@@ -1327,7 +1483,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
                     ok: false,
                     content: String::new(),
@@ -1347,7 +1507,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Success!".to_string(),
@@ -1377,10 +1541,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(FailTool),
-            Arc::new(SuccessTool),
-        ];
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FailTool), Arc::new(SuccessTool)];
 
         // LLM returns both tool calls, then text
         let provider = Arc::new(MockProvider::new(vec![
@@ -1412,10 +1573,13 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        let result = agent_loop.run("Test failure", &mut context_builder, None).await;
+        let result = agent_loop
+            .run("Test failure", &mut context_builder, None)
+            .await;
         assert!(result.is_ok(), "Should succeed even with one tool failure");
         assert_eq!(result.unwrap(), "Mixed results");
     }
@@ -1434,7 +1598,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 // Sleep for a long time — should be cut short by timeout.
                 // 5s is more than enough to verify timeout works (100ms threshold),
                 // while avoiding a 60s hang if timeout logic breaks.
@@ -1473,26 +1641,43 @@ mod tests {
             "After timeout",
         ));
 
-        let config = RuntimeConfig { iteration_timeout_ms: 100, ..Default::default() }; // 100ms timeout
+        let config = RuntimeConfig {
+            iteration_timeout_ms: 100,
+            ..Default::default()
+        }; // 100ms timeout
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Test timeout", &mut context_builder, None).await;
+        let result = agent_loop
+            .run("Test timeout", &mut context_builder, None)
+            .await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_ok(), "Should succeed with timeout error captured: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Should succeed with timeout error captured: {:?}",
+            result
+        );
         // Should complete within ~1 second (100ms timeout + overhead)
-        assert!(elapsed < std::time::Duration::from_secs(2),
-            "Should timeout quickly: {:?}", elapsed);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "Should timeout quickly: {:?}",
+            elapsed
+        );
 
         // Verify the timeout error message appears in history
         let messages = agent_loop.history().messages();
-        let timeout_msg: Vec<_> = messages.iter()
+        let timeout_msg: Vec<_> = messages
+            .iter()
             .filter(|m| m.content.contains("timed out"))
             .collect();
-        assert!(!timeout_msg.is_empty(), "Timeout error should appear in tool result history");
+        assert!(
+            !timeout_msg.is_empty(),
+            "Timeout error should appear in tool result history"
+        );
     }
 
     #[tokio::test]
@@ -1527,12 +1712,15 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         // The tool call will fail because shell is not in the tool registry
         // (empty tools vec), so it should produce "Unknown tool: shell"
-        let result = agent_loop.run("Run shell", &mut context_builder, None).await;
+        let result = agent_loop
+            .run("Run shell", &mut context_builder, None)
+            .await;
         // Should still succeed — error becomes tool result message
         assert!(result.is_ok());
     }
@@ -1556,7 +1744,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
                     ok: true,
                     content: self.output.clone(),
@@ -1590,9 +1782,18 @@ mod tests {
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(OrderedTool { name: "tool_a".to_string(), output: "Result A".to_string() }),
-            Arc::new(OrderedTool { name: "tool_b".to_string(), output: "Result B".to_string() }),
-            Arc::new(OrderedTool { name: "tool_c".to_string(), output: "Result C".to_string() }),
+            Arc::new(OrderedTool {
+                name: "tool_a".to_string(),
+                output: "Result A".to_string(),
+            }),
+            Arc::new(OrderedTool {
+                name: "tool_b".to_string(),
+                output: "Result B".to_string(),
+            }),
+            Arc::new(OrderedTool {
+                name: "tool_c".to_string(),
+                output: "Result C".to_string(),
+            }),
         ];
 
         let provider = Arc::new(MockProvider::new(vec![
@@ -1632,24 +1833,37 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        let result = agent_loop.run("Run ordered", &mut context_builder, None).await;
+        let result = agent_loop
+            .run("Run ordered", &mut context_builder, None)
+            .await;
         assert!(result.is_ok());
 
         // Verify that tool results in history are in order
         let messages = agent_loop.history().messages();
-        let tool_results: Vec<_> = messages.iter()
+        let tool_results: Vec<_> = messages
+            .iter()
             .filter(|m| matches!(m.role, MessageRole::Tool))
             .collect();
         assert_eq!(tool_results.len(), 3);
         // First tool result should be tool_a
-        assert!(tool_results[0].content.contains("Result A"), "First result should be A");
+        assert!(
+            tool_results[0].content.contains("Result A"),
+            "First result should be A"
+        );
         // Second should be tool_b
-        assert!(tool_results[1].content.contains("Result B"), "Second result should be B");
+        assert!(
+            tool_results[1].content.contains("Result B"),
+            "Second result should be B"
+        );
         // Third should be tool_c
-        assert!(tool_results[2].content.contains("Result C"), "Third result should be C");
+        assert!(
+            tool_results[2].content.contains("Result C"),
+            "Third result should be C"
+        );
     }
 
     // ── Fix #1: Iteration timeout with partial results ─────────────────
@@ -1670,7 +1884,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Fast result".to_string(),
@@ -1692,7 +1910,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 // Sleep longer than the iteration timeout (200ms).
                 // 5s is plenty to verify timeout works without risking a 60s hang.
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1725,10 +1947,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(FastTool),
-            Arc::new(SlowTool),
-        ];
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FastTool), Arc::new(SlowTool)];
 
         // LLM requests both tools; fast_tool completes quickly, slow_tool times out
         let provider = Arc::new(MockProvider::new(vec![
@@ -1765,29 +1984,45 @@ mod tests {
             ..Default::default()
         };
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Test iteration timeout", &mut context_builder, None).await;
+        let result = agent_loop
+            .run("Test iteration timeout", &mut context_builder, None)
+            .await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_ok(), "Should succeed with partial results: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Should succeed with partial results: {:?}",
+            result
+        );
         // Should complete within ~1 second (200ms iteration timeout + overhead)
-        assert!(elapsed < std::time::Duration::from_secs(2),
-            "Should complete quickly with iteration timeout: {:?}", elapsed);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "Should complete quickly with iteration timeout: {:?}",
+            elapsed
+        );
 
         // Verify the fast_tool result and slow_tool timeout both appear in history
         let messages = agent_loop.history().messages();
-        let tool_results: Vec<_> = messages.iter()
+        let tool_results: Vec<_> = messages
+            .iter()
             .filter(|m| matches!(m.role, MessageRole::Tool))
             .collect();
         // fast_tool should have its result
-        assert!(tool_results[0].content.contains("Fast result"),
-            "Fast tool should have its result");
+        assert!(
+            tool_results[0].content.contains("Fast result"),
+            "Fast tool should have its result"
+        );
         // slow_tool should have iteration timeout error
-        assert!(tool_results[1].content.contains("iteration timed out"),
-            "Slow tool should have iteration timeout error: {}", tool_results[1].content);
+        assert!(
+            tool_results[1].content.contains("iteration timed out"),
+            "Slow tool should have iteration timeout error: {}",
+            tool_results[1].content
+        );
     }
 
     #[tokio::test]
@@ -1808,7 +2043,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 // Sleep longer than tool_timeout (100ms) but shorter than iteration_timeout (30s)
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 Ok(acowork_core::tools::traits::ToolResult {
@@ -1853,27 +2092,45 @@ mod tests {
             ..Default::default()
         };
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Test tool timeout", &mut context_builder, None).await;
+        let result = agent_loop
+            .run("Test tool timeout", &mut context_builder, None)
+            .await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_ok(), "Should succeed with tool timeout error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Should succeed with tool timeout error: {:?}",
+            result
+        );
         // Should complete in ~100ms (tool timeout) + overhead, not 500ms
-        assert!(elapsed < std::time::Duration::from_secs(2),
-            "Should timeout at tool level: {:?}", elapsed);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "Should timeout at tool level: {:?}",
+            elapsed
+        );
 
         // Verify per-tool timeout message (not iteration timeout)
         let messages = agent_loop.history().messages();
-        let timeout_msg: Vec<_> = messages.iter()
+        let timeout_msg: Vec<_> = messages
+            .iter()
             .filter(|m| m.content.contains("timed out"))
             .collect();
-        assert!(!timeout_msg.is_empty(), "Per-tool timeout should be recorded");
+        assert!(
+            !timeout_msg.is_empty(),
+            "Per-tool timeout should be recorded"
+        );
         // Should NOT be an iteration timeout message
-        assert!(timeout_msg.iter().all(|m| !m.content.contains("iteration timed out")),
-            "Should be per-tool timeout, not iteration timeout");
+        assert!(
+            timeout_msg
+                .iter()
+                .all(|m| !m.content.contains("iteration timed out")),
+            "Should be per-tool timeout, not iteration timeout"
+        );
     }
 
     // ── Fix #2: Partial permission denial ──────────────────────────────
@@ -1900,7 +2157,11 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _params: serde_json::Value, _work_dir: Option<&str>) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
                     ok: true,
                     content: "Echo result".to_string(),
@@ -1963,25 +2224,39 @@ mod tests {
 
         let config = RuntimeConfig::default();
         let budget = test_budget();
-        let (mut agent_loop, _) = AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        let (mut agent_loop, _) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
 
-        let result = agent_loop.run("Test partial permission", &mut context_builder, None).await;
-        assert!(result.is_ok(), "Should succeed even with one tool permission denied: {:?}", result);
+        let result = agent_loop
+            .run("Test partial permission", &mut context_builder, None)
+            .await;
+        assert!(
+            result.is_ok(),
+            "Should succeed even with one tool permission denied: {:?}",
+            result
+        );
 
         // Verify echo result appears (it was executed) and shell has permission denied
         let messages = agent_loop.history().messages();
-        let tool_results: Vec<_> = messages.iter()
+        let tool_results: Vec<_> = messages
+            .iter()
             .filter(|m| matches!(m.role, MessageRole::Tool))
             .collect();
         assert_eq!(tool_results.len(), 2, "Should have 2 tool results");
         // First tool (echo) should have result
-        assert!(tool_results[0].content.contains("Echo result") || tool_results[0].content.contains("Unknown tool"),
-            "Echo tool should have result or unknown tool error");
+        assert!(
+            tool_results[0].content.contains("Echo result")
+                || tool_results[0].content.contains("Unknown tool"),
+            "Echo tool should have result or unknown tool error"
+        );
         // Second tool (shell) is not in the tool registry (permission denied),
         // so it should produce an "Unknown tool" error.
-        assert!(tool_results[1].content.contains("Unknown tool: shell"),
-            "Shell tool should be unknown (not in registry): {}", tool_results[1].content);
+        assert!(
+            tool_results[1].content.contains("Unknown tool: shell"),
+            "Shell tool should be unknown (not in registry): {}",
+            tool_results[1].content
+        );
     }
 
     // ── S1.9: Tool call argument robustness tests ──────────────────────
@@ -2006,12 +2281,22 @@ mod tests {
         let result = execute_single_tool(&tools, &tc, None).await;
 
         // Must NOT contain "Echo:" — tool was never called
-        assert!(!result.contains("Echo:"), "Tool should NOT be executed, got: {}", result);
+        assert!(
+            !result.contains("Echo:"),
+            "Tool should NOT be executed, got: {}",
+            result
+        );
         // Must contain the error message from the marker
-        assert!(result.contains("truncated during streaming"),
-            "Result should explain truncation: {}", result);
-        assert!(result.contains("NOT executed"),
-            "Result should state it was NOT executed: {}", result);
+        assert!(
+            result.contains("truncated during streaming"),
+            "Result should explain truncation: {}",
+            result
+        );
+        assert!(
+            result.contains("NOT executed"),
+            "Result should state it was NOT executed: {}",
+            result
+        );
     }
 
     /// Verify that genuinely unparseable JSON (e.g. LLM hallucinated output)
@@ -2033,12 +2318,22 @@ mod tests {
         let result = execute_single_tool(&tools, &tc, None).await;
 
         // Must NOT execute the tool
-        assert!(!result.contains("Echo:"), "Tool should NOT be executed on invalid JSON, got: {}", result);
+        assert!(
+            !result.contains("Echo:"),
+            "Tool should NOT be executed on invalid JSON, got: {}",
+            result
+        );
         // Must contain error explanation
-        assert!(result.contains("not valid JSON"),
-            "Result should explain JSON parse failure: {}", result);
-        assert!(result.contains("NOT executed"),
-            "Result should state it was NOT executed: {}", result);
+        assert!(
+            result.contains("not valid JSON"),
+            "Result should explain JSON parse failure: {}",
+            result
+        );
+        assert!(
+            result.contains("NOT executed"),
+            "Result should state it was NOT executed: {}",
+            result
+        );
     }
 
     /// Verify that valid JSON tool arguments execute normally (regression test
@@ -2057,7 +2352,10 @@ mod tests {
         };
 
         let result = execute_single_tool(&tools, &tc, None).await;
-        assert_eq!(result, "Echo: hello world",
-            "Valid tool call should execute normally, got: {}", result);
+        assert_eq!(
+            result, "Echo: hello world",
+            "Valid tool call should execute normally, got: {}",
+            result
+        );
     }
 }

@@ -10,9 +10,9 @@
 //! Agent must be running (HTTP API returns 409 if not).
 
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -106,7 +106,11 @@ async fn get_cached_config(state: &AppState, agent_id: &str) -> Option<Workspace
 /// ADR-009: IPC push is synchronous — we await the result before updating
 /// the in-memory cache. This avoids TOCTOU where the cache shows a config
 /// that Runtime never received (e.g. channel closed mid-push).
-async fn push_and_cache(state: &AppState, agent_id: &str, config: &WorkspaceConfig) -> Result<(), String> {
+async fn push_and_cache(
+    state: &AppState,
+    agent_id: &str,
+    config: &WorkspaceConfig,
+) -> Result<(), String> {
     let config_json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
@@ -131,10 +135,7 @@ async fn push_and_cache(state: &AppState, agent_id: &str, config: &WorkspaceConf
                     agent_id
                 ));
             }
-            tracing::info!(
-                "Pushed WorkspaceConfigUpdate to agent={}",
-                agent_id
-            );
+            tracing::info!("Pushed WorkspaceConfigUpdate to agent={}", agent_id);
         } else {
             // Agent has no active IPC session — cannot update workspace
             return Err(format!(
@@ -199,16 +200,22 @@ pub async fn add_workspace(
 ) -> Result<(StatusCode, Json<WorkspaceDir>), (StatusCode, Json<ApiError>)> {
     // Validate path exists and is a directory
     if !StdPath::new(&req.path).is_dir() {
-        return Err(ApiError::bad_request(&format!("Directory not found: {}", req.path)));
+        return Err(ApiError::bad_request(&format!(
+            "Directory not found: {}",
+            req.path
+        )));
     }
 
     // Load current config from cache
-    let mut config = get_cached_config(&state, &agent_id).await
+    let mut config = get_cached_config(&state, &agent_id)
+        .await
         .ok_or_else(|| ApiError::not_found("Agent not running — cannot add workspace"))?;
 
     // Check for duplicate path
     if config.additional_dirs.iter().any(|d| d.path == req.path) {
-        return Err(ApiError::bad_request("Directory already exists in workspace list"));
+        return Err(ApiError::bad_request(
+            "Directory already exists in workspace list",
+        ));
     }
 
     // Create new entry
@@ -227,7 +234,8 @@ pub async fn add_workspace(
     config.additional_dirs.push(new_dir);
 
     // Push to Runtime + update cache
-    push_and_cache(&state, &agent_id, &config).await
+    push_and_cache(&state, &agent_id, &config)
+        .await
         .map_err(|e| ApiError::internal(&e))?;
 
     Ok((StatusCode::CREATED, Json(result)))
@@ -239,11 +247,14 @@ pub async fn update_workspace(
     Path((agent_id, ws_id)): Path<(String, String)>,
     Json(req): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<WorkspaceDir>, (StatusCode, Json<ApiError>)> {
-    let mut config = get_cached_config(&state, &agent_id).await
+    let mut config = get_cached_config(&state, &agent_id)
+        .await
         .ok_or_else(|| ApiError::not_found("Agent not running — cannot update workspace"))?;
 
     // Find and update directory
-    let dir = config.additional_dirs.iter_mut()
+    let dir = config
+        .additional_dirs
+        .iter_mut()
         .find(|d| d.id == ws_id)
         .ok_or_else(|| ApiError::not_found(&format!("Workspace directory not found: {}", ws_id)))?;
 
@@ -257,7 +268,8 @@ pub async fn update_workspace(
     let updated = dir.clone();
 
     // Push to Runtime + update cache
-    push_and_cache(&state, &agent_id, &config).await
+    push_and_cache(&state, &agent_id, &config)
+        .await
         .map_err(|e| ApiError::internal(&e))?;
 
     Ok(Json(updated))
@@ -274,12 +286,18 @@ pub async fn set_current_workspace(
     Query(query): Query<SetCurrentWorkspaceQuery>,
     Json(req): Json<SetCurrentWorkspaceRequest>,
 ) -> Result<Json<WorkspaceListResponse>, (StatusCode, Json<ApiError>)> {
-    let mut config = get_cached_config(&state, &agent_id).await
+    let mut config = get_cached_config(&state, &agent_id)
+        .await
         .ok_or_else(|| ApiError::not_found("Agent not running — cannot set workspace"))?;
 
     // Validate workspace: either "__agent_home__" or an existing workspace ID
     let is_agent_home = req.workspace_id == "__agent_home__";
-    if !is_agent_home && !config.additional_dirs.iter().any(|d| d.id == req.workspace_id) {
+    if !is_agent_home
+        && !config
+            .additional_dirs
+            .iter()
+            .any(|d| d.id == req.workspace_id)
+    {
         return Err(ApiError::not_found(&format!(
             "Workspace directory not found: {}",
             req.workspace_id
@@ -332,7 +350,8 @@ pub async fn set_current_workspace(
     }
 
     // Push WorkspaceConfigUpdate to Runtime (updates list stats + cache)
-    push_and_cache(&state, &agent_id, &config).await
+    push_and_cache(&state, &agent_id, &config)
+        .await
         .map_err(|e| ApiError::internal(&e))?;
 
     Ok(Json(WorkspaceListResponse {
@@ -346,19 +365,24 @@ pub async fn delete_workspace(
     State(state): State<AppState>,
     Path((agent_id, ws_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let mut config = get_cached_config(&state, &agent_id).await
+    let mut config = get_cached_config(&state, &agent_id)
+        .await
         .ok_or_else(|| ApiError::not_found("Agent not running — cannot delete workspace"))?;
 
     // Check if exists
     if !config.additional_dirs.iter().any(|d| d.id == ws_id) {
-        return Err(ApiError::not_found(&format!("Workspace directory not found: {}", ws_id)));
+        return Err(ApiError::not_found(&format!(
+            "Workspace directory not found: {}",
+            ws_id
+        )));
     }
 
     // Remove directory
     config.additional_dirs.retain(|d| d.id != ws_id);
 
     // Push to Runtime + update cache
-    push_and_cache(&state, &agent_id, &config).await
+    push_and_cache(&state, &agent_id, &config)
+        .await
         .map_err(|e| ApiError::internal(&e))?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -424,7 +448,9 @@ fn resolve_tree_path(
         .canonicalize()
         .map_err(|e| format!("Cannot resolve workspace root: {}", e))?;
 
-    let rel = requested_path.trim_start_matches("./").trim_start_matches("/");
+    let rel = requested_path
+        .trim_start_matches("./")
+        .trim_start_matches("/");
     let abs = if rel.is_empty() || rel == "." {
         canonical_root.clone()
     } else {
@@ -442,7 +468,10 @@ fn resolve_tree_path(
                 // Validate containment without requiring the path to exist.
                 let rel_path = std::path::Path::new(rel);
                 // Reject `..` components that would escape the workspace
-                if rel_path.components().any(|c| c == std::path::Component::ParentDir) {
+                if rel_path
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+                {
                     return Err("Path traversal not allowed".to_string());
                 }
                 // Reject absolute-looking paths: on Windows `root.join("C:\\x")`
@@ -480,9 +509,10 @@ pub async fn list_tree(
     // Determine the workspace root based on workspace_id
     let workspace_root = {
         let gw = state.gateway_state.read().await;
-        let info = gw.running_agents.get(&agent_id).ok_or_else(|| {
-            ApiError::not_found("Agent not running — cannot browse workspace")
-        })?;
+        let info = gw
+            .running_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found("Agent not running — cannot browse workspace"))?;
 
         let ws_id = query.workspace_id.as_deref().unwrap_or("");
 
@@ -491,19 +521,19 @@ pub async fn list_tree(
             info.workspace.clone()
         } else {
             // Look up workspace path from cached config
-            let config = info.workspace_config_json.as_ref()
+            let config = info
+                .workspace_config_json
+                .as_ref()
                 .and_then(|json| serde_json::from_str::<WorkspaceConfig>(json).ok());
             match config {
-                Some(cfg) => {
-                    cfg.additional_dirs
-                        .iter()
-                        .find(|d| d.id == ws_id)
-                        .map(|d| d.path.clone())
-                        .ok_or_else(|| ApiError::not_found(&format!(
-                            "Workspace directory not found: {}",
-                            ws_id
-                        )))?
-                }
+                Some(cfg) => cfg
+                    .additional_dirs
+                    .iter()
+                    .find(|d| d.id == ws_id)
+                    .map(|d| d.path.clone())
+                    .ok_or_else(|| {
+                        ApiError::not_found(&format!("Workspace directory not found: {}", ws_id))
+                    })?,
                 None => {
                     return Err(ApiError::not_found(
                         "Agent workspace config not available yet",
@@ -514,9 +544,8 @@ pub async fn list_tree(
     };
 
     let requested_path = query.path.as_deref().unwrap_or("").to_string();
-    let (canonical_root, abs_path, rel_path) =
-        resolve_tree_path(&workspace_root, &requested_path)
-            .map_err(|e| ApiError::bad_request(&e))?;
+    let (canonical_root, abs_path, rel_path) = resolve_tree_path(&workspace_root, &requested_path)
+        .map_err(|e| ApiError::bad_request(&e))?;
 
     // Read directory entries
     let read_dir = match std::fs::read_dir(&abs_path) {
@@ -525,7 +554,7 @@ pub async fn list_tree(
             return Err(ApiError::internal(&format!(
                 "Failed to read directory: {}",
                 e
-            )))
+            )));
         }
     };
 
@@ -565,11 +594,7 @@ pub async fn list_tree(
                 .map(|rd| {
                     rd.filter(|e| {
                         e.as_ref()
-                            .map(|e| {
-                                !e.file_name()
-                                    .to_string_lossy()
-                                    .starts_with('.')
-                            })
+                            .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
                             .unwrap_or(false)
                     })
                     .count()
@@ -581,20 +606,15 @@ pub async fn list_tree(
                 entry_type: "directory".to_string(),
                 size: None,
                 modified: metadata.and_then(|m| {
-                    m.modified()
-                        .ok()
-                        .and_then(|t| {
-                            t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                .ok()
-                                .map(|d| {
-                                    chrono::DateTime::from_timestamp(
-                                        d.as_secs() as i64,
-                                        0,
-                                    )
+                    m.modified().ok().and_then(|t| {
+                        t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| {
+                                chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
                                     .map(|dt| dt.to_rfc3339())
                                     .unwrap_or_default()
-                                })
-                        })
+                            })
+                    })
                 }),
                 children_count: Some(children_count),
             });
@@ -604,20 +624,15 @@ pub async fn list_tree(
                 entry_type: "file".to_string(),
                 size: metadata.as_ref().map(|m| m.len()),
                 modified: metadata.and_then(|m| {
-                    m.modified()
-                        .ok()
-                        .and_then(|t| {
-                            t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                .ok()
-                                .map(|d| {
-                                    chrono::DateTime::from_timestamp(
-                                        d.as_secs() as i64,
-                                        0,
-                                    )
+                    m.modified().ok().and_then(|t| {
+                        t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| {
+                                chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
                                     .map(|dt| dt.to_rfc3339())
                                     .unwrap_or_default()
-                                })
-                        })
+                            })
+                    })
                 }),
                 children_count: None,
             });
@@ -749,9 +764,10 @@ async fn resolve_workspace_root(
     workspace_id: Option<&str>,
 ) -> Result<String, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
-    let info = gw.running_agents.get(agent_id).ok_or_else(|| {
-        ApiError::not_found("Agent not running — cannot access workspace")
-    })?;
+    let info = gw
+        .running_agents
+        .get(agent_id)
+        .ok_or_else(|| ApiError::not_found("Agent not running — cannot access workspace"))?;
 
     let ws_id = workspace_id.unwrap_or("");
     if ws_id.is_empty() || ws_id == "__agent_home__" {
@@ -767,10 +783,9 @@ async fn resolve_workspace_root(
                 .iter()
                 .find(|d| d.id == ws_id)
                 .map(|d| d.path.clone())
-                .ok_or_else(|| ApiError::not_found(&format!(
-                    "Workspace directory not found: {}",
-                    ws_id
-                ))),
+                .ok_or_else(|| {
+                    ApiError::not_found(&format!("Workspace directory not found: {}", ws_id))
+                }),
             None => Err(ApiError::not_found(
                 "Agent workspace config not available yet",
             )),
@@ -793,8 +808,7 @@ pub async fn read_file(
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
 
     // Verify it's a file
     if !abs_path.is_file() {
@@ -819,16 +833,12 @@ pub async fn read_file(
     }
 
     // Detect MIME type
-    let ext = abs_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mime_type = detect_mime(ext).unwrap_or("text/plain").to_string();
 
     // Read content
-    let content = std::fs::read_to_string(&abs_path).map_err(|e| {
-        ApiError::internal(&format!("Failed to read file: {}", e))
-    })?;
+    let content = std::fs::read_to_string(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?;
 
     Ok(Json(FileResponse {
         content,
@@ -868,15 +878,15 @@ pub async fn write_file(
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
 
     // Verify parent directory exists (allow creating new files)
     if let Some(parent) = abs_path.parent() {
         if !parent.is_dir() {
-            return Err(ApiError::bad_request(
-                &format!("Parent directory does not exist: {}", parent.display()),
-            ));
+            return Err(ApiError::bad_request(&format!(
+                "Parent directory does not exist: {}",
+                parent.display()
+            )));
         }
     }
 
@@ -904,9 +914,8 @@ pub async fn write_file(
     }
 
     // Write content
-    std::fs::write(&abs_path, &req.content).map_err(|e| {
-        ApiError::internal(&format!("Failed to write file: {}", e))
-    })?;
+    std::fs::write(&abs_path, &req.content)
+        .map_err(|e| ApiError::internal(&format!("Failed to write file: {}", e)))?;
 
     Ok(Json(WriteFileResponse {
         ok: true,
@@ -934,8 +943,7 @@ pub async fn create_file(
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
 
     // Create parent directories if needed
     if let Some(parent) = abs_path.parent() {
@@ -982,12 +990,10 @@ pub async fn create_dir(
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, dir_rel_path)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, dir_rel_path).map_err(|e| ApiError::bad_request(&e))?;
 
-    std::fs::create_dir_all(&abs_path).map_err(|e| {
-        ApiError::internal(&format!("Failed to create directory: {}", e))
-    })?;
+    std::fs::create_dir_all(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Failed to create directory: {}", e)))?;
 
     Ok((
         StatusCode::CREATED,
@@ -1020,20 +1026,19 @@ pub async fn delete_file(
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
 
-    let metadata = std::fs::metadata(&abs_path).map_err(|e| {
-        ApiError::internal(&format!("Failed to read file metadata: {}", e))
-    })?;
+    let metadata = std::fs::metadata(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Failed to read file metadata: {}", e)))?;
 
     if metadata.is_dir() {
-        return Err(ApiError::bad_request("Path is a directory, use /dir endpoint"));
+        return Err(ApiError::bad_request(
+            "Path is a directory, use /dir endpoint",
+        ));
     }
 
-    std::fs::remove_file(&abs_path).map_err(|e| {
-        ApiError::internal(&format!("Failed to delete file: {}", e))
-    })?;
+    std::fs::remove_file(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Failed to delete file: {}", e)))?;
 
     Ok(Json(CreateFileResponse {
         ok: true,
@@ -1061,20 +1066,17 @@ pub async fn delete_dir(
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, dir_rel_path)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, dir_rel_path).map_err(|e| ApiError::bad_request(&e))?;
 
-    let metadata = std::fs::metadata(&abs_path).map_err(|e| {
-        ApiError::internal(&format!("Failed to read directory metadata: {}", e))
-    })?;
+    let metadata = std::fs::metadata(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Failed to read directory metadata: {}", e)))?;
 
     if !metadata.is_dir() {
         return Err(ApiError::bad_request("Path is a file, use /file endpoint"));
     }
 
-    std::fs::remove_dir_all(&abs_path).map_err(|e| {
-        ApiError::internal(&format!("Failed to delete directory: {}", e))
-    })?;
+    std::fs::remove_dir_all(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Failed to delete directory: {}", e)))?;
 
     Ok(Json(CreateFileResponse {
         ok: true,
@@ -1087,8 +1089,8 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     std::fs::create_dir_all(dst)
         .map_err(|e| format!("Failed to create destination directory: {}", e))?;
 
-    let entries = std::fs::read_dir(src)
-        .map_err(|e| format!("Failed to read source directory: {}", e))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("Failed to read source directory: {}", e))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
@@ -1114,19 +1116,19 @@ pub async fn copy_item(
     Json(req): Json<CopyRequest>,
 ) -> Result<(StatusCode, Json<CreateFileResponse>), (StatusCode, Json<ApiError>)> {
     if req.source.is_empty() || req.dest.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'source' or 'dest' parameter"));
+        return Err(ApiError::bad_request(
+            "Missing required 'source' or 'dest' parameter",
+        ));
     }
 
     let workspace_root =
         resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_src, _rel_src) =
-        resolve_tree_path(&workspace_root, &req.source)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, &req.source).map_err(|e| ApiError::bad_request(&e))?;
 
     let (_canonical_root, abs_dest, _rel_dest) =
-        resolve_tree_path(&workspace_root, &req.dest)
-            .map_err(|e| ApiError::bad_request(&e))?;
+        resolve_tree_path(&workspace_root, &req.dest).map_err(|e| ApiError::bad_request(&e))?;
 
     if abs_dest.exists() {
         return Err(ApiError::bad_request(&format!(
@@ -1136,8 +1138,7 @@ pub async fn copy_item(
     }
 
     if abs_src.is_dir() {
-        copy_dir_recursive(&abs_src, &abs_dest)
-            .map_err(|e| ApiError::internal(&e))?;
+        copy_dir_recursive(&abs_src, &abs_dest).map_err(|e| ApiError::internal(&e))?;
     } else {
         // Ensure parent directory exists
         if let Some(parent) = abs_dest.parent() {
@@ -1145,9 +1146,8 @@ pub async fn copy_item(
                 ApiError::internal(&format!("Failed to create parent directory: {}", e))
             })?;
         }
-        std::fs::copy(&abs_src, &abs_dest).map_err(|e| {
-            ApiError::internal(&format!("Failed to copy file: {}", e))
-        })?;
+        std::fs::copy(&abs_src, &abs_dest)
+            .map_err(|e| ApiError::internal(&format!("Failed to copy file: {}", e)))?;
     }
 
     Ok((
@@ -1362,17 +1362,12 @@ fn is_binary_path(path: &std::path::Path) -> bool {
         // Images
         "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "tiff", "tif",
         // Audio / Video
-        "mp3", "mp4", "avi", "mov", "wav", "flac", "ogg", "webm", "mkv",
-        // Archives
-        "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst",
-        // Object / Library / Binary
-        "o", "obj", "a", "so", "dylib", "dll", "exe", "pdb", "lib", "class",
-        "wasm", "bc", "ll",
+        "mp3", "mp4", "avi", "mov", "wav", "flac", "ogg", "webm", "mkv", // Archives
+        "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", // Object / Library / Binary
+        "o", "obj", "a", "so", "dylib", "dll", "exe", "pdb", "lib", "class", "wasm", "bc", "ll",
         // Compiled / Cache
-        "pyc", "pyo", "rlib", "rmeta",
-        // Documents
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-        // Other binary
+        "pyc", "pyo", "rlib", "rmeta", // Documents
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", // Other binary
         "bin", "dat", "db", "sqlite", "sqlite3", "pack", "idx",
     ];
 
@@ -1384,8 +1379,8 @@ fn is_binary_path(path: &std::path::Path) -> bool {
 
 // ─── Routes ─────────────────────────────────────────────────────────────
 
-use axum::routing::{put, post};
 use axum::Router;
+use axum::routing::{post, put};
 
 /// Create workspace management routes
 pub fn workspace_routes() -> Router<AppState> {
@@ -1402,22 +1397,19 @@ pub fn workspace_routes() -> Router<AppState> {
             "/api/agents/{agent_id}/workspaces/{ws_id}",
             put(update_workspace).delete(delete_workspace),
         )
-        .route(
-            "/api/agents/{agent_id}/workspaces/tree",
-            get(list_tree),
-        )
+        .route("/api/agents/{agent_id}/workspaces/tree", get(list_tree))
         .route(
             "/api/agents/{agent_id}/workspaces/file",
-            get(read_file).put(write_file).post(create_file).delete(delete_file),
+            get(read_file)
+                .put(write_file)
+                .post(create_file)
+                .delete(delete_file),
         )
         .route(
             "/api/agents/{agent_id}/workspaces/dir",
             post(create_dir).delete(delete_dir),
         )
-        .route(
-            "/api/agents/{agent_id}/workspaces/copy",
-            post(copy_item),
-        )
+        .route("/api/agents/{agent_id}/workspaces/copy", post(copy_item))
         .route(
             "/api/agents/{agent_id}/workspaces/search",
             get(search_files),

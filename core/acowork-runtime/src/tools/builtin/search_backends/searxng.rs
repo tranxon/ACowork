@@ -73,11 +73,7 @@ impl SearchBackend for SearXngBackend {
         let resp = self
             .client
             .get(&url)
-            .query(&[
-                ("q", query),
-                ("format", "json"),
-                ("categories", "general"),
-            ])
+            .query(&[("q", query), ("format", "json"), ("categories", "general")])
             .timeout(self.search_timeout)
             .send()
             .await

@@ -7,7 +7,7 @@ use grafeo_common::types::Value;
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::retrieval::cosine_distance_to_similarity;
-use crate::types::{labels, Episode};
+use crate::types::{Episode, labels};
 
 impl GrafeoStore {
     /// Search episodes within a time range.
@@ -97,7 +97,9 @@ impl GrafeoStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<(Episode, f64)>> {
-        let results = self.db.text_search(labels::EPISODIC, "content", query, limit)?;
+        let results = self
+            .db
+            .text_search(labels::EPISODIC, "content", query, limit)?;
 
         let mut episodes = Vec::new();
         for (node_id, score) in results {
@@ -124,9 +126,9 @@ impl GrafeoStore {
         embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(Episode, f64)>> {
-        let raw = self
-            .db
-            .vector_search(labels::EPISODIC, "embedding", embedding, limit, None, None)?;
+        let raw =
+            self.db
+                .vector_search(labels::EPISODIC, "embedding", embedding, limit, None, None)?;
 
         let mut episodes = Vec::new();
         for (node_id, distance) in raw {

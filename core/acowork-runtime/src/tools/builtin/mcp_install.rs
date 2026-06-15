@@ -8,9 +8,9 @@
 //! [`McpConfigNotifier`](crate::mcp_notify::McpConfigNotifier) that the
 //! config has changed, triggering MCP server reconnection.
 
-use async_trait::async_trait;
 use acowork_core::protocol::{McpServerConfigDef, McpTransportDef};
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::agent_config::{load_agent_mcp_config, save_agent_mcp_config};
@@ -46,7 +46,8 @@ impl McpInstallTool {
                 after the next config reload. On failure, the config is rolled back. \
                 Parameters: name (unique identifier), transport (stdio/sse/http), \
                 command (executable path), args (command arguments), env (environment \
-                variables), url (for SSE/HTTP transport).".to_string(),
+                variables), url (for SSE/HTTP transport)."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -90,7 +91,10 @@ impl McpInstallTool {
     /// MCP configs are per-agent — they must always be written to the
     /// agent's home directory, not the session's project workspace.
     pub fn new(notifier: McpNotifyRef, agent_home: String) -> Self {
-        Self { notifier, agent_home }
+        Self {
+            notifier,
+            agent_home,
+        }
     }
 }
 
@@ -151,7 +155,11 @@ impl Tool for McpInstallTool {
 
         let args: Vec<String> = params["args"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let env: std::collections::HashMap<String, String> = params["env"]
@@ -221,7 +229,8 @@ impl Tool for McpInstallTool {
         match scratch_result {
             Ok(client) => {
                 // Verify: fetch tool names from the connected server
-                let tool_names: Vec<String> = client.tools().iter().map(|t| t.name.clone()).collect();
+                let tool_names: Vec<String> =
+                    client.tools().iter().map(|t| t.name.clone()).collect();
                 let tool_count = tool_names.len();
 
                 // Disconnect the scratch client

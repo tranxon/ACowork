@@ -165,12 +165,12 @@ mod tests {
         notifier.notify();
 
         // changed() should resolve immediately
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            rx.changed(),
-        )
-        .await;
-        assert!(result.is_ok(), "changed() should resolve immediately after notify");
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.changed()).await;
+        assert!(
+            result.is_ok(),
+            "changed() should resolve immediately after notify"
+        );
     }
 
     #[test]

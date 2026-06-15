@@ -3,8 +3,8 @@
 //! Implements the Phase 3 application-layer security as defined in
 //! `docs/08-security.md` §11: FileProvenance + ShellRisk + Approval Gate.
 
-pub mod file_provenance;
-pub mod shell_risk;
 pub mod approval_gate;
 pub mod audit_log;
+pub mod file_provenance;
 pub mod fs_watcher;
+pub mod shell_risk;

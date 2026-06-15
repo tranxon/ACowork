@@ -9,9 +9,7 @@
 //! - Memory limit configurable per tool instance
 //! - Cranelift optimizer set to Speed for best throughput
 
-use wasmtime::{
-    Config, Engine, Module, OptLevel,
-};
+use wasmtime::{Config, Engine, Module, OptLevel};
 
 use crate::error::RuntimeError;
 
@@ -275,13 +273,11 @@ pub mod wasm_generator {
             0x02, // 2 exports
             // Export "memory"
             0x06, // name length
-            b'm', b'e', b'm', b'o', b'r', b'y',
-            0x02, // export kind: memory
+            b'm', b'e', b'm', b'o', b'r', b'y', 0x02, // export kind: memory
             0x00, // memory index
             // Export "execute"
             0x07, // name length
-            b'e', b'x', b'e', b'c', b'u', b't', b'e',
-            0x00, // export kind: function
+            b'e', b'x', b'e', b'c', b'u', b't', b'e', 0x00, // export kind: function
             0x00, // function index
             // Code section
             0x0a, 0x09, // section id, length

@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::session_task::SessionMessage;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::session_state::SessionStatus;
 use crate::debug::DebugHandles;
-use super::session_task::SessionMessage;
 
 /// External handle for interacting with a running SessionTask.
 ///
@@ -57,7 +57,10 @@ impl SessionHandle {
     ///
     /// Returns an error if the session task has stopped and the channel
     /// is closed, or if the channel is full.
-    pub fn send(&self, msg: SessionMessage) -> Result<(), Box<tokio::sync::mpsc::error::TrySendError<SessionMessage>>> {
+    pub fn send(
+        &self,
+        msg: SessionMessage,
+    ) -> Result<(), Box<tokio::sync::mpsc::error::TrySendError<SessionMessage>>> {
         self.touch();
         self.inbound_tx.try_send(msg).map_err(Box::new)
     }
@@ -72,7 +75,7 @@ impl SessionHandle {
     pub fn send_inbound(
         &self,
         msg: InboundMessage,
-    ) -> Result<(), Box<tokio::sync::mpsc::error::TrySendError<InboundMessage> > > {
+    ) -> Result<(), Box<tokio::sync::mpsc::error::TrySendError<InboundMessage>>> {
         self.touch();
         self.agent_inbound_tx.try_send(msg).map_err(Box::new)
     }
@@ -95,11 +98,17 @@ impl SessionHandle {
 
     /// Update `last_active_at` to now. Called automatically on `send`/`send_inbound`.
     pub fn touch(&self) {
-        *self.last_active_at.lock().expect("last_active_at mutex poisoned") = Instant::now();
+        *self
+            .last_active_at
+            .lock()
+            .expect("last_active_at mutex poisoned") = Instant::now();
     }
 
     /// Read the last active timestamp.
     pub fn last_active_at(&self) -> Instant {
-        *self.last_active_at.lock().expect("last_active_at mutex poisoned")
+        *self
+            .last_active_at
+            .lock()
+            .expect("last_active_at mutex poisoned")
     }
 }

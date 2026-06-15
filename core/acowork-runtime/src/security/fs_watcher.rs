@@ -52,12 +52,13 @@ impl FsWatcher {
     pub fn new(workspace_dir: &Path) -> Result<Self, FsWatcherError> {
         let (tx, rx) = mpsc::unbounded_channel();
 
-        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res {
-                let _ = tx.send(event);
-            }
-        })
-        .map_err(|e| FsWatcherError::Init(e.to_string()))?;
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    let _ = tx.send(event);
+                }
+            })
+            .map_err(|e| FsWatcherError::Init(e.to_string()))?;
 
         // Start watching the workspace directory recursively
         watcher
@@ -189,8 +190,7 @@ pub fn is_executable_file(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let script_extensions = [
-        "sh", "bash", "zsh", "fish", "py", "rb", "pl", "pm",
-        "js", "ts", "lua", "php",
+        "sh", "bash", "zsh", "fish", "py", "rb", "pl", "pm", "js", "ts", "lua", "php",
     ];
     if script_extensions.contains(&ext) {
         return true;
@@ -322,7 +322,10 @@ mod tests {
 
             let events = watcher.recv_events(Duration::from_secs(2)).await;
             // We should get at least one event (Create or Modify).
-            assert!(!events.is_empty(), "Expected at least one FsEvent after file creation");
+            assert!(
+                !events.is_empty(),
+                "Expected at least one FsEvent after file creation"
+            );
         }
 
         let _ = fs::remove_dir_all(&dir);

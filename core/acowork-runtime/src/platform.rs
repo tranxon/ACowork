@@ -89,9 +89,7 @@ pub fn find_git_bash() -> Option<(String, String)> {
 
     // Fallback: check PATH using Windows "where" command.
     // Filter out WSL bash entries — they are NOT Git Bash.
-    if let Ok(output) = std::process::Command::new("where")
-        .arg("bash")
-        .output()
+    if let Ok(output) = std::process::Command::new("where").arg("bash").output()
         && output.status.success()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);

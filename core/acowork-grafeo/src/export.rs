@@ -12,9 +12,7 @@ use acowork_core::packaging::PackageOptions;
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::types::labels;
-use crate::types::{
-    AutobiographicalNode, Episode, KnowledgeNode, ProceduralNode,
-};
+use crate::types::{AutobiographicalNode, Episode, KnowledgeNode, ProceduralNode};
 
 // ---------------------------------------------------------------------------
 // FilteredNode
@@ -110,13 +108,12 @@ impl GrafeoStore {
                         .collect();
                     if let Ok(kn) = KnowledgeNode::from_properties(id, &props) {
                         let is_public = knowledge_privacy_is_public(&kn);
-                        let should_include = (is_public && include_public)
-                            || (!is_public && include_private);
+                        let should_include =
+                            (is_public && include_public) || (!is_public && include_private);
                         if should_include {
                             filtered.push(FilteredNode {
                                 label: labels::KNOWLEDGE.to_string(),
-                                data: serde_json::to_value(&kn)
-                                    .unwrap_or(serde_json::Value::Null),
+                                data: serde_json::to_value(&kn).unwrap_or(serde_json::Value::Null),
                             });
                         }
                     }
@@ -137,8 +134,7 @@ impl GrafeoStore {
                     if let Ok(pn) = ProceduralNode::from_properties(id, &props) {
                         filtered.push(FilteredNode {
                             label: labels::PROCEDURAL.to_string(),
-                            data: serde_json::to_value(&pn)
-                                .unwrap_or(serde_json::Value::Null),
+                            data: serde_json::to_value(&pn).unwrap_or(serde_json::Value::Null),
                         });
                     }
                 }
@@ -158,8 +154,7 @@ impl GrafeoStore {
                     if let Ok(an) = AutobiographicalNode::from_properties(id, &props) {
                         filtered.push(FilteredNode {
                             label: labels::AUTOBIOGRAPHICAL.to_string(),
-                            data: serde_json::to_value(&an)
-                                .unwrap_or(serde_json::Value::Null),
+                            data: serde_json::to_value(&an).unwrap_or(serde_json::Value::Null),
                         });
                     }
                 }
@@ -173,9 +168,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        AutobioCategory, KnowledgeSubType, NodeStatus,
-    };
+    use crate::types::{AutobioCategory, KnowledgeSubType, NodeStatus};
     use std::collections::HashMap;
 
     fn test_dt() -> chrono::DateTime<chrono::Utc> {
@@ -301,7 +294,9 @@ mod tests {
 
     /// Populate a test store with all node types.
     fn populate_test_store(store: &GrafeoStore) {
-        store.store_episode(&make_episode("sess-1", "Hello")).unwrap();
+        store
+            .store_episode(&make_episode("sess-1", "Hello"))
+            .unwrap();
         store
             .store_knowledge(&make_public_knowledge("agent", "framework", "AgentCowork"))
             .unwrap();
@@ -309,9 +304,15 @@ mod tests {
             .store_knowledge(&make_private_knowledge("user", "name", "Alice"))
             .unwrap();
         store
-            .store_knowledge(&make_sensitive_knowledge("user", "email", "alice@example.com"))
+            .store_knowledge(&make_sensitive_knowledge(
+                "user",
+                "email",
+                "alice@example.com",
+            ))
             .unwrap();
-        store.store_procedural(&make_procedural("deploy_flow")).unwrap();
+        store
+            .store_procedural(&make_procedural("deploy_flow"))
+            .unwrap();
         store
             .store_autobiographical(&make_autobiographical("name", "WeatherBot"))
             .unwrap();
@@ -432,7 +433,11 @@ mod tests {
         };
         let filtered = store.export_nodes_filtered(&opts).unwrap();
 
-        assert_eq!(filtered.len(), 1, "Only public knowledge should be included");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Only public knowledge should be included"
+        );
         assert_eq!(filtered[0].label, "Knowledge");
     }
 

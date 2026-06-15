@@ -85,7 +85,9 @@ pub fn build_glob_set(pattern: &str, literal_separator: bool) -> Result<GlobSet,
             .map_err(|e| format!("Invalid glob '{expanded}': {e}"))?;
         builder.add(glob);
     }
-    builder.build().map_err(|e| format!("Failed to build glob set: {e}"))
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build glob set: {e}"))
 }
 
 #[cfg(test)]

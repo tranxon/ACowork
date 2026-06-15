@@ -41,14 +41,10 @@ fn truncate_json_to_bytes(val: &serde_json::Value, max_bytes: usize) -> serde_js
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UserOp {
     /// Stop the current agent loop iteration.
-    StopLoop {
-        reason: String,
-    },
+    StopLoop { reason: String },
     /// Continue execution after iteration limit was reached.
     /// Resets the iteration counter and resumes the agent loop.
-    ContinueLoop {
-        reason: String,
-    },
+    ContinueLoop { reason: String },
     /// Tool approval decision from user (shell command risk confirmation).
     ApprovalDecision {
         request_id: String,
@@ -57,10 +53,7 @@ pub enum UserOp {
         reason: Option<String>,
     },
     /// User's answer to an ask_user_question prompt.
-    QuestionAnswer {
-        request_id: String,
-        answer: String,
-    },
+    QuestionAnswer { request_id: String, answer: String },
     /// Apply runtime configuration changes immediately.
     /// These are also persisted via the SessionTask channel
     /// (`SessionMessage::UpdateRuntimeConfig`) for tool definitions
@@ -91,9 +84,7 @@ pub enum InboundMessage {
         params: serde_json::Value,
     },
     /// Stop signal to stop the current agent loop iteration
-    Stop {
-        reason: String,
-    },
+    Stop { reason: String },
     /// Continue execution after iteration limit was reached.
     /// Resets the iteration counter and resumes the agent loop.
     ContinueExecution {
@@ -146,7 +137,10 @@ impl InboundMessage {
                     truncated = true;
                 }
             }
-            InboundMessage::SystemNotification { notification_type, data } => {
+            InboundMessage::SystemNotification {
+                notification_type,
+                data,
+            } => {
                 let data_str = data.to_string();
                 let header_overhead = notification_type.len() + "[system:] ".len();
                 let effective_limit = MAX_INBOUND_PAYLOAD_SIZE.saturating_sub(header_overhead);
@@ -161,7 +155,11 @@ impl InboundMessage {
                     truncated = true;
                 }
             }
-            InboundMessage::IntentMessage { from, action, params } => {
+            InboundMessage::IntentMessage {
+                from,
+                action,
+                params,
+            } => {
                 let params_str = params.to_string();
                 let header_overhead = from.len() + action.len() + "[intent::] ".len();
                 let effective_limit = MAX_INBOUND_PAYLOAD_SIZE.saturating_sub(header_overhead);
@@ -218,7 +216,12 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
-        if let InboundMessage::IntentMessage { from, action, params } = decoded {
+        if let InboundMessage::IntentMessage {
+            from,
+            action,
+            params,
+        } = decoded
+        {
             assert_eq!(from, "com.acowork.system");
             assert_eq!(action, "update_identity");
             assert_eq!(params["key"], "value");

@@ -3,12 +3,7 @@
 mod events;
 mod menu;
 
-use tauri::{
-    image::Image,
-    menu::MenuBuilder,
-    tray::TrayIconBuilder,
-    App,
-};
+use tauri::{App, image::Image, menu::MenuBuilder, tray::TrayIconBuilder};
 
 /// Set up the system tray
 pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {

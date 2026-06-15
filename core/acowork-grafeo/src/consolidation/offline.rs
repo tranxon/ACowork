@@ -13,7 +13,7 @@ use crate::consolidation::generalization::GeneralizationConfig;
 use crate::consolidation::triple_extraction::{ExtractedTriple, TripleExtractorLlm};
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{labels, AutobioCategory, AutobiographicalNode, KnowledgeNode, NodeStatus};
+use crate::types::{AutobioCategory, AutobiographicalNode, KnowledgeNode, NodeStatus, labels};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -118,9 +118,13 @@ impl GrafeoStore {
         // Step 2: Triple extraction from unconsolidated episodes (if LLM available).
         if let Some(llm_ref) = llm {
             if let Some(ref emb_fn) = embedding_fn {
-                let episode_contents = self.get_unconsolidated_episode_contents(config.batch_size)?;
+                let episode_contents =
+                    self.get_unconsolidated_episode_contents(config.batch_size)?;
                 if !episode_contents.is_empty() {
-                    match self.extract_triples(&episode_contents, llm_ref, emb_fn).await {
+                    match self
+                        .extract_triples(&episode_contents, llm_ref, emb_fn)
+                        .await
+                    {
                         Ok(extraction_result) => {
                             result.triples_extracted = extraction_result.triples.len();
 
@@ -129,7 +133,8 @@ impl GrafeoStore {
                             // This marks the old node as Dormant before the new
                             // triple is stored.
                             if !extraction_result.triples.is_empty() {
-                                let updated = self.apply_knowledge_updates(&extraction_result.triples)?;
+                                let updated =
+                                    self.apply_knowledge_updates(&extraction_result.triples)?;
                                 // Track: updated nodes are not "new" triples,
                                 // they replace existing ones.
                                 let _ = updated;
@@ -137,9 +142,8 @@ impl GrafeoStore {
 
                             // Step 3: Resolve conflicts between extracted and existing knowledge.
                             if extraction_result.deduplicated > 0 {
-                                let conflict_result = self
-                                    .resolve_conflicts_with_llm(llm_ref)
-                                    .await?;
+                                let conflict_result =
+                                    self.resolve_conflicts_with_llm(llm_ref).await?;
                                 result.conflicts_resolved = conflict_result.resolved;
                                 result.conflicts_evolution = conflict_result.evolution;
                                 result.conflicts_correction = conflict_result.correction;
@@ -158,9 +162,7 @@ impl GrafeoStore {
         // Step 4: Experience generalization (if embedding function provided)
         if let Some(ref emb_fn) = embedding_fn {
             let gen_config = gen_config.cloned().unwrap_or_default();
-            let gen_result = self
-                .run_generalization(llm, emb_fn, &gen_config)
-                .await?;
+            let gen_result = self.run_generalization(llm, emb_fn, &gen_config).await?;
             result.procedural_created = gen_result.nodes_created;
             result.procedural_boosted = gen_result.nodes_boosted;
         }
@@ -198,10 +200,8 @@ impl GrafeoStore {
         &self,
         config: &OfflineConsolidationConfig,
     ) -> Result<OfflineConsolidationResult> {
-        let pending_nodes = self.get_pending_for_consolidation(
-            config.min_pending_age_hours,
-            config.batch_size,
-        )?;
+        let pending_nodes =
+            self.get_pending_for_consolidation(config.min_pending_age_hours, config.batch_size)?;
 
         let mut result = OfflineConsolidationResult::default();
 
@@ -430,10 +430,7 @@ impl GrafeoStore {
         let mut groups: std::collections::HashMap<(String, String), Vec<&KnowledgeNode>> =
             std::collections::HashMap::new();
         for node in &active {
-            let key = (
-                node.subject.to_lowercase(),
-                node.predicate.to_lowercase(),
-            );
+            let key = (node.subject.to_lowercase(), node.predicate.to_lowercase());
             groups.entry(key).or_default().push(node);
         }
 
@@ -755,7 +752,9 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AutobioCategory, AutobiographicalNode, KnowledgeSubType, DEFAULT_EMBEDDING_DIM};
+    use crate::types::{
+        AutobioCategory, AutobiographicalNode, DEFAULT_EMBEDDING_DIM, KnowledgeSubType,
+    };
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
@@ -1006,7 +1005,10 @@ mod tests {
         }
 
         let compressed = store.compress_history_nodes(10).unwrap();
-        assert_eq!(compressed, 0, "no compression should happen with ≤ 10 nodes");
+        assert_eq!(
+            compressed, 0,
+            "no compression should happen with ≤ 10 nodes"
+        );
     }
 
     // =====================================================================
@@ -1041,12 +1043,22 @@ mod tests {
         assert!(compressed > 0, "should compress some History nodes");
 
         // Verify: some original nodes should be Dormant now.
-        let history = store.find_autobiographical_by_category(AutobioCategory::History).unwrap();
-        let dormant_count = history.iter().filter(|n| n.status == NodeStatus::Dormant).count();
+        let history = store
+            .find_autobiographical_by_category(AutobioCategory::History)
+            .unwrap();
+        let dormant_count = history
+            .iter()
+            .filter(|n| n.status == NodeStatus::Dormant)
+            .count();
         assert!(dormant_count > 0, "some original nodes should be Dormant");
 
         // Verify: a summary node should exist.
-        let summary = store.find_autobiographical_by_key("history_summary_2023-11").unwrap();
-        assert!(summary.is_some(), "a summary node should be created for the month");
+        let summary = store
+            .find_autobiographical_by_key("history_summary_2023-11")
+            .unwrap();
+        assert!(
+            summary.is_some(),
+            "a summary node should be created for the month"
+        );
     }
 }

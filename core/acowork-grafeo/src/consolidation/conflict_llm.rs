@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::consolidation::triple_extraction::{TripleExtractorLlm, LlmMessage};
+use crate::consolidation::triple_extraction::{LlmMessage, TripleExtractorLlm};
 use crate::error::{GrafeoError, Result};
 
 // ---------------------------------------------------------------------------
@@ -94,9 +94,7 @@ pub async fn classify_conflict(
         "Old knowledge: ({}, {}, {})\n\
          New knowledge: ({}, {}, {})\n\
          Evidence context: {}",
-        old_subject, old_predicate, old_object,
-        new_subject, new_predicate, new_object,
-        evidence,
+        old_subject, old_predicate, old_object, new_subject, new_predicate, new_object, evidence,
     );
 
     let messages = vec![
@@ -111,7 +109,10 @@ pub async fn classify_conflict(
     ];
 
     let response = llm.chat(messages).await.map_err(|e| {
-        GrafeoError::Memory(format!("LLM call failed during conflict classification: {}", e))
+        GrafeoError::Memory(format!(
+            "LLM call failed during conflict classification: {}",
+            e
+        ))
     })?;
 
     parse_classification(&response.content)
@@ -125,7 +126,10 @@ fn parse_classification(content: &str) -> Result<ConflictClassification> {
     let json_str = extract_json_object(content);
 
     let raw: RawClassification = serde_json::from_str(&json_str).map_err(|e| {
-        GrafeoError::Memory(format!("Failed to parse conflict classification response: {}", e))
+        GrafeoError::Memory(format!(
+            "Failed to parse conflict classification response: {}",
+            e
+        ))
     })?;
 
     let conflict_type = match raw.conflict_type.to_lowercase().as_str() {
@@ -190,7 +194,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TripleExtractorLlm for MockConflictLlm {
-        async fn chat(&self, _messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String> {
+        async fn chat(
+            &self,
+            _messages: Vec<LlmMessage>,
+        ) -> std::result::Result<LlmResponse, String> {
             Ok(LlmResponse {
                 content: self.response.clone(),
                 usage_tokens: Some(100),
@@ -209,11 +216,17 @@ mod tests {
         };
 
         let result = classify_conflict(
-            "user", "lives_in", "Beijing",
-            "user", "lives_in", "Shanghai",
+            "user",
+            "lives_in",
+            "Beijing",
+            "user",
+            "lives_in",
+            "Shanghai",
             Some("User said: I moved to Shanghai last month"),
             &llm,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.conflict_type, LlmConflictType::Evolution);
         assert_eq!(result.suggested_action, "replace");
@@ -232,11 +245,17 @@ mod tests {
         };
 
         let result = classify_conflict(
-            "user", "birthday", "March",
-            "user", "birthday", "May",
+            "user",
+            "birthday",
+            "March",
+            "user",
+            "birthday",
+            "May",
             Some("User said: Not March, it's May"),
             &llm,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.conflict_type, LlmConflictType::Correction);
         assert_eq!(result.suggested_action, "replace");
@@ -253,11 +272,17 @@ mod tests {
         };
 
         let result = classify_conflict(
-            "user", "likes", "Chinese food",
-            "user", "likes", "Western food",
+            "user",
+            "likes",
+            "Chinese food",
+            "user",
+            "likes",
+            "Western food",
             None,
             &llm,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.conflict_type, LlmConflictType::Ambiguous);
         assert_eq!(result.suggested_action, "keep_both");
@@ -303,7 +328,11 @@ mod tests {
 
     #[test]
     fn test_conflict_type_serde() {
-        for ct in [LlmConflictType::Evolution, LlmConflictType::Correction, LlmConflictType::Ambiguous] {
+        for ct in [
+            LlmConflictType::Evolution,
+            LlmConflictType::Correction,
+            LlmConflictType::Ambiguous,
+        ] {
             let json = serde_json::to_string(&ct).unwrap();
             let decoded: LlmConflictType = serde_json::from_str(&json).unwrap();
             assert_eq!(ct, decoded);

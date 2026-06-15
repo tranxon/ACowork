@@ -69,9 +69,7 @@ impl CliApprovalGate {
 
     /// Create with auto-approve mode (for testing).
     pub fn new_auto_approve() -> Self {
-        Self {
-            auto_approve: true,
-        }
+        Self { auto_approve: true }
     }
 }
 

@@ -21,7 +21,6 @@ use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Pro
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
 
-
 /// History manager for conversation
 pub struct HistoryManager {
     /// Conversation messages
@@ -157,12 +156,20 @@ impl HistoryManager {
             }
         }
 
-        tracing::debug!(old, new = prompt_tokens, "History token count calibrated from API usage");
+        tracing::debug!(
+            old,
+            new = prompt_tokens,
+            "History token count calibrated from API usage"
+        );
     }
 
     /// Append a message to history
     pub fn append(&mut self, message: ChatMessage) {
-        let tokens = self.counter.count_message(&message, self.model_for_counting(), Some(&self.protocol_type));
+        let tokens = self.counter.count_message(
+            &message,
+            self.model_for_counting(),
+            Some(&self.protocol_type),
+        );
         self.current_tokens += tokens;
         self.messages.push(message);
     }
@@ -170,7 +177,11 @@ impl HistoryManager {
     /// Append multiple messages
     pub fn extend(&mut self, messages: Vec<ChatMessage>) {
         for msg in &messages {
-            self.current_tokens += self.counter.count_message(msg, self.model_for_counting(), Some(&self.protocol_type));
+            self.current_tokens += self.counter.count_message(
+                msg,
+                self.model_for_counting(),
+                Some(&self.protocol_type),
+            );
         }
         self.messages.extend(messages);
     }
@@ -205,7 +216,10 @@ impl HistoryManager {
         self.current_tokens = self
             .messages
             .iter()
-            .map(|m| self.counter.count_message(m, self.model_for_counting(), Some(&self.protocol_type)))
+            .map(|m| {
+                self.counter
+                    .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
+            })
             .sum();
         tracing::info!(
             target_len,
@@ -225,7 +239,7 @@ impl HistoryManager {
         if self.current_tokens <= self.max_tokens {
             return 0;
         }
-    
+
         let mut removed = 0;
         // Never remove system messages; start from first user/assistant message
         let first_removable = self
@@ -233,28 +247,39 @@ impl HistoryManager {
             .iter()
             .position(|m| !matches!(m.role, MessageRole::System))
             .unwrap_or(0);
-    
-        while self.current_tokens > self.max_tokens && first_removable + removed < self.messages.len() - 1 {
+
+        while self.current_tokens > self.max_tokens
+            && first_removable + removed < self.messages.len() - 1
+        {
             let idx = first_removable + removed;
             if idx < self.messages.len() {
-                let tokens = self.counter.count_message(&self.messages[idx], self.model_for_counting(), Some(&self.protocol_type));
+                let tokens = self.counter.count_message(
+                    &self.messages[idx],
+                    self.model_for_counting(),
+                    Some(&self.protocol_type),
+                );
                 self.current_tokens = self.current_tokens.saturating_sub(tokens);
                 removed += 1;
             } else {
                 break;
             }
         }
-    
+
         if removed > 0 {
             // Actually remove the messages
             let end = first_removable + removed;
-            self.messages.drain(first_removable..end.min(self.messages.len()));
-            tracing::debug!(removed, remaining_tokens = self.current_tokens, "FIFO trimmed");
+            self.messages
+                .drain(first_removable..end.min(self.messages.len()));
+            tracing::debug!(
+                removed,
+                remaining_tokens = self.current_tokens,
+                "FIFO trimmed"
+            );
         }
-    
+
         removed
     }
-    
+
     /// Emergency trim — drastic measure for context overflow recovery.
     /// Keeps only the last 4 non-system messages.
     ///
@@ -297,7 +322,11 @@ impl HistoryManager {
             {
                 i += 1;
             } else {
-                let tokens = self.counter.count_message(&self.messages[i], self.model_for_counting(), Some(&self.protocol_type));
+                let tokens = self.counter.count_message(
+                    &self.messages[i],
+                    self.model_for_counting(),
+                    Some(&self.protocol_type),
+                );
                 self.current_tokens = self.current_tokens.saturating_sub(tokens);
                 self.messages.remove(i);
                 removed += 1;
@@ -501,8 +530,7 @@ impl HistoryManager {
             ));
         }
 
-        let prompt =
-            crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
+        let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
 
         let request = ChatRequest {
             model: model_name.to_string(),
@@ -541,11 +569,7 @@ impl HistoryManager {
     /// a compaction marker for [`last_compaction_index`].
     ///
     /// Returns the number of messages removed.
-    pub fn replace_middle_with_summary(
-        &mut self,
-        summary: &str,
-        keep_last_rounds: usize,
-    ) -> usize {
+    pub fn replace_middle_with_summary(&mut self, summary: &str, keep_last_rounds: usize) -> usize {
         // Count leading system messages
         let system_count = self
             .messages
@@ -617,7 +641,11 @@ impl HistoryManager {
 
         // Subtract tokens of removed messages
         for msg in &self.messages[system_count..tail_start] {
-            let tokens = self.counter.count_message(msg, self.model_for_counting(), Some(&self.protocol_type));
+            let tokens = self.counter.count_message(
+                msg,
+                self.model_for_counting(),
+                Some(&self.protocol_type),
+            );
             self.current_tokens = self.current_tokens.saturating_sub(tokens);
         }
 
@@ -631,7 +659,11 @@ impl HistoryManager {
             name: Some("compaction_summary".to_string()),
             ..Default::default()
         };
-        let summary_tokens = self.counter.count_message(&summary_msg, self.model_for_counting(), Some(&self.protocol_type));
+        let summary_tokens = self.counter.count_message(
+            &summary_msg,
+            self.model_for_counting(),
+            Some(&self.protocol_type),
+        );
         self.messages.insert(system_count, summary_msg);
         self.current_tokens += summary_tokens;
 
@@ -691,12 +723,19 @@ mod tests {
         let mut hm = HistoryManager::new(50); // Very small budget
         hm.append(make_message(MessageRole::System, "System prompt"));
         for i in 0..10 {
-            hm.append(make_message(MessageRole::User, &format!("Message {i} with some content to fill tokens")));
+            hm.append(make_message(
+                MessageRole::User,
+                &format!("Message {i} with some content to fill tokens"),
+            ));
         }
         let removed = hm.trim_fifo();
         assert!(removed > 0);
         // System message should still be there
-        assert!(hm.messages().iter().any(|m| matches!(m.role, MessageRole::System)));
+        assert!(
+            hm.messages()
+                .iter()
+                .any(|m| matches!(m.role, MessageRole::System))
+        );
     }
 
     #[test]
@@ -730,10 +769,14 @@ mod tests {
         // but NOT the compaction marker
         assert_eq!(removed, 6);
         // Compaction marker should still be present
-        let has_marker = hm.messages().iter().any(|m| {
-            m.name.as_deref() == Some("compaction_summary")
-        });
-        assert!(has_marker, "Compaction marker should survive emergency trim");
+        let has_marker = hm
+            .messages()
+            .iter()
+            .any(|m| m.name.as_deref() == Some("compaction_summary"));
+        assert!(
+            has_marker,
+            "Compaction marker should survive emergency trim"
+        );
     }
 
     #[test]
@@ -751,12 +794,20 @@ mod tests {
         assert_eq!(hm.len(), 3); // No messages removed
 
         // The tool message should now be truncated
-        let tool_msg = hm.messages().iter().find(|m| matches!(m.role, MessageRole::Tool)).unwrap();
+        let tool_msg = hm
+            .messages()
+            .iter()
+            .find(|m| matches!(m.role, MessageRole::Tool))
+            .unwrap();
         assert!(tool_msg.content.len() < long_content.len());
         assert!(tool_msg.content.contains("[...truncated"));
 
         // System message should NOT be truncated
-        let sys_msg = hm.messages().iter().find(|m| matches!(m.role, MessageRole::System)).unwrap();
+        let sys_msg = hm
+            .messages()
+            .iter()
+            .find(|m| matches!(m.role, MessageRole::System))
+            .unwrap();
         assert_eq!(sys_msg.content, "System prompt");
     }
 
@@ -782,10 +833,13 @@ mod tests {
     #[test]
     fn test_sanitize_fixes_invalid_arguments() {
         let mut messages = vec![
-            ChatMessage::assistant_with_tools("", vec![
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![
                     make_tool_call("tc_1", "read_file", "not valid json{{"),
                     make_tool_call("tc_2", "write_file", r#"{"path":"/tmp"}"#),
-                ]),
+                ],
+            ),
             make_tool_result("tc_1", "result 1"),
             make_tool_result("tc_2", "result 2"),
         ];
@@ -803,9 +857,10 @@ mod tests {
     #[test]
     fn test_sanitize_removes_orphaned_tool_result() {
         let mut messages = vec![
-            ChatMessage::assistant_with_tools("I'll help you", vec![
-                    make_tool_call("tc_1", "read_file", "{}"),
-                ]),
+            ChatMessage::assistant_with_tools(
+                "I'll help you",
+                vec![make_tool_call("tc_1", "read_file", "{}")],
+            ),
             make_tool_result("tc_1", "result 1"),
             make_tool_result("tc_orphan", "orphaned result"),
         ];
@@ -820,10 +875,13 @@ mod tests {
     #[test]
     fn test_sanitize_removes_orphaned_tool_call() {
         let mut messages = vec![
-            ChatMessage::assistant_with_tools("", vec![
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![
                     make_tool_call("tc_1", "read_file", "{}"),
                     make_tool_call("tc_2", "write_file", "{}"),
-                ]),
+                ],
+            ),
             make_tool_result("tc_1", "result 1"),
             // tc_2 has no result
         ];
@@ -858,9 +916,10 @@ mod tests {
         let mut messages = vec![
             make_message(MessageRole::System, "System"),
             make_message(MessageRole::User, "Hello"),
-            ChatMessage::assistant_with_tools("Let me check", vec![
-                    make_tool_call("tc_1", "search", "{}"),
-                ]),
+            ChatMessage::assistant_with_tools(
+                "Let me check",
+                vec![make_tool_call("tc_1", "search", "{}")],
+            ),
             make_tool_result("tc_1", "Found it"),
             make_message(MessageRole::Assistant, "Here's the answer"),
         ];
@@ -879,9 +938,10 @@ mod tests {
     #[test]
     fn test_sanitize_is_idempotent() {
         let mut messages = vec![
-            ChatMessage::assistant_with_tools("", vec![
-                    make_tool_call("tc_1", "read_file", "not json"),
-                ]),
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![make_tool_call("tc_1", "read_file", "not json")],
+            ),
             make_tool_result("tc_1", "result 1"),
         ];
 
@@ -900,12 +960,13 @@ mod tests {
 
     #[test]
     fn test_sanitize_clears_tool_calls_when_all_orphaned() {
-        let mut messages = vec![
-            ChatMessage::assistant_with_tools("Let me check", vec![
-                    make_tool_call("tc_1", "search", "{}"),
-                    make_tool_call("tc_2", "read", "{}"),
-                ]),
-        ];
+        let mut messages = vec![ChatMessage::assistant_with_tools(
+            "Let me check",
+            vec![
+                make_tool_call("tc_1", "search", "{}"),
+                make_tool_call("tc_2", "read", "{}"),
+            ],
+        )];
         // No tool results at all — both tool_calls should be removed
 
         HistoryManager::sanitize_messages(&mut messages);
@@ -930,33 +991,37 @@ mod tests {
 
         // Q1
         hm.append(make_message(MessageRole::User, "Question 1"));
-        hm.append(ChatMessage::assistant_with_tools("Searching", vec![
-            make_tool_call("tc_1", "search", "{}"),
-        ]));
+        hm.append(ChatMessage::assistant_with_tools(
+            "Searching",
+            vec![make_tool_call("tc_1", "search", "{}")],
+        ));
         hm.append(make_tool_result("tc_1", "Result for Q1"));
         hm.append(make_message(MessageRole::Assistant, "Answer 1"));
 
         // Q2
         hm.append(make_message(MessageRole::User, "Question 2"));
-        hm.append(ChatMessage::assistant_with_tools("Searching again", vec![
-            make_tool_call("tc_2", "search", "{}"),
-        ]));
+        hm.append(ChatMessage::assistant_with_tools(
+            "Searching again",
+            vec![make_tool_call("tc_2", "search", "{}")],
+        ));
         hm.append(make_tool_result("tc_2", "Result for Q2"));
         hm.append(make_message(MessageRole::Assistant, "Answer 2"));
 
         // Q3
         hm.append(make_message(MessageRole::User, "Question 3"));
-        hm.append(ChatMessage::assistant_with_tools("Searching third", vec![
-            make_tool_call("tc_3", "search", "{}"),
-        ]));
+        hm.append(ChatMessage::assistant_with_tools(
+            "Searching third",
+            vec![make_tool_call("tc_3", "search", "{}")],
+        ));
         hm.append(make_tool_result("tc_3", "Result for Q3"));
         hm.append(make_message(MessageRole::Assistant, "Answer 3"));
 
         // Q4
         hm.append(make_message(MessageRole::User, "Question 4"));
-        hm.append(ChatMessage::assistant_with_tools("Searching fourth", vec![
-            make_tool_call("tc_4", "search", "{}"),
-        ]));
+        hm.append(ChatMessage::assistant_with_tools(
+            "Searching fourth",
+            vec![make_tool_call("tc_4", "search", "{}")],
+        ));
         hm.append(make_tool_result("tc_4", "Result for Q4"));
         hm.append(make_message(MessageRole::Assistant, "Answer 4"));
 
@@ -967,18 +1032,22 @@ mod tests {
 
         // Q1 (tc_1) should be compacted
         let has_tc1 = messages.iter().any(|m| {
-            m.tool_calls.as_ref()
+            m.tool_calls
+                .as_ref()
                 .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == "tc_1"))
         });
         assert!(!has_tc1, "Q1 should be compacted");
 
         // Q4 must be complete (User + Assistant tc + Tool result)
         let has_tc4_call = messages.iter().any(|m| {
-            m.tool_calls.as_ref()
+            m.tool_calls
+                .as_ref()
                 .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == "tc_4"))
         });
         assert!(has_tc4_call, "Q4 tool_call should be preserved");
-        let has_tc4_result = messages.iter().any(|m| m.tool_call_id.as_deref() == Some("tc_4"));
+        let has_tc4_result = messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("tc_4"));
         assert!(has_tc4_result, "Q4 tool result should be preserved");
 
         // Key assertion: sanitize should NOT remove any messages from the tail.
@@ -995,7 +1064,8 @@ mod tests {
             if msg.role == MessageRole::Tool {
                 if let Some(ref tcid) = msg.tool_call_id {
                     let has_call = messages_clone.iter().any(|m| {
-                        m.tool_calls.as_ref()
+                        m.tool_calls
+                            .as_ref()
                             .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == *tcid))
                     });
                     assert!(has_call, "Tool result {tcid} has matching Assistant");
@@ -1015,9 +1085,10 @@ mod tests {
 
         // 5 rounds of tool calls
         for i in 1..=5 {
-            hm.append(ChatMessage::assistant_with_tools(&format!("Round {i}"), vec![
-                make_tool_call(&format!("tc_{i}"), "tool", "{}"),
-            ]));
+            hm.append(ChatMessage::assistant_with_tools(
+                &format!("Round {i}"),
+                vec![make_tool_call(&format!("tc_{i}"), "tool", "{}")],
+            ));
             hm.append(make_tool_result(&format!("tc_{i}"), &format!("Result {i}")));
         }
 
@@ -1031,8 +1102,7 @@ mod tests {
 
         // Verify compaction summary exists
         let has_summary = messages.iter().any(|m| {
-            m.role == MessageRole::Assistant
-                && m.name.as_deref() == Some("compaction_summary")
+            m.role == MessageRole::Assistant && m.name.as_deref() == Some("compaction_summary")
         });
         assert!(has_summary, "Compaction summary should be present");
 
@@ -1040,12 +1110,15 @@ mod tests {
         for i in 4..=5 {
             let tc_id = format!("tc_{i}");
             let has_call = messages.iter().any(|m| {
-                m.tool_calls.as_ref()
+                m.tool_calls
+                    .as_ref()
                     .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == tc_id))
             });
             assert!(has_call, "Tool call {tc_id} should be preserved");
 
-            let has_result = messages.iter().any(|m| m.tool_call_id.as_deref() == Some(&tc_id));
+            let has_result = messages
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some(&tc_id));
             assert!(has_result, "Tool result {tc_id} should be preserved");
         }
 
@@ -1053,7 +1126,8 @@ mod tests {
         for i in 1..=3 {
             let tc_id = format!("tc_{i}");
             let has_call = messages.iter().any(|m| {
-                m.tool_calls.as_ref()
+                m.tool_calls
+                    .as_ref()
                     .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == tc_id))
             });
             assert!(!has_call, "Tool call {tc_id} should be compacted");

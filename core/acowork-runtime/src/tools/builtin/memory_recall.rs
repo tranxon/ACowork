@@ -6,8 +6,8 @@
 //! parameter for future embedding/hybrid search.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -29,10 +29,7 @@ pub struct MemoryRecallTool {
 }
 
 impl MemoryRecallTool {
-    pub fn new(
-        agent_id: &str,
-        handle: Option<Arc<crate::memory::MemorySessionHandle>>,
-    ) -> Self {
+    pub fn new(agent_id: &str, handle: Option<Arc<crate::memory::MemorySessionHandle>>) -> Self {
         Self {
             agent_id: agent_id.to_string(),
             handle,
@@ -79,7 +76,11 @@ impl Tool for MemoryRecallTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let since = params.get("since").and_then(|v| v.as_str());
         let until = params.get("until").and_then(|v| v.as_str());
@@ -90,7 +91,8 @@ impl Tool for MemoryRecallTool {
                 ok: false,
                 content: String::new(),
                 error: Some(
-                    "Provide at least 'query' (keywords) or time range ('since'/'until')".to_string(),
+                    "Provide at least 'query' (keywords) or time range ('since'/'until')"
+                        .to_string(),
                 ),
                 token_usage: None,
             });
@@ -98,7 +100,8 @@ impl Tool for MemoryRecallTool {
 
         // Validate date strings
         if let Some(s) = since
-            && chrono::DateTime::parse_from_rfc3339(s).is_err() {
+            && chrono::DateTime::parse_from_rfc3339(s).is_err()
+        {
             return Ok(ToolResult {
                 ok: false,
                 content: String::new(),
@@ -109,7 +112,8 @@ impl Tool for MemoryRecallTool {
             });
         }
         if let Some(u) = until
-            && chrono::DateTime::parse_from_rfc3339(u).is_err() {
+            && chrono::DateTime::parse_from_rfc3339(u).is_err()
+        {
             return Ok(ToolResult {
                 ok: false,
                 content: String::new(),
@@ -124,7 +128,8 @@ impl Tool for MemoryRecallTool {
                 chrono::DateTime::parse_from_rfc3339(s),
                 chrono::DateTime::parse_from_rfc3339(u),
             )
-            && s_dt >= u_dt {
+            && s_dt >= u_dt
+        {
             return Ok(ToolResult {
                 ok: false,
                 content: String::new(),
@@ -135,7 +140,8 @@ impl Tool for MemoryRecallTool {
 
         // Validate search_mode
         if let Some(mode) = params.get("search_mode").and_then(|v| v.as_str())
-            && !["bm25", "embedding", "hybrid"].contains(&mode) {
+            && !["bm25", "embedding", "hybrid"].contains(&mode)
+        {
             return Ok(ToolResult {
                 ok: false,
                 content: String::new(),
@@ -165,29 +171,25 @@ impl Tool for MemoryRecallTool {
             }
         };
 
-        let exclude_session_id = self
-            .handle
-            .as_ref()
-            .and_then(|h| h.current_session_id());
+        let exclude_session_id = self.handle.as_ref().and_then(|h| h.current_session_id());
 
         // Build memory query with deep recall strategy.
         // LLM can override the limit via the 'limit' parameter.
         let mut memory_query = MemoryQuery::deep_recall(query.to_string(), exclude_session_id);
         memory_query.limit = limit;
 
-        let manager = crate::memory::MemoryManager::new(
-            crate::memory::MemoryManagerConfig::default(),
-        );
+        let manager =
+            crate::memory::MemoryManager::new(crate::memory::MemoryManagerConfig::default());
 
         // Pass embedding provider from session handle so retrieve() can
         // auto-generate query embeddings (Ollama → Remote fallback).
-        let emb_provider = self
-            .handle
-            .as_ref()
-            .and_then(|h| h.embedding());
+        let emb_provider = self.handle.as_ref().and_then(|h| h.embedding());
         let emb_deref = emb_provider.as_deref();
 
-        match manager.retrieve(&*store, &mut memory_query, emb_deref).await {
+        match manager
+            .retrieve(&*store, &mut memory_query, emb_deref)
+            .await
+        {
             Ok(retrieval) => {
                 if retrieval.memories.is_empty() {
                     return Ok(ToolResult {
@@ -302,10 +304,13 @@ mod tests {
     async fn test_memory_recall_with_time_range() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({
-                "since": "2025-01-01T00:00:00Z",
-                "until": "2025-12-31T23:59:59Z"
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "since": "2025-01-01T00:00:00Z",
+                    "until": "2025-12-31T23:59:59Z"
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -326,24 +331,35 @@ mod tests {
     async fn test_memory_recall_since_after_until() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({
-                "since": "2026-01-01T00:00:00Z",
-                "until": "2025-01-01T00:00:00Z"
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "since": "2026-01-01T00:00:00Z",
+                    "until": "2025-01-01T00:00:00Z"
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("'since' must be before 'until'"));
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("'since' must be before 'until'")
+        );
     }
 
     #[tokio::test]
     async fn test_memory_recall_invalid_search_mode() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({
-                "query": "test",
-                "search_mode": "invalid"
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "query": "test",
+                    "search_mode": "invalid"
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(!result.ok);
@@ -355,10 +371,13 @@ mod tests {
         for mode in &["bm25", "embedding", "hybrid"] {
             let tool = test_tool();
             let result = tool
-                .execute(serde_json::json!({
-                    "query": "test",
-                    "search_mode": mode
-                }), None)
+                .execute(
+                    serde_json::json!({
+                        "query": "test",
+                        "search_mode": mode
+                    }),
+                    None,
+                )
                 .await
                 .unwrap();
             assert!(result.ok, "search_mode '{}' should be valid", mode);
@@ -379,13 +398,16 @@ mod tests {
     async fn test_memory_recall_combined() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({
-                "query": "project status",
-                "since": "2025-01-01T00:00:00Z",
-                "until": "2025-12-31T23:59:59Z",
-                "search_mode": "hybrid",
-                "limit": 10
-            }), None)
+            .execute(
+                serde_json::json!({
+                    "query": "project status",
+                    "since": "2025-01-01T00:00:00Z",
+                    "until": "2025-12-31T23:59:59Z",
+                    "search_mode": "hybrid",
+                    "limit": 10
+                }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);

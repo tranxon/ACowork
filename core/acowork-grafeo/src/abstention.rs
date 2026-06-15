@@ -70,10 +70,7 @@ pub fn check_abstention(
     let threshold = min_score_override.unwrap_or(config.default_min_score);
     let original_count = scores.len();
 
-    let max_score = scores
-        .iter()
-        .map(|s| *s as f32)
-        .fold(0.0_f32, f32::max);
+    let max_score = scores.iter().map(|s| *s as f32).fold(0.0_f32, f32::max);
 
     if !config.enabled {
         return AbstentionResult {

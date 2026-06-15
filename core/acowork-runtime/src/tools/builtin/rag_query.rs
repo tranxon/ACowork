@@ -6,8 +6,8 @@
 //!
 //! Permission: `rag:query` + `network:<endpoint_url>`
 
-use async_trait::async_trait;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::tools::rag::client::RagClient;
@@ -69,7 +69,11 @@ impl Tool for RagQueryTool {
         Self::spec_value()
     }
 
-    async fn execute(&self, params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+    async fn execute(
+        &self,
+        params: Value,
+        _work_dir: Option<&str>,
+    ) -> acowork_core::error::Result<ToolResult> {
         let query = params["query"].as_str().unwrap_or("").trim();
         if query.is_empty() {
             return Ok(ToolResult {
@@ -84,7 +88,8 @@ impl Tool for RagQueryTool {
         let score_threshold = params["score_threshold"].as_f64().map(|v| v as f32);
         let filters = params.get("filters").cloned();
 
-        let results = self.client
+        let results = self
+            .client
             .query_with_params(query, top_k, score_threshold, filters)
             .await;
 
@@ -100,11 +105,7 @@ impl Tool for RagQueryTool {
         // Format results for LLM consumption with source annotations
         let mut content_parts: Vec<String> = Vec::new();
         for (i, result) in results.iter().enumerate() {
-            let mut part = format!(
-                "{} [score={:.2}]",
-                result.item.content,
-                result.item.score
-            );
+            let mut part = format!("{} [score={:.2}]", result.item.content, result.item.score);
             if let Some(ref source_url) = result.item.source_url {
                 part.push_str(&format!(" (source: {source_url})"));
             }
@@ -155,7 +156,12 @@ mod tests {
         assert!(spec.input_schema["properties"]["query"].is_object());
         assert!(spec.input_schema["properties"]["top_k"].is_object());
         assert!(spec.input_schema["properties"]["filters"].is_object());
-        assert!(spec.input_schema["required"].as_array().unwrap().contains(&serde_json::json!("query")));
+        assert!(
+            spec.input_schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("query"))
+        );
     }
 
     #[tokio::test]
@@ -171,7 +177,10 @@ mod tests {
     async fn test_rag_query_tool_empty_query() {
         let client = test_rag_client();
         let tool = RagQueryTool::new(client);
-        let result = tool.execute(serde_json::json!({ "query": "" }), None).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({ "query": "" }), None)
+            .await
+            .unwrap();
         assert!(!result.ok);
     }
 

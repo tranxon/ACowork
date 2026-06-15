@@ -14,8 +14,8 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use crate::error::Result;
-use crate::keygen::load_keypair;
 use crate::keygen::KeyType;
+use crate::keygen::load_keypair;
 use crate::signing_block::{
     Certificate, DigestAlgorithm, SectionDigest, SignedAttributes, Signer as BlockSigner,
     SigningBlock,
@@ -109,7 +109,10 @@ fn compute_digests(zip_data: &[u8]) -> Result<Vec<SectionDigest>> {
 }
 
 /// Create the data to be signed (concatenation of all digests + signed_attrs JSON)
-pub fn create_signature_data(digests: &[SectionDigest], signed_attrs: &SignedAttributes) -> Vec<u8> {
+pub fn create_signature_data(
+    digests: &[SectionDigest],
+    signed_attrs: &SignedAttributes,
+) -> Vec<u8> {
     let mut data = Vec::new();
 
     for digest in digests {
@@ -139,8 +142,8 @@ fn write_signed_zip(original_data: &[u8], block: &SigningBlock, output_path: &Pa
 
     let clean_zip_buffer = Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(clean_zip_buffer);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
@@ -242,7 +245,10 @@ mod tests {
             &crate::signing_block::SIGNING_BLOCK_MAGIC_V2,
         )
         .unwrap();
-        assert!(found.is_some(), "Binary signing block not found in signed ZIP");
+        assert!(
+            found.is_some(),
+            "Binary signing block not found in signed ZIP"
+        );
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
@@ -551,7 +557,9 @@ mod tests {
         for i in 0..25 {
             let name = format!("file_{:02}.txt", i);
             writer.start_file(&name, options).unwrap();
-            writer.write_all(format!("Content of file {}", i).as_bytes()).unwrap();
+            writer
+                .write_all(format!("Content of file {}", i).as_bytes())
+                .unwrap();
         }
         writer.finish().unwrap();
 
@@ -611,7 +619,9 @@ mod tests {
 
         for name in &nested_files {
             writer.start_file(name, options).unwrap();
-            writer.write_all(format!("Content of {}", name).as_bytes()).unwrap();
+            writer
+                .write_all(format!("Content of {}", name).as_bytes())
+                .unwrap();
         }
         writer.finish().unwrap();
 
@@ -689,8 +699,8 @@ mod tests {
         // Verify the signed ZIP can be opened by zip::ZipArchive
         let signed_data = fs::read(&signed_path).unwrap();
         let reader = Cursor::new(&signed_data);
-        let mut archive = zip::ZipArchive::new(reader)
-            .expect("Signed ZIP should be openable by zip crate");
+        let mut archive =
+            zip::ZipArchive::new(reader).expect("Signed ZIP should be openable by zip crate");
 
         // All original entries should be readable
         assert_eq!(archive.len(), entries.len());
@@ -706,8 +716,12 @@ mod tests {
 
             // Find expected content
             let expected = entries.iter().find(|(n, _)| *n == name).unwrap();
-            assert_eq!(content.as_bytes(), expected.1,
-                "Content mismatch for entry '{}'", name);
+            assert_eq!(
+                content.as_bytes(),
+                expected.1,
+                "Content mismatch for entry '{}'",
+                name
+            );
         }
         found_names.sort();
 

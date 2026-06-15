@@ -4,8 +4,8 @@
 //! enabling the IntentRouter to discover target agents for
 //! incoming Intent requests.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Capability key: `agent_id:action`
 pub type CapabilityKey = String;
@@ -47,20 +47,32 @@ impl CapabilityRegistry {
     ///
     /// S4.2.2: Called during package installation to register
     /// all capabilities declared in the manifest.
-    pub fn register(&mut self, agent_id: &str, action: &str, definition: acowork_core::CapabilityDef) {
+    pub fn register(
+        &mut self,
+        agent_id: &str,
+        action: &str,
+        definition: acowork_core::CapabilityDef,
+    ) {
         let key = Self::make_key(agent_id, action);
         tracing::info!("Registering capability: {}", key);
-        self.capabilities.insert(key, RegisteredCapability {
-            agent_id: agent_id.to_string(),
-            action: action.to_string(),
-            definition,
-        });
+        self.capabilities.insert(
+            key,
+            RegisteredCapability {
+                agent_id: agent_id.to_string(),
+                action: action.to_string(),
+                definition,
+            },
+        );
     }
 
     /// Register all capabilities from an agent manifest
     ///
     /// S4.2.2: Install-time registration
-    pub fn register_from_manifest(&mut self, agent_id: &str, manifest: &acowork_core::AgentManifest) {
+    pub fn register_from_manifest(
+        &mut self,
+        agent_id: &str,
+        manifest: &acowork_core::AgentManifest,
+    ) {
         for (action, def) in &manifest.capabilities {
             self.register(agent_id, action, def.clone());
         }
@@ -180,8 +192,12 @@ mod tests {
     #[test]
     fn test_register_and_get() {
         let mut registry = CapabilityRegistry::new();
-        registry.register("com.example.weather", "query", test_capability_def("Query weather"));
-        
+        registry.register(
+            "com.example.weather",
+            "query",
+            test_capability_def("Query weather"),
+        );
+
         let cap = registry.get("com.example.weather", "query").unwrap();
         assert_eq!(cap.agent_id, "com.example.weather");
         assert_eq!(cap.action, "query");
@@ -208,7 +224,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
         registry.register_from_manifest("com.example.weather", &manifest);
-        
+
         assert_eq!(registry.len(), 2);
         assert!(registry.get("com.example.weather", "query").is_some());
         assert!(registry.get("com.example.weather", "forecast").is_some());
@@ -218,9 +234,17 @@ mod tests {
     fn test_unregister_agent() {
         let mut registry = CapabilityRegistry::new();
         registry.register("com.example.weather", "query", test_capability_def("Query"));
-        registry.register("com.example.weather", "forecast", test_capability_def("Forecast"));
-        registry.register("com.example.calendar", "schedule", test_capability_def("Schedule"));
-        
+        registry.register(
+            "com.example.weather",
+            "forecast",
+            test_capability_def("Forecast"),
+        );
+        registry.register(
+            "com.example.calendar",
+            "schedule",
+            test_capability_def("Schedule"),
+        );
+
         assert_eq!(registry.len(), 3);
         registry.unregister_agent("com.example.weather");
         assert_eq!(registry.len(), 1);
@@ -231,9 +255,17 @@ mod tests {
     #[test]
     fn test_find_by_action() {
         let mut registry = CapabilityRegistry::new();
-        registry.register("com.example.weather", "query", test_capability_def("Weather query"));
-        registry.register("com.example.search", "query", test_capability_def("Search query"));
-        
+        registry.register(
+            "com.example.weather",
+            "query",
+            test_capability_def("Weather query"),
+        );
+        registry.register(
+            "com.example.search",
+            "query",
+            test_capability_def("Search query"),
+        );
+
         let results = registry.find_by_action("query");
         assert_eq!(results.len(), 2);
     }
@@ -242,9 +274,17 @@ mod tests {
     fn test_capabilities_for_agent() {
         let mut registry = CapabilityRegistry::new();
         registry.register("com.example.weather", "query", test_capability_def("Query"));
-        registry.register("com.example.weather", "forecast", test_capability_def("Forecast"));
-        registry.register("com.example.calendar", "schedule", test_capability_def("Schedule"));
-        
+        registry.register(
+            "com.example.weather",
+            "forecast",
+            test_capability_def("Forecast"),
+        );
+        registry.register(
+            "com.example.calendar",
+            "schedule",
+            test_capability_def("Schedule"),
+        );
+
         let weather_caps = registry.capabilities_for_agent("com.example.weather");
         assert_eq!(weather_caps.len(), 2);
     }
@@ -253,8 +293,12 @@ mod tests {
     fn test_overview() {
         let mut registry = CapabilityRegistry::new();
         registry.register("com.example.weather", "query", test_capability_def("Query"));
-        registry.register("com.example.weather", "forecast", test_capability_def("Forecast"));
-        
+        registry.register(
+            "com.example.weather",
+            "forecast",
+            test_capability_def("Forecast"),
+        );
+
         let overview = registry.overview();
         assert_eq!(overview.by_agent.len(), 1);
         assert_eq!(overview.by_agent["com.example.weather"].len(), 2);
@@ -262,6 +306,9 @@ mod tests {
 
     #[test]
     fn test_make_key() {
-        assert_eq!(CapabilityRegistry::make_key("com.example.weather", "query"), "com.example.weather:query");
+        assert_eq!(
+            CapabilityRegistry::make_key("com.example.weather", "query"),
+            "com.example.weather:query"
+        );
     }
 }

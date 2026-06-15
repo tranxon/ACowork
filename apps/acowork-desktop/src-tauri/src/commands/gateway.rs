@@ -6,6 +6,7 @@
 //! all HTTP commands use the correct base URL and the local spawn is
 //! skipped in remote mode. See module docs of `crate::state` for details.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -85,7 +86,10 @@ pub async fn set_gateway_config(
     if mode == GatewayMode::Remote {
         let mut proc = state.gateway_process.lock().await;
         if let Some(mut child) = proc.take() {
-            tracing::info!("[CFG] Switching to remote: stopping local Gateway (pid: {:?})", child.id());
+            tracing::info!(
+                "[CFG] Switching to remote: stopping local Gateway (pid: {:?})",
+                child.id()
+            );
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -147,9 +151,6 @@ pub async fn init_local_gateway(
 /// System Agent ID — always bundled with Desktop App.
 pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
 
-/// Bundled system-agent resource directory name (under resource_dir).
-pub const SYSTEM_AGENT_RESOURCE: &str = "system-agent";
-
 /// Auto-install the bundled System Agent if not already installed.
 ///
 /// Called by the frontend after `init_local_gateway` (local mode) or
@@ -161,7 +162,7 @@ pub async fn ensure_system_agent(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     // Resolve URL from AppState (single source of truth)
     let gateway_url = state.gateway.read().await.base_url().to_string();
@@ -173,17 +174,29 @@ pub async fn ensure_system_agent(
 
     // Wait for Gateway to be reachable (max ~15s)
     for i in 0..30 {
-        if client.get(format!("{}/health", gateway_url)).send().await.is_ok() {
+        if client
+            .get(format!("{}/health", gateway_url))
+            .send()
+            .await
+            .is_ok()
+        {
             break;
         }
         sleep(Duration::from_millis(500)).await;
         if i % 6 == 0 {
-            tracing::debug!("[SYS-AGENT] Waiting for Gateway at {} to be ready...", gateway_url);
+            tracing::debug!(
+                "[SYS-AGENT] Waiting for Gateway at {} to be ready...",
+                gateway_url
+            );
         }
     }
 
     // Check if System Agent is already installed
-    match client.get(format!("{}/api/agents/{}", gateway_url, SYSTEM_AGENT_ID)).send().await {
+    match client
+        .get(format!("{}/api/agents/{}", gateway_url, SYSTEM_AGENT_ID))
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             tracing::info!("[SYS-AGENT] Already installed, skipping");
             return Ok(());
@@ -196,27 +209,38 @@ pub async fn ensure_system_agent(
         .path()
         .resource_dir()
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
-    let system_agent_path = resource_dir.join(SYSTEM_AGENT_RESOURCE);
+    let system_agent_package = resource_dir
+        .join("agent-packages")
+        .join("com.acowork.system.agent");
 
-    if !system_agent_path.exists() {
-        tracing::warn!("[SYS-AGENT] Bundled package not found at {:?}", system_agent_path);
+    if !system_agent_package.exists() {
+        tracing::warn!(
+            "[SYS-AGENT] Bundled package not found at {:?}",
+            system_agent_package
+        );
         return Ok(());
     }
-    if !system_agent_path.join("manifest.toml").exists() {
-        tracing::warn!("[SYS-AGENT] Bundled package missing manifest.toml");
-        return Ok(());
-    }
 
-    tracing::info!("[SYS-AGENT] Installing bundled package from {:?}", system_agent_path);
+    tracing::info!(
+        "[SYS-AGENT] Installing bundled package from {:?}",
+        system_agent_package
+    );
 
-    let body = serde_json::json!({
-        "package_path": system_agent_path.to_string_lossy(),
-        "dev_mode": true
-    });
+    let package_bytes = std::fs::read(&system_agent_package)
+        .map_err(|e| format!("Failed to read System Agent package: {}", e))?;
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "package",
+            reqwest::multipart::Part::bytes(package_bytes)
+                .file_name("com.acowork.system.agent")
+                .mime_str("application/octet-stream")
+                .map_err(|e| format!("Invalid package mime: {}", e))?,
+        )
+        .text("dev_mode", "true");
 
     match client
         .post(format!("{}/api/agents/install", gateway_url))
-        .json(&body)
+        .multipart(form)
         .send()
         .await
     {
@@ -274,10 +298,7 @@ pub async fn start_local_gateway(
 /// instances started outside of Tauri (e.g. a leftover from a crashed
 /// previous run still holding the port) and skips spawning in that case
 /// as well.
-pub async fn spawn_gateway(
-    state: &AppState,
-    app_handle: &tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> Result<(), String> {
     tracing::info!("[BOOT] spawn_gateway entered");
 
     // ── Single critical section: serialise check → spawn → store ─────
@@ -327,10 +348,20 @@ pub async fn spawn_gateway(
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
     tracing::info!("[BOOT] Tauri resource_dir: {}", resource_dir.display());
 
-    let child = Command::new(&gateway_bin)
+    let mut command = Command::new(&gateway_bin);
+    command
+        .current_dir(&resource_dir)
         .env("ACOWORK_GATEWAY_DAEMON", "true")
         .env("ACOWORK_GATEWAY_LOG_LEVEL", "info")
-        .env("ACOWORK_LSP_CONFIG_DIR", resource_dir.to_string_lossy().to_string())
+        .env(
+            "ACOWORK_LSP_CONFIG_DIR",
+            resource_dir.to_string_lossy().to_string(),
+        );
+    if let Some(ort_lib_dir) = locate_bundled_ort_lib_dir(&gateway_bin, &resource_dir) {
+        inject_ort_env(&mut command, &ort_lib_dir);
+        tracing::info!(ort_lib_dir = %ort_lib_dir.display(), "Injected bundled ORT for Gateway");
+    }
+    let child = command
         .spawn()
         .map_err(|e| format!("Failed to spawn Gateway process: {}", e))?;
 
@@ -345,9 +376,7 @@ pub async fn spawn_gateway(
 
 /// Stop the locally running Gateway process.
 #[tauri::command]
-pub async fn stop_local_gateway(
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn stop_local_gateway(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut proc = state.gateway_process.lock().await;
     if let Some(mut child) = proc.take() {
         tracing::info!("Stopping local Gateway (pid: {:?})", child.id());
@@ -364,9 +393,7 @@ pub async fn stop_local_gateway(
 
 /// Check if the local Gateway process is currently running.
 #[tauri::command]
-pub async fn get_local_gateway_status(
-    state: tauri::State<'_, AppState>,
-) -> Result<bool, String> {
+pub async fn get_local_gateway_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let proc = state.gateway_process.lock().await;
     if let Some(ref child) = *proc {
         Ok(child_output_is_alive(child))
@@ -376,6 +403,80 @@ pub async fn get_local_gateway_status(
 }
 
 // ── Helper functions ────────────────────────────────────────────────────
+
+fn locate_bundled_ort_lib_dir(gateway_bin: &Path, resource_dir: &Path) -> Option<PathBuf> {
+    let gateway_dir = gateway_bin.parent();
+    let candidates = [gateway_dir, Some(resource_dir)];
+    for dir in candidates.into_iter().flatten() {
+        if ort_lib_exists(dir) {
+            return Some(dir.to_path_buf());
+        }
+    }
+    locate_workspace_ort_lib_dir()
+}
+
+fn locate_workspace_ort_lib_dir() -> Option<PathBuf> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let mut base = PathBuf::from(manifest_dir);
+    for _ in 0..3 {
+        base = base.parent()?.to_path_buf();
+    }
+    let ort_base = base.join(".ort");
+    let entries = std::fs::read_dir(ort_base).ok()?;
+    for entry in entries.flatten() {
+        let lib_dir = entry.path().join("lib");
+        if ort_lib_exists(&lib_dir) {
+            return Some(lib_dir);
+        }
+    }
+    None
+}
+
+fn ort_lib_exists(dir: &Path) -> bool {
+    let lib_path = if cfg!(windows) {
+        dir.join("onnxruntime.dll")
+    } else if cfg!(target_os = "macos") {
+        dir.join("libonnxruntime.dylib")
+    } else {
+        dir.join("libonnxruntime.so")
+    };
+    lib_path.exists()
+}
+
+fn inject_ort_env(command: &mut Command, ort_lib_dir: &Path) {
+    let dylib_path = if cfg!(windows) {
+        ort_lib_dir.join("onnxruntime.dll")
+    } else if cfg!(target_os = "macos") {
+        ort_lib_dir.join("libonnxruntime.dylib")
+    } else {
+        ort_lib_dir.join("libonnxruntime.so")
+    };
+    command.env("ORT_LIB_LOCATION", ort_lib_dir);
+    command.env("ORT_DYLIB_PATH", dylib_path);
+    command.env("ORT_PREFER_DYNAMIC_LINK", "1");
+
+    #[cfg(windows)]
+    {
+        let previous = std::env::var("PATH").unwrap_or_default();
+        command.env("PATH", format!("{};{}", ort_lib_dir.display(), previous));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let previous = std::env::var("DYLD_LIBRARY_PATH").unwrap_or_default();
+        command.env(
+            "DYLD_LIBRARY_PATH",
+            format!("{}:{}", ort_lib_dir.display(), previous),
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let previous = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        command.env(
+            "LD_LIBRARY_PATH",
+            format!("{}:{}", ort_lib_dir.display(), previous),
+        );
+    }
+}
 
 /// Find the Gateway binary next to the current executable.
 pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -388,10 +489,7 @@ pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::Pa
         .to_path_buf();
 
     // Also check the Tauri resource directory (for bundled builds)
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .unwrap_or(exe_dir.clone());
+    let resource_dir = app_handle.path().resource_dir().unwrap_or(exe_dir.clone());
 
     let candidates = [
         exe_dir.join("acowork-gateway.exe"),
@@ -408,8 +506,8 @@ pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::Pa
 
     // Also try the workspace target/ directory for dev convenience.
     // Check release first, then debug.
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR")
-        .or_else(|_| std::env::var("TAURI_DEV_DIR"))
+    if let Ok(manifest_dir) =
+        std::env::var("CARGO_MANIFEST_DIR").or_else(|_| std::env::var("TAURI_DEV_DIR"))
     {
         let manifest_path = std::path::PathBuf::from(&manifest_dir);
         // manifest_dir = .../apps/acowork-desktop/src-tauri
@@ -438,7 +536,10 @@ pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::Pa
 
     Err(format!(
         "Gateway binary not found. Searched: {:?}",
-        candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
     ))
 }
 

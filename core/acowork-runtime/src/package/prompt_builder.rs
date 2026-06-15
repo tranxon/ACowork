@@ -99,14 +99,12 @@ pub fn build_system_prompt_with_mode(
 /// Collect markdown/text files from a directory
 fn collect_markdown_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
-    let entries = fs::read_dir(dir).map_err(|e| {
-        RuntimeError::Package(format!("Failed to read prompts dir: {e}"))
-    })?;
+    let entries = fs::read_dir(dir)
+        .map_err(|e| RuntimeError::Package(format!("Failed to read prompts dir: {e}")))?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            RuntimeError::Package(format!("Failed to read dir entry: {e}"))
-        })?;
+        let entry =
+            entry.map_err(|e| RuntimeError::Package(format!("Failed to read dir entry: {e}")))?;
 
         let path = entry.path();
         if path.is_file()
@@ -201,7 +199,8 @@ Be friendly and welcoming.
         )
         .unwrap();
 
-        let prompt = build_system_prompt_with_mode(&dir, acowork_core::SkillMode::Progressive).unwrap();
+        let prompt =
+            build_system_prompt_with_mode(&dir, acowork_core::SkillMode::Progressive).unwrap();
         assert!(prompt.contains("You are a test assistant."));
         assert!(prompt.contains("## Available Skills"));
         assert!(prompt.contains("greeting"));

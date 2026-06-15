@@ -34,7 +34,11 @@ impl GlobalResourcePusher {
         gateway_state: SharedHttpState,
         data_dir: PathBuf,
     ) -> Self {
-        Self { grpc_session_mgr, gateway_state, data_dir }
+        Self {
+            grpc_session_mgr,
+            gateway_state,
+            data_dir,
+        }
     }
 
     // ── Provider list (provider/model/key change) ───────────────────
@@ -76,7 +80,12 @@ impl GlobalResourcePusher {
                     })
                 })
                 .collect();
-            (agent_ids, provider_list, provider_list_version, provider_key_vault)
+            (
+                agent_ids,
+                provider_list,
+                provider_list_version,
+                provider_key_vault,
+            )
         };
 
         if agent_ids.is_empty() {
@@ -205,8 +214,10 @@ impl GlobalResourcePusher {
             return;
         }
 
-        let push_targets: Vec<(String, Vec<McpServerConfigDef>)> =
-            agent_ids.into_iter().map(|aid| (aid, catalog.clone())).collect();
+        let push_targets: Vec<(String, Vec<McpServerConfigDef>)> = agent_ids
+            .into_iter()
+            .map(|aid| (aid, catalog.clone()))
+            .collect();
 
         if push_targets.is_empty() {
             return;
@@ -216,7 +227,10 @@ impl GlobalResourcePusher {
         let mut pushed = 0u32;
         let mut failed = 0u32;
         for aid in push_targets.iter().map(|(aid, _)| aid.clone()) {
-            let servers = match push_targets.iter().find_map(|(a, s)| if a == &aid { Some(s.clone()) } else { None }) {
+            let servers = match push_targets
+                .iter()
+                .find_map(|(a, s)| if a == &aid { Some(s.clone()) } else { None })
+            {
                 Some(s) => s,
                 None => continue,
             };
@@ -287,7 +301,10 @@ impl GlobalResourcePusher {
 
         let (user_identity, version) = {
             let gw = self.gateway_state.read().await;
-            let active_user = gw.resource_cache.user_profile_list.users
+            let active_user = gw
+                .resource_cache
+                .user_profile_list
+                .users
                 .iter()
                 .find(|u| u.is_active)
                 .cloned();
@@ -363,7 +380,8 @@ impl GlobalResourcePusher {
             "embed_endpoint": embed_endpoint,
             "embed_model_id": embed_model_id,
             "embed_dimension": embed_dimension,
-        }).to_string();
+        })
+        .to_string();
 
         let mut pushed = 0u32;
         let mut failed = 0u32;

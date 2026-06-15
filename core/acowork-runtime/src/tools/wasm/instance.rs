@@ -8,7 +8,7 @@
 //! - Memory limit enforced by StoreLimits (ResourceLimiter) + WasmEngine config
 //! - No access to host resources unless explicitly granted via WASI
 
-use wasmtime::{Memory, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, Instance, AsContextMut};
+use wasmtime::{AsContextMut, Instance, Memory, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 use super::engine::WasmEngine;
 use crate::error::RuntimeError;
@@ -52,8 +52,8 @@ impl HostState {
         let limits = StoreLimitsBuilder::new()
             .memory_size(max_memory_bytes)
             .instances(1) // One instance per tool execution
-            .memories(1)  // One memory per instance
-            .tables(10)   // Reasonable table limit
+            .memories(1) // One memory per instance
+            .tables(10) // Reasonable table limit
             .build();
         Self {
             input_buffer: Vec::new(),
@@ -109,7 +109,8 @@ impl WasmToolInstance {
     /// instantiates the module. The `execute` export function is
     /// looked up and bound.
     pub fn new(engine: &WasmEngine, wasm_bytes: &[u8]) -> Result<Self, RuntimeError> {
-        let module = engine.compile(wasm_bytes)
+        let module = engine
+            .compile(wasm_bytes)
             .map_err(|e| RuntimeError::Tool(format!("Failed to compile WASM module: {}", e)))?;
 
         Self::from_module(engine, &module)
@@ -121,7 +122,10 @@ impl WasmToolInstance {
     /// enforces the `max_memory_mb` cap from `WasmEngineConfig`. Without
     /// the limiter, a WASM module that declares unbounded memory could
     /// allocate far beyond the configured limit.
-    pub fn from_module(engine: &WasmEngine, module: &wasmtime::Module) -> Result<Self, RuntimeError> {
+    pub fn from_module(
+        engine: &WasmEngine,
+        module: &wasmtime::Module,
+    ) -> Result<Self, RuntimeError> {
         let fuel_limit = engine.fuel_limit();
         let max_memory_bytes = (engine.max_memory_mb() as usize) * 1024 * 1024;
 
@@ -132,7 +136,8 @@ impl WasmToolInstance {
         // before allowing memory/table growth or instance creation.
         store.limiter(|state| &mut state.limits);
 
-        store.set_fuel(fuel_limit)
+        store
+            .set_fuel(fuel_limit)
             .map_err(|e| RuntimeError::Tool(format!("Failed to set fuel: {}", e)))?;
 
         // Instantiate module (no imports for simple modules)
@@ -140,10 +145,11 @@ impl WasmToolInstance {
             .map_err(|e| RuntimeError::Tool(format!("Failed to instantiate WASM module: {}", e)))?;
 
         // Look up the `execute` export
-        let execute_fn = instance.get_typed_func::<(u32, u32), u32>(&mut store, "execute")
-            .map_err(|e| RuntimeError::Tool(format!(
-                "WASM module missing 'execute' export: {}", e
-            )))?;
+        let execute_fn = instance
+            .get_typed_func::<(u32, u32), u32>(&mut store, "execute")
+            .map_err(|e| {
+                RuntimeError::Tool(format!("WASM module missing 'execute' export: {}", e))
+            })?;
 
         // Look up optional memory export
         let memory = instance.get_memory(&mut store, "memory");
@@ -166,8 +172,7 @@ impl WasmToolInstance {
     /// For simple modules without memory export, a simpler protocol
     /// is used where the function return value is the result directly.
     pub fn execute(&mut self, input_json: &str) -> Result<WasmExecutionResult, RuntimeError> {
-        let fuel_before = self.store.get_fuel()
-            .unwrap_or(0);
+        let fuel_before = self.store.get_fuel().unwrap_or(0);
 
         // Reset state
         self.store.data_mut().input_buffer = input_json.as_bytes().to_vec();
@@ -183,8 +188,7 @@ impl WasmToolInstance {
             self.execute_simple(input_json.len() as u32)?
         }
 
-        let fuel_after = self.store.get_fuel()
-            .unwrap_or(0);
+        let fuel_after = self.store.get_fuel().unwrap_or(0);
         let fuel_consumed = fuel_before.saturating_sub(fuel_after);
 
         let state = self.store.data();
@@ -225,7 +229,8 @@ impl WasmToolInstance {
                 // Check if it's a fuel exhaustion trap
                 if err_msg.contains("all fuel consumed") {
                     self.store.data_mut().last_ok = false;
-                    self.store.data_mut().last_error = Some("Fuel exhausted: execution timed out".to_string());
+                    self.store.data_mut().last_error =
+                        Some("Fuel exhausted: execution timed out".to_string());
                 } else {
                     self.store.data_mut().last_ok = false;
                     self.store.data_mut().last_error = Some(format!("WASM trap: {}", e));
@@ -248,7 +253,8 @@ impl WasmToolInstance {
                 let err_msg = format!("{}", e);
                 if err_msg.contains("all fuel consumed") {
                     self.store.data_mut().last_ok = false;
-                    self.store.data_mut().last_error = Some("Fuel exhausted: execution timed out".to_string());
+                    self.store.data_mut().last_error =
+                        Some("Fuel exhausted: execution timed out".to_string());
                 } else {
                     self.store.data_mut().last_ok = false;
                     self.store.data_mut().last_error = Some(format!("WASM trap: {}", e));
@@ -259,14 +265,19 @@ impl WasmToolInstance {
     }
 
     /// Read null-terminated output from WASM memory.
-    fn read_output_from_memory(&mut self, memory: Memory, start_ptr: u32) -> Result<(), RuntimeError> {
+    fn read_output_from_memory(
+        &mut self,
+        memory: Memory,
+        start_ptr: u32,
+    ) -> Result<(), RuntimeError> {
         let ctx = self.store.as_context_mut();
         let mem_data = memory.data(&ctx);
 
         let start = start_ptr as usize;
         if start >= mem_data.len() {
             self.store.data_mut().last_ok = false;
-            self.store.data_mut().last_error = Some("Output pointer out of memory bounds".to_string());
+            self.store.data_mut().last_error =
+                Some("Output pointer out of memory bounds".to_string());
             return Ok(());
         }
 
@@ -314,7 +325,7 @@ impl Drop for WasmToolInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::wasm::engine::{wasm_generator, WasmEngineConfig};
+    use crate::tools::wasm::engine::{WasmEngineConfig, wasm_generator};
     use wasmtime::ResourceLimiter;
 
     fn create_test_engine() -> WasmEngine {
@@ -327,7 +338,10 @@ mod tests {
         let empty_wasm = wasm_generator::empty_module();
         // Empty module has no `execute` export, should fail
         let result = WasmToolInstance::new(&engine, &empty_wasm);
-        assert!(result.is_err(), "Empty module should fail (no execute export)");
+        assert!(
+            result.is_err(),
+            "Empty module should fail (no execute export)"
+        );
     }
 
     #[test]
@@ -338,7 +352,10 @@ mod tests {
         assert!(result.is_ok(), "Module with execute export should load");
 
         let instance = result.unwrap();
-        assert!(!instance.has_memory(), "This module should not have memory export");
+        assert!(
+            !instance.has_memory(),
+            "This module should not have memory export"
+        );
     }
 
     #[test]
@@ -349,7 +366,10 @@ mod tests {
         assert!(result.is_ok(), "Module with memory export should load");
 
         let instance = result.unwrap();
-        assert!(instance.has_memory(), "This module should have memory export");
+        assert!(
+            instance.has_memory(),
+            "This module should have memory export"
+        );
     }
 
     #[test]
@@ -386,7 +406,10 @@ mod tests {
 
         instance.execute(r#"{}"#).unwrap();
         let remaining = instance.remaining_fuel();
-        assert!(remaining < initial_fuel, "Fuel should decrease after execution");
+        assert!(
+            remaining < initial_fuel,
+            "Fuel should decrease after execution"
+        );
     }
 
     #[test]
@@ -424,7 +447,10 @@ mod tests {
         // This should succeed since 640 KB < 1 MB
         let wasm = wasm_generator::module_with_memory();
         let result = WasmToolInstance::new(&engine, &wasm);
-        assert!(result.is_ok(), "Module with small memory should load under 1MB limit");
+        assert!(
+            result.is_ok(),
+            "Module with small memory should load under 1MB limit"
+        );
     }
 
     #[test]
@@ -438,7 +464,10 @@ mod tests {
         // Actually 0 MB = 0 bytes, so even 1 page should be rejected
         let wasm = wasm_generator::module_with_memory();
         let result = WasmToolInstance::new(&engine, &wasm);
-        assert!(result.is_err(), "Module with memory should fail under 0MB limit");
+        assert!(
+            result.is_err(),
+            "Module with memory should fail under 0MB limit"
+        );
     }
 
     #[test]

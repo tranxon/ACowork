@@ -88,12 +88,10 @@ pub fn clone_agent(
     new_manifest.agent_id = new_agent_id.to_string();
     new_manifest.dev = true;
 
-    let manifest_toml = toml::to_string_pretty(&new_manifest).map_err(|e| {
-        GatewayError::Package(format!("Failed to serialize manifest: {}", e))
-    })?;
-    std::fs::write(target_path.join("manifest.toml"), &manifest_toml).map_err(|e| {
-        GatewayError::Package(format!("Failed to write manifest: {}", e))
-    })?;
+    let manifest_toml = toml::to_string_pretty(&new_manifest)
+        .map_err(|e| GatewayError::Package(format!("Failed to serialize manifest: {}", e)))?;
+    std::fs::write(target_path.join("manifest.toml"), &manifest_toml)
+        .map_err(|e| GatewayError::Package(format!("Failed to write manifest: {}", e)))?;
 
     // 6. Copy skeleton directories
     let skeleton_dirs = &["prompts", "config", "tools", "resources"];
@@ -130,18 +128,11 @@ pub fn clone_agent(
             if private_grafeo.exists() {
                 let target_memory = target_path.join("memory");
                 std::fs::create_dir_all(&target_memory).map_err(|e| {
-                    GatewayError::Package(format!(
-                        "Failed to create memory dir: {}",
-                        e
-                    ))
+                    GatewayError::Package(format!("Failed to create memory dir: {}", e))
                 })?;
-                std::fs::copy(&private_grafeo, target_memory.join("private.grafeo"))
-                    .map_err(|e| {
-                        GatewayError::Package(format!(
-                            "Failed to copy private.grafeo: {}",
-                            e
-                        ))
-                    })?;
+                std::fs::copy(&private_grafeo, target_memory.join("private.grafeo")).map_err(
+                    |e| GatewayError::Package(format!("Failed to copy private.grafeo: {}", e)),
+                )?;
             }
         }
     }
@@ -185,9 +176,8 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), GatewayError> {
     })?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            GatewayError::Package(format!("Failed to read entry: {}", e))
-        })?;
+        let entry =
+            entry.map_err(|e| GatewayError::Package(format!("Failed to read entry: {}", e)))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
@@ -234,8 +224,13 @@ mod tests {
         let conversations_dir = dir.join("conversations");
         let memory_dir = dir.join("memory");
 
-        for d in &[&prompts_dir, &config_dir, &skills_dir, &conversations_dir, &memory_dir]
-        {
+        for d in &[
+            &prompts_dir,
+            &config_dir,
+            &skills_dir,
+            &conversations_dir,
+            &memory_dir,
+        ] {
             std::fs::create_dir_all(d).unwrap();
         }
 
@@ -259,7 +254,11 @@ mod tests {
         std::fs::write(prompts_dir.join("system.md"), "You are a test agent.").unwrap();
         std::fs::write(config_dir.join("settings.toml"), "temperature = 0.7").unwrap();
         std::fs::write(skills_dir.join("search.md"), "# Search skill").unwrap();
-        std::fs::write(conversations_dir.join("session.jsonl"), r#"{"role":"user","content":"hello"}"#).unwrap();
+        std::fs::write(
+            conversations_dir.join("session.jsonl"),
+            r#"{"role":"user","content":"hello"}"#,
+        )
+        .unwrap();
         std::fs::write(memory_dir.join("private.grafeo"), b"grafeo-data").unwrap();
     }
 
@@ -282,8 +281,10 @@ mod tests {
             [llm]
             provider = "openai"
             model = "gpt-4"
-            "#
-        , agent_id)).unwrap();
+            "#,
+            agent_id
+        ))
+        .unwrap();
         state.add_installed(AgentInfo {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
@@ -295,7 +296,8 @@ mod tests {
 
     #[test]
     fn test_clone_skeleton_success() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-clone-sk-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-clone-sk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -305,7 +307,11 @@ mod tests {
 
         let vault_dir = temp_vault_dir("clone-sk");
         let mut state = GatewayState::new(&vault_dir);
-        add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
+        add_agent_to_state(
+            &mut state,
+            "com.test.weather",
+            &source_dir.to_string_lossy(),
+        );
 
         let result = clone_agent(
             "com.test.weather",
@@ -325,14 +331,18 @@ mod tests {
         assert!(target.join("prompts").exists(), "prompts should be copied");
         assert!(target.join("config").exists(), "config should be copied");
         // Skills should NOT be copied in skeleton mode
-        assert!(!target.join("skills").exists(), "skills should not be copied");
+        assert!(
+            !target.join("skills").exists(),
+            "skills should not be copied"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_clone_full_success() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-clone-full-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-clone-full-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -342,7 +352,11 @@ mod tests {
 
         let vault_dir = temp_vault_dir("clone-full");
         let mut state = GatewayState::new(&vault_dir);
-        add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
+        add_agent_to_state(
+            &mut state,
+            "com.test.weather",
+            &source_dir.to_string_lossy(),
+        );
 
         let result = clone_agent(
             "com.test.weather",
@@ -356,16 +370,26 @@ mod tests {
         assert_eq!(info.agent_id, "com.test.weather-full-clone");
 
         let target = install_dir.join("com.test.weather-full-clone");
-        assert!(target.join("skills").exists(), "skills should be copied in full mode");
-        assert!(target.join("conversations").exists(), "conversations should be copied");
-        assert!(target.join("memory/private.grafeo").exists(), "private.grafeo should be copied");
+        assert!(
+            target.join("skills").exists(),
+            "skills should be copied in full mode"
+        );
+        assert!(
+            target.join("conversations").exists(),
+            "conversations should be copied"
+        );
+        assert!(
+            target.join("memory/private.grafeo").exists(),
+            "private.grafeo should be copied"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_clone_system_agent_rejected() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-clone-sys-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-clone-sys-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -401,7 +425,8 @@ mod tests {
 
     #[test]
     fn test_clone_duplicate_agent_id() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-clone-dup-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-clone-dup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -412,8 +437,16 @@ mod tests {
         let vault_dir = temp_vault_dir("clone-dup");
         let mut state = GatewayState::new(&vault_dir);
         // Pre-install the target agent ID
-        add_agent_to_state(&mut state, "com.test.weather-clone", &source_dir.to_string_lossy());
-        add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
+        add_agent_to_state(
+            &mut state,
+            "com.test.weather-clone",
+            &source_dir.to_string_lossy(),
+        );
+        add_agent_to_state(
+            &mut state,
+            "com.test.weather",
+            &source_dir.to_string_lossy(),
+        );
 
         let result = clone_agent(
             "com.test.weather",
@@ -422,14 +455,18 @@ mod tests {
             &install_dir,
             &mut state,
         );
-        assert!(result.is_err(), "Clone to existing agent_id should be rejected");
+        assert!(
+            result.is_err(),
+            "Clone to existing agent_id should be rejected"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_clone_source_not_found() {
-        let temp_dir = std::env::temp_dir().join(format!("acowork-test-clone-nf-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("acowork-test-clone-nf-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 

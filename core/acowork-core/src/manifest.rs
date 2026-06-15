@@ -186,9 +186,10 @@ impl AgentManifest {
     /// Returns `Some((tool_name, &RagToolConfig))` if a `[[tools]]` entry
     /// with `type = "rag"` is declared, otherwise `None`.
     pub fn rag_config(&self) -> Option<(&str, &RagToolConfig)> {
-        self.tools.iter().find(|t| t.is_rag()).and_then(|t| {
-            t.rag.as_ref().map(|rag| (t.name.as_str(), rag))
-        })
+        self.tools
+            .iter()
+            .find(|t| t.is_rag())
+            .and_then(|t| t.rag.as_ref().map(|rag| (t.name.as_str(), rag)))
     }
 
     /// Check if this manifest declares any RAG tool
@@ -566,7 +567,10 @@ mod tests {
         let result = AgentManifest::from_toml(toml_str);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("agent_id"), "Expected agent_id error, got: {err}");
+        assert!(
+            err.contains("agent_id"),
+            "Expected agent_id error, got: {err}"
+        );
     }
 
     #[test]
@@ -639,7 +643,10 @@ mod tests {
         assert_eq!(tool_name, "enterprise_knowledge");
         assert_eq!(rag_config.endpoint, "https://rag.corp.example.com/v1/query");
         assert_eq!(rag_config.collection.as_deref(), Some("product_docs"));
-        assert_eq!(rag_config.auth_ref.as_deref(), Some("vault:rag_enterprise_key"));
+        assert_eq!(
+            rag_config.auth_ref.as_deref(),
+            Some("vault:rag_enterprise_key")
+        );
         assert_eq!(rag_config.auth_type, "bearer");
         assert_eq!(rag_config.max_results, 5);
         assert!((rag_config.score_threshold - 0.7).abs() < 0.001);

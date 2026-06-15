@@ -4,8 +4,8 @@
 //! Handles port conflict auto-increment and pidfile writing.
 
 use std::net::TcpListener as StdTcpListener;
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 use axum;
 use tokio::sync::RwLock;
@@ -14,7 +14,7 @@ use crate::config::HttpConfig;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
-use crate::http::routes::{self, AppState, SharedSessionMgr, BridgeEvent, SessionPendingRequests};
+use crate::http::routes::{self, AppState, BridgeEvent, SessionPendingRequests, SharedSessionMgr};
 use crate::ipc::global_push::GlobalResourcePusher;
 
 /// PID file content for Desktop App discovery
@@ -44,7 +44,9 @@ impl Drop for PidFileGuard {
         if self.path.exists() {
             match std::fs::remove_file(&self.path) {
                 Ok(()) => tracing::info!("PID file cleaned up: {}", self.path.display()),
-                Err(e) => tracing::warn!("Failed to remove PID file '{}': {}", self.path.display(), e),
+                Err(e) => {
+                    tracing::warn!("Failed to remove PID file '{}': {}", self.path.display(), e)
+                }
             }
         }
     }
@@ -61,20 +63,27 @@ pub fn cleanup_stale_pidfile(data_dir: &Path) -> Result<(), GatewayError> {
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(&pid_path)
-        .map_err(|e| GatewayError::Config(format!(
-            "Failed to read pidfile '{}': {}", pid_path.display(), e
-        )))?;
+    let content = std::fs::read_to_string(&pid_path).map_err(|e| {
+        GatewayError::Config(format!(
+            "Failed to read pidfile '{}': {}",
+            pid_path.display(),
+            e
+        ))
+    })?;
 
-    let parsed: PidFile = serde_json::from_str(&content)
-        .map_err(|e| GatewayError::Config(format!(
-            "Failed to parse pidfile '{}': {}", pid_path.display(), e
-        )))?;
+    let parsed: PidFile = serde_json::from_str(&content).map_err(|e| {
+        GatewayError::Config(format!(
+            "Failed to parse pidfile '{}': {}",
+            pid_path.display(),
+            e
+        ))
+    })?;
 
     // Check if the recorded process is still alive
     if is_pid_alive(parsed.pid) {
         return Err(GatewayError::Config(format!(
-            "Another Gateway instance is running (PID {})", parsed.pid
+            "Another Gateway instance is running (PID {})",
+            parsed.pid
         )));
     }
 
@@ -84,10 +93,13 @@ pub fn cleanup_stale_pidfile(data_dir: &Path) -> Result<(), GatewayError> {
         pid_path.display(),
         parsed.pid
     );
-    std::fs::remove_file(&pid_path)
-        .map_err(|e| GatewayError::Config(format!(
-            "Failed to remove stale pidfile '{}': {}", pid_path.display(), e
-        )))?;
+    std::fs::remove_file(&pid_path).map_err(|e| {
+        GatewayError::Config(format!(
+            "Failed to remove stale pidfile '{}': {}",
+            pid_path.display(),
+            e
+        ))
+    })?;
 
     Ok(())
 }
@@ -159,11 +171,8 @@ pub(crate) async fn start_http_server(
 
     // P1-3 fix: Find available port and return the bound listener
     // to eliminate the TOCTOU race between checking and binding.
-    let (actual_port, std_listener) = find_available_port(
-        &http_config.host,
-        http_config.port,
-        http_config.port_max,
-    )?;
+    let (actual_port, std_listener) =
+        find_available_port(&http_config.host, http_config.port, http_config.port_max)?;
 
     // Write pidfile for Desktop App discovery
     let _pidfile_guard = write_pidfile(data_dir, actual_port, socket_path)?;
@@ -174,16 +183,17 @@ pub(crate) async fn start_http_server(
     // Convert std::net::TcpListener to tokio::net::TcpListener
     // This reuses the already-bound listener — no second bind() call.
     // On Windows, we must set non-blocking mode before conversion.
-    std_listener.set_nonblocking(true)
-        .map_err(|e| GatewayError::Config(format!(
-            "Failed to set non-blocking mode: {}", e
-        )))?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| GatewayError::Config(format!("Failed to set non-blocking mode: {}", e)))?;
     let listener = tokio::net::TcpListener::from_std(std_listener)
-        .map_err(|e| GatewayError::Config(format!(
-            "Failed to convert TCP listener: {}", e
-        )))?;
+        .map_err(|e| GatewayError::Config(format!("Failed to convert TCP listener: {}", e)))?;
 
-    tracing::info!("HTTP API listening on http://{}:{}", http_config.host, actual_port);
+    tracing::info!(
+        "HTTP API listening on http://{}:{}",
+        http_config.host,
+        actual_port
+    );
 
     axum::serve(listener, app)
         .await
@@ -214,13 +224,18 @@ fn find_available_port(
         }
     }
     Err(GatewayError::Config(format!(
-        "No available port in range {}-{}", start_port, max_port
+        "No available port in range {}-{}",
+        start_port, max_port
     )))
 }
 
 /// Write pidfile for Desktop App discovery.
 /// Returns a `PidFileGuard` that will delete the pidfile on Drop.
-fn write_pidfile(data_dir: &Path, http_port: u16, socket_path: &str) -> Result<PidFileGuard, GatewayError> {
+fn write_pidfile(
+    data_dir: &Path,
+    http_port: u16,
+    socket_path: &str,
+) -> Result<PidFileGuard, GatewayError> {
     let pid_file = PidFile {
         pid: std::process::id(),
         http_port,
@@ -229,10 +244,13 @@ fn write_pidfile(data_dir: &Path, http_port: u16, socket_path: &str) -> Result<P
     let content = serde_json::to_string_pretty(&pid_file)
         .map_err(|e| GatewayError::Config(format!("Failed to serialize pidfile: {}", e)))?;
     let pid_path = data_dir.join("gateway.pid");
-    std::fs::write(&pid_path, content)
-        .map_err(|e| GatewayError::Config(format!(
-            "Failed to write pidfile '{}': {}", pid_path.display(), e
-        )))?;
+    std::fs::write(&pid_path, content).map_err(|e| {
+        GatewayError::Config(format!(
+            "Failed to write pidfile '{}': {}",
+            pid_path.display(),
+            e
+        ))
+    })?;
     tracing::info!("PID file written to {}", pid_path.display());
     Ok(PidFileGuard::new(pid_path))
 }
@@ -276,38 +294,47 @@ mod tests {
         assert!(parsed["pid"].as_u64().unwrap() > 0);
 
         drop(_guard);
-        assert!(!pid_path.exists(), "pidfile should be cleaned up after guard is dropped");
+        assert!(
+            !pid_path.exists(),
+            "pidfile should be cleaned up after guard is dropped"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-    
+
     // ── S5.9 tests ──────────────────────────────────────────────────────────
-    
+
     #[test]
     fn test_pidfile_guard_cleanup_on_drop() {
         let dir = std::env::temp_dir().join("acowork-test-pidfile-drop");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-    
+
         // Write pidfile via write_pidfile, which returns a PidFileGuard
         let pid_path = dir.join("gateway.pid");
         {
             let _guard = write_pidfile(&dir, 19876, "/tmp/test.sock").unwrap();
             // pidfile should exist while guard is alive
-            assert!(pid_path.exists(), "pidfile should exist while PidFileGuard is alive");
+            assert!(
+                pid_path.exists(),
+                "pidfile should exist while PidFileGuard is alive"
+            );
         }
         // After guard is dropped, pidfile should be cleaned up
-        assert!(!pid_path.exists(), "pidfile should be deleted after PidFileGuard is dropped");
-    
+        assert!(
+            !pid_path.exists(),
+            "pidfile should be deleted after PidFileGuard is dropped"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
-    
+
     #[test]
     fn test_cleanup_stale_pidfile_removes_dead_process() {
         let dir = std::env::temp_dir().join("acowork-test-pidfile-stale");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-    
+
         // Write a pidfile referencing a PID that doesn't exist
         let stale_pid: u32 = 9999999; // Extremely unlikely to be a running process
         let pid_file = PidFile {
@@ -318,22 +345,32 @@ mod tests {
         let pid_path = dir.join("gateway.pid");
         let content = serde_json::to_string_pretty(&pid_file).unwrap();
         std::fs::write(&pid_path, &content).unwrap();
-        assert!(pid_path.exists(), "stale pidfile should exist before cleanup");
-    
+        assert!(
+            pid_path.exists(),
+            "stale pidfile should exist before cleanup"
+        );
+
         // cleanup_stale_pidfile should detect the dead process and remove the file
         let result = cleanup_stale_pidfile(&dir);
-        assert!(result.is_ok(), "cleanup_stale_pidfile should succeed for dead process: {:?}", result);
-        assert!(!pid_path.exists(), "stale pidfile should be removed after cleanup");
-    
+        assert!(
+            result.is_ok(),
+            "cleanup_stale_pidfile should succeed for dead process: {:?}",
+            result
+        );
+        assert!(
+            !pid_path.exists(),
+            "stale pidfile should be removed after cleanup"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
-    
+
     #[test]
     fn test_cleanup_stale_pidfile_rejects_live_process() {
         let dir = std::env::temp_dir().join("acowork-test-pidfile-live");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-    
+
         // Write a pidfile referencing our own PID (which is definitely alive)
         let live_pid: u32 = std::process::id();
         let pid_file = PidFile {
@@ -344,25 +381,34 @@ mod tests {
         let pid_path = dir.join("gateway.pid");
         let content = serde_json::to_string_pretty(&pid_file).unwrap();
         std::fs::write(&pid_path, &content).unwrap();
-    
+
         // cleanup_stale_pidfile should refuse because the process is alive
         let result = cleanup_stale_pidfile(&dir);
-        assert!(result.is_err(), "cleanup_stale_pidfile should reject a live Gateway process");
-        assert!(pid_path.exists(), "pidfile should NOT be removed when process is alive");
-    
+        assert!(
+            result.is_err(),
+            "cleanup_stale_pidfile should reject a live Gateway process"
+        );
+        assert!(
+            pid_path.exists(),
+            "pidfile should NOT be removed when process is alive"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
-    
+
     #[test]
     fn test_cleanup_stale_pidfile_no_file() {
         let dir = std::env::temp_dir().join("acowork-test-pidfile-none");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-    
+
         // No pidfile exists — should succeed without doing anything
         let result = cleanup_stale_pidfile(&dir);
-        assert!(result.is_ok(), "cleanup_stale_pidfile should succeed when no pidfile exists");
-    
+        assert!(
+            result.is_ok(),
+            "cleanup_stale_pidfile should succeed when no pidfile exists"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

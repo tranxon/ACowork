@@ -16,8 +16,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::intent::privacy;
-use crate::ipc::session::SessionManager;
 use crate::ipc::server::SharedState;
+use crate::ipc::session::SessionManager;
 
 /// Default timeout for synchronous Intent routing (30 seconds)
 pub const DEFAULT_INTENT_TIMEOUT_SECS: u64 = 30;
@@ -160,7 +160,8 @@ impl IntentRouter {
         // Step 3: Find the target agent's IPC session and forward
         let target_conn_id = {
             let mgr = session_mgr.lock().await;
-            mgr.find_by_agent_id(target).map(|(conn_id, _)| conn_id.clone())
+            mgr.find_by_agent_id(target)
+                .map(|(conn_id, _)| conn_id.clone())
         };
 
         match target_conn_id {
@@ -178,7 +179,10 @@ impl IntentRouter {
                 // For sync intents, we acknowledge and record the pending intent.
                 tracing::info!(
                     "Sync Intent routed: from={} to={} action={} msg={}",
-                    from, target, action, message_id
+                    from,
+                    target,
+                    action,
+                    message_id
                 );
 
                 Ok(IntentResult {
@@ -225,13 +229,16 @@ impl IntentRouter {
         // Record pending intent for callback
         {
             let mut pending = self.pending.lock().await;
-            pending.insert(message_id.clone(), PendingIntent {
-                from_agent: from.to_string(),
-                target_agent: target.to_string(),
-                action: action.to_string(),
-                message_id: message_id.clone(),
-                created_at: chrono::Utc::now(),
-            });
+            pending.insert(
+                message_id.clone(),
+                PendingIntent {
+                    from_agent: from.to_string(),
+                    target_agent: target.to_string(),
+                    action: action.to_string(),
+                    message_id: message_id.clone(),
+                    created_at: chrono::Utc::now(),
+                },
+            );
         }
 
         // Check if target is running
@@ -249,7 +256,10 @@ impl IntentRouter {
 
         tracing::info!(
             "Async Intent queued: from={} to={} action={} msg={}",
-            from, target, action, message_id
+            from,
+            target,
+            action,
+            message_id
         );
 
         Ok(IntentResult {
@@ -263,11 +273,7 @@ impl IntentRouter {
     ///
     /// Called when the target agent sends back a response for a previously
     /// routed async intent. The privacy filter is applied before delivery.
-    pub async fn complete_async_intent(
-        &self,
-        message_id: &str,
-        response: Value,
-    ) -> Option<Value> {
+    pub async fn complete_async_intent(&self, message_id: &str, response: Value) -> Option<Value> {
         let mut pending = self.pending.lock().await;
         if pending.remove(message_id).is_some() {
             Some(self.filter_response(response))
@@ -312,9 +318,9 @@ impl Default for IntentRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::state::GatewayState;
     use serde_json::json;
     use tokio::sync::RwLock;
-    use crate::gateway::state::GatewayState;
 
     fn test_state() -> SharedState {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

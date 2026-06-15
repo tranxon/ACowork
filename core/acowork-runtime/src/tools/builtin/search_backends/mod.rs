@@ -3,8 +3,8 @@
 //! Each provider implements the `SearchBackend` trait.
 //! `WebSearchEngine` manages a fallback chain of backends.
 
-use async_trait::async_trait;
 use acowork_core::protocol::{SearchKeyEntry, SearchProviderListItem};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -90,7 +90,11 @@ impl std::fmt::Display for SearchBackendError {
 
 /// Ordered list of backends with API keys for fallback chain execution.
 pub struct WebSearchEngine {
-    backends: Vec<(Box<dyn SearchBackend>, Option<SearchKeyEntry>, Option<String>)>, // (backend, key, base_url)
+    backends: Vec<(
+        Box<dyn SearchBackend>,
+        Option<SearchKeyEntry>,
+        Option<String>,
+    )>, // (backend, key, base_url)
     search_timeout: Duration,
 }
 
@@ -102,10 +106,17 @@ impl WebSearchEngine {
     ///   Providers are tried in the given order (first = highest priority).
     /// * `search_timeout` - HTTP timeout applied to every search request.
     pub fn new(
-        backends: Vec<(Box<dyn SearchBackend>, Option<SearchKeyEntry>, Option<String>)>,
+        backends: Vec<(
+            Box<dyn SearchBackend>,
+            Option<SearchKeyEntry>,
+            Option<String>,
+        )>,
         search_timeout: Duration,
     ) -> Self {
-        Self { backends, search_timeout }
+        Self {
+            backends,
+            search_timeout,
+        }
     }
 
     /// Create a `SearchBackend` box for the given provider id, using this engine's timeout.
@@ -113,14 +124,28 @@ impl WebSearchEngine {
     /// Returns `None` if the provider id is not recognized.
     pub fn build_backend(&self, provider_id: &str) -> Option<Box<dyn SearchBackend>> {
         match provider_id {
-            "brave" => Some(Box::new(brave::BraveBackend::with_timeout(self.search_timeout))),
-            "serper" => Some(Box::new(serper::SerperBackend::with_timeout(self.search_timeout))),
-            "tavily" => Some(Box::new(tavily::TavilyBackend::with_timeout(self.search_timeout))),
+            "brave" => Some(Box::new(brave::BraveBackend::with_timeout(
+                self.search_timeout,
+            ))),
+            "serper" => Some(Box::new(serper::SerperBackend::with_timeout(
+                self.search_timeout,
+            ))),
+            "tavily" => Some(Box::new(tavily::TavilyBackend::with_timeout(
+                self.search_timeout,
+            ))),
             "exa" => Some(Box::new(exa::ExaBackend::with_timeout(self.search_timeout))),
-            "google-cse" => Some(Box::new(google_cse::GoogleCseBackend::with_timeout(self.search_timeout))),
-            "perplexity" => Some(Box::new(perplexity::PerplexityBackend::with_timeout(self.search_timeout))),
-            "firecrawl" => Some(Box::new(firecrawl::FirecrawlBackend::with_timeout(self.search_timeout))),
-            "searxng" => Some(Box::new(searxng::SearXngBackend::with_timeout(self.search_timeout))),
+            "google-cse" => Some(Box::new(google_cse::GoogleCseBackend::with_timeout(
+                self.search_timeout,
+            ))),
+            "perplexity" => Some(Box::new(perplexity::PerplexityBackend::with_timeout(
+                self.search_timeout,
+            ))),
+            "firecrawl" => Some(Box::new(firecrawl::FirecrawlBackend::with_timeout(
+                self.search_timeout,
+            ))),
+            "searxng" => Some(Box::new(searxng::SearXngBackend::with_timeout(
+                self.search_timeout,
+            ))),
             _ => None,
         }
     }
@@ -129,7 +154,11 @@ impl WebSearchEngine {
     ///
     /// Tries each backend in priority order. On failure (no key, API error, network error),
     /// automatically falls through to the next backend. Returns an error only if ALL backends fail.
-    pub async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, SearchBackendError> {
+    pub async fn search(
+        &self,
+        query: &str,
+        count: u32,
+    ) -> Result<Vec<SearchResult>, SearchBackendError> {
         if self.backends.is_empty() {
             return Err(SearchBackendError::NotConfigured);
         }
@@ -140,7 +169,10 @@ impl WebSearchEngine {
         for (backend, key_entry, base_url) in &self.backends {
             let api_key = key_entry.as_ref().map(|k| k.api_key.as_str()).unwrap_or("");
 
-            match backend.search(query, count, api_key, base_url.as_deref()).await {
+            match backend
+                .search(query, count, api_key, base_url.as_deref())
+                .await
+            {
                 Ok(results) => {
                     if !errors.is_empty() {
                         tracing::warn!(
@@ -217,7 +249,8 @@ pub fn search_provider_catalog() -> Vec<SearchProviderListItem> {
         SearchProviderListItem {
             id: "google-cse".to_string(),
             name: "Google CSE".to_string(),
-            description: "Google Custom Search Engine — requires API key + Search Engine ID (CX)".to_string(),
+            description: "Google Custom Search Engine — requires API key + Search Engine ID (CX)"
+                .to_string(),
             requires_api_key: true,
             base_url: "https://www.googleapis.com".to_string(),
         },

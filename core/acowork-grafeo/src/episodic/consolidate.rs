@@ -23,10 +23,7 @@ impl GrafeoStore {
         let session = self.db.session();
         // Note: GQL ORDER BY / WHERE returns bare Int64 IDs instead of full node maps
         // in the current grafeo-engine version. Fetch all and filter/sort in Rust.
-        let gql = format!(
-            "MATCH (e:Episodic) RETURN e LIMIT {}",
-            limit
-        );
+        let gql = format!("MATCH (e:Episodic) RETURN e LIMIT {}", limit);
         let result = session.execute(&gql)?;
 
         let mut episodes: Vec<crate::types::Episode> = Vec::new();
@@ -132,12 +129,28 @@ mod tests {
         store.store_episode(&ep2).unwrap();
 
         // Verify both episodes were stored by retrieving directly
-        let node1 = store.db.get_node(grafeo_common::types::NodeId::new(0)).unwrap();
-        let node2 = store.db.get_node(grafeo_common::types::NodeId::new(1)).unwrap();
-        let props1: Vec<(String, Value)> = node1.properties_as_btree().into_iter().map(|(k, v)| (k.as_str().to_string(), v)).collect();
-        let props2: Vec<(String, Value)> = node2.properties_as_btree().into_iter().map(|(k, v)| (k.as_str().to_string(), v)).collect();
-        let ep1_restored = Episode::from_properties(grafeo_common::types::NodeId::new(0), &props1).unwrap();
-        let ep2_restored = Episode::from_properties(grafeo_common::types::NodeId::new(1), &props2).unwrap();
+        let node1 = store
+            .db
+            .get_node(grafeo_common::types::NodeId::new(0))
+            .unwrap();
+        let node2 = store
+            .db
+            .get_node(grafeo_common::types::NodeId::new(1))
+            .unwrap();
+        let props1: Vec<(String, Value)> = node1
+            .properties_as_btree()
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_string(), v))
+            .collect();
+        let props2: Vec<(String, Value)> = node2
+            .properties_as_btree()
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_string(), v))
+            .collect();
+        let ep1_restored =
+            Episode::from_properties(grafeo_common::types::NodeId::new(0), &props1).unwrap();
+        let ep2_restored =
+            Episode::from_properties(grafeo_common::types::NodeId::new(1), &props2).unwrap();
         assert_eq!(ep1_restored.content, "first");
         assert!(!ep1_restored.consolidated);
         assert_eq!(ep2_restored.content, "second");

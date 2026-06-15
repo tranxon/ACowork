@@ -11,8 +11,8 @@
 use wasmtime::Module;
 
 use super::engine::WasmEngine;
-use super::instance::{WasmToolInstance, WasmExecutionResult};
-use super::wit::{ToolInput, ToolOutput, ComponentInterface, ComponentInterfaceVersion};
+use super::instance::{WasmExecutionResult, WasmToolInstance};
+use super::wit::{ComponentInterface, ComponentInterfaceVersion, ToolInput, ToolOutput};
 use crate::error::RuntimeError;
 
 /// A loaded WASM tool component with interface metadata.
@@ -31,11 +31,7 @@ impl WasmToolComponent {
     /// Load a WASM tool component from bytes.
     ///
     /// Compiles the module and detects the interface version.
-    pub fn load(
-        name: &str,
-        engine: &WasmEngine,
-        wasm_bytes: &[u8],
-    ) -> Result<Self, RuntimeError> {
+    pub fn load(name: &str, engine: &WasmEngine, wasm_bytes: &[u8]) -> Result<Self, RuntimeError> {
         let module = engine.compile(wasm_bytes)?;
 
         let interface = ComponentInterface::detect(
@@ -78,7 +74,11 @@ impl WasmToolComponent {
     ///
     /// Handles both V1 (raw pointer) and V3 (typed) protocols
     /// transparently.
-    pub fn execute(&self, engine: &WasmEngine, input: &ToolInput) -> Result<ToolOutput, RuntimeError> {
+    pub fn execute(
+        &self,
+        engine: &WasmEngine,
+        input: &ToolInput,
+    ) -> Result<ToolOutput, RuntimeError> {
         let mut instance = WasmToolInstance::from_module(engine, &self.module)?;
 
         let input_json = serde_json::to_string(&input.params)
@@ -90,7 +90,11 @@ impl WasmToolComponent {
     }
 
     /// Execute with raw JSON string (backward compatible).
-    pub fn execute_raw(&self, engine: &WasmEngine, input_json: &str) -> Result<WasmExecutionResult, RuntimeError> {
+    pub fn execute_raw(
+        &self,
+        engine: &WasmEngine,
+        input_json: &str,
+    ) -> Result<WasmExecutionResult, RuntimeError> {
         let mut instance = WasmToolInstance::from_module(engine, &self.module)?;
         instance.execute(input_json)
     }
@@ -109,7 +113,11 @@ impl WasmToolComponent {
                 }
             }
         } else {
-            ToolOutput::err(result.error.unwrap_or_else(|| "Unknown WASM execution error".to_string()))
+            ToolOutput::err(
+                result
+                    .error
+                    .unwrap_or_else(|| "Unknown WASM execution error".to_string()),
+            )
         }
     }
 
@@ -157,7 +165,10 @@ mod tests {
         let engine = create_test_engine();
         let wasm = wasm_generator::module_with_execute();
         let component = WasmToolComponent::load("test_tool", &engine, &wasm);
-        assert!(component.is_ok(), "Should load component with execute export");
+        assert!(
+            component.is_ok(),
+            "Should load component with execute export"
+        );
 
         let component = component.unwrap();
         assert_eq!(component.name(), "test_tool");

@@ -33,13 +33,13 @@
 pub mod pool;
 
 use axum::{
+    Json,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -149,11 +149,10 @@ fn canonical_language(lang: &str) -> &str {
 fn lsp_servers_config() -> &'static LspServersConfig {
     static CFG: OnceLock<LspServersConfig> = OnceLock::new();
     CFG.get_or_init(|| {
-        load_lsp_servers_from_file()
-            .unwrap_or_else(|| {
-                tracing::warn!("lsp_servers.json not found, using built-in defaults");
-                builtin_lsp_defaults()
-            })
+        load_lsp_servers_from_file().unwrap_or_else(|| {
+            tracing::warn!("lsp_servers.json not found, using built-in defaults");
+            builtin_lsp_defaults()
+        })
     })
 }
 
@@ -162,25 +161,23 @@ fn load_lsp_servers_from_file() -> Option<LspServersConfig> {
     for path in &candidates {
         if path.exists() {
             match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    match serde_json::from_str::<LspServersConfig>(&content) {
-                        Ok(cfg) => {
-                            tracing::info!(
-                                path = %path.display(),
-                                count = cfg.servers.len(),
-                                "Loaded LSP servers config"
-                            );
-                            return Some(cfg);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                path = %path.display(),
-                                error = %e,
-                                "Failed to parse lsp_servers.json"
-                            );
-                        }
+                Ok(content) => match serde_json::from_str::<LspServersConfig>(&content) {
+                    Ok(cfg) => {
+                        tracing::info!(
+                            path = %path.display(),
+                            count = cfg.servers.len(),
+                            "Loaded LSP servers config"
+                        );
+                        return Some(cfg);
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "Failed to parse lsp_servers.json"
+                        );
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -211,7 +208,10 @@ fn build_config_candidates() -> Vec<std::path::PathBuf> {
     // 1. CARGO_MANIFEST_DIR ../../assets/ (dev and test via cargo)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let path = std::path::PathBuf::from(&manifest_dir)
-            .join("..").join("..").join("assets").join("lsp_servers.json");
+            .join("..")
+            .join("..")
+            .join("assets")
+            .join("lsp_servers.json");
         if path.exists() {
             candidates.push(path);
         }
@@ -237,100 +237,156 @@ fn build_config_candidates() -> Vec<std::path::PathBuf> {
 fn builtin_lsp_defaults() -> LspServersConfig {
     let mut servers = std::collections::HashMap::new();
 
-    servers.insert("rust".into(), LspServerEntry {
-        candidates: vec!["rust-analyzer".into()],
-        args: vec![],
-        install_hint: "rustup component add rust-analyzer".into(),
-        install_script: Some("rust".into()),
-        description: "Rust language server (defaults to stdio, no --stdio flag)".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("python".into(), LspServerEntry {
-        candidates: vec!["pyright-langserver".into(), "pylsp".into(), "python-lsp-server".into()],
-        args: vec!["--stdio".into()],
-        install_hint: "pip install python-lsp-server".into(),
-        install_script: Some("python".into()),
-        description: "Python language server".into(),
-        // pylsp defaults to stdio — no --stdio flag. Override to empty args.
-        candidate_args: std::collections::HashMap::from([
-            ("pylsp".into(), vec![]),
-            ("python-lsp-server".into(), vec![]),
-        ]),
-    });
-    servers.insert("typescript".into(), LspServerEntry {
-        candidates: vec!["typescript-language-server".into(), "typescript-language-server.cmd".into()],
-        args: vec!["--stdio".into()],
-        install_hint: "npm install -g typescript-language-server typescript".into(),
-        install_script: Some("typescript".into()),
-        description: "TypeScript/JavaScript language server".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("go".into(), LspServerEntry {
-        candidates: vec!["gopls".into()],
-        args: vec!["serve".into()],
-        install_hint: "go install golang.org/x/tools/gopls@latest".into(),
-        install_script: Some("go".into()),
-        description: "Go language server (uses 'serve' subcommand)".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("c".into(), LspServerEntry {
-        candidates: vec!["clangd".into()],
-        args: vec![],
-        install_hint: "Install clangd: https://clangd.llvm.org/installation".into(),
-        install_script: Some("clangd".into()),
-        description: "C/C++ language server (defaults to stdio)".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("json".into(), LspServerEntry {
-        candidates: vec!["vscode-json-language-server".into(), "vscode-json-languageserver".into(), "json-languageserver".into()],
-        args: vec!["--stdio".into()],
-        install_hint: "npm install -g vscode-langservers-extracted".into(),
-        install_script: Some("json".into()),
-        description: "JSON language server".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("yaml".into(), LspServerEntry {
-        candidates: vec!["yaml-language-server".into()],
-        args: vec!["--stdio".into()],
-        install_hint: "npm install -g yaml-language-server".into(),
-        install_script: Some("yaml".into()),
-        description: "YAML language server".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("html".into(), LspServerEntry {
-        candidates: vec!["vscode-html-language-server".into(), "vscode-html-languageserver".into(), "html-languageserver".into()],
-        args: vec!["--stdio".into()],
-        install_hint: "npm install -g vscode-langservers-extracted".into(),
-        install_script: Some("html".into()),
-        description: "HTML language server".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("css".into(), LspServerEntry {
-        candidates: vec!["vscode-css-language-server".into(), "vscode-css-languageserver".into(), "css-languageserver".into()],
-        args: vec!["--stdio".into()],
-        install_hint: "npm install -g vscode-langservers-extracted".into(),
-        install_script: Some("css".into()),
-        description: "CSS/SCSS/Less language server".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("markdown".into(), LspServerEntry {
-        candidates: vec!["marksman".into()],
-        args: vec![],
-        install_hint: "Install marksman: https://github.com/artempyanykh/marksman".into(),
-        install_script: Some("markdown".into()),
-        description: "Markdown language server (defaults to stdio)".into(),
-        candidate_args: Default::default(),
-    });
-    servers.insert("java".into(), LspServerEntry {
-        candidates: vec!["jdtls".into()],
-        args: vec![],
-        install_hint: "Download Eclipse JDT Language Server: https://download.eclipse.org/jdtls/".into(),
-        install_script: Some("java".into()),
-        description: "Eclipse JDT Language Server for Java".into(),
-        candidate_args: Default::default(),
-    });
+    servers.insert(
+        "rust".into(),
+        LspServerEntry {
+            candidates: vec!["rust-analyzer".into()],
+            args: vec![],
+            install_hint: "rustup component add rust-analyzer".into(),
+            install_script: Some("rust".into()),
+            description: "Rust language server (defaults to stdio, no --stdio flag)".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "python".into(),
+        LspServerEntry {
+            candidates: vec![
+                "pyright-langserver".into(),
+                "pylsp".into(),
+                "python-lsp-server".into(),
+            ],
+            args: vec!["--stdio".into()],
+            install_hint: "pip install python-lsp-server".into(),
+            install_script: Some("python".into()),
+            description: "Python language server".into(),
+            // pylsp defaults to stdio — no --stdio flag. Override to empty args.
+            candidate_args: std::collections::HashMap::from([
+                ("pylsp".into(), vec![]),
+                ("python-lsp-server".into(), vec![]),
+            ]),
+        },
+    );
+    servers.insert(
+        "typescript".into(),
+        LspServerEntry {
+            candidates: vec![
+                "typescript-language-server".into(),
+                "typescript-language-server.cmd".into(),
+            ],
+            args: vec!["--stdio".into()],
+            install_hint: "npm install -g typescript-language-server typescript".into(),
+            install_script: Some("typescript".into()),
+            description: "TypeScript/JavaScript language server".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "go".into(),
+        LspServerEntry {
+            candidates: vec!["gopls".into()],
+            args: vec!["serve".into()],
+            install_hint: "go install golang.org/x/tools/gopls@latest".into(),
+            install_script: Some("go".into()),
+            description: "Go language server (uses 'serve' subcommand)".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "c".into(),
+        LspServerEntry {
+            candidates: vec!["clangd".into()],
+            args: vec![],
+            install_hint: "Install clangd: https://clangd.llvm.org/installation".into(),
+            install_script: Some("clangd".into()),
+            description: "C/C++ language server (defaults to stdio)".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "json".into(),
+        LspServerEntry {
+            candidates: vec![
+                "vscode-json-language-server".into(),
+                "vscode-json-languageserver".into(),
+                "json-languageserver".into(),
+            ],
+            args: vec!["--stdio".into()],
+            install_hint: "npm install -g vscode-langservers-extracted".into(),
+            install_script: Some("json".into()),
+            description: "JSON language server".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "yaml".into(),
+        LspServerEntry {
+            candidates: vec!["yaml-language-server".into()],
+            args: vec!["--stdio".into()],
+            install_hint: "npm install -g yaml-language-server".into(),
+            install_script: Some("yaml".into()),
+            description: "YAML language server".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "html".into(),
+        LspServerEntry {
+            candidates: vec![
+                "vscode-html-language-server".into(),
+                "vscode-html-languageserver".into(),
+                "html-languageserver".into(),
+            ],
+            args: vec!["--stdio".into()],
+            install_hint: "npm install -g vscode-langservers-extracted".into(),
+            install_script: Some("html".into()),
+            description: "HTML language server".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "css".into(),
+        LspServerEntry {
+            candidates: vec![
+                "vscode-css-language-server".into(),
+                "vscode-css-languageserver".into(),
+                "css-languageserver".into(),
+            ],
+            args: vec!["--stdio".into()],
+            install_hint: "npm install -g vscode-langservers-extracted".into(),
+            install_script: Some("css".into()),
+            description: "CSS/SCSS/Less language server".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "markdown".into(),
+        LspServerEntry {
+            candidates: vec!["marksman".into()],
+            args: vec![],
+            install_hint: "Install marksman: https://github.com/artempyanykh/marksman".into(),
+            install_script: Some("markdown".into()),
+            description: "Markdown language server (defaults to stdio)".into(),
+            candidate_args: Default::default(),
+        },
+    );
+    servers.insert(
+        "java".into(),
+        LspServerEntry {
+            candidates: vec!["jdtls".into()],
+            args: vec![],
+            install_hint:
+                "Download Eclipse JDT Language Server: https://download.eclipse.org/jdtls/".into(),
+            install_script: Some("java".into()),
+            description: "Eclipse JDT Language Server for Java".into(),
+            candidate_args: Default::default(),
+        },
+    );
 
-    LspServersConfig { version: 1, servers }
+    LspServersConfig {
+        version: 1,
+        servers,
+    }
 }
 
 // ── Resolve LSP command ────────────────────────────────────────────────
@@ -348,7 +404,11 @@ fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
 
     let entry = cfg.servers.get(canonical);
     if entry.is_none() {
-        tracing::warn!("[LSP] No config entry for language '{}' (canonical: '{}')", language, canonical);
+        tracing::warn!(
+            "[LSP] No config entry for language '{}' (canonical: '{}')",
+            language,
+            canonical
+        );
         return None;
     }
     let entry = entry.unwrap();
@@ -358,7 +418,10 @@ fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
         if let Some(found) = find_on_path(cmd) {
             tracing::info!(
                 "[LSP] Found LSP command for '{}' (canonical '{}'): {}, args: {:?}",
-                language, canonical, found, entry.args
+                language,
+                canonical,
+                found,
+                entry.args
             );
             return Some(LspServerSpec {
                 command: found,
@@ -372,7 +435,9 @@ fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
 
     tracing::warn!(
         "[LSP] No LSP command found for '{}' (canonical '{}', checked: {:?})",
-        language, canonical, entry.candidates
+        language,
+        canonical,
+        entry.candidates
     );
     // Return spec with install_hint even if command not found, so the
     // handler can give a useful error message.
@@ -429,9 +494,7 @@ pub struct LspQuery {
 /// Returns the full `lsp_servers.json` content so the Desktop App
 /// can display install hints, available languages, etc.
 /// Works for both local and remote Gateway scenarios.
-pub async fn lsp_servers_list(
-    State(_state): State<AppState>,
-) -> Json<LspServersConfig> {
+pub async fn lsp_servers_list(State(_state): State<AppState>) -> Json<LspServersConfig> {
     let cfg = lsp_servers_config();
     Json(cfg.clone())
 }
@@ -449,16 +512,22 @@ pub async fn lsp_install_script(
     let canonical = canonical_language(&lang_lower);
     let cfg = lsp_servers_config();
 
-    let script_name = cfg.servers.get(canonical)
+    let script_name = cfg
+        .servers
+        .get(canonical)
         .and_then(|e| e.install_script.as_ref());
 
     let script_name = match script_name {
         Some(name) => name,
         None => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": format!("No install script for language: {}", language),
-                "code": 404
-            }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("No install script for language: {}", language),
+                    "code": 404
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -469,16 +538,24 @@ pub async fn lsp_install_script(
     // Search for the script file
     let content = load_install_script(&filename);
     match content {
-        Some(script) => (StatusCode::OK, Json(serde_json::json!({
-            "language": canonical,
-            "filename": filename,
-            "script": script,
-            "platform": ext,
-        }))).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": format!("Install script file '{}' not found", filename),
-            "code": 404
-        }))).into_response(),
+        Some(script) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "language": canonical,
+                "filename": filename,
+                "script": script,
+                "platform": ext,
+            })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Install script file '{}' not found", filename),
+                "code": 404
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -494,16 +571,22 @@ pub async fn lsp_install_run(
     let canonical = canonical_language(&lang_lower);
     let cfg = lsp_servers_config();
 
-    let script_name = cfg.servers.get(canonical)
+    let script_name = cfg
+        .servers
+        .get(canonical)
         .and_then(|e| e.install_script.as_ref());
 
     let script_name = match script_name {
         Some(name) => name,
         None => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": format!("No install script for language: {}", language),
-                "code": 404
-            }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("No install script for language: {}", language),
+                    "code": 404
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -513,10 +596,14 @@ pub async fn lsp_install_run(
     let script_path = match find_install_script_path(&filename) {
         Some(path) => path,
         None => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": format!("Install script file '{}' not found", filename),
-                "code": 404
-            }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("Install script file '{}' not found", filename),
+                    "code": 404
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -529,11 +616,7 @@ pub async fn lsp_install_run(
     // Spawn the script: powershell on Windows, bash on Unix
     let result: std::io::Result<std::process::Output> = if cfg!(windows) {
         std::process::Command::new("powershell")
-            .args([
-                "-ExecutionPolicy", "Bypass",
-                "-NoProfile",
-                "-File",
-            ])
+            .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-File"])
             .arg(&script_path)
             .output()
     } else {
@@ -556,24 +639,37 @@ pub async fn lsp_install_run(
                 stderr.len()
             );
 
-            let code = if success { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR };
-            (code, Json(serde_json::json!({
-                "language": canonical,
-                "success": success,
-                "exit_code": output.status.code(),
-                "stdout": stdout,
-                "stderr": stderr,
-            }))).into_response()
+            let code = if success {
+                StatusCode::OK
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                code,
+                Json(serde_json::json!({
+                    "language": canonical,
+                    "success": success,
+                    "exit_code": output.status.code(),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                })),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!(
                 "[LSP] Failed to run install script for '{}': {}",
-                canonical, e
+                canonical,
+                e
             );
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to run install script: {}", e),
-                "code": 500
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to run install script: {}", e),
+                    "code": 500
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -615,7 +711,9 @@ fn build_install_script_candidates(filename: &str) -> Vec<std::path::PathBuf> {
     // 0. CLI / env override: --lsp-config-dir / ACOWORK_LSP_CONFIG_DIR
     //    Desktop App passes its Tauri resource_dir here.
     if let Ok(config_dir) = std::env::var("ACOWORK_LSP_CONFIG_DIR") {
-        let path = std::path::PathBuf::from(&config_dir).join("lsp_install").join(filename);
+        let path = std::path::PathBuf::from(&config_dir)
+            .join("lsp_install")
+            .join(filename);
         if path.exists() {
             candidates.push(path);
         }
@@ -624,7 +722,11 @@ fn build_install_script_candidates(filename: &str) -> Vec<std::path::PathBuf> {
     // 1. CARGO_MANIFEST_DIR ../../assets/lsp_install/ (dev)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let path = std::path::PathBuf::from(&manifest_dir)
-            .join("..").join("..").join("assets").join("lsp_install").join(filename);
+            .join("..")
+            .join("..")
+            .join("assets")
+            .join("lsp_install")
+            .join(filename);
         if path.exists() {
             candidates.push(path);
         }
@@ -669,10 +771,7 @@ pub async fn lsp_handler(
     );
     let workspace_root = match resolve_workspace_root_for_lsp(&state, &query).await {
         Ok(root) => {
-            tracing::info!(
-                "[LSP] lsp_handler — workspace_root resolved: '{}'",
-                root
-            );
+            tracing::info!("[LSP] lsp_handler — workspace_root resolved: '{}'", root);
             root
         }
         Err((status, msg)) => {
@@ -706,7 +805,9 @@ pub async fn lsp_handler(
             let lang_lower2 = lang_lower.clone();
             let canonical2 = canonical_language(&lang_lower2);
             let cfg = lsp_servers_config();
-            let install_hint = cfg.servers.get(canonical2)
+            let install_hint = cfg
+                .servers
+                .get(canonical2)
                 .map(|e| e.install_hint.as_str())
                 .unwrap_or("Install the LSP server and ensure it is on PATH");
             let msg = format!(
@@ -720,7 +821,10 @@ pub async fn lsp_handler(
 
     tracing::info!(
         "[LSP] Upgrading WebSocket for language='{}', cmd='{}' args={:?}, workspace='{}'",
-        lang_lower, spec.command, spec.args, workspace_root
+        lang_lower,
+        spec.command,
+        spec.args,
+        workspace_root
     );
 
     let pool = Arc::clone(&state.lsp_pool);
@@ -757,7 +861,10 @@ async fn lsp_relay(
     );
 
     // Get or spawn from pool
-    let entry = match pool.get_or_spawn(&spec.command, &spec.args, &workspace_root).await {
+    let entry = match pool
+        .get_or_spawn(&spec.command, &spec.args, &workspace_root)
+        .await
+    {
         Ok(e) => {
             tracing::info!(
                 "[LSP] relay — pool entry obtained for '{}', PID={}, active_clients={}",
@@ -768,7 +875,11 @@ async fn lsp_relay(
             e
         }
         Err(err) => {
-            tracing::error!("[LSP] relay — Failed to get/spawn '{}': {}", spec.command, err);
+            tracing::error!(
+                "[LSP] relay — Failed to get/spawn '{}': {}",
+                spec.command,
+                err
+            );
             return;
         }
     };
@@ -787,7 +898,10 @@ async fn lsp_relay(
     // Task: LSP stdout (broadcast) + synthesised messages → WebSocket
     let cmd_for_send = spec.command.clone();
     let mut send_task = tokio::spawn(async move {
-        tracing::info!("[LSP] relay — stdout→WS task started for '{}'", cmd_for_send);
+        tracing::info!(
+            "[LSP] relay — stdout→WS task started for '{}'",
+            cmd_for_send
+        );
         loop {
             tokio::select! {
                 result = stdout_rx.recv() => {
@@ -873,7 +987,10 @@ async fn lsp_relay(
                     let method_hint = extract_method_hint(t.as_str());
                     // Log workspace-level & registration messages at info level
                     // for diagnosing jdtls workspace/symbol issues.
-                    if method_hint.starts_with("workspace/") || method_hint == "client/registerFeature" || method_hint == "client/unregisterFeature" {
+                    if method_hint.starts_with("workspace/")
+                        || method_hint == "client/registerFeature"
+                        || method_hint == "client/unregisterFeature"
+                    {
                         tracing::info!(
                             "[LSP] relay WS → stdin: '{}' method='{}' len={}",
                             cmd_for_recv,
@@ -890,12 +1007,10 @@ async fn lsp_relay(
                     }
                     t.to_string()
                 }
-                Ok(Message::Binary(data)) => {
-                    match String::from_utf8(data.to_vec()) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    }
-                }
+                Ok(Message::Binary(data)) => match String::from_utf8(data.to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                },
                 Ok(Message::Close(_)) => break,
                 _ => continue,
             };
@@ -946,10 +1061,12 @@ async fn lsp_relay(
     }
 
     // Client disconnected — mark in pool (process stays alive)
-    pool.client_disconnected(&spec.command, &spec.args, &workspace_root).await;
+    pool.client_disconnected(&spec.command, &spec.args, &workspace_root)
+        .await;
     tracing::info!(
         "[LSP] relay — WebSocket client disconnected for '{}' in '{}'",
-        spec.command, workspace_root
+        spec.command,
+        workspace_root
     );
 }
 
@@ -1006,7 +1123,8 @@ fn extract_jsonrpc_id(msg: &str) -> String {
             }
         } else {
             // Numeric id: "id":42
-            let end = rest.find(|c: char| !c.is_ascii_digit())
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
                 .unwrap_or(rest.len());
             return rest[..end].to_string();
         }
@@ -1034,7 +1152,8 @@ fn substitute_jsonrpc_id(msg: &str, new_id: &str) -> String {
             }
         } else {
             // Numeric id — skip digits
-            let end = rest_trimmed.find(|c: char| !c.is_ascii_digit())
+            let end = rest_trimmed
+                .find(|c: char| !c.is_ascii_digit())
                 .unwrap_or(rest_trimmed.len());
             let after = &rest_trimmed[end..];
             return format!("{}{}{}{}", before, whitespace, new_id, after);
@@ -1077,7 +1196,10 @@ async fn resolve_workspace_root_for_lsp(
 
     let gw = state.gateway_state.read().await;
     let info = gw.running_agents.get(agent_id).ok_or_else(|| {
-        (StatusCode::NOT_FOUND, "Agent not running — cannot resolve workspace".to_string())
+        (
+            StatusCode::NOT_FOUND,
+            "Agent not running — cannot resolve workspace".to_string(),
+        )
     })?;
 
     let ws_id = query.workspace_id.as_deref().unwrap_or("");
@@ -1106,7 +1228,10 @@ async fn resolve_workspace_root_for_lsp(
             }
         }
 
-        Err((StatusCode::NOT_FOUND, format!("Workspace directory not found: {}", ws_id)))
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("Workspace directory not found: {}", ws_id),
+        ))
     }
 }
 

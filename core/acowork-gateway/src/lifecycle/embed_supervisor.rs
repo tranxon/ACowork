@@ -97,14 +97,17 @@ struct RestartHistory {
 
 impl RestartHistory {
     fn new() -> Self {
-        Self { attempts: Vec::new() }
+        Self {
+            attempts: Vec::new(),
+        }
     }
 
     /// Record a restart attempt, pruning anything older than the window.
     /// Returns the number of attempts now in the window (after pruning).
     fn record(&mut self) -> usize {
         let now = Instant::now();
-        self.attempts.retain(|t| now.duration_since(*t) < RESTART_WINDOW);
+        self.attempts
+            .retain(|t| now.duration_since(*t) < RESTART_WINDOW);
         self.attempts.push(now);
         self.attempts.len()
     }
@@ -192,8 +195,16 @@ async fn run_supervisor(
                 break;
             }
             if Instant::now() >= deadline {
+                if embed_process_alive(&state, port).await {
+                    tracing::warn!(
+                        "Initial embed has not bound /events within {:?}, but process is still running; continuing startup wait",
+                        STARTUP_GRACE
+                    );
+                    sleep(STARTUP_POLL).await;
+                    continue;
+                }
                 tracing::warn!(
-                    "Initial embed did not respond within {:?}; entering normal monitor mode anyway",
+                    "Initial embed did not respond within {:?} and process is not alive; entering restart loop",
                     STARTUP_GRACE
                 );
                 in_startup_grace = false;
@@ -204,20 +215,19 @@ async fn run_supervisor(
     }
 
     loop {
-        let exit_reason = match run_monitor_session(&cfg, &state, &pusher, port, &mut in_startup_grace).await {
-            MonitorExit::Clean => {
-                tracing::info!("Embed monitor session ended cleanly");
-                return;
-            }
-            exit @ MonitorExit::HeartbeatTimeout | exit @ MonitorExit::ConnectionLost => exit,
-        };
+        let exit_reason =
+            match run_monitor_session(&cfg, &state, &pusher, port, &mut in_startup_grace).await {
+                MonitorExit::Clean => {
+                    tracing::info!("Embed monitor session ended cleanly");
+                    return;
+                }
+                exit @ MonitorExit::HeartbeatTimeout | exit @ MonitorExit::ConnectionLost => exit,
+            };
 
         // During startup grace, failures don't count — the embed is
         // probably just slow to boot.
         if in_startup_grace {
-            tracing::warn!(
-                "Embed monitor session ended during startup grace — retrying shortly"
-            );
+            tracing::warn!("Embed monitor session ended during startup grace — retrying shortly");
             sleep(STARTUP_POLL).await;
             continue;
         }
@@ -233,9 +243,10 @@ async fn run_supervisor(
                 // deadlock or ONNX hang). Kill + restart.
                 tracing::warn!("Embed heartbeat timeout — killing stuck process");
                 if embed_alive {
-                    let pid = state.read().await
-                        .embed_process.as_ref().map(|e| e.pid);
-                    if let Some(p) = pid {
+                    let pid = state.read().await.embed_process.as_ref().map(|e| e.pid);
+                    if let Some(p) = pid
+                        && p != 0
+                    {
                         let _ = super::embed::kill_embed_process(p).await;
                     }
                 }
@@ -254,9 +265,14 @@ async fn run_supervisor(
             MonitorExit::Clean => unreachable!(),
         }
 
-        // If the reaper hasn't fired yet but the embed is actually
-        // dead, we may still see a stale Some in embed_process.
-        // Clear it so the restart logic starts from a clean state.
+        if embed_process_alive(&state, port).await {
+            tracing::info!(
+                "Embed HTTP is not ready yet, but process is still alive; waiting instead of restarting"
+            );
+            sleep(STARTUP_POLL).await;
+            continue;
+        }
+
         {
             let mut gw = state.write().await;
             gw.embed_process = None;
@@ -275,12 +291,9 @@ async fn run_supervisor(
             return;
         }
 
-        let backoff = backoff_with_jitter(attempts as u32, RESTART_BACKOFF_MIN, RESTART_BACKOFF_MAX);
-        tracing::info!(
-            attempt = attempts,
-            ?backoff,
-            "Restarting embed process"
-        );
+        let backoff =
+            backoff_with_jitter(attempts as u32, RESTART_BACKOFF_MIN, RESTART_BACKOFF_MAX);
+        tracing::info!(attempt = attempts, ?backoff, "Restarting embed process");
         sleep(backoff).await;
 
         match spawn_embed_process(
@@ -337,8 +350,23 @@ async fn run_supervisor(
                 }
             }
             Err(e) => {
-                tracing::error!(error = %e, "Failed to restart embed process");
-                // Loop will retry per backoff policy.
+                if let Some(health) = super::embed::check_embed_health(port).await {
+                    let attached = super::embed::attach_existing_embed_process(port, Some(health));
+                    tracing::info!(
+                        port,
+                        ready = attached.ready,
+                        "Reusing existing embed after restart failure"
+                    );
+                    {
+                        let mut gw = state.write().await;
+                        gw.embed_process = Some(attached);
+                    }
+                    if let Some(p) = &pusher {
+                        p.push_embedding_config().await;
+                    }
+                } else {
+                    tracing::error!(error = %e, "Failed to restart embed process");
+                }
             }
         }
 
@@ -358,8 +386,16 @@ async fn run_supervisor(
                     break;
                 }
                 if Instant::now() >= deadline {
+                    if embed_process_alive(&state, port).await {
+                        tracing::warn!(
+                            "Restarted embed has not bound /events within {:?}, but process is still running; continuing startup wait",
+                            STARTUP_GRACE
+                        );
+                        sleep(STARTUP_POLL).await;
+                        continue;
+                    }
                     tracing::warn!(
-                        "Restarted embed did not respond within {:?}; entering monitor anyway",
+                        "Restarted embed did not respond within {:?} and process is not alive; entering monitor anyway",
                         STARTUP_GRACE
                     );
                     break;
@@ -411,7 +447,12 @@ async fn run_monitor_session(
         }
     };
 
-    let resp = match client.get(&url).header("Accept", "text/event-stream").send().await {
+    let resp = match client
+        .get(&url)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to connect to embed /events");
@@ -617,6 +658,15 @@ async fn bootstrap_state_from_health(
 /// it returns a 2xx status. Used during the startup grace window to
 /// wait for the freshly-spawned embed to begin serving without
 /// consuming the restart budget.
+async fn embed_process_alive(state: &SharedEmbedState, port: u16) -> bool {
+    let pid = state.read().await.embed_process.as_ref().map(|e| e.pid);
+    match pid {
+        Some(0) => super::embed::check_embed_health(port).await.is_some(),
+        Some(pid) => crate::lifecycle::process::check_health(pid).await,
+        None => false,
+    }
+}
+
 async fn try_connect_events(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/events");
     let client = match reqwest::Client::builder()
@@ -626,7 +676,12 @@ async fn try_connect_events(port: u16) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    match client.get(&url).header("Accept", "text/event-stream").send().await {
+    match client
+        .get(&url)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+    {
         Ok(r) => r.status().is_success(),
         Err(_) => false,
     }

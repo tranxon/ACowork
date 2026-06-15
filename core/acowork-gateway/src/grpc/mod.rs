@@ -5,9 +5,9 @@
 //! business logic (handler functions) as the IPC server, but converts
 //! between proto types and domain types instead of JSON framing.
 
-pub mod server;
 pub mod dispatch;
+pub mod server;
 
 // Re-export the main entry point and types
-pub use server::start_grpc_server;
 pub use server::SharedGrpcSessionMgr;
+pub use server::start_grpc_server;

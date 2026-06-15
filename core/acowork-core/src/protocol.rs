@@ -1120,8 +1120,10 @@ pub enum SessionStatusDto {
     /// A tool requires user approval before execution
     WaitingApproval { request_id: String },
     /// Iteration limit reached or debug pause — awaiting user decision
-    Paused { iteration: Option<u32>, max_iterations: Option<u32> },
-
+    Paused {
+        iteration: Option<u32>,
+        max_iterations: Option<u32>,
+    },
 }
 
 /// Conversation entry DTO for IPC responses (S1.14)
@@ -1181,8 +1183,6 @@ fn default_retry_interval() -> u64 {
     60
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,10 +1207,7 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: GatewayRequest = serde_json::from_str(&json).unwrap();
-        if let GatewayRequest::IntentSend {
-            target, action, ..
-        } = parsed
-        {
+        if let GatewayRequest::IntentSend { target, action, .. } = parsed {
             assert_eq!(target, "com.example.calendar");
             assert_eq!(action, "schedule");
         } else {
@@ -1248,7 +1245,13 @@ mod tests {
         // command should be skipped when None
         assert!(!json.contains("command"));
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
-        if let GatewayResponse::IntentReceived { from, action, command, .. } = parsed {
+        if let GatewayResponse::IntentReceived {
+            from,
+            action,
+            command,
+            ..
+        } = parsed
+        {
             assert_eq!(from, "http-api");
             assert_eq!(action, "chat_message");
             assert!(command.is_none());
@@ -1268,7 +1271,13 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("command"));
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
-        if let GatewayResponse::IntentReceived { from, action, command, .. } = parsed {
+        if let GatewayResponse::IntentReceived {
+            from,
+            action,
+            command,
+            ..
+        } = parsed
+        {
             assert_eq!(from, "http-api");
             assert_eq!(action, "chat_message");
             assert_eq!(command, Some("/commit".to_string()));
@@ -1288,7 +1297,4 @@ mod tests {
             panic!("Expected IntentReceived variant");
         }
     }
-
-
-
 }

@@ -58,10 +58,7 @@ pub fn clean_schema(schema: Value) -> Value {
                 if let Some(Value::Array(arr)) = map.remove(*combiner) {
                     let cleaned: Vec<Value> = arr.into_iter().map(clean_schema).collect();
                     if !cleaned.is_empty() {
-                        map.insert(
-                            (*combiner).to_string(),
-                            Value::Array(cleaned),
-                        );
+                        map.insert((*combiner).to_string(), Value::Array(cleaned));
                     }
                 }
             }
