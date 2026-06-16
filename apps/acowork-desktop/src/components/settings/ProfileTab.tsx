@@ -126,7 +126,7 @@ export function ProfileTab() {
   return (
     <div className="max-w-lg space-y-4">
       {/* ── Avatar & Display Name ────────────────────────────────── */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.profileTitle")}</h2>
 
         {/* Live avatar preview — click to open icon picker */}
@@ -135,13 +135,13 @@ export function ProfileTab() {
             <Tooltip content={t("settings.chooseIcon")} variant="plain">
               <button
                 onClick={() => setIconOpen(!iconOpen)}
-                className="rounded-lg border border-transparent p-0.5 transition-colors hover:border-zinc-300 dark:hover:border-zinc-600"
+                className="rounded-md border border-transparent p-0.5 transition-colors hover:border-zinc-300 dark:hover:border-zinc-600"
               >
                 <UserAvatar size={64} />
               </button>
             </Tooltip>
             {iconOpen && (
-              <div className="absolute left-0 z-50 mt-1 w-max rounded-lg border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="absolute left-0 z-50 mt-1 w-max rounded-md border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
                 <div className="grid grid-cols-4 gap-1">
                   {BUILTIN_ICON_IDS.map((iconId) => (
                     <button
@@ -191,13 +191,13 @@ export function ProfileTab() {
               }
             }}
             placeholder={t("settings.displayNamePlaceholder")}
-            className="rounded-lg border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
+            className="rounded border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
           />
         </div>
       </div>
 
       {/* ── Backend Identity Fields ───────────────────────────────── */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("settings.identityTitle")}</h2>
           {savedMsg && (
@@ -228,7 +228,7 @@ export function ProfileTab() {
                     saveField(backendUser.user_id, "language", lng);
                   }
                 }}
-                className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                className="w-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
                 style={{
                   backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                   backgroundPosition: 'right 0.5rem center',
@@ -255,7 +255,7 @@ export function ProfileTab() {
                   setTimezone(e.target.value);
                   saveField(backendUser.user_id, "timezone", e.target.value);
                 }}
-                className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                className="w-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
                 style={{
                   backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                   backgroundPosition: 'right 0.5rem center',
@@ -288,7 +288,7 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.cityPlaceholder")}
-                className="rounded-lg border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
+                className="rounded border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
               />
             </div>
 
@@ -307,7 +307,7 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.occupationPlaceholder")}
-                className="rounded-lg border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
+                className="rounded border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
               />
             </div>
           </div>
@@ -319,7 +319,7 @@ export function ProfileTab() {
       </div>
 
       {/* ── Avatar Customization ───────────────────────────────────── */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.avatarCustomization")}</h2>
 
         <div className="space-y-1.5">

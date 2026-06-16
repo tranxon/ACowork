@@ -167,7 +167,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
       <div className="mt-8 space-y-3">
         <button
           onClick={onNext}
-          className="w-full rounded-md btn-solid py-2.5 text-sm font-medium"
+          className="w-full rounded btn-solid py-2.5 text-sm font-medium"
         >
           Start Setup
         </button>
@@ -251,7 +251,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
       <div className="mt-6 space-y-4">
         {/* Mode selection */}
-        <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
           <label className="mb-2 block text-xs text-zinc-500">Gateway Mode</label>
           <RadioGroup
             name="gatewayMode"
@@ -276,7 +276,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
         {/* Local mode: auto-start status */}
         {gatewayMode === "local" && (
-          <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+          <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
             <div className="flex items-center gap-2 text-sm">
               <span className="text-zinc-500">Status:</span>
               {starting ? (
@@ -312,7 +312,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
         {/* Remote mode: URL config + test */}
         {gatewayMode === "remote" && (
-          <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+          <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
             <label className="mb-1 block text-xs text-zinc-500">Gateway URL</label>
             <div className="flex gap-2">
               <input
@@ -354,7 +354,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
               <button
                 onClick={handleTestRemote}
                 disabled={checking || !urlDraft.trim()}
-                className="mt-3 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+                className="mt-3 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
               >
                 {checking ? "Testing..." : "Test Connection"}
               </button>
@@ -370,7 +370,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
         <button
           onClick={onNext}
           disabled={!canProceed || starting}
-          className="rounded-md btn-solid px-4 py-2 text-xs font-medium disabled:opacity-50"
+          className="rounded btn-solid px-4 py-2 text-xs font-medium disabled:opacity-50"
         >
           {starting ? "Starting..." : "Next"}
         </button>
@@ -467,7 +467,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
 
       <div className="mt-6 space-y-4">
         {/* Provider selector */}
-        <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
           <div className="flex items-center gap-2">
             <span className="text-lg">🔑</span>
             <select
@@ -575,14 +575,14 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
           <button
             onClick={handleSave}
             disabled={!canSave || saving}
-            className="mt-2 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+            className="mt-2 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
           >
             {saving ? "Saving..." : saved ? "Saved \u2713" : "Save"}
           </button>
         </div>
 
         {/* Local providers info */}
-        <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
           <div className="flex items-center gap-2">
             <span className="text-lg">🏠</span>
             <span className="text-sm font-medium">Local Providers (no key needed)</span>
@@ -599,7 +599,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
         </button>
         <button
           onClick={onNext}
-          className="rounded-md btn-solid px-4 py-2 text-xs font-medium"
+          className="rounded btn-solid px-4 py-2 text-xs font-medium"
         >
           Next
         </button>
@@ -640,7 +640,7 @@ function IdentityStep({
           <select
             value={language}
             onChange={(e) => onUpdate({ language: e.target.value })}
-            className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className="w-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
               backgroundPosition: 'right 0.5rem center',
@@ -664,7 +664,7 @@ function IdentityStep({
           <select
             value={timezone}
             onChange={(e) => onUpdate({ timezone: e.target.value })}
-            className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className="w-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
               backgroundPosition: 'right 0.5rem center',
@@ -788,7 +788,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       <p className="mt-1 text-sm text-zinc-500">Choose recommended built-in agents or install a local package</p>
 
       <div className="mt-6 space-y-3">
-        <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h3 className="text-sm font-medium">Recommended Agents</h3>
@@ -823,7 +823,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           <button
             onClick={handleInstallRecommended}
             disabled={!!installing || selectedAgents.length === 0}
-            className="mt-4 w-full rounded-md btn-solid py-2 text-xs font-medium disabled:opacity-50"
+            className="mt-4 w-full rounded btn-solid py-2 text-xs font-medium disabled:opacity-50"
           >
             {installing ? `Installing ${installing}...` : `Install selected (${selectedAgents.length})`}
           </button>
@@ -832,7 +832,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         <button
           onClick={handleInstallFromFile}
           disabled={!!installing}
-          className="w-full rounded-lg border border-zinc-200 p-4 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          className="w-full rounded-md border border-zinc-200 p-4 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           <span className="text-sm font-medium">Install from .agent file</span>
           <p className="mt-1 text-xs text-zinc-400">Select a .agent package from your computer</p>

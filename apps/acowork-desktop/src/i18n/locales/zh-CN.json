@@ -394,10 +394,19 @@
             "loading": "加载中...",
             "refresh": "刷新",
             "searchPlaceholder": "搜索文件..."
+        },
+        "contextMenu": {
+            "addToChat": "添加到对话",
+            "preview": "预览",
+            "newFile": "新建文件",
+            "newFolder": "新建文件夹",
+            "copy": "复制",
+            "paste": "粘贴",
+            "delete": "删除"
         }
     },
     "fileEditor": {
-        "emptyState": "双击工作区目录树中的文件以打开",
+        "emptyState": "双击工作区文件树中的文件以打开",
         "unsavedChanges": "未保存的更改",
         "saveChanges": "此文件有未保存的更改。放弃并关闭？",
         "cancel": "取消",
@@ -405,10 +414,13 @@
         "close": "关闭",
         "closeOthers": "关闭其他",
         "closeAll": "全部关闭",
-        "batchCloseOthersConfirm": "其他 {{count}} 个标签页有未保存的更改。放弃并关闭？",
-        "batchCloseAllConfirm": "{{count}} 个标签页有未保存的更改。放弃并全部关闭？",
+        "batchCloseOthersConfirm": "其他 {{count}} 个标签有未保存的更改。放弃并关闭？",
+        "batchCloseAllConfirm": "{{count}} 个标签有未保存的更改。放弃并全部关闭？",
         "save": "保存 (Ctrl+S)",
-        "copy": "复制"
+        "copy": "复制",
+        "previewBadge": "预览",
+        "previewLoading": "正在加载预览...",
+        "previewDoubleClickHint": "双击切换到编辑器"
     },
     "sessionPanel": {
         "loadingSessions": "加载会话中...",
@@ -479,6 +491,11 @@
     },
     "skillsPanel": {
         "selectSkill": "选择技能"
+    },
+    "statusBar": {
+        "agent": "agent",
+        "sessions": "sessions",
+        "context": "context"
     },
     "debugPanel": {
         "editSection": "编辑区域",

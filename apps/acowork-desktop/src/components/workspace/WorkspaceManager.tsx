@@ -121,7 +121,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-2xl rounded-lg bg-white shadow-xl dark:bg-zinc-900">
+      <div className="w-full max-w-2xl rounded-md bg-white shadow-xl dark:bg-zinc-900">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
@@ -205,7 +205,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
         <div className="flex items-center justify-between border-t border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <button
             onClick={() => setShowAddDialog(true)}
-            className="flex items-center gap-2 rounded-md btn-solid px-4 py-2 text-sm font-medium"
+            className="flex items-center gap-2 rounded btn-solid px-4 py-2 text-sm font-medium"
           >
             <Plus className="h-4 w-4" />
             Add Workspace
@@ -293,7 +293,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-lg rounded-lg bg-white shadow-xl dark:bg-zinc-900">
+      <div className="w-full max-w-lg rounded-md bg-white shadow-xl dark:bg-zinc-900">
         <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Add Workspace</h3>
           <button onClick={onClose} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800">
@@ -445,7 +445,7 @@ function ConfirmPermissionChange({
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-lg bg-white shadow-xl dark:bg-zinc-900">
+      <div className="w-full max-w-md rounded-md bg-white shadow-xl dark:bg-zinc-900">
         <div className="flex items-start gap-3 px-6 py-5">
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-orange-100 dark:bg-orange-900/30">
             <AlertCircle className="h-5 w-5 text-orange-600 dark:text-orange-400" />

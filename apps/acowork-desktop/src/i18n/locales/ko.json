@@ -391,6 +391,15 @@
             "loading": "로딩 중...",
             "refresh": "새로고침",
             "searchPlaceholder": "파일 검색..."
+        },
+        "contextMenu": {
+            "addToChat": "채팅에 추가",
+            "preview": "미리보기",
+            "newFile": "새 파일",
+            "newFolder": "새 폴더",
+            "copy": "복사",
+            "paste": "붙여넣기",
+            "delete": "삭제"
         }
     },
     "fileEditor": {
@@ -405,7 +414,10 @@
         "batchCloseOthersConfirm": "다른 {{count}}개 탭에 저장되지 않은 변경사항이 있습니다. 삭제하고 닫으시겠습니까?",
         "batchCloseAllConfirm": "{{count}}개 탭에 저장되지 않은 변경사항이 있습니다. 모두 삭제하고 닫으시겠습니까?",
         "save": "Save (Ctrl+S)",
-        "copy": "Copy"
+        "copy": "Copy",
+        "previewBadge": "미리보기",
+        "previewLoading": "미리보기 로딩 중...",
+        "previewDoubleClickHint": "더블클릭하여 에디터에서 열기"
     },
     "sessionPanel": {
         "loadingSessions": "세션 로딩 중...",
@@ -475,7 +487,12 @@
         "health": "건강도"
     },
     "skillsPanel": {
-        "selectSkill": "Select skill"
+        "selectSkill": "기술 선택"
+    },
+    "statusBar": {
+        "agent": "agent",
+        "sessions": "sessions",
+        "context": "context"
     },
     "debugPanel": {
         "editSection": "Edit section",

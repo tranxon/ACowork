@@ -11,6 +11,7 @@ import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useStatusBarStore } from "../../stores/statusBarStore";
 import { cn } from "../../lib/utils";
@@ -18,12 +19,14 @@ import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { useChatStore } from "../../stores/chatStore";
 import { getGatewayUrl } from "../../lib/config";
+import { useTranslation } from "../../i18n/useTranslation";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
 type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
 
 const MIN_SIDEBAR_WIDTH = 160;
+const AVATAR_SIDEBAR_WIDTH = 64;
 const MAX_SIDEBAR_WIDTH = 400;
 const DEFAULT_SIDEBAR_WIDTH = 240;
 const SIDEBAR_WIDTH_KEY = "acowork-sidebar-width";
@@ -45,7 +48,12 @@ export function AppLayout() {
   const [activeTab, setActiveTab] = useState<PanelTab>("workspace");
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
-    return stored ? Math.min(Math.max(parseInt(stored, 10), MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH) : DEFAULT_SIDEBAR_WIDTH;
+    if (stored) {
+      const val = parseInt(stored, 10);
+      if (val <= AVATAR_SIDEBAR_WIDTH) return AVATAR_SIDEBAR_WIDTH;
+      return Math.min(val, MAX_SIDEBAR_WIDTH);
+    }
+    return DEFAULT_SIDEBAR_WIDTH;
   });
   const [rightWidth, setRightWidth] = useState(() => {
     const stored = localStorage.getItem(RIGHT_WIDTH_KEY);
@@ -98,6 +106,24 @@ export function AppLayout() {
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
   const isDebugMode = selectedAgent?.dev_mode && selectedAgent?.running;
+  const agentProfiles = useAgentProfileStore((s) => s.profiles);
+  const agentDisplayName = selectedAgent
+    ? (agentProfiles[selectedAgent.agent_id]?.displayName ??
+      selectedAgent.display_name ??
+      selectedAgent.name)
+    : null;
+  // Agent session count + context usage for the bottom status bar
+  const openSessionCount = useChatStore((s) => {
+    if (!selectedAgentId) return 0;
+    return s.agentStates[selectedAgentId]?.openSessionIds?.length ?? 0;
+  });
+  const contextUsage = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
+  });
+  const { t } = useTranslation();
 
   // ── Glass background color ───────────────────────────────────────
   const { opacity, theme } = useSettingsStore();
@@ -260,9 +286,29 @@ export function AppLayout() {
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isResizing.current) return;
     const delta = e.clientX - startX.current;
-    const newWidth = Math.min(Math.max(startWidth.current + delta, MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH);
-    currentWidthRef.current = newWidth;
-    setSidebarWidth(newWidth);
+    const rawWidth = startWidth.current + delta;
+
+    if (currentWidthRef.current === AVATAR_SIDEBAR_WIDTH) {
+      // In collapsed state — only expand when dragged back past MIN_SIDEBAR_WIDTH
+      if (rawWidth >= MIN_SIDEBAR_WIDTH) {
+        const newWidth = Math.min(rawWidth, MAX_SIDEBAR_WIDTH);
+        currentWidthRef.current = newWidth;
+        setSidebarWidth(newWidth);
+      }
+      return;
+    }
+
+    if (rawWidth < MIN_SIDEBAR_WIDTH) {
+      // Crossed below minimum — collapse to avatar width
+      currentWidthRef.current = AVATAR_SIDEBAR_WIDTH;
+      setSidebarWidth(AVATAR_SIDEBAR_WIDTH);
+    } else if (rawWidth > MAX_SIDEBAR_WIDTH) {
+      currentWidthRef.current = MAX_SIDEBAR_WIDTH;
+      setSidebarWidth(MAX_SIDEBAR_WIDTH);
+    } else {
+      currentWidthRef.current = rawWidth;
+      setSidebarWidth(rawWidth);
+    }
   }, []);
 
   const handleMouseUp = useCallback(() => {
@@ -417,20 +463,20 @@ export function AppLayout() {
         )}
 
         {currentView === "settings" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-[#FAFAFA] dark:bg-zinc-900">
+          <div className="flex flex-1 overflow-hidden rounded-lg bg-[#FAFAFA] dark:bg-zinc-900">
             <SettingsPage initialTab={settingsInitialTab} />
           </div>
         )}
 
         {currentView === "harness" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-[#FAFAFA] dark:bg-zinc-900">
+          <div className="flex flex-1 overflow-hidden rounded-lg bg-[#FAFAFA] dark:bg-zinc-900">
             <HarnessPage />
           </div>
         )}
 
         {(currentView === "projects" || currentView === "docs") && (
-          <div className="flex flex-1 items-center justify-center overflow-hidden rounded-xl bg-[#FAFAFA] dark:bg-zinc-900">
-            <div className="rounded-lg border border-zinc-200 bg-white p-8 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="flex flex-1 items-center justify-center overflow-hidden rounded-lg bg-[#FAFAFA] dark:bg-zinc-900">
+            <div className="rounded-md border border-zinc-200 bg-white p-8 dark:border-zinc-700 dark:bg-zinc-800">
               <p className="text-sm text-zinc-400 dark:text-zinc-500">TODO</p>
             </div>
           </div>
@@ -438,7 +484,7 @@ export function AppLayout() {
       </div>
 
       {/* Bottom status bar */}
-      <div className="flex h-5 shrink-0 items-center gap-3 px-3 text-[11px] select-none dark:text-zinc-400">
+      <div className="flex h-5 shrink-0 items-center gap-3 pl-12 pr-3 text-[11px] select-none dark:text-zinc-400">
         {statusVisible && (
           <span className={cn(
             "truncate",
@@ -449,8 +495,46 @@ export function AppLayout() {
             {statusMsg}
           </span>
         )}
+        {(resultsCollapsed || activeTab !== "status") && selectedAgent?.running && agentDisplayName && (
+          <span className="flex items-center gap-3 truncate">
+            <span>
+              <span className="text-zinc-500 dark:text-zinc-500">{t("statusBar.agent")}: </span>
+              <span className="font-medium text-zinc-700 dark:text-zinc-200">{agentDisplayName}</span>
+            </span>
+            <span>
+              <span className="text-zinc-500 dark:text-zinc-500">{t("statusBar.sessions")}: </span>
+              <span className="font-mono text-zinc-700 dark:text-zinc-200">{openSessionCount}</span>
+            </span>
+            {contextUsage && (
+              <span>
+                <span className="text-zinc-500 dark:text-zinc-500">{t("statusBar.context")}: </span>
+                <span
+                  className="font-mono text-zinc-700 dark:text-zinc-200"
+                  style={{
+                    color:
+                      contextUsage.usage_percent >= 90
+                        ? "var(--color-accent)"
+                        : undefined,
+                  }}
+                >
+                  {contextUsage.usage_percent}%
+                </span>
+                <span className="text-zinc-400 dark:text-zinc-500"> | </span>
+                <span className="font-mono text-zinc-700 dark:text-zinc-200">
+                  {formatTokenCount(contextUsage.total_tokens)}/{formatTokenCount(contextUsage.context_window)}
+                </span>
+              </span>
+            )}
+          </span>
+        )}
       </div>
 
     </div>
   );
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toString();
 }

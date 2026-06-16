@@ -48,14 +48,14 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
           <div className="mt-6 flex items-center justify-center gap-3">
             <button
               onClick={onRetry}
-              className="flex items-center gap-2 rounded-lg bg-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              className="flex items-center gap-2 rounded-md bg-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
             >
               <RefreshCw className="h-4 w-4" />
               {t("errorBoundary.retry")}
             </button>
             <button
               onClick={onRefresh}
-              className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+              className="flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-white"
               style={{ backgroundColor: "var(--color-accent)" }}
               onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.85)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}

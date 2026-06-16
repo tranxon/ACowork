@@ -236,7 +236,7 @@ export function AgentSetupTab() {
           <Tooltip content={t("agentSetup.chooseIcon")} variant="plain">
             <button
               onClick={() => setIconOpen(!iconOpen)}
-              className="rounded-lg border border-transparent p-0.5 transition-colors hover:border-zinc-300 dark:hover:border-zinc-600"
+              className="rounded-md border border-transparent p-0.5 transition-colors hover:border-zinc-300 dark:hover:border-zinc-600"
             >
               <UserAvatar
                 displayName={agentName}
@@ -247,7 +247,7 @@ export function AgentSetupTab() {
             </button>
           </Tooltip>
           {iconOpen && (
-            <div className="absolute left-0 z-50 mt-1 w-max rounded-lg border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="absolute left-0 z-50 mt-1 w-max rounded-md border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
               <div className="grid grid-cols-4 gap-1">
                 {BUILTIN_ICON_IDS.map((iconId) => (
                   <button
@@ -295,7 +295,7 @@ export function AgentSetupTab() {
             setProfile(selectedAgentId, { displayName: e.target.value || undefined })
           }
           placeholder={selectedAgent.name ?? "Agent name"}
-          className="rounded-lg bg-white dark:bg-zinc-800"
+          className="rounded-md bg-white dark:bg-zinc-800"
         />
       </div>
 
@@ -317,7 +317,7 @@ export function AgentSetupTab() {
             });
           }}
           placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.gatewayLimit")}`}
-          className="rounded-lg bg-white dark:bg-zinc-800"
+          className="rounded-md bg-white dark:bg-zinc-800"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.leaveEmptyDefault")}
@@ -341,7 +341,7 @@ export function AgentSetupTab() {
             });
           }}
           placeholder={t("agentSetup.defaultIterations")}
-          className="rounded-lg bg-white dark:bg-zinc-800"
+          className="rounded-md bg-white dark:bg-zinc-800"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.leaveEmptyDefault")}
@@ -386,7 +386,7 @@ export function AgentSetupTab() {
               shellApprovalThreshold: v,
             });
           }}
-          className="w-full appearance-none rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+          className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
           style={{
             backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
             backgroundPosition: 'right 0.5rem center',
@@ -422,7 +422,7 @@ export function AgentSetupTab() {
             });
           }}
           placeholder="300 (5 min)"
-          className="rounded-lg bg-white dark:bg-zinc-800"
+          className="rounded-md bg-white dark:bg-zinc-800"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.approvalTimeoutDesc")}
@@ -435,13 +435,13 @@ export function AgentSetupTab() {
           {t("agentSetup.webSearchProviders")}
         </label>
         {searchProviders.length === 0 ? (
-          <div className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noSearchKeys")}
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
             {searchProviders.map((sp) => {
               const active = activeSearch.find((p) => p.provider === sp.id);
               const isChecked = !!active;
@@ -516,13 +516,13 @@ export function AgentSetupTab() {
           {t("agentSetup.mcpServers")}
         </label>
         {catalog.length === 0 ? (
-          <div className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noMcpInCatalog")}
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
             {catalog.map((server) => {
               const isChecked = activeServers.includes(server.name);
               return (
@@ -565,13 +565,13 @@ export function AgentSetupTab() {
         <button
           onClick={handleApply}
           disabled={configSaving}
-          className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+          className="flex-1 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
         >
           {configSaving ? t("agentSetup.applying") : t("agentSetup.applyToRuntime")}
         </button>
         <button
           onClick={() => setShowResetConfirm(true)}
-          className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium"
+          className="flex-1 rounded btn-solid px-3 py-1.5 text-xs font-medium"
         >
           {t("agentSetup.resetToDefaults")}
         </button>

@@ -81,7 +81,7 @@ function hashStr(s: string): number {
 }
 
 const wrapperClass =
-  "my-2 w-full overflow-x-auto rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900/40";
+  "my-2 w-full overflow-x-auto rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900/40";
 
 /** Applied to the SVG-rendered container — forces SVG to fill available width */
 const svgContainerClass =

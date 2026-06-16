@@ -96,7 +96,7 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
   return (
     <div
       ref={ref}
-      className="absolute right-0 top-full mt-1 w-72 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800 z-50"
+      className="absolute right-0 top-full mt-1 w-72 rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800 z-50"
     >
       {/* Header with total count */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
@@ -170,13 +170,13 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
                   <button
                     onClick={(e) => { e.stopPropagation(); void handleDelete(session.session_id); }}
                     disabled={deletingId !== null}
-                    className="rounded-md btn-accent px-2 py-0.5 text-xs disabled:opacity-50"
+                    className="rounded btn-accent px-2 py-0.5 text-xs disabled:opacity-50"
                   >
                     {t("common.delete")}
                   </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }}
-                    className="rounded-md btn-solid px-2 py-0.5 text-xs"
+                    className="rounded btn-solid px-2 py-0.5 text-xs"
                   >
                     {t("common.cancel")}
                   </button>
@@ -394,7 +394,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
       {closingSessionId && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={() => setClosingSessionId(null)}>
           <div
-            className="mx-4 w-full max-w-sm rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
+            className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
@@ -413,13 +413,13 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setClosingSessionId(null)}
-                className="rounded-lg btn-solid px-3 py-1.5 text-xs"
+                className="rounded btn-solid px-3 py-1.5 text-xs"
               >
                 {t("sessionTabBar.cancel")}
               </button>
               <button
                 onClick={confirmClose}
-                className="rounded-lg btn-accent px-3 py-1.5 text-xs"
+                className="rounded btn-accent px-3 py-1.5 text-xs"
               >
                 {t("sessionTabBar.confirmClose")}
               </button>

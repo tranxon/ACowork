@@ -108,7 +108,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
 
       {/* Dropdown menu */}
       {open && (
-        <div className="absolute bottom-full left-0 mb-2 w-72 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800 z-50">
+        <div className="absolute bottom-full left-0 mb-2 w-72 rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800 z-50">
           {/* Session list */}
           <div ref={listRef} className="max-h-80 overflow-y-auto py-1">
             {isLoading && sessions.length === 0 && (
@@ -176,7 +176,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                           void handleDeleteSession(session.session_id);
                         }}
                         disabled={deletingId !== null}
-                        className="rounded-md btn-accent px-2 py-0.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="rounded btn-accent px-2 py-0.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {t("common.delete")}
                       </button>
@@ -185,7 +185,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                           e.stopPropagation();
                           setConfirmDelete(null);
                         }}
-                        className="rounded-md btn-solid px-2 py-0.5 text-xs"
+                        className="rounded btn-solid px-2 py-0.5 text-xs"
                       >
                         {t("common.cancel")}
                       </button>

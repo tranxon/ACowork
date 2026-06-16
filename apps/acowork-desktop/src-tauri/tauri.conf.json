@@ -14,7 +14,13 @@
     "security": {
       "capabilities": [
         "main-capability"
-      ]
+      ],
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
     },
     "windows": [
       {

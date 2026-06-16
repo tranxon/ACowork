@@ -293,7 +293,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                             <button
                                 onClick={handleRetry}
                                 disabled={retrying}
-                                className="mt-2 rounded-lg bg-zinc-200 px-5 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-300 disabled:opacity-40 dark:bg-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-600"
+                                className="mt-2 rounded-md bg-zinc-200 px-5 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-300 disabled:opacity-40 dark:bg-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-600"
                             >
                                 {retrying ? "Retrying..." : "Retry Connection"}
                             </button>

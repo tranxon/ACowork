@@ -394,7 +394,7 @@ export function SnapshotNode({
         tabIndex={0}
         onClick={() => setCollapsed(!collapsed)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setCollapsed(!collapsed); }}
-        className="flex w-full items-center gap-2 rounded-lg bg-zinc-50 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:hover:bg-zinc-800/50 cursor-pointer"
+        className="flex w-full items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:hover:bg-zinc-800/50 cursor-pointer"
       >
         {collapsed ? (
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
@@ -422,7 +422,7 @@ export function SnapshotNode({
 
       {/* Sections */}
       {!collapsed && (
-        <div className="ml-2 mt-1 rounded-lg border-l-2 border-zinc-300 bg-zinc-50 pl-2 pr-1.5 py-1.5 space-y-0.5 dark:border-zinc-600 dark:bg-zinc-800/30">
+        <div className="ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-zinc-50 pl-2 pr-1.5 py-1.5 space-y-0.5 dark:border-zinc-600 dark:bg-zinc-800/30">
           {SECTION_ORDER.map((sectionKey) => {
             const section = snapshot.sections[sectionKey];
             if (!section) return null;

@@ -189,7 +189,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
   }, [selectedAgent?.running, activeTab]);
 
   return (
-    <div className="relative flex flex-col bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900 rounded-xl ml-1" style={{ width }}>
+    <div className="relative flex flex-col bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900 rounded-lg ml-1" style={{ width }}>
       {/* Resize handle overlay — sits at the left edge */}
       <div
         className="absolute -left-1 top-0 bottom-0 w-1 cursor-col-resize z-10 group"
@@ -238,7 +238,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
           ) : (
             <div className="flex-1 overflow-y-auto p-3 space-y-3">
               {/* ── Controls card ──────────────────────────────────── */}
-              <div className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
                 <div className="flex items-center gap-1">
                   <ControlButton
                     onClick={debugState === "Paused" ? resume : debugState === "Stopped" ? restart : pauseDebug}
@@ -289,7 +289,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               </div>
 
               {/* ── State card ─────────────────────────────────────── */}
-              <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                   <StateLabel label={t("resultsPanel.iteration")} value={`#${iteration}`} />
                   <StateLabel label={t("resultsPanel.phase")} value={phase} highlight />
@@ -303,7 +303,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               </div>
 
               {/* ── Context snapshots card ─────────────────────────── */}
-              <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
                 <div className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
                   {t("resultsPanel.contextSnapshots", { count: snapshots.length })}
                 </div>

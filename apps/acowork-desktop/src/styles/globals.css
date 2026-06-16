@@ -4,6 +4,17 @@
   --color-accent: #3B82F6;
   --color-text-secondary: hsl(240 3.7% 46.9%);
   /* ~zinc-500: secondary labels & icons */
+
+  /* Border radius — 3-tier unified scale
+     sm (4px): buttons, inputs, labels, badges
+     md (6px): card containers, dialogs, message boxes
+     lg (8px): panel containers, layout wrappers
+     xl (12px): reserved, not yet applied */
+  --radius: 4px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
 }
 
 /* Enable class-based dark mode for Tailwind v4 */
@@ -78,10 +89,15 @@
   --text-lg: 1.125rem;
   --text-xl: 1.25rem;
 
-  /* Border radius */
+  /* Border radius — 3-tier design tokens (mirrors @theme above) */
   --radius-sm: 4px;
+  /* small: buttons, inputs, labels */
   --radius-md: 6px;
+  /* medium: card containers, dialogs */
   --radius-lg: 8px;
+  /* large: panel containers */
+  --radius-xl: 12px;
+  /* reserved */
 
   /* Animation */
   --duration-fast: 150ms;
@@ -260,7 +276,7 @@ body {
 .prose pre {
   background-color: hsl(240 5% 88%);
   border: 1px solid hsl(240 5% 80%);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 0.75em 1em;
   overflow-x: auto;
   font-size: 1em;
@@ -272,11 +288,220 @@ body {
   border: 1px solid hsl(240 5% 28%);
 }
 
+/* ---- Syntax highlighting (highlight.js) ---- */
+/* Light mode — GitHub-inspired palette on zinc background */
+.hljs-comment,
+.hljs-quote {
+  color: hsl(120 3% 46%);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-subst {
+  color: hsl(271 73% 40%);
+  font-weight: 500;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-template-variable,
+.hljs-tag .hljs-attr {
+  color: hsl(10 75% 38%);
+}
+.hljs-string,
+.hljs-doctag {
+  color: hsl(155 55% 28%);
+}
+.hljs-title,
+.hljs-section,
+.hljs-selector-id {
+  color: hsl(220 70% 40%);
+}
+.hljs-title.class_,
+.hljs-title.function_ {
+  color: hsl(220 70% 40%);
+}
+.hljs-type {
+  color: hsl(40 80% 35%);
+}
+.hljs-attr,
+.hljs-built_in,
+.hljs-meta .hljs-keyword {
+  color: hsl(200 70% 32%);
+}
+.hljs-meta {
+  color: hsl(260 50% 42%);
+}
+.hljs-meta .hljs-string {
+  color: hsl(155 55% 28%);
+}
+.hljs-tag,
+.hljs-name {
+  color: hsl(100 40% 32%);
+}
+.hljs-addition {
+  color: hsl(130 50% 28%);
+  background: hsl(130 50% 92%);
+}
+.hljs-deletion {
+  color: hsl(0 60% 40%);
+  background: hsl(0 60% 94%);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}
+.hljs-link {
+  color: hsl(240 50% 45%);
+  text-decoration: underline;
+}
+.hljs-formula {
+  color: hsl(30 80% 40%);
+}
+.hljs-operator {
+  color: hsl(240 5% 35%);
+}
+.hljs-params {
+  color: hsl(240 5% 30%);
+}
+.hljs-property {
+  color: hsl(220 50% 35%);
+}
+.hljs-punctuation {
+  color: hsl(240 4% 45%);
+}
+.hljs-regexp {
+  color: hsl(0 60% 40%);
+}
+.hljs-selector-class {
+  color: hsl(40 80% 35%);
+}
+.hljs-selector-pseudo {
+  color: hsl(200 70% 32%);
+}
+.hljs-symbol {
+  color: hsl(155 55% 28%);
+}
+.hljs-template-tag {
+  color: hsl(200 70% 32%);
+}
+.hljs-template-variable {
+  color: hsl(10 75% 38%);
+}
+.hljs-variable.language_ {
+  color: hsl(271 73% 40%);
+}
+
+/* Dark mode — soft pastel colors on dark zinc background */
+.dark .hljs-comment,
+.dark .hljs-quote {
+  color: hsl(120 3% 48%);
+  font-style: italic;
+}
+.dark .hljs-keyword,
+.dark .hljs-selector-tag,
+.dark .hljs-subst {
+  color: hsl(271 70% 72%);
+  font-weight: 500;
+}
+.dark .hljs-number,
+.dark .hljs-literal,
+.dark .hljs-template-variable,
+.dark .hljs-tag .hljs-attr {
+  color: hsl(10 72% 58%);
+}
+.dark .hljs-string,
+.dark .hljs-doctag {
+  color: hsl(155 50% 52%);
+}
+.dark .hljs-title,
+.dark .hljs-section,
+.dark .hljs-selector-id {
+  color: hsl(220 68% 64%);
+}
+.dark .hljs-title.class_,
+.dark .hljs-title.function_ {
+  color: hsl(220 68% 64%);
+}
+.dark .hljs-type {
+  color: hsl(40 70% 55%);
+}
+.dark .hljs-attr,
+.dark .hljs-built_in,
+.dark .hljs-meta .hljs-keyword {
+  color: hsl(200 60% 56%);
+}
+.dark .hljs-meta {
+  color: hsl(260 45% 62%);
+}
+.dark .hljs-meta .hljs-string {
+  color: hsl(155 50% 52%);
+}
+.dark .hljs-tag,
+.dark .hljs-name {
+  color: hsl(100 35% 52%);
+}
+.dark .hljs-addition {
+  color: hsl(130 40% 48%);
+  background: hsl(130 40% 12%);
+}
+.dark .hljs-deletion {
+  color: hsl(0 60% 56%);
+  background: hsl(0 50% 16%);
+}
+.dark .hljs-emphasis {
+  font-style: italic;
+}
+.dark .hljs-strong {
+  font-weight: 700;
+}
+.dark .hljs-link {
+  color: hsl(240 50% 68%);
+  text-decoration: underline;
+}
+.dark .hljs-formula {
+  color: hsl(30 70% 58%);
+}
+.dark .hljs-operator {
+  color: hsl(240 5% 62%);
+}
+.dark .hljs-params {
+  color: hsl(240 5% 72%);
+}
+.dark .hljs-property {
+  color: hsl(220 45% 62%);
+}
+.dark .hljs-punctuation {
+  color: hsl(240 4% 52%);
+}
+.dark .hljs-regexp {
+  color: hsl(0 60% 56%);
+}
+.dark .hljs-selector-class {
+  color: hsl(40 70% 55%);
+}
+.dark .hljs-selector-pseudo {
+  color: hsl(200 60% 56%);
+}
+.dark .hljs-symbol {
+  color: hsl(155 50% 52%);
+}
+.dark .hljs-template-tag {
+  color: hsl(200 60% 56%);
+}
+.dark .hljs-template-variable {
+  color: hsl(10 72% 58%);
+}
+.dark .hljs-variable.language_ {
+  color: hsl(271 70% 72%);
+}
+
 /* Inline code — visible background pill */
 .prose :where(code):not(:where(pre code)) {
   background-color: hsl(240 5% 92%);
   padding: 0.15em 0.4em;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 0.9em;
   font-weight: 500;
 }
@@ -436,6 +661,38 @@ body {
   margin-bottom: 0;
 }
 
+/* ── Markdown preview (Preview tab) — GitHub-style HTML passthrough ── */
+/* Scoped strictly under .markdown-preview so chat markdown rendering is unaffected.
+   Written as flat rules (not nested) because Tailwind v4 / Lightning CSS
+   does not reliably process CSS nesting in globals.css. The align/valign
+   attributes are handled primarily via useLayoutEffect in MarkdownPreviewView.tsx. */
+
+/* Deprecated `align` attribute on block elements (h1, p, td, etc.) */
+.markdown-preview [data-align="center"] {
+  text-align: center !important;
+}
+
+.markdown-preview [data-align="right"] {
+  text-align: right !important;
+}
+
+.markdown-preview [data-align="left"] {
+  text-align: left !important;
+}
+
+/* Deprecated `valign` attribute on table cells */
+.markdown-preview [data-valign="top"] {
+  vertical-align: top !important;
+}
+
+.markdown-preview [data-valign="middle"] {
+  vertical-align: middle !important;
+}
+
+.markdown-preview [data-valign="bottom"] {
+  vertical-align: bottom !important;
+}
+
 /* Lists */
 .prose ul,
 .prose ol {
@@ -458,7 +715,7 @@ body {
 
 /* Images — rounded with max constraint */
 .prose img {
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   max-width: 100%;
   height: auto;
 }
@@ -621,7 +878,7 @@ input[type="radio"]:checked {
 
 /* ── Segmented/option button — e.g. Font Size / Content Width / Avatar Type ── */
 .btn-option {
-  border-radius: 0.375rem;
+  border-radius: var(--radius-sm);
   border: 1px solid #d4d4d8;
   padding: var(--ui-btn-py) 0.75rem;
   font-size: 0.75rem;

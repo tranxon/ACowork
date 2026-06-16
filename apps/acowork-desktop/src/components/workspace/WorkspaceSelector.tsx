@@ -174,7 +174,7 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
         {/* Dropdown menu */}
         {open && (
           <div className={cn(
-            "absolute left-0 w-60 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800",
+            "absolute left-0 w-60 rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800",
             dropDirection === "down" ? "top-full mt-1" : "bottom-full mb-1",
           )} style={{ zIndex: 100 }}>
             {/* Workspace list */}
@@ -192,15 +192,15 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
               >
                 <Home className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
                 <div className="min-w-0 flex-1 text-left">
-                  <div className={cn("truncate text-xs", currentWsId === "__agent_home__" ? "font-semibold" : "text-zinc-800 dark:text-zinc-200")} style={currentWsId === "__agent_home__" ? { color: "var(--color-accent)" } : undefined}>
+                  <div className={cn("truncate", currentWsId === "__agent_home__" ? "font-semibold" : "text-zinc-800 dark:text-zinc-200")} style={{ fontSize: "var(--ui-font-size, 0.875rem)", ...(currentWsId === "__agent_home__" ? { color: "var(--color-accent)" } : {}) }}>
                     Agent Home
                   </div>
-                  <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                  <div className="truncate text-zinc-500 dark:text-zinc-400" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.78)" }}>
                     Default working directory
                   </div>
                 </div>
                 {currentWsId === "__agent_home__" && (
-                  <span className="text-xs font-medium" style={{ color: "var(--color-accent)" }}>✓</span>
+                  <span className="font-medium" style={{ color: "var(--color-accent)", fontSize: "var(--ui-font-size, 0.875rem)" }}>✓</span>
                 )}
               </button>
 
@@ -208,9 +208,9 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
               <div className="mx-2 my-1 border-t border-zinc-200 dark:border-zinc-700" />
 
               {loading ? (
-                <div className="py-4 text-center text-xs text-zinc-400">Loading...</div>
+                <div className="py-4 text-center text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>Loading...</div>
               ) : filteredWorkspaces.length === 0 ? (
-                <div className="py-4 text-center text-xs text-zinc-400">
+                <div className="py-4 text-center text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {searchQuery ? "No matching workspaces" : "No workspaces configured"}
                 </div>
               ) : (
@@ -232,11 +232,11 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
                         >
                           <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
                           <div className="min-w-0 flex-1">
-                            <div className={cn("truncate text-xs", isCurrent ? "font-semibold" : "text-zinc-800 dark:text-zinc-200")} style={isCurrent ? { color: "var(--color-accent)" } : undefined}>
+                            <div className={cn("truncate", isCurrent ? "font-semibold" : "text-zinc-800 dark:text-zinc-200")} style={{ fontSize: "var(--ui-font-size, 0.875rem)", ...(isCurrent ? { color: "var(--color-accent)" } : {}) }}>
                               {displayName}
                             </div>
                             <Tooltip content={dir.path} variant="plain" position="bottom">
-                              <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                              <div className="truncate text-zinc-500 dark:text-zinc-400" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.78)" }}>
                                 {dir.path}
                               </div>
                             </Tooltip>
@@ -254,8 +254,8 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
                                   void handleDelete(dir.id, displayName);
                                 }}
                                 disabled={deletingId !== null}
-                                className="rounded px-2 py-0.5 text-xs text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                                style={{ backgroundColor: "var(--color-accent)" }}
+                                className="rounded px-2 py-0.5 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                                style={{ backgroundColor: "var(--color-accent)", fontSize: "var(--ui-font-size, 0.875rem)" }}
                               >
                                 {t("workspace.delete")}
                               </button>
@@ -264,7 +264,8 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
                                   e.stopPropagation();
                                   setConfirmDelete(null);
                                 }}
-                                className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-500"
+                                className="rounded bg-zinc-200 px-2 py-0.5 text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-500"
+                                style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
                               >
                                 {t("workspace.cancel")}
                               </button>
@@ -292,7 +293,8 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
                                 e.stopPropagation();
                                 void handleToggleAccess(dir);
                               }}
-                              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-600"
+                              className="flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-600"
+                              style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                             >
                               {dir.access === "read-write" ? (
                                 <>
@@ -321,7 +323,8 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
             {/* Add workspace button */}
             <button
               onClick={handleBrowse}
-              className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("workspace.addWorkspace")}

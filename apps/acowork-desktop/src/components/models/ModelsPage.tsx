@@ -172,7 +172,7 @@ export function ModelsPage() {
         <h1 className="text-xl font-semibold">Models</h1>
         <button
           onClick={() => setShowAddDialog(true)}
-          className="inline-flex items-center gap-1.5 rounded-md btn-solid px-3 py-1.5 text-xs font-medium"
+          className="inline-flex items-center gap-1.5 rounded btn-solid px-3 py-1.5 text-xs font-medium"
         >
           <Plus className="h-3.5 w-3.5" /> Add Key
         </button>
@@ -189,7 +189,7 @@ export function ModelsPage() {
             providers.map((provider) => {
               const keyEntry = keys.find((k) => k.provider === provider.id);
               return (
-                <div key={provider.id} className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+                <div key={provider.id} className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
                   <div className="flex items-start justify-between">
                     <div className="flex items-center gap-3">
                       {provider.local ? (
@@ -262,7 +262,7 @@ export function ModelsPage() {
       {/* Add key dialog */}
       {showAddDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-96 rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+          <div className="w-96 rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
             <h3 className="mb-4 text-sm font-semibold">Add API Key</h3>
             <div className="space-y-3">
               <div>
@@ -369,7 +369,7 @@ export function ModelsPage() {
               <button
                 onClick={handleAdd}
                 disabled={needsApiKey(newProvider) ? !newKey.trim() : false}
-                className="rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+                className="rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
               >
                 Save
               </button>

@@ -7,15 +7,15 @@
 
 /** Standard input field (text, number, etc.) */
 export const inputBase =
-  "w-full rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
+  "w-full rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
 
 /** Read-only input field */
 export const inputReadonly =
-  "rounded-md border border-zinc-200 bg-zinc-50 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400";
+  "rounded border border-zinc-200 bg-zinc-50 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400";
 
 /** Select/dropdown field */
 export const selectBase =
-  "appearance-none rounded-md border border-zinc-200 bg-white px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 bg-[url('data:image/svg+xml,%3csvg xmlns=%27http://www.w3.org/2000/svg%27 fill=%27none%27 viewBox=%270 0 20 20%27%3e%3cpath stroke=%27%236b7280%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27 stroke-width=%271.5%27 d=%27M6 8l4 4 4-4%27/%3e%3c/svg%3e')] bg-[position:right_0.5rem_center] bg-no-repeat bg-[length:1.5em_1.5em]";
+  "appearance-none rounded border border-zinc-200 bg-white px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 bg-[url('data:image/svg+xml,%3csvg xmlns=%27http://www.w3.org/2000/svg%27 fill=%27none%27 viewBox=%270 0 20 20%27%3e%3cpath stroke=%27%236b7280%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27 stroke-width=%271.5%27 d=%27M6 8l4 4 4-4%27/%3e%3c/svg%3e')] bg-[position:right_0.5rem_center] bg-no-repeat bg-[length:1.5em_1.5em]";
 
 export const selectArrowStyle: React.CSSProperties = {
   backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
@@ -27,13 +27,13 @@ export const selectArrowStyle: React.CSSProperties = {
 
 /** Font-mono input (for API keys, codes) */
 export const inputMono =
-  "rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
+  "rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
 
 // ── Button styles ───────────────────────────────────────────────────
 
 /** Toolbar button (borderless, compact) — used for Model/Workspace selectors */
 export const toolbarButton =
-  "inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition-colors text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200";
+  "inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200";
 
 /** Toolbar button active state */
 export const toolbarButtonActive =
@@ -41,15 +41,15 @@ export const toolbarButtonActive =
 
 /** Dialog action button (Cancel/Save) — fixed width */
 export const dialogButton =
-  "w-20 rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center";
+  "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center";
 
 /** Dialog primary action (Save) */
 export const dialogButtonPrimary =
-  "w-20 rounded-md bg-zinc-800 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600";
+  "w-20 rounded bg-zinc-800 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600";
 
 /** Dialog secondary action (Cancel) */
 export const dialogButtonSecondary =
-  "w-20 rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700";
+  "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700";
 
 // ── Test result styles ──────────────────────────────────────────────
 

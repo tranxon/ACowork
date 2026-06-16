@@ -391,6 +391,15 @@
             "loading": "載入中...",
             "refresh": "重新整理",
             "searchPlaceholder": "搜尋檔案..."
+        },
+        "contextMenu": {
+            "addToChat": "加入對話",
+            "preview": "預覽",
+            "newFile": "新增檔案",
+            "newFolder": "新增資料夾",
+            "copy": "複製",
+            "paste": "貼上",
+            "delete": "刪除"
         }
     },
     "fileEditor": {
@@ -404,8 +413,11 @@
         "closeAll": "全部關閉",
         "batchCloseOthersConfirm": "其他 {{count}} 個分頁有未儲存的變更。放棄並關閉？",
         "batchCloseAllConfirm": "{{count}} 個分頁有未儲存的變更。放棄並全部關閉？",
-        "save": "Save (Ctrl+S)",
-        "copy": "Copy"
+        "save": "儲存 (Ctrl+S)",
+        "copy": "複製",
+        "previewBadge": "預覽",
+        "previewLoading": "正在載入預覽...",
+        "previewDoubleClickHint": "雙擊切換到編輯器"
     },
     "sessionPanel": {
         "loadingSessions": "載入工作階段中...",
@@ -475,7 +487,12 @@
         "health": "健康度"
     },
     "skillsPanel": {
-        "selectSkill": "Select skill"
+        "selectSkill": "選擇技能"
+    },
+    "statusBar": {
+        "agent": "agent",
+        "sessions": "sessions",
+        "context": "context"
     },
     "debugPanel": {
         "editSection": "Edit section",

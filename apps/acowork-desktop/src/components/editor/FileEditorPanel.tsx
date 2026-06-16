@@ -9,12 +9,13 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useLspClientPool, type LspStatus } from "../../hooks/useLspClientPool";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
-import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle } from "lucide-react";
+import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle, Eye } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
+import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
@@ -271,7 +272,7 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
 
             {/* Install hint popover */}
             {showPopover && hint && (
-                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800 text-xs">
+                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800 text-xs">
                     <div className="font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                         Install {hint.name}
                     </div>
@@ -419,15 +420,15 @@ export function FileEditorPanel({ width }: { width: number }) {
         return treeRoots[rootKey];
     }, [activeFile, treeRoots]);
 
-    // Determine the active language for LSP — use the active file's language
-    const lspLanguage = activeFile?.language ?? null;
+    // Determine the active language for LSP — preview-mode files don't need LSP.
+    const lspLanguage = activeFile && activeFile.mode === "edit" ? activeFile.language : null;
 
-    // Compute the set of all languages open in tabs (for pool lifecycle).
-    // As long as a language appears here, its LSP connection stays alive.
+    // Compute the set of all languages open in EDIT tabs (for pool lifecycle).
+    // Preview-mode tabs are excluded — they are read-only and don't need LSP.
     const openLanguages = useMemo(() => {
         const langs = new Set<string>();
         for (const file of openFiles) {
-            if (file.language && !file.loading) langs.add(file.language);
+            if (file.mode === "edit" && file.language && !file.loading) langs.add(file.language);
         }
         return langs;
     }, [openFiles]);
@@ -1207,7 +1208,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     return (
         <div
-            className="relative flex flex-col bg-[#FAFAFA] dark:border-zinc-800 dark:bg-zinc-900 rounded-xl overflow-hidden"
+            className="relative flex flex-col bg-[#FAFAFA] dark:border-zinc-800 dark:bg-zinc-900 rounded-lg overflow-hidden"
             style={{ width }}
         >
             {/* Tab bar */}
@@ -1218,17 +1219,24 @@ export function FileEditorPanel({ width }: { width: number }) {
                 >
                     {openFiles.map((file) => {
                         const isActive = file.id === activeFileId;
+                        const isPreview = file.mode === "preview";
                         return (
-                            <Tooltip content={file.relPath} variant="plain" key={file.id}>
+                            <Tooltip
+                                content={isPreview ? `${file.relPath} · ${t("fileEditor.previewBadge")}` : file.relPath}
+                                variant="plain"
+                                key={file.id}
+                            >
                                 <TabItem
                                     data-file-id={file.id}
                                     onClick={() => setActiveFile(file.id)}
                                     onContextMenu={(e) => handleTabContextMenu(e, file)}
                                     active={isActive}
                                 >
-                                    {/* Dirty indicator / loading */}
+                                    {/* Dirty indicator / loading / preview badge */}
                                     {file.loading ? (
                                         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-400" />
+                                    ) : isPreview ? (
+                                        <Eye className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
                                     ) : file.dirty ? (
                                         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
                                     ) : null}
@@ -1256,8 +1264,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                     })}
                 </ScrollableTabBar>
 
-                {/* Save button */}
-                {activeFile && !activeFile.loading && (
+                {/* Save button — only for editable files in edit mode */}
+                {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
                     <Tooltip content={t("fileEditor.save")} variant="plain">
                         <button
                             onClick={() => activeFile.dirty && void saveFile(activeFile.id)}
@@ -1288,6 +1296,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                     <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
                         {t("fileEditor.emptyState")}
                     </div>
+                ) : activeFile.mode === "preview" ? (
+                    <MarkdownPreviewView file={activeFile} />
                 ) : (
                     <>
                         <Editor
@@ -1341,8 +1351,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                 )}
             </div>
 
-            {/* Status bar */}
-            {activeFile && !activeFile.loading && (
+            {/* Status bar — only for editable files */}
+            {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
                 <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-100 px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-800 dark:text-zinc-400">
                     <span className="uppercase truncate min-w-0">{activeFile.language || "plain text"}</span>
                     {lspEnabled && lspLanguage && (
@@ -1361,7 +1371,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     onClick={() => setClosingFileId(null)}
                 >
                     <div
-                        className="mx-4 w-full max-w-sm rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
+                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">
@@ -1380,13 +1390,13 @@ export function FileEditorPanel({ width }: { width: number }) {
                         <div className="mt-4 flex justify-end gap-2">
                             <button
                                 onClick={() => setClosingFileId(null)}
-                                className="rounded-lg btn-solid px-3 py-1.5 text-xs"
+                                className="rounded btn-solid px-3 py-1.5 text-xs"
                             >
                                 {t("fileEditor.cancel")}
                             </button>
                             <button
                                 onClick={confirmClose}
-                                className="rounded-lg btn-accent px-3 py-1.5 text-xs"
+                                className="rounded btn-accent px-3 py-1.5 text-xs"
                             >
                                 {t("fileEditor.discard")}
                             </button>
@@ -1426,7 +1436,7 @@ export function FileEditorPanel({ width }: { width: number }) {
             {tabContextMenu && createPortal(
                 <div
                     ref={tabMenuRef}
-                    className="fixed z-[100] min-w-[160px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+                    className="fixed z-[100] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
                     style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
                     onContextMenu={(e) => e.preventDefault()}
                 >
@@ -1478,7 +1488,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     onClick={() => setBatchCloseRequest(null)}
                 >
                     <div
-                        className="mx-4 w-full max-w-sm rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
+                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">
@@ -1503,13 +1513,13 @@ export function FileEditorPanel({ width }: { width: number }) {
                         <div className="mt-4 flex justify-end gap-2">
                             <button
                                 onClick={() => setBatchCloseRequest(null)}
-                                className="rounded-lg btn-solid px-3 py-1.5 text-xs"
+                                className="rounded btn-solid px-3 py-1.5 text-xs"
                             >
                                 {t("fileEditor.cancel")}
                             </button>
                             <button
                                 onClick={confirmBatchClose}
-                                className="rounded-lg btn-accent px-3 py-1.5 text-xs"
+                                className="rounded btn-accent px-3 py-1.5 text-xs"
                             >
                                 {t("fileEditor.discard")}
                             </button>

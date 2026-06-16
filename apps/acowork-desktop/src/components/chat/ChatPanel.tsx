@@ -871,11 +871,11 @@ export function ChatPanel() {
   return (
     <>
       <div
-        className="flex flex-1 min-w-0 flex-col bg-[#FAFAFA] dark:bg-zinc-900 rounded-xl overflow-hidden"
+        className="flex flex-1 min-w-0 flex-col bg-[#FAFAFA] dark:bg-zinc-900 rounded-lg overflow-hidden"
       >
         {/* LLM config warning */}
         {hasLlmConfig === false && (
-          <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 rounded-t-xl dark:border-amber-900 dark:bg-amber-950">
+          <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 rounded-t-lg dark:border-amber-900 dark:bg-amber-950">
             <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
             <span className="text-xs text-amber-700 dark:text-amber-300">
               {t("chatPanel.llmNotConfigured")}
@@ -1078,7 +1078,7 @@ export function ChatPanel() {
         {/* Todo list box — above the message queue, same collapsible style.
           Shows current task list from todo_write tool calls. */}
         {todos.length > 0 && (
-          <div className="mx-5 mb-0 rounded-t-lg border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className="mx-5 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
             <button
               className="flex items-center w-full px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
               onClick={() => setTodosCollapsed(!todosCollapsed)}
@@ -1141,7 +1141,7 @@ export function ChatPanel() {
         {queuedMessages.length > 0 && (
           <div className={cn(
             "mx-5 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
-            todos.length > 0 ? "" : "rounded-t-lg"
+            todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
               <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
@@ -1183,7 +1183,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-[#FAFAFA] dark:bg-zinc-900">
+        <div className="mx-3 mb-3 rounded-md border border-zinc-200 dark:border-zinc-700 bg-[#FAFAFA] dark:bg-zinc-900">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
@@ -1223,7 +1223,7 @@ export function ChatPanel() {
               {pendingImages.map((img) => (
                 <div
                   key={img.tempId}
-                  className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700"
+                  className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700"
                 >
                   <img
                     src={img.base64Url}
@@ -1327,7 +1327,7 @@ export function ChatPanel() {
                     : t("chatPanel.stop"))
                 : t("chatPanel.sendMessage")}>
                 <button
-                  className={`rounded-lg p-1.5 transition-colors ${sending
+                  className={`rounded-md p-1.5 transition-colors ${sending
                     ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
                     : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
                     }`}
@@ -1490,7 +1490,7 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
       {contextMenu && (
         <div
           ref={wrapperRef}
-          className="fixed z-[100] min-w-[120px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+          className="fixed z-[100] min-w-[120px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onContextMenu={(e) => e.stopPropagation()}
         >
@@ -1545,7 +1545,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
               </div>
             )}
             {message.content && (
-              <div className="mt-[6px] max-w-[85%] rounded-lg rounded-br-sm bg-[var(--color-accent)]/60 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
+              <div className="mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-[var(--color-accent)]/60 px-4 py-2.5 text-zinc-900 dark:text-zinc-200 select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
                 {message.content}
               </div>
             )}
@@ -1582,7 +1582,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
                 <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
               )}
             </div>
-            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               {message.content && (
                 <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_table]:bg-zinc-200/20 [&_tbody_tr]:!bg-transparent dark:[&_table]:bg-zinc-900/30" style={fontSizeStyle}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown>
@@ -1622,7 +1622,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
                 <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
               )}
             </div>
-            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               <ThinkBlock
                 content={message.content}
                 isStreaming={isStreaming}
@@ -1657,7 +1657,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
                 <span className="rounded bg-zinc-200 px-1 py-0 text-[10px] font-medium text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">{message.senderRole}</span>
               )}
             </div>
-            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-lg rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
+            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-zinc-100 px-4 py-2.5 dark:bg-zinc-800 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
               <div className="flex items-start gap-2 min-w-0">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
                 <div className="min-w-0 whitespace-pre-wrap break-words">{message.content}</div>
@@ -1699,7 +1699,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
   if (message.type === "tool_call") {
     return (
       <div className="flex justify-start">
-        <div className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800">
+        <div className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800">
           <button
             className="flex flex-1 items-start gap-2 min-w-0"
             onClick={() => setExpanded(!expanded)}
@@ -1719,7 +1719,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
       <MessageContentWrapper>
         <div className="flex justify-start">
           <button
-            className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
             onClick={() => setExpanded(!expanded)}
           >
             <Wrench className="h-3 w-3 shrink-0" />
@@ -1729,7 +1729,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
           </button>
           {expanded && (
-            <pre className="mt-1 max-w-full overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400 select-text">
+            <pre className="mt-1 max-w-full overflow-x-auto rounded-md bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400 select-text">
               {message.content}
             </pre>
           )}
@@ -1951,7 +1951,7 @@ function AddModelDialog({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="w-[440px] max-h-[85vh] overflow-hidden rounded-lg bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
+        className="w-[440px] max-h-[85vh] overflow-hidden rounded-md bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="shrink-0 px-6 pt-6 pb-3 text-sm font-semibold">Add Model</h3>
@@ -2276,7 +2276,7 @@ function AddModelDialog({
             <button
               onClick={handleSave}
               disabled={(needsApiKey(provider) ? !key.trim() : false) || saving}
-              className="w-20 rounded-md btn-solid px-3 py-1.5 text-xs font-medium text-center disabled:opacity-50"
+              className="w-20 rounded btn-solid px-3 py-1.5 text-xs font-medium text-center disabled:opacity-50"
             >
               {saving ? "Saving..." : "Save"}
             </button>
@@ -2305,7 +2305,7 @@ function UnsupportedImageDialog({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="w-[400px] overflow-hidden rounded-lg bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
+        className="w-[400px] overflow-hidden rounded-md bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="shrink-0 px-6 pt-6 pb-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
@@ -2431,7 +2431,7 @@ function ModelMenu({
       {open && (
         <div
           className={cn(
-            "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-lg border shadow-lg",
+            "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
             "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
           )}
           style={{ width: `${menuWidth}px` }}

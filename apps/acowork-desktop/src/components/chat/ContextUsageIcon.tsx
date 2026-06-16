@@ -141,7 +141,7 @@ export function ContextUsageIcon() {
       {/* Icon button — matches the adjacent Send button exactly */}
       <button
         className={cn(
-          "rounded-lg p-1.5 transition-colors",
+          "rounded-md p-1.5 transition-colors",
           "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200",
         )}
         aria-label={t("contextUsage.ariaLabel")}
@@ -162,7 +162,7 @@ export function ContextUsageIcon() {
           onMouseEnter={handlePopoverEnter}
           onMouseLeave={handleMouseLeave}
           className={cn(
-            "absolute bottom-full right-0 z-50 mb-1 overflow-hidden rounded-lg border shadow-lg",
+            "absolute bottom-full right-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
             "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
           )}
         >

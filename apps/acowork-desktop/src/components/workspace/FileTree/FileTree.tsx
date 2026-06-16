@@ -122,14 +122,14 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
         const rootEntries = treeCache[`${treeCachePrefix}:`];
         if (!rootEntries) {
             return (
-                <div className="flex items-center justify-center py-8 text-xs text-zinc-400">
+                <div className="flex items-center justify-center py-8 text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                     Loading...
                 </div>
             );
         }
         if (rootEntries.length === 0) {
             return (
-                <div className="flex flex-col items-center justify-center py-8 text-xs text-zinc-400">
+                <div className="flex flex-col items-center justify-center py-8 text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                     <span>Empty workspace</span>
                 </div>
             );

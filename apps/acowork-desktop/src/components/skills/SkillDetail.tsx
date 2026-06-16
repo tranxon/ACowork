@@ -73,7 +73,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
       )}
       <div className="flex-1 overflow-y-auto p-6">
       {/* Basic info card */}
-      <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+      <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
         <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
           {detail.name}
         </h2>
@@ -137,7 +137,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
         <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
           Instructions
         </h3>
-        <div className="mt-2 rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
+        <div className="mt-2 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
           <pre className="whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
             {detail.instructions}
           </pre>

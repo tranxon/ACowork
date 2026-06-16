@@ -42,7 +42,7 @@ export function ConfirmDialog({
 
       {/* Dialog */}
       <div
-        className="relative z-10 w-full max-w-sm rounded-lg border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
+        className="relative z-10 w-full max-w-sm rounded-md border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-title"

@@ -195,7 +195,7 @@ export function RemoteFolderPicker({ onSelect, onCancel }: RemoteFolderPickerPro
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-            <div className="w-full max-w-lg rounded-lg bg-white shadow-xl dark:bg-zinc-900 flex flex-col max-h-[80vh]">
+            <div className="w-full max-w-lg rounded-md bg-white shadow-xl dark:bg-zinc-900 flex flex-col max-h-[80vh]">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
                     <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">

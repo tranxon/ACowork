@@ -90,7 +90,7 @@ export function MemoryPanel() {
           value={filters.keyword}
           onChange={(e) => setFilters({ keyword: e.target.value })}
           placeholder={t("memoryPanel.searchNodes")}
-          className="rounded-lg bg-white px-2.5 py-1.5 dark:bg-zinc-800"
+          className="rounded-md bg-white px-2.5 py-1.5 dark:bg-zinc-800"
         />
         <div className="flex gap-2">
           <select
@@ -105,7 +105,7 @@ export function MemoryPanel() {
                   | "Autobiographical",
               })
             }
-            className="min-w-0 flex-1 appearance-none rounded-lg border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className="min-w-0 flex-1 appearance-none rounded-md border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
               backgroundPosition: 'right 0.5rem center',
@@ -126,7 +126,7 @@ export function MemoryPanel() {
                 timeRange: e.target.value as "1h" | "1d" | "7d" | "30d" | "all",
               })
             }
-            className="min-w-0 flex-1 appearance-none rounded-lg border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className="min-w-0 flex-1 appearance-none rounded-md border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
               backgroundPosition: 'right 0.5rem center',
@@ -203,14 +203,14 @@ export function MemoryPanel() {
         <button
           onClick={handleConsolidate}
           disabled={loading}
-          className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+          className="flex-1 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
         >
           {t("memoryPanel.consolidate")}
         </button>
         <button
           onClick={handleRefresh}
           disabled={loading}
-          className="flex-1 rounded-lg btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+          className="flex-1 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
         >
           {t("memoryPanel.refresh")}
         </button>

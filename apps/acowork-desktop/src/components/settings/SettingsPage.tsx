@@ -159,7 +159,7 @@ function GatewayTab() {
   return (
     <div className="max-w-lg space-y-4">
       {/* Mode selection */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.gatewayMode")}</h2>
         <RadioGroup
           name="gatewayMode"
@@ -174,7 +174,7 @@ function GatewayTab() {
 
       {/* Local mode: status + controls */}
       {gatewayMode === "local" && (
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
           <h2 className="mb-3 text-xs font-medium">{t("settings.localGateway")}</h2>
 
           <div className="flex items-center gap-2 text-xs">
@@ -206,7 +206,7 @@ function GatewayTab() {
               <button
                 onClick={handleStartLocal}
                 disabled={starting}
-                className="rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+                className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
               >
                 {starting ? t("settings.starting") : t("settings.startGateway")}
               </button>
@@ -216,7 +216,7 @@ function GatewayTab() {
                 <button
                   onClick={handleRestartLocal}
                   disabled={starting}
-                  className="rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+                  className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
                 >
                   {starting ? t("settings.restarting") : t("settings.restart")}
                 </button>
@@ -235,7 +235,7 @@ function GatewayTab() {
 
       {/* Remote mode: URL + test */}
       {gatewayMode === "remote" && (
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+        <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
           <h2 className="mb-3 text-xs font-medium">{t("settings.gatewayConnection")}</h2>
 
           <div className="space-y-3">
@@ -289,7 +289,7 @@ function GatewayTab() {
             <button
               onClick={handleTest}
               disabled={testing || !urlDraft.trim()}
-              className="rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+              className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
             >
               {testing ? t("settings.testing") : t("settings.testConnection")}
             </button>
@@ -298,7 +298,7 @@ function GatewayTab() {
       )}
 
       {/* Connected Agents (shared between modes) */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.connectedAgents")}</h2>
 
         {status !== "connected" ? (
@@ -338,7 +338,7 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
   }, [agent.agent_id]);
 
   return (
-    <div className="flex items-center justify-between rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+    <div className="flex items-center justify-between rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
       <div className="flex items-center gap-2 min-w-0">
         <Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
         <span className="text-xs font-medium truncate">{agent.name}</span>
@@ -388,7 +388,7 @@ function AppearanceTab() {
 
   return (
     <div className="w-fit space-y-4">
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.theme")}</h2>
         <RadioGroup
           name="theme"
@@ -402,7 +402,7 @@ function AppearanceTab() {
         />
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.accentColor")}</h2>
         <p className="mb-3 text-xs text-zinc-500">{t("settings.accentColor")}</p>
         <div className="flex flex-wrap gap-[14px]">
@@ -439,7 +439,7 @@ function AppearanceTab() {
         </div>
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.contentWidth")}</h2>
         <p className="mb-2 text-xs text-zinc-500">{t("settings.contentWidthHint")}</p>
         <RadioGroup
@@ -451,7 +451,7 @@ function AppearanceTab() {
         />
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.fontSize")}</h2>
         <RadioGroup
           name="fontSize"
@@ -461,7 +461,7 @@ function AppearanceTab() {
         />
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.opacity")}</h2>
         <p className="mb-2 text-xs text-zinc-500">{t("settings.opacityHint")}</p>
         <div className="flex items-center gap-3">
@@ -481,10 +481,10 @@ function AppearanceTab() {
         </div>
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <button
           onClick={() => setShowResetConfirm(true)}
-          className="rounded-lg btn-solid px-3 py-[var(--ui-btn-py)] text-xs"
+          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs"
         >
           {t("settings.resetToDefaults")}
         </button>
@@ -547,7 +547,7 @@ function GeneralTab() {
 
   return (
     <div className="max-w-lg space-y-4">
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.logSetup")}</h2>
 
         {/* Log level */}
@@ -570,7 +570,7 @@ function GeneralTab() {
                   setLogLevel(val);
                 } catch { /* ignore */ }
               }}
-              className="w-[5.5rem] appearance-none rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+              className="w-[5.5rem] appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
               style={{
                 backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                 backgroundPosition: 'right 0.5rem center',
@@ -659,7 +659,7 @@ function GeneralTab() {
         <button
           onClick={() => setShowDeleteConfirm(true)}
           disabled={deleting}
-          className="rounded-lg btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
         >
           {deleting ? t("settings.deleting") : t("settings.deleteAllLogs")}
         </button>
@@ -667,7 +667,7 @@ function GeneralTab() {
         {/* Delete confirmation dialog */}
         {showDeleteConfirm && (
           <div className="fixed inset-0 z-50 flex items-cell justify-center bg-black/50">
-            <div className="w-[380px] rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+            <div className="w-[380px] rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
               <h3 className="mb-2 text-sm font-semibold">{t("settings.deleteLogsConfirmTitle")}</h3>
               <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
                 {t("settings.deleteLogsConfirmMsg")}
@@ -691,7 +691,7 @@ function GeneralTab() {
         )}
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.dataDirectory")}</h2>
         <input
           type="text"
@@ -701,7 +701,7 @@ function GeneralTab() {
         />
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.about")}</h2>
         <div className="text-xs text-zinc-500 dark:text-zinc-400">
           <p>AgentCowork Desktop v0.1.0</p>
@@ -710,14 +710,14 @@ function GeneralTab() {
       </div>
 
       {/* Reset Onboarding */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="text-xs font-medium">{t("settings.resetOnboarding")}</h2>
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           {t("settings.resetOnboardingDesc")}
         </p>
         <button
           onClick={() => setShowResetOnboardingConfirm(true)}
-          className="mt-3 rounded-md btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
+          className="mt-3 rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
         >
           {t("settings.resetOnboardingBtn")}
         </button>

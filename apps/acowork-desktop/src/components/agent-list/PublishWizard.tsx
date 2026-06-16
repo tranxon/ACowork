@@ -274,7 +274,7 @@ export function PublishWizard({
       />
 
       {/* Dialog */}
-      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
           <Package className="h-5 w-5 text-zinc-500 dark:text-zinc-400" />
@@ -511,7 +511,7 @@ export function PublishWizard({
             <button
               onClick={currentAction.action}
               disabled={busy}
-              className="flex items-center gap-2 rounded-md btn-solid px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-2 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
             >
               {busy ? (
                 <>

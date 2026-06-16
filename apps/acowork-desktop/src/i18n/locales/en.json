@@ -343,6 +343,7 @@
         "memory": "Memory",
         "setup": "Setup",
         "workspace": "Workspace",
+        "preview": "Preview",
         "debugUnavailableRemote": "Debug unavailable in remote mode",
         "debugRemoteDesc": "Debug requires a direct local connection to the Agent Runtime. The Desktop App and Gateway must run on the same machine.",
         "connectingDebug": "Connecting to debug server...",
@@ -394,6 +395,15 @@
             "loading": "Loading...",
             "refresh": "Refresh",
             "searchPlaceholder": "Search files..."
+        },
+        "contextMenu": {
+            "addToChat": "Add to Chat",
+            "preview": "Preview",
+            "newFile": "New File",
+            "newFolder": "New Folder",
+            "copy": "Copy",
+            "paste": "Paste",
+            "delete": "Delete"
         }
     },
     "fileEditor": {
@@ -408,7 +418,10 @@
         "batchCloseOthersConfirm": "{{count}} other tab(s) have unsaved changes. Discard and close?",
         "batchCloseAllConfirm": "{{count}} tab(s) have unsaved changes. Discard and close all?",
         "save": "Save (Ctrl+S)",
-        "copy": "Copy"
+        "copy": "Copy",
+        "previewBadge": "Preview",
+        "previewLoading": "Loading preview...",
+        "previewDoubleClickHint": "Double-click to open in editor"
     },
     "sessionPanel": {
         "loadingSessions": "Loading sessions...",
@@ -479,6 +492,11 @@
     },
     "skillsPanel": {
         "selectSkill": "Select skill"
+    },
+    "statusBar": {
+        "agent": "agent",
+        "sessions": "sessions",
+        "context": "context"
     },
     "debugPanel": {
         "editSection": "Edit section",

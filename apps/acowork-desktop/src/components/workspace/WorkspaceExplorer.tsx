@@ -170,7 +170,7 @@ export function WorkspaceExplorer() {
 
     if (!selectedAgent?.running) {
         return (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                 <FolderOpen className="h-6 w-6" />
                 <span>{t("workspace.explorer.agentNotRunning")}</span>
             </div>
@@ -212,7 +212,7 @@ export function WorkspaceExplorer() {
             {/* Inline name prompt for new file/directory */}
             {newItemPrompt && (
                 <div className="flex items-center gap-1.5 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5">
-                    <span className="text-[10px] font-medium text-[var(--color-accent)] shrink-0">
+                    <span className="font-medium text-[var(--color-accent)] shrink-0" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.78)" }}>
                         {newItemPrompt.type === "file" ? "New file:" : "New folder:"}
                     </span>
                     <input
@@ -222,7 +222,8 @@ export function WorkspaceExplorer() {
                         onChange={(e) => setNewItemName(e.target.value)}
                         onKeyDown={handlePromptKeyDown}
                         placeholder={newItemPrompt.type === "file" ? "filename.ext" : "folder-name"}
-                        className="flex-1 bg-transparent text-xs text-zinc-700 outline-none placeholder:text-zinc-400 dark:text-zinc-300 dark:placeholder:text-zinc-500"
+                        className="flex-1 bg-transparent text-zinc-700 outline-none placeholder:text-zinc-400 dark:text-zinc-300 dark:placeholder:text-zinc-500"
+                        style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
                     />
                 </div>
             )}

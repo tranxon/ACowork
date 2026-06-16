@@ -1,11 +1,13 @@
 import { memo, useCallback, useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste } from "lucide-react";
+import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste, Eye } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { getFileIcon } from "./fileIcons";
 import { SetiIcon } from "../../common/SetiIcon";
 import { useChatStore } from "../../../stores/chatStore";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
+import { useFileEditorStore } from "../../../stores/fileEditorStore";
+import { useTranslation } from "../../../i18n/useTranslation";
 import type { TreeEntry } from "../../../stores/workspaceStore";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
@@ -16,6 +18,8 @@ async function getTauriDialog() {
   }
   return _dialogModule;
 }
+
+const CONTEXT_MENU_FONT_SIZE: React.CSSProperties = { fontSize: "var(--ui-font-size, 0.875rem)" };
 
 interface FileTreeNodeProps {
   entry: TreeEntry;
@@ -53,6 +57,10 @@ export const FileTreeNode = memo(function FileTreeNode({
 }: FileTreeNodeProps) {
   const isDir = entry.type === "directory";
   const fileIcon = isDir ? null : getFileIcon(entry.name);
+  const { t } = useTranslation();
+  const openPreview = useFileEditorStore((s) => s.openPreview);
+  // Preview is currently limited to Markdown files only.
+  const isPreviewable = !isDir && entry.name.toLowerCase().endsWith(".md");
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -158,14 +166,25 @@ export const FileTreeNode = memo(function FileTreeNode({
     setContextMenu(null);
   }, [isDir, relPath, onPaste]);
 
+  const handlePreview = useCallback(() => {
+    const agentId = useChatStore.getState().currentAgentId;
+    if (!agentId) return;
+    // Find the workspace ID via the active session.
+    const sessionId = useChatStore.getState().getActiveSessionId(agentId);
+    if (!sessionId) return;
+    const workspaceId = useWorkspaceStore.getState().sessionWorkspaceMap[sessionId] ?? "__agent_home__";
+    void openPreview(agentId, workspaceId, relPath);
+    setContextMenu(null);
+  }, [relPath, openPreview]);
+
   return (
     <>
       <div
         className={cn(
-          "flex cursor-pointer items-center gap-1 py-[2px] pr-3 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800",
+          "flex cursor-pointer items-center gap-1 py-[2px] pr-3 hover:bg-zinc-100 dark:hover:bg-zinc-800",
           isSelected && "bg-[var(--color-accent)]/10",
         )}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        style={{ paddingLeft: `${depth * 16 + 8}px`, fontSize: "var(--ui-font-size, 0.875rem)" }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
@@ -193,7 +212,7 @@ export const FileTreeNode = memo(function FileTreeNode({
 
         {/* Loading indicator for directories being fetched */}
         {isLoading && isDir && isExpanded && (
-          <span className="ml-auto text-[10px] text-zinc-400">...</span>
+          <span className="ml-auto text-zinc-400" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.78)" }}>...</span>
         )}
 
         {/* Open-files dot indicator for directories (VS Code style) */}
@@ -206,53 +225,69 @@ export const FileTreeNode = memo(function FileTreeNode({
       {contextMenu && createPortal(
         <div
           ref={menuRef}
-          className="fixed z-[100] min-w-[160px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+          className="fixed z-[100] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           <button
             onClick={handleAddToChat}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            style={CONTEXT_MENU_FONT_SIZE}
           >
             <MessageSquarePlus className="h-3.5 w-3.5 text-zinc-400" />
-            Add to Chat
+            {t("workspace.contextMenu.addToChat")}
           </button>
+          {isPreviewable && (
+            <button
+              onClick={handlePreview}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              style={CONTEXT_MENU_FONT_SIZE}
+            >
+              <Eye className="h-3.5 w-3.5 text-zinc-400" />
+              {t("workspace.contextMenu.preview")}
+            </button>
+          )}
           <div className="my-1 border-t border-zinc-200 dark:border-zinc-700" />
           <button
             onClick={handleNewFile}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            style={CONTEXT_MENU_FONT_SIZE}
           >
             <FilePlus className="h-3.5 w-3.5 text-zinc-400" />
-            New File
+            {t("workspace.contextMenu.newFile")}
           </button>
           <button
             onClick={handleNewFolder}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            style={CONTEXT_MENU_FONT_SIZE}
           >
             <FolderPlus className="h-3.5 w-3.5 text-zinc-400" />
-            New Folder
+            {t("workspace.contextMenu.newFolder")}
           </button>
           <div className="my-1 border-t border-zinc-200 dark:border-zinc-700" />
           <button
             onClick={handleCopy}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            style={CONTEXT_MENU_FONT_SIZE}
           >
             <Copy className="h-3.5 w-3.5 text-zinc-400" />
-            Copy
+            {t("workspace.contextMenu.copy")}
           </button>
           <button
             onClick={handlePaste}
             disabled={!useWorkspaceStore.getState().copiedEntry}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed dark:text-zinc-300 dark:hover:bg-zinc-700"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed dark:text-zinc-300 dark:hover:bg-zinc-700"
+            style={CONTEXT_MENU_FONT_SIZE}
           >
             <ClipboardPaste className="h-3.5 w-3.5 text-zinc-400" />
-            Paste
+            {t("workspace.contextMenu.paste")}
           </button>
           <button
             onClick={handleDelete}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
+            style={CONTEXT_MENU_FONT_SIZE}
           >
             <Trash2 className="h-3.5 w-3.5 text-red-500" />
-            Delete
+            {t("workspace.contextMenu.delete")}
           </button>
         </div>,
         document.body,

@@ -256,7 +256,7 @@ export function EmbeddingModelTab() {
     return (
         <div className="max-w-2xl space-y-4">
             {/* Service status */}
-            <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
                 <h2 className="mb-3 text-xs font-medium">{t("embedding.serviceStatus")}</h2>
                 <div className="flex items-center gap-2 text-xs">
                     <span className="text-zinc-500">{t("embedding.status")}</span>
@@ -321,13 +321,13 @@ export function EmbeddingModelTab() {
 
             {/* Error message */}
             {error && (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
+                <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
                     {error}
                 </div>
             )}
 
             {/* Model list */}
-            <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
                 <div className="mb-3 flex items-center justify-between">
                     <h2 className="text-xs font-medium">{t("embedding.availableModels")}</h2>
                     <button
@@ -435,7 +435,7 @@ function ModelCard({
     return (
         <div
             className={cn(
-                "rounded-lg border p-3 transition-colors",
+                "rounded-md border p-3 transition-colors",
                 isActive
                     ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5 dark:border-[var(--color-accent)]/20 dark:bg-[var(--color-accent)]/5"
                     : "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
@@ -508,7 +508,7 @@ function ModelCard({
                         <button
                             onClick={onSelect}
                             disabled={isBusy}
-                            className="inline-flex items-center gap-1 rounded-md btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
                         >
                             {isSelecting ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />

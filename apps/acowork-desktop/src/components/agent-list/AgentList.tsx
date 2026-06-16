@@ -24,6 +24,7 @@ interface AgentListProps {
 
 export function AgentList({ width }: AgentListProps) {
   const { t } = useTranslation();
+  const isCollapsed = width !== undefined && width <= 80;
   const { agents, selectedAgentId, loading, fetchAgents, selectAgent, startAgent, stopAgent, uninstallAgent, restartAgentInDebug } =
     useAgentStore();
   const sessionTitles = useSessionStore((s) => s.sessionTitles);
@@ -241,58 +242,69 @@ export function AgentList({ width }: AgentListProps) {
 
   return (
     <div
-      className="flex flex-col bg-[#EEEEF0] dark:bg-[#2F2F30] rounded-xl"
+      className="flex flex-col bg-[#EEEEF0] dark:bg-[#2F2F30] rounded-lg"
       style={{ width: width ?? 240 }}
     >
-      {/* Header */}
-      <div className="px-3 py-2">
+      {/* Header — search input always visible, add button hidden when collapsed */}
+      <div className={cn(isCollapsed ? "px-1.5 py-2" : "px-3 py-2")}>
         <div className="flex items-center gap-2">
           {/* Search input */}
           <div className="relative flex-1">
-            <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400" />
+            <Search
+              className={cn(
+                "absolute top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400",
+                isCollapsed ? "left-1/2 h-3.5 w-3.5 -translate-x-1/2" : "left-2 h-3.5 w-3.5",
+              )}
+            />
             <StyledInput
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={t("agentList.searchPlaceholder")}
-              className="rounded-md bg-[#D8D9DC] py-1.5 pl-7 pr-2 dark:bg-[#3D3D3F]"
+              placeholder={isCollapsed ? "" : t("agentList.searchPlaceholder")}
+              aria-label={t("agentList.searchPlaceholder")}
+              className={cn(
+                "rounded-md bg-[#D8D9DC] dark:bg-[#3D3D3F]",
+                isCollapsed ? "h-7 min-w-0 p-0" : "py-1.5 pl-7 pr-2",
+              )}
             />
           </div>
-          {/* Add button */}
-          <div ref={addMenuRef} className="relative">
-            <button
-              onClick={() => setAddMenuOpen(!addMenuOpen)}
-              className="flex items-center justify-center rounded-md p-1.5 transition-colors hover:bg-[#D8D9DC] dark:hover:bg-[#3D3D3F]"
-            >
-              <Plus className="h-4 w-4 text-zinc-600 dark:text-zinc-300" />
-            </button>
-            {/* Add menu dropdown */}
-            {addMenuOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 w-max rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
-                <button
-                  onClick={() => {
-                    setAddMenuOpen(false);
-                    setShowCreateWizard(true);
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
-                >
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Create Agent
-                </button>
-                <button
-                  onClick={() => {
-                    setAddMenuOpen(false);
-                    void handleInstall();
-                  }}
-                  disabled={installing}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Install Agent
-                </button>
-              </div>
-            )}
-          </div>
+          {/* Add button — hidden when collapsed */}
+          {!isCollapsed && (
+            <div ref={addMenuRef} className="relative">
+              <button
+                onClick={() => setAddMenuOpen(!addMenuOpen)}
+                className="flex items-center justify-center rounded-md p-1.5 transition-colors hover:bg-[#D8D9DC] dark:hover:bg-[#3D3D3F]"
+              >
+                <Plus className="h-4 w-4 text-zinc-600 dark:text-zinc-300" />
+              </button>
+              {/* Add menu dropdown */}
+              {addMenuOpen && (
+                <div className="absolute right-0 top-full z-50 mt-1 w-max rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                  <button
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      setShowCreateWizard(true);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    Create Agent
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      void handleInstall();
+                    }}
+                    disabled={installing}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Install Agent
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -314,7 +326,7 @@ export function AgentList({ width }: AgentListProps) {
             <div
               key={agent.agent_id}
               className={cn(
-                "relative flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors duration-150",
+                "relative flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors duration-150",
                 selectedAgentId === agent.agent_id
                   ? "bg-[var(--color-accent)]/90 text-white"
                   : "hover:bg-[#E2E3E6] dark:hover:bg-[#38383A]",
@@ -331,25 +343,27 @@ export function AgentList({ width }: AgentListProps) {
                 avatarUrl={agent.avatar}
                 iconId={agentProfiles[agent.agent_id]?.avatarIconId}
                 size={40}
-                className="mt-0.5"
+                className={isCollapsed ? "mx-auto" : ""}
               />
 
-              {/* Content area */}
-              <div className="min-w-0 flex-1">
-                {/* Top row: name */}
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 flex items-center gap-1.5">
-                    <span className={cn("truncate font-medium", selectedAgentId === agent.agent_id ? "text-white" : agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name}</span>
+              {/* Content area — hidden when collapsed */}
+              {!isCollapsed && (
+                <div className="min-w-0 flex-1">
+                  {/* Top row: name */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex items-center gap-1.5">
+                      <span className={cn("truncate font-medium", selectedAgentId === agent.agent_id ? "text-white" : agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name}</span>
 
+                    </div>
+                  </div>
+                  {/* Bottom row: current session title */}
+                  <div className="mt-0.5 truncate" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
+                    <span className={cn(selectedAgentId === agent.agent_id ? "text-white/70" : "text-zinc-500 dark:text-zinc-400")}>
+                      {sessionTitle === undefined ? "" : (sessionTitle === null ? "No session" : (sessionTitle || "Untitled session"))}
+                    </span>
                   </div>
                 </div>
-                {/* Bottom row: current session title */}
-                <div className="mt-0.5 truncate" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
-                  <span className={cn(selectedAgentId === agent.agent_id ? "text-white/70" : "text-zinc-500 dark:text-zinc-400")}>
-                    {sessionTitle === undefined ? "" : (sessionTitle === null ? "No session" : (sessionTitle || "Untitled session"))}
-                  </span>
-                </div>
-              </div>
+              )}
             </div>
           );
         })}
@@ -365,7 +379,7 @@ export function AgentList({ width }: AgentListProps) {
       {contextMenu && (
         <div
           ref={menuRef}
-          className="fixed z-50 min-w-[160px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+          className="fixed z-50 min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           {contextAgent && !contextAgent.running && (

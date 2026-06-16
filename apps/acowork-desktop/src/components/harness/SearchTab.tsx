@@ -143,7 +143,7 @@ export function SearchTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("harnessSearch.searchProviderManagement")}</h2>
         </div>
@@ -160,7 +160,7 @@ export function SearchTab() {
                 const providerName = def?.name || keyEntry.provider;
 
                 return (
-                  <div key={keyEntry.provider} className="rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+                  <div key={keyEntry.provider} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center flex-nowrap gap-2">
                         <span className="shrink-0 text-xs font-medium">{providerName}</span>
@@ -191,7 +191,7 @@ export function SearchTab() {
 
       </div>
 
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
 
         {/* Available Search Providers (bottom section) */}
         <div>
@@ -201,7 +201,7 @@ export function SearchTab() {
               <div className="py-3 text-center text-xs text-zinc-400">{t("harnessSearch.allConfigured")}</div>
             ) : (
               availableProviders.map((item) => (
-                <div key={item.id} className="rounded-lg border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+                <div key={item.id} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
                   <div className="flex items-center justify-between">
                     <div className="min-w-0 flex-1">
                       <span className="text-xs font-medium">{item.name}</span>
@@ -229,7 +229,7 @@ export function SearchTab() {
       {/* Add key dialog */}
       {showAddDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-[400px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+          <div className="w-[400px] max-h-[85vh] overflow-y-auto rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
             <h3 className="mb-3 text-sm font-semibold">
               {t("harnessSearch.addSearchProvider")} {lookupSearchProvider(newProvider)?.name || newProvider}
             </h3>
@@ -307,7 +307,7 @@ export function SearchTab() {
       {/* Edit key dialog */}
       {showEditDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-[400px] max-h-[85vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-zinc-800">
+          <div className="w-[400px] max-h-[85vh] overflow-y-auto rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
             <h3 className="mb-3 text-sm font-semibold">
               {t("harnessSearch.editSearchProvider")} {editProviderDef?.name || showEditDialog}
             </h3>

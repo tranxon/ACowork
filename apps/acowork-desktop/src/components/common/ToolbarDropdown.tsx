@@ -50,7 +50,7 @@ export function ToolbarDropdownTrigger({
                     )}
                 >
                     {icon}
-                    <span className={cn(collapseClass, "max-w-[120px] truncate")}>{label}</span>
+                    <span className={cn(collapseClass, "max-w-[120px] truncate")} style={{ fontSize: "0.75rem" }}>{label}</span>
                     <ChevronDown className={cn("h-3 w-3 text-zinc-400", collapseClass)} />
                 </button>
             </Tooltip>

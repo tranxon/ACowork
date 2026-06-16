@@ -127,7 +127,7 @@ export function SkillsPanel() {
       >
         {/* Dropdown menu */}
         {open && (
-          <div className="absolute bottom-full left-0 mb-1 w-60 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800" style={{ zIndex: 100 }}>
+          <div className="absolute bottom-full left-0 mb-1 w-60 rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800" style={{ zIndex: 100 }}>
             {/* Skills list */}
             <div className="max-h-56 overflow-y-auto py-1">
               {loading && skills.length === 0 ? (
@@ -199,7 +199,7 @@ export function SkillsPanel() {
       {/* Import Dialog */}
       {importDialogOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50">
-          <div className="w-96 rounded-lg border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="w-96 rounded-md border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
             {/* Header */}
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
@@ -228,7 +228,7 @@ export function SkillsPanel() {
               onDragOver={handleDragOver}
               onClick={() => fileInputRef.current?.click()}
               className={cn(
-                "mb-3 cursor-pointer rounded-lg border-2 border-dashed p-6 text-center transition-colors",
+                "mb-3 cursor-pointer rounded-md border-2 border-dashed p-6 text-center transition-colors",
                 selectedFile
                   ? "border-[var(--color-accent)]/40"
                   : "border-zinc-300 hover:border-zinc-400 dark:border-zinc-600 dark:hover:border-zinc-500",

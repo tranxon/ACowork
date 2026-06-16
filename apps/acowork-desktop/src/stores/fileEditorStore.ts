@@ -71,15 +71,21 @@ export interface OpenFile {
     dirty: boolean;
     /** If set, editor should reveal this line (1-based) after mount */
     cursorLine?: number;
+    /** "edit" = Monaco editor; "preview" = read-only Markdown render. */
+    mode: "edit" | "preview";
 }
 
 interface FileEditorState {
     openFiles: OpenFile[];
     activeFileId: string | null;
 
-    /** Open a file (or activate if already open). Fetches content from Gateway.
+    /** Open a file in edit mode (or activate if already open). Fetches content from Gateway.
      * @param line - Optional 1-based line number to reveal after opening */
     openFile: (agentId: string, workspaceId: string, relPath: string, line?: number) => Promise<void>;
+    /** Open a file in read-only preview mode. Re-fetches content from disk.
+     *  - If the file is already open in preview mode, just activates it.
+     *  - If the file is open in edit mode, switches that tab to preview mode. */
+    openPreview: (agentId: string, workspaceId: string, relPath: string) => Promise<void>;
     /** Open a file with pre-loaded content (skips Gateway fetch). Used by LSP cross-file navigation. */
     openFileWithContent: (agentId: string, workspaceId: string, relPath: string, content: string, language: string) => void;
     /** Close a file tab. Returns false if dirty (caller should confirm first). */
@@ -120,12 +126,17 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         const fileId = `${agentId}:${workspaceId}:${relPath}`;
         const existing = get().openFiles.find((f) => f.id === fileId);
         if (existing) {
-            // Already open — activate and jump to line if specified
+            // Already open — activate, switch to edit mode if it was preview,
+            // and jump to line if specified
             set({
                 activeFileId: fileId,
                 openFiles: get().openFiles.map((f) =>
-                    f.id === fileId && line !== undefined
-                        ? { ...f, cursorLine: line }
+                    f.id === fileId
+                        ? {
+                            ...f,
+                            mode: "edit",
+                            ...(line !== undefined ? { cursorLine: line } : {}),
+                        }
                         : f,
                 ),
             });
@@ -148,6 +159,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             saving: false,
             language,
             dirty: false,
+            mode: "edit",
             ...(line !== undefined ? { cursorLine: line } : {}),
         };
 
@@ -193,6 +205,79 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }
     },
 
+    openPreview: async (agentId: string, workspaceId: string, relPath: string) => {
+        const fileId = `${agentId}:${workspaceId}:${relPath}`;
+        const fileName = relPath.split("/").pop() || relPath;
+
+        // If already open — just activate and switch to preview mode
+        const existing = get().openFiles.find((f) => f.id === fileId);
+        if (existing) {
+            set({
+                activeFileId: fileId,
+                openFiles: get().openFiles.map((f) =>
+                    f.id === fileId ? { ...f, mode: "preview" } : f,
+                ),
+            });
+            return;
+        }
+
+        // Add a preview-mode placeholder
+        const newFile: OpenFile = {
+            id: fileId,
+            agentId,
+            workspaceId,
+            relPath,
+            fileName,
+            content: "",
+            originalContent: "",
+            loading: true,
+            saving: false,
+            language: "markdown",
+            dirty: false,
+            mode: "preview",
+        };
+
+        set((state) => ({
+            openFiles: [...state.openFiles, newFile],
+            activeFileId: fileId,
+        }));
+
+        // Fetch content from Gateway
+        try {
+            const baseUrl = getGatewayUrl();
+            const params = new URLSearchParams();
+            if (workspaceId && workspaceId !== "__agent_home__") {
+                params.set("workspace_id", workspaceId);
+            }
+            params.set("path", relPath);
+            const url = `${baseUrl}/api/agents/${agentId}/workspaces/file?${params.toString()}`;
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                console.error("[FileEditorStore] openPreview read failed:", resp.status);
+                set((state) => ({
+                    openFiles: state.openFiles.filter((f) => f.id !== fileId),
+                    activeFileId: state.activeFileId === fileId ? null : state.activeFileId,
+                }));
+                return;
+            }
+            const data = (await resp.json()) as { content: string; size: number; mimeType: string };
+            set((state) => ({
+                openFiles: state.openFiles.map((f) =>
+                    f.id === fileId
+                        ? { ...f, content: data.content, originalContent: data.content, loading: false }
+                        : f,
+                ),
+            }));
+        } catch (e) {
+            console.error("[FileEditorStore] openPreview error:", e);
+            set((state) => ({
+                openFiles: state.openFiles.map((f) =>
+                    f.id === fileId ? { ...f, loading: false } : f,
+                ),
+            }));
+        }
+    },
+
     openFileWithContent: (agentId: string, workspaceId: string, relPath: string, content: string, language: string) => {
         const fileId = `${agentId}:${workspaceId}:${relPath}`;
         const existing = get().openFiles.find((f) => f.id === fileId);
@@ -215,6 +300,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             saving: false,
             language,
             dirty: false,
+            mode: "edit",
         };
 
         set((state) => ({

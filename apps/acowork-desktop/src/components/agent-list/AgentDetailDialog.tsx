@@ -59,7 +59,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
 
       {/* Dialog */}
-      <div className="relative z-10 w-full max-w-md rounded-lg border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-semibold">Agent Details</h3>
           <button
