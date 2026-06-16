@@ -852,16 +852,26 @@ impl SessionTask {
                         )
                         .await;
 
-                    // ── Debug mode: auto-resume if paused/stepping ──
-                    // When the user sends a chat message, they expect a response.
-                    // If the debug controller is Paused or Stepping, the agent loop
-                    // will block at await_resume().  Auto-resume so the
-                    // message is processed immediately.
+                    // ── Debug mode: auto-resume if paused/stopped ──
+                    // When the user sends a chat message while the debug controller
+                    // is Paused, the agent loop is blocking in await_step_or_continue()
+                    // on rewind_notify (polled every 100ms).  Switch to Running so the
+                    // next poll sees the new state and continues processing.
+                    //
+                    // We do NOT match Stepping here — stepping is a deliberate mode
+                    // where each phase step auto-pauses (on_phase_step_done → Paused).
+                    // Overriding Stepping to Running would defeat the user's intent to
+                    // single-step through the agent's reasoning.
+                    //
+                    // We do NOT call resume_notify.notify_one() — the paused agent loop
+                    // waits on rewind_notify (polling), not resume_notify.  Calling
+                    // notify_one() here would leak a permit to the next iteration of
+                    // the SessionTask loop, causing an unwanted replay of the last
+                    // user message via the resume.notified() branch.
                     if let Some(ctrl) = agent_loop.core.debug_observer.debug_ctrl() {
                         let mut guard = ctrl.lock().await;
                         match guard.state {
                             crate::debug::controller::DebugState::Paused
-                            | crate::debug::controller::DebugState::Stepping
                             | crate::debug::controller::DebugState::Stopped => {
                                 let old_state = guard.state.clone();
                                 guard.state = crate::debug::controller::DebugState::Running;
@@ -883,12 +893,6 @@ impl SessionTask {
                                             iteration,
                                         },
                                     );
-                                }
-                                // Wake the agent loop's await_resume() if it's
-                                // currently blocking on the resume notify.
-                                if let Some(notify) = agent_loop.core.debug_observer.resume_notify()
-                                {
-                                    notify.notify_one();
                                 }
                             }
                             _ => {}
