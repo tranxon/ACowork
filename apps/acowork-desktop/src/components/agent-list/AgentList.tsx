@@ -246,73 +246,28 @@ export function AgentList({ width }: AgentListProps) {
       className="flex flex-col bg-[#EEEEF0] dark:bg-[#2F2F30] rounded-lg"
       style={{ width: width ?? 240 }}
     >
-      {/* Header — search input always visible, add button hidden when collapsed */}
+      {/* Header — search input */}
       <div className={cn(isCollapsed ? "px-1.5 py-2" : "px-3 py-2")}>
-        <div className="flex items-center gap-2">
-          {/* Search input */}
-          <div className="relative flex-1">
-            <Search
-              className={cn(
-                "absolute top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400",
-                isCollapsed ? "left-1/2 h-3.5 w-3.5 -translate-x-1/2" : "left-2 h-3.5 w-3.5",
-              )}
-            />
-            <StyledInput
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={isCollapsed ? "" : t("agentList.searchPlaceholder")}
-              aria-label={t("agentList.searchPlaceholder")}
-              className={cn(
-                "rounded-md bg-[#D8D9DC] dark:bg-[#3D3D3F]",
-                isCollapsed ? "h-7 min-w-0 p-0" : "py-1.5 pl-7 pr-2",
-              )}
-            />
-          </div>
-          {/* Add button — hidden when collapsed */}
-          {!isCollapsed && (
-            <div ref={addMenuRef} className="relative">
-              <button
-                onClick={() => setAddMenuOpen(!addMenuOpen)}
-                className="flex items-center justify-center rounded-md p-1.5 transition-colors hover:bg-[#D8D9DC] dark:hover:bg-[#3D3D3F]"
-              >
-                <Plus className="h-4 w-4 text-zinc-600 dark:text-zinc-300" />
-              </button>
-              {/* Add menu dropdown */}
-              {addMenuOpen && (
-                <div className="absolute right-0 top-full z-50 mt-1 w-max rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
-                  <button
-                    onClick={() => {
-                      setAddMenuOpen(false);
-                      setShowCreateWizard(true);
-                    }}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    Create Agent
-                  </button>
-                  <button
-                    onClick={() => {
-                      setAddMenuOpen(false);
-                      void handleInstall();
-                    }}
-                    disabled={installing}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    Install Agent
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
+        <div className="relative min-w-0 flex-1">
+          <Search
+            className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
+          />
+          <StyledInput
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={isCollapsed ? "" : t("agentList.searchPlaceholder")}
+            aria-label={t("agentList.searchPlaceholder")}
+            className={cn(
+              "rounded-md bg-[#D8D9DC] pl-7 dark:bg-[#3D3D3F]",
+              isCollapsed ? "h-7 min-w-0 pr-0" : "py-1.5 pr-2",
+            )}
+          />
         </div>
       </div>
 
       {/* Agent list */}
       <div className="flex-1 overflow-y-auto" role="list" aria-label="Agent list">
-
-        <div className="border-t border-[#C8C8C8]/40 dark:border-zinc-600/40" />
 
         {loading && agents.length === 0 && (
           <div className="flex items-center justify-center py-8">
@@ -331,7 +286,7 @@ export function AgentList({ width }: AgentListProps) {
                 selectedAgentId === agent.agent_id
                   ? "bg-[var(--color-accent)]/90 text-white"
                   : "hover:bg-[#E2E3E6] dark:hover:bg-[#38383A]",
-                index < filteredAgents.length - 1 && "border-b border-[#C8C8C8]/40 dark:border-zinc-600/40"
+                index < filteredAgents.length - 1 && (isCollapsed ? "after:absolute after:bottom-0 after:left-1 after:right-1 after:border-b after:border-[#C8C8C8]/40 dark:after:border-zinc-600/40" : "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-[#C8C8C8]/40 dark:after:border-zinc-600/40")
               )}
               onClick={() => selectAgent(agent.agent_id)}
               onContextMenu={(e) => handleContextMenu(e, agent.agent_id)}
@@ -379,6 +334,41 @@ export function AgentList({ width }: AgentListProps) {
         {filteredAgents.length === 0 && !loading && (
           <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-500">
             {agents.length === 0 ? "No agents installed" : "No matching agents"}
+          </div>
+        )}
+      </div>
+
+      <div ref={addMenuRef} className={cn("relative", isCollapsed ? "p-1" : "p-1.5")}>
+        <button
+          onClick={() => setAddMenuOpen(!addMenuOpen)}
+          className="flex w-full items-center justify-center rounded-md bg-[#D8D9DC] px-0 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 transition-colors hover:bg-[#C8C9CC] dark:bg-[#3D3D3F] dark:text-zinc-300 dark:hover:bg-[#474749]"
+          aria-label="Add agent"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+        {addMenuOpen && (
+          <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+            <button
+              onClick={() => {
+                setAddMenuOpen(false);
+                setShowCreateWizard(true);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Create Agent
+            </button>
+            <button
+              onClick={() => {
+                setAddMenuOpen(false);
+                void handleInstall();
+              }}
+              disabled={installing}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Install Agent
+            </button>
           </div>
         )}
       </div>
