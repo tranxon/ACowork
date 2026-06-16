@@ -23,7 +23,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
-type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
+type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
 
 const MIN_SIDEBAR_WIDTH = 100;
 const AVATAR_SIDEBAR_WIDTH = 64;

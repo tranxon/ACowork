@@ -15,6 +15,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
+import { ToolsTab } from "./ToolsTab";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
@@ -25,8 +26,8 @@ interface ResultsPanelProps {
   onCollapse: () => void;
   isDebugMode?: boolean;
   onResizeStart?: (e: React.MouseEvent) => void;
-  activeTab: "debug" | "status" | "setup" | "memory" | "workspace";
-  onTabChange: (tab: "debug" | "status" | "setup" | "memory" | "workspace") => void;
+  activeTab: "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
+  onTabChange: (tab: "debug" | "status" | "setup" | "tools" | "memory" | "workspace") => void;
 }
 
 // Stable empty array reference to avoid Zustand selector infinite loop
@@ -185,7 +186,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
   useEffect(() => {
     const isRunning = selectedAgent?.running ?? false;
     const wasRunning = prevRunning.current;
-    if (!isRunning && wasRunning !== false && (activeTab === "memory" || activeTab === "setup")) {
+    if (!isRunning && wasRunning !== false && (activeTab === "memory" || activeTab === "setup" || activeTab === "tools")) {
       onTabChange("status");
     }
     prevRunning.current = isRunning;
@@ -464,6 +465,9 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
 
       {/* ── Setup tab content ─────────────────────────────────────── */}
       {activeTab === "setup" && <AgentSetupTab />}
+
+      {/* ── Tools tab content ─────────────────────────────────────── */}
+      {activeTab === "tools" && <ToolsTab />}
 
       {/* ── Workspace tab content ─────────────────────────────────── */}
       {activeTab === "workspace" && <WorkspaceExplorer />}

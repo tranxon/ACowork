@@ -342,6 +342,7 @@
         "status": "Status",
         "memory": "Memory",
         "setup": "Setup",
+        "tools": "Tools",
         "workspace": "Workspace",
         "preview": "Preview",
         "debugUnavailableRemote": "Debug unavailable in remote mode",
