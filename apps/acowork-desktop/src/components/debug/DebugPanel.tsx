@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
+import { useChatStore } from "../../stores/chatStore";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -65,14 +66,7 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
     connected,
     connecting,
     debugAgentId,
-    iteration,
-    phase,
-    debugState,
-    promptTokens,
-    completionTokens,
-    snapshots,
-    sectionCache,
-    hasPendingPatches,
+    sessionStates,
     connect,
     disconnect,
     resume,
@@ -91,6 +85,17 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
   // Track which sections have content loaded
   const [loadedSections, setLoadedSections] = useState<Set<string>>(new Set());
   // Inline editing state: key = `${iteration}:${section}` → edited text
+  const activeSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
+  const sessionDebugState = activeSessionId ? sessionStates[activeSessionId] : null;
+  const iteration = sessionDebugState?.iteration ?? 0;
+  const phase = sessionDebugState?.phase ?? "Idle";
+  const debugState = sessionDebugState?.debugState ?? "Stepping";
+  const promptTokens = sessionDebugState?.promptTokens ?? 0;
+  const completionTokens = sessionDebugState?.completionTokens ?? 0;
+  const snapshots = sessionDebugState?.snapshots ?? [];
+  const sectionCache = sessionDebugState?.sectionCache ?? new Map();
+  const hasPendingPatches = sessionDebugState?.hasPendingPatches ?? false;
+
   const [editingSection, setEditingSection] = useState<{
     iteration: number;
     section: string;
@@ -140,14 +145,14 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
           next.add(key);
           // Trigger lazy load
           if (!loadedSections.has(key)) {
-            getSection(iteration, section);
+            getSection(activeSessionId, iteration, section);
             setLoadedSections((l) => new Set(l).add(key));
           }
         }
         return next;
       });
     },
-    [getSection, loadedSections]
+    [activeSessionId, getSection, loadedSections]
   );
 
   // ── Not connected fallback ───────────────────────────────────────────
@@ -191,7 +196,11 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
       {/* Control bar */}
       <div className="flex items-center gap-1 border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-800">
         <ControlButton
-          onClick={debugState === "Paused" ? resume : debugState === "Stopped" ? restart : pauseDebug}
+          onClick={() => {
+            if (debugState === "Paused") void resume(activeSessionId);
+            else if (debugState === "Stopped") void restart(activeSessionId);
+            else void pauseDebug(activeSessionId);
+          }}
           title={
             debugState === "Paused"
               ? "Resume (F5)"
@@ -207,27 +216,27 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
           }
         </ControlButton>
         <ControlButton
-          onClick={() => step("iteration")}
+          onClick={() => step(activeSessionId, "iteration")}
           title="Step (F10)"
           disabled={debugState === "Stopped"}
         >
           <StepForward className="h-3.5 w-3.5" />
         </ControlButton>
         <ControlButton
-          onClick={stop}
+          onClick={() => stop(activeSessionId)}
           title="Stop"
           disabled={debugState === "Stopped"}
         >
           <Square className="h-3.5 w-3.5" />
         </ControlButton>
-        <ControlButton onClick={restart} title="Restart" disabled={!debugAgentId}>
+        <ControlButton onClick={() => restart(activeSessionId)} title="Restart" disabled={!debugAgentId}>
           <RefreshCw className="h-3.5 w-3.5" />
         </ControlButton>
         {hasPendingPatches && (
           <>
             <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
             <ControlButton
-              onClick={() => reExecute().catch(console.error)}
+              onClick={() => reExecute(activeSessionId).catch(console.error)}
               title="Re-execute with patches"
               active
             >
@@ -278,14 +287,14 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
             onSaveEdit={(section, content) => {
               const patches: Record<string, unknown> = {};
               patches[section] = content;
-              patchContext(patches).catch(console.error);
+              patchContext(activeSessionId, patches).catch(console.error);
               setEditingSection(null);
             }}
             onEditChange={(content) =>
               setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
             }
-            onRewind={(iter) => rewind(iter).catch(console.error)}
-            getSection={getSection}
+            onRewind={(iter) => rewind(activeSessionId, iter).catch(console.error)}
+            getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
           />
         ))}
       </div>

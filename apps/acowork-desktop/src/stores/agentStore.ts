@@ -9,6 +9,7 @@ const SYSTEM_AGENT_ID = "com.acowork.system";
 interface AgentStore {
   agents: AgentInfo[];
   selectedAgentId: string | null;
+  _userHasSelected: boolean;
   loading: boolean;
   error: string | null;
 
@@ -27,6 +28,7 @@ interface AgentStore {
 export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: [],
   selectedAgentId: null,
+  _userHasSelected: false,
   loading: false,
   error: null,
 
@@ -55,9 +57,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         })),
       );
 
-      // Auto-select System Agent if available and nothing is selected
+      // Auto-select System Agent on initial load (user has not explicitly picked yet)
       const current = get();
-      if (!current.selectedAgentId && agents.length > 0) {
+      if (!current.selectedAgentId && !current._userHasSelected && agents.length > 0) {
         const systemAgent = agents.find((a) => a.agent_id === SYSTEM_AGENT_ID);
         if (systemAgent) {
           set({ selectedAgentId: SYSTEM_AGENT_ID });
@@ -72,7 +74,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   selectAgent: (id) => {
-    set({ selectedAgentId: id });
+    set({ selectedAgentId: id, _userHasSelected: true });
   },
 
   installAgent: async (packagePath) => {

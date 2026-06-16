@@ -24,6 +24,8 @@ const CONTEXT_MENU_FONT_SIZE: React.CSSProperties = { fontSize: "var(--ui-font-s
 interface FileTreeNodeProps {
   entry: TreeEntry;
   depth: number;
+  agentId: string;
+  sessionId: string;
   relPath: string;
   isExpanded: boolean;
   isLoading: boolean;
@@ -42,6 +44,8 @@ interface FileTreeNodeProps {
 export const FileTreeNode = memo(function FileTreeNode({
   entry,
   depth,
+  agentId,
+  sessionId,
   relPath,
   isExpanded,
   isLoading,
@@ -67,7 +71,6 @@ export const FileTreeNode = memo(function FileTreeNode({
   const menuRef = useRef<HTMLDivElement>(null);
 
   const addAttachedContext = useChatStore((s) => s.addAttachedContext);
-  const getActiveSessionId = useChatStore((s) => s.getActiveSessionId);
 
   // Close context menu on click outside or Escape
   useEffect(() => {
@@ -121,10 +124,6 @@ export const FileTreeNode = memo(function FileTreeNode({
   }, [isDir, relPath, onContextNewItem]);
 
   const handleAddToChat = useCallback(() => {
-    const agentId = useChatStore.getState().currentAgentId;
-    if (!agentId) return;
-    const sessionId = getActiveSessionId(agentId);
-    if (!sessionId) return;
     addAttachedContext(agentId, sessionId, {
       id: `${agentId}:${relPath}`,
       type: isDir ? "directory" : "file",
@@ -132,7 +131,7 @@ export const FileTreeNode = memo(function FileTreeNode({
       relPath,
     });
     setContextMenu(null);
-  }, [isDir, relPath, entry.name, addAttachedContext, getActiveSessionId]);
+  }, [agentId, sessionId, isDir, relPath, entry.name, addAttachedContext]);
 
   const handleDelete = useCallback(async () => {
     const label = isDir ? `directory "${entry.name}"` : `file "${entry.name}"`;
@@ -167,15 +166,10 @@ export const FileTreeNode = memo(function FileTreeNode({
   }, [isDir, relPath, onPaste]);
 
   const handlePreview = useCallback(() => {
-    const agentId = useChatStore.getState().currentAgentId;
-    if (!agentId) return;
-    // Find the workspace ID via the active session.
-    const sessionId = useChatStore.getState().getActiveSessionId(agentId);
-    if (!sessionId) return;
     const workspaceId = useWorkspaceStore.getState().sessionWorkspaceMap[sessionId] ?? "__agent_home__";
     void openPreview(agentId, workspaceId, relPath);
     setContextMenu(null);
-  }, [relPath, openPreview]);
+  }, [agentId, sessionId, relPath, openPreview]);
 
   return (
     <>

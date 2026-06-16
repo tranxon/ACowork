@@ -271,8 +271,6 @@ interface ChatStore {
   /** Per-agent WebSocket connections: agentId → WebSocket */
   wsMap: Record<string, WebSocket>;
   availableModels: ModelEntry[];
-  /** Current agent ID for stop functionality */
-  currentAgentId: string | null;
   /** Whether more messages are being loaded */
   isLoadingMore: boolean;
   /** Load sequence number to prevent race conditions on fast session switches */
@@ -285,11 +283,11 @@ interface ChatStore {
   // ---- Actions ----
   connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{ id: string; filename: string; format: string; size: number; path?: string }>, imageParts?: Array<{ url: string; width: number; height: number }>) => Promise<void>;
-  stopCurrentMessage: () => Promise<void>;
-  sendStop: () => void;
+  stopCurrentMessage: (agentId: string) => Promise<void>;
+  sendStop: (agentId: string) => void;
   disconnectStream: (agentId?: string) => void;
   /** Clear session state for a specific agent's active session */
-  clearMessages: (agentId?: string) => void;
+  clearMessages: (agentId: string) => void;
   /** Clear a specific session's state */
   clearSessionState: (agentId: string, sessionId: string) => void;
   /** Remove a session's cached state (e.g. on session delete) */
@@ -404,7 +402,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   agentStates: {},
   wsMap: {},
   availableModels: [],
-  currentAgentId: null,
   isLoadingMore: false,
   loadSequence: 0,
   abortController: null,
@@ -610,18 +607,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  clearMessages: (agentId?: string) => {
-    const targetId = agentId ?? get().currentAgentId;
-    if (!targetId) return;
-    const sessionId = getAgentState(get(), targetId).activeSessionId;
+  clearMessages: (agentId: string) => {
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
     if (!sessionId) return;
     set((state) => ({
-      ...updateSessionState(state, targetId, sessionId, {
+      ...updateSessionState(state, agentId, sessionId, {
         messages: [],
         streamingMessageId: null,
         streamBuffer: "",
         thinkingMessageId: null,
         isInThinkPhase: false,
+        isReasoning: false,
         tokenUsage: null,
         contextUsage: null,
         hasMoreMessages: false,
@@ -667,7 +663,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
-    set({ currentAgentId: agentId });
     resetReconnect(agentId);
 
     const existing = get().wsMap[agentId];
@@ -757,7 +752,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     set((state) => ({
       wsMap: { ...state.wsMap, [agentId]: ws },
-      currentAgentId: agentId,
     }));
     // Clear active session's streaming state
     const activeSessionId = getAgentState(get(), agentId).activeSessionId;
@@ -778,7 +772,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{ id: string; filename: string; format: string; size: number; path?: string }>, imageParts?: Array<{ url: string; width: number; height: number }>) => {
     const ws = get().wsMap[agentId];
-    const sessionId = useSessionStore.getState().currentSessionId;
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
 
     // Add user message to the active session's state
     const userMsg: ChatMessage = {
@@ -816,7 +810,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Update session title immediately when first message is sent
     const activeState = getActiveSessionState(get(), agentId);
-    updateSessionTitleFromMessages(activeState.messages, agentId);
+    if (sessionId) updateSessionTitleFromMessages(activeState.messages, sessionId, agentId);
 
     // Build multimodal content_parts when images are attached
     const contentParts = imageParts && imageParts.length > 0
@@ -968,29 +962,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  stopCurrentMessage: async () => {
-    const { currentAgentId } = get();
-    if (!currentAgentId) {
-      console.warn("[ChatStore] No active agent to stop");
-      return;
-    }
+  stopCurrentMessage: async (agentId: string) => {
+    console.log("[ChatStore] Stopping current message for agent:", agentId);
 
-    console.log("[ChatStore] Stopping current message for agent:", currentAgentId);
-
-    const ws = get().wsMap[currentAgentId];
+    const ws = get().wsMap[agentId];
     if (ws && ws.readyState === WebSocket.OPEN) {
-      const sessionId = useSessionStore.getState().currentSessionId;
+      const sessionId = getAgentState(get(), agentId).activeSessionId;
       ws.send(JSON.stringify({
         type: "stop",
-        agentId: currentAgentId,
+        agentId,
         ...(sessionId ? { session_id: sessionId } : {}),
       }));
     }
 
-    const activeSessionId = getAgentState(get(), currentAgentId).activeSessionId;
+    const activeSessionId = getAgentState(get(), agentId).activeSessionId;
     if (activeSessionId) {
       set((state) => ({
-        ...updateSessionState(state, currentAgentId, activeSessionId, {
+        ...updateSessionState(state, agentId, activeSessionId, {
           pendingSend: false,
           streamingMessageId: null,
           streamBuffer: "",
@@ -1001,15 +989,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  sendStop: () => {
-    const { currentAgentId } = get();
-    if (!currentAgentId) return;
-    const ws = get().wsMap[currentAgentId];
+  sendStop: (agentId: string) => {
+    const ws = get().wsMap[agentId];
     if (ws && ws.readyState === WebSocket.OPEN) {
-      const sessionId = useSessionStore.getState().currentSessionId;
+      const sessionId = getAgentState(get(), agentId).activeSessionId;
       ws.send(JSON.stringify({
         type: "stop",
-        agentId: currentAgentId,
+        agentId,
         ...(sessionId ? { session_id: sessionId } : {}),
       }));
     }
@@ -1110,7 +1096,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
   continueExecution: async (agentId: string) => {
     try {
-      const sessionId = useSessionStore.getState().currentSessionId;
+      const sessionId = getAgentState(get(), agentId).activeSessionId;
       const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/continue`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1369,11 +1355,9 @@ function makeSessionTitle(content: string): string {
   return content.replace(/\n/g, " ").trim().substring(0, 30);
 }
 
-function updateSessionTitleFromMessages(messages: ChatMessage[], agentId?: string) {
+function updateSessionTitleFromMessages(messages: ChatMessage[], sessionId: string, agentId?: string) {
   const firstUserMsg = messages.find((m) => m.type === "user");
   if (!firstUserMsg || !firstUserMsg.content) return;
-  const sessionId = useSessionStore.getState().currentSessionId;
-  if (!sessionId) return;
 
   // Don't overwrite an existing title — historical sessions should keep
   // their original title. Only set title for brand-new sessions.
@@ -1891,7 +1875,7 @@ function handleMessageEvent(
         };
       });
       const doneSessionState = getSessionState(get(), agentId, sid);
-      updateSessionTitleFromMessages(doneSessionState.messages, agentId);
+      updateSessionTitleFromMessages(doneSessionState.messages, sid, agentId);
       break;
     }
 
@@ -2086,12 +2070,16 @@ function handleMessageEvent(
               sessionPatch.iterationLimitPaused = null;
             }
 
-            // Update session state (model/provider/status)
+            // Update session state (model/provider/status) then agent-level defaults
             const sessionResult = updateSessionState(state, agentId, sid, sessionPatch);
+            let agentStates = sessionResult.agentStates;
 
-            // Update agent's default model from resumed session (new sessions inherit this)
             if (typeof data.model === "string" && data.model) {
-              set((s) => updateAgentState(s, agentId, { preferredModel: data.model as string }));
+              agentStates = updateAgentState(
+                { ...state, agentStates },
+                agentId,
+                { preferredModel: data.model as string },
+              ).agentStates;
             }
 
             // Sync per-session workspace from session_state_changed event.
@@ -2099,7 +2087,7 @@ function handleMessageEvent(
             if (typeof data.workspace_id === "string" && data.workspace_id) {
               useWorkspaceStore.getState().setSessionWorkspaceLocal(sid, data.workspace_id as string);
             }
-            return sessionResult;
+            return { agentStates };
           });
         }
       }

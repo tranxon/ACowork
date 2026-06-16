@@ -113,21 +113,6 @@ function ensureSessionState(
   return states[sid];
 }
 
-/** Build the top-level "view" fields from a per-session state. */
-function topLevelFromSession(st: PerSessionDebugState) {
-  return {
-    iteration: st.iteration,
-    phase: st.phase,
-    debugState: st.debugState,
-    paused: st.paused,
-    promptTokens: st.promptTokens,
-    completionTokens: st.completionTokens,
-    snapshots: st.snapshots,
-    sectionCache: st.sectionCache,
-    hasPendingPatches: st.hasPendingPatches,
-  };
-}
-
 // ── Store interface ────────────────────────────────────────────────────
 
 interface DebugStore {
@@ -137,21 +122,8 @@ interface DebugStore {
   connecting: boolean;
   debugAgentId: string | null;
 
-  // Current session ID — determines which per-session state is the live view
-  currentSessionId: string | null;
   /** Per-session debug state map — preserved across session switches. */
   sessionStates: Record<string, PerSessionDebugState>;
-
-  // Live view fields — reflect currentSessionId's state
-  iteration: number;
-  phase: Phase;
-  debugState: DebugState;
-  paused: boolean;
-  promptTokens: number;
-  completionTokens: number;
-  snapshots: ContextSnapshotMeta[];
-  sectionCache: Map<string, SectionContent>;
-  hasPendingPatches: boolean;
 
   // Pending RPC (shared)
   nextRequestId: number;
@@ -160,28 +132,25 @@ interface DebugStore {
   // Actions
   connect: (agentId: string, debugPort?: number) => void;
   disconnect: () => void;
-  setCurrentSessionId: (sessionId: string | null) => void;
-  sendRequest: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+  sendRequest: (sessionId: string | null, method: string, params?: Record<string, unknown>) => Promise<unknown>;
 
   // Debug commands
-  resume: () => Promise<void>;
-  pause: () => Promise<void>;
-  step: (granularity?: "iteration" | "phase") => Promise<void>;
-  stop: () => Promise<void>;
-  restart: () => Promise<void>;
-  getState: () => Promise<void>;
+  resume: (sessionId: string | null) => Promise<void>;
+  pause: (sessionId: string | null) => Promise<void>;
+  step: (sessionId: string | null, granularity?: "iteration" | "phase") => Promise<void>;
+  stop: (sessionId: string | null) => Promise<void>;
+  restart: (sessionId: string | null) => Promise<void>;
+  getState: (sessionId: string | null) => Promise<void>;
 
   // Context commands
-  getContextSnapshot: (iteration: number) => Promise<void>;
-  getSection: (iteration: number, section: string) => Promise<SectionContent | null>;
+  getContextSnapshot: (sessionId: string | null, iteration: number) => Promise<void>;
+  getSection: (sessionId: string | null, iteration: number, section: string) => Promise<SectionContent | null>;
 
   // Context editing commands (S2.8)
-  rewind: (toIteration: number) => Promise<{ rewound_to_iteration: number; messages_trimmed_to: number }>;
-  reExecute: () => Promise<{ has_patches: boolean }>;
-  patchContext: (patches: Record<string, unknown>) => Promise<void>;
+  rewind: (sessionId: string | null, toIteration: number) => Promise<{ rewound_to_iteration: number; messages_trimmed_to: number }>;
+  reExecute: (sessionId: string | null) => Promise<{ has_patches: boolean }>;
+  patchContext: (sessionId: string | null, patches: Record<string, unknown>) => Promise<void>;
 }
-
-const initialTopLevel = topLevelFromSession(freshPerSessionState());
 
 export const useDebugStore = create<DebugStore>((set, get) => ({
   // Connection
@@ -189,11 +158,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   connected: false,
   connecting: false,
   debugAgentId: null,
-  currentSessionId: null,
   sessionStates: {},
-
-  // Live view fields
-  ...initialTopLevel,
 
   // Pending RPC
   nextRequestId: 1,
@@ -231,9 +196,10 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         }
         set({ connected: true, connecting: false });
         setTimeout(() => {
-          get().getState().catch(() => { });
+          const sessionId = useChatStore.getState().getActiveSessionId(agentId);
+          get().getState(sessionId).catch(() => { });
           console.log("[debugStore] WebSocket connected, sending initial step");
-          get().sendRequest("debugger.step").catch((e) => console.warn("[debugStore] initial step failed:", e));
+          get().sendRequest(sessionId, "debugger.step").catch((e) => console.warn("[debugStore] initial step failed:", e));
         }, 0);
       };
 
@@ -246,7 +212,9 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
           if ("id" in msg && msg.id !== undefined) {
             const pending = store.pendingRequests.get(msg.id);
             if (pending) {
-              store.pendingRequests.delete(msg.id);
+              const nextPending = new Map(store.pendingRequests);
+              nextPending.delete(msg.id);
+              set({ pendingRequests: nextPending });
               if (msg.error) {
                 pending.reject(new Error(msg.error.message));
               } else {
@@ -290,54 +258,38 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     }
     const { socket } = get();
     if (socket) socket.close();
-    set({ socket: null, connected: false, connecting: false, debugAgentId: null, currentSessionId: null });
-  },
-
-  // ── Session switching ──────────────────────────────────────────────
-
-  setCurrentSessionId: (sessionId: string | null) => {
-    const prev = get().currentSessionId;
-    if (prev === sessionId) return;
-    console.log("[debugStore] setCurrentSessionId:", prev, "→", sessionId);
-
-    // Switch the live view to the new session's state (or fresh if not yet created).
-    const liveView = sessionId
-      ? topLevelFromSession(ensureSessionState(get().sessionStates, sessionId))
-      : initialTopLevel;
-
-    set({
-      currentSessionId: sessionId,
-      ...liveView,
-    });
+    set({ socket: null, connected: false, connecting: false, debugAgentId: null });
   },
 
   // ── RPC ────────────────────────────────────────────────────────────
 
-  sendRequest: (method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+  sendRequest: (sessionId: string | null, method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
     return new Promise((resolve, reject) => {
-      const state = get();
-      if (!state.socket || !state.connected) {
-        reject(new Error("Not connected to debug WebSocket"));
-        return;
-      }
-      // Auto-inject current session_id so the backend knows which
-      // DebugController to query.  Callers can override by passing
-      // session_id explicitly — their value wins because ...params
-      // comes after the default.
-      const finalParams: Record<string, unknown> = {
-        session_id: state.currentSessionId,
-        ...params,
-      };
-      const id = state.nextRequestId;
-      set({ nextRequestId: id + 1 });
-      const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params: finalParams };
-      state.pendingRequests.set(id, { resolve, reject });
-      try {
-        state.socket.send(JSON.stringify(request));
-      } catch (sendErr) {
-        state.pendingRequests.delete(id);
-        reject(new Error(`WebSocket send failed: ${sendErr}`));
-      }
+      set((state) => {
+        if (!state.socket || !state.connected) {
+          reject(new Error("Not connected to debug WebSocket"));
+          return {};
+        }
+        // Auto-inject current session_id so the backend knows which
+        // DebugController to query.  Callers can override by passing
+        // session_id explicitly — their value wins because ...params
+        // comes after the default.
+        const finalParams: Record<string, unknown> = {
+          session_id: sessionId,
+          ...params,
+        };
+        const id = state.nextRequestId;
+        const newPending = new Map(state.pendingRequests);
+        newPending.set(id, { resolve, reject });
+        const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params: finalParams };
+        try {
+          state.socket.send(JSON.stringify(request));
+        } catch (sendErr) {
+          reject(new Error(`WebSocket send failed: ${sendErr}`));
+          return {};
+        }
+        return { nextRequestId: id + 1, pendingRequests: newPending };
+      });
     });
   },
 
@@ -346,37 +298,24 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   _handleEvent: function (event: JsonRpcEvent) {
     // Route events by session_id so background sessions' state is
     // updated correctly even when not currently displayed.
-    const eventSessionId = event.params.session_id as string | undefined;
-    const targetSid = eventSessionId ?? get().currentSessionId;
+    const targetSid = event.params.session_id as string | undefined;
     if (!targetSid) return;
 
-    const isCurrentSession = targetSid === get().currentSessionId;
-
-    // Helper: patch per-session state, and sync to live view if current.
     const patchSession = (patch: Partial<PerSessionDebugState>) => {
       set((s) => {
         const updated = { ...ensureSessionState(s.sessionStates, targetSid), ...patch };
-        const result: Partial<DebugStore> = {
+        return {
           sessionStates: { ...s.sessionStates, [targetSid]: updated },
         };
-        if (isCurrentSession) {
-          Object.assign(result, topLevelFromSession(updated));
-        }
-        return result;
       });
     };
 
-    // Helper: full setter for session state (e.g. for snapshot array updates).
     const setSession = (fn: (current: PerSessionDebugState) => PerSessionDebugState) => {
       set((s) => {
         const updated = fn(ensureSessionState(s.sessionStates, targetSid));
-        const result: Partial<DebugStore> = {
+        return {
           sessionStates: { ...s.sessionStates, [targetSid]: updated },
         };
-        if (isCurrentSession) {
-          Object.assign(result, topLevelFromSession(updated));
-        }
-        return result;
       });
     };
 
@@ -448,27 +387,27 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   // ── Control commands ────────────────────────────────────────────────
 
-  resume: async () => {
-    await get().sendRequest("debugger.resume");
-    patchCurrent({ debugState: "Running", paused: false });
+  resume: async (sessionId: string | null) => {
+    await get().sendRequest(sessionId, "debugger.resume");
+    patchSessionDebug(sessionId, { debugState: "Running", paused: false });
   },
 
-  pause: async () => {
-    await get().sendRequest("debugger.pause");
-    patchCurrent({ debugState: "Paused" });
+  pause: async (sessionId: string | null) => {
+    await get().sendRequest(sessionId, "debugger.pause");
+    patchSessionDebug(sessionId, { debugState: "Paused" });
   },
 
-  step: async (granularity = "iteration") => {
-    await get().sendRequest("debugger.step", { granularity });
-    patchCurrent({ debugState: "Stepping" });
+  step: async (sessionId: string | null, granularity = "iteration") => {
+    await get().sendRequest(sessionId, "debugger.step", { granularity });
+    patchSessionDebug(sessionId, { debugState: "Stepping" });
   },
 
-  stop: async () => {
-    await get().sendRequest("debugger.stop");
-    patchCurrent({ debugState: "Stopped", paused: true });
+  stop: async (sessionId: string | null) => {
+    await get().sendRequest(sessionId, "debugger.stop");
+    patchSessionDebug(sessionId, { debugState: "Stopped", paused: true });
   },
 
-  restart: async () => {
+  restart: async (sessionId: string | null) => {
     const agentId = get().debugAgentId;
     if (!agentId) {
       console.warn("[debugStore] restart: no debugAgentId, skipping");
@@ -483,7 +422,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       throw e;
     }
     // Reset UI state; the backend will push fresh events after reconnect.
-    patchCurrent({
+    patchSessionDebug(sessionId, {
       iteration: 0,
       phase: "Idle",
       debugState: "Stepping",
@@ -496,8 +435,8 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   // ── State query ─────────────────────────────────────────────────────
 
-  getState: async () => {
-    const result = (await get().sendRequest("debugger.getState")) as {
+  getState: async (sessionId: string | null) => {
+    const result = (await get().sendRequest(sessionId, "debugger.getState")) as {
       iteration: number;
       phase: Phase;
       state: DebugState;
@@ -506,7 +445,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     };
     if (result) {
       const debugState = result.state ?? "Running";
-      patchCurrent({
+      patchSessionDebug(sessionId, {
         iteration: result.iteration ?? 0,
         phase: result.phase ?? "Idle",
         debugState,
@@ -519,12 +458,12 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   // ── Context commands ────────────────────────────────────────────────
 
-  getContextSnapshot: async (iteration: number) => {
-    const result = (await get().sendRequest("debugger.getContextSnapshot", { iteration })) as
+  getContextSnapshot: async (sessionId: string | null, iteration: number) => {
+    const result = (await get().sendRequest(sessionId, "debugger.getContextSnapshot", { iteration })) as
       | ContextSnapshotMeta
       | undefined;
     if (result) {
-      applyCurrent((s) => {
+      applySessionDebug(sessionId, (s) => {
         const idx = s.snapshots.findIndex((sn) => sn.iteration === iteration);
         if (idx >= 0) {
           const updated = [...s.snapshots];
@@ -536,17 +475,17 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     }
   },
 
-  getSection: async (iteration: number, section: string): Promise<SectionContent | null> => {
+  getSection: async (sessionId: string | null, iteration: number, section: string): Promise<SectionContent | null> => {
     const cacheKey = `${iteration}:${section}`;
-    const current = get().sectionCache;
-    const cached = current.get(cacheKey);
+    const current = sessionId ? get().sessionStates[sessionId]?.sectionCache : undefined;
+    const cached = current?.get(cacheKey);
     if (cached) return cached;
     try {
-      const result = (await get().sendRequest("debugger.getSection", { iteration, section })) as
+      const result = (await get().sendRequest(sessionId, "debugger.getSection", { iteration, section })) as
         | SectionContent
         | undefined;
       if (result) {
-        applyCurrent((s) => {
+        applySessionDebug(sessionId, (s) => {
           const updated = new Map(s.sectionCache);
           updated.set(cacheKey, result);
           return { ...s, sectionCache: updated };
@@ -554,24 +493,23 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         return result;
       }
     } catch {
-      // Section fetch failed — probably not built yet
     }
     return null;
   },
 
   // ── Context editing commands (S2.8) ────────────────────────────────
 
-  patchContext: async (patches: Record<string, unknown>) => {
-    await get().sendRequest("debugger.patchContext", { patches });
-    patchCurrent({ hasPendingPatches: true });
+  patchContext: async (sessionId: string | null, patches: Record<string, unknown>) => {
+    await get().sendRequest(sessionId, "debugger.patchContext", { patches });
+    patchSessionDebug(sessionId, { hasPendingPatches: true });
   },
 
-  rewind: async (toIteration: number) => {
-    const result = (await get().sendRequest("debugger.rewind", { to_iteration: toIteration })) as {
+  rewind: async (sessionId: string | null, toIteration: number) => {
+    const result = (await get().sendRequest(sessionId, "debugger.rewind", { to_iteration: toIteration })) as {
       rewound_to_iteration: number;
       messages_trimmed_to: number;
     };
-    applyCurrent((s) => {
+    applySessionDebug(sessionId, (s) => {
       const newCache = new Map(s.sectionCache);
       const keysToDelete: string[] = [];
       newCache.forEach((_, key) => {
@@ -593,37 +531,31 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     return result;
   },
 
-  reExecute: async () => {
-    const result = (await get().sendRequest("debugger.reExecute", {})) as { has_patches: boolean };
-    patchCurrent({ hasPendingPatches: false, debugState: "Running", paused: false });
+  reExecute: async (sessionId: string | null) => {
+    const result = (await get().sendRequest(sessionId, "debugger.reExecute", {})) as { has_patches: boolean };
+    patchSessionDebug(sessionId, { hasPendingPatches: false, debugState: "Running", paused: false });
     return result;
   },
 }));
 
 // ── Internal helpers (called inside store actions) ────────────────────
 
-/** Patch the current session's state AND sync to live view. */
-function patchCurrent(patch: Partial<PerSessionDebugState>) {
+function patchSessionDebug(sessionId: string | null, patch: Partial<PerSessionDebugState>) {
+  if (!sessionId) return;
   useDebugStore.setState((s) => {
-    const sid = s.currentSessionId;
-    if (!sid) return s;
-    const updated = { ...ensureSessionState(s.sessionStates, sid), ...patch };
+    const updated = { ...ensureSessionState(s.sessionStates, sessionId), ...patch };
     return {
-      sessionStates: { ...s.sessionStates, [sid]: updated },
-      ...topLevelFromSession(updated),
+      sessionStates: { ...s.sessionStates, [sessionId]: updated },
     };
   });
 }
 
-/** Apply a transformation to the current session's state AND sync to live view. */
-function applyCurrent(fn: (current: PerSessionDebugState, sid: string) => PerSessionDebugState) {
+function applySessionDebug(sessionId: string | null, fn: (current: PerSessionDebugState, sid: string) => PerSessionDebugState) {
+  if (!sessionId) return;
   useDebugStore.setState((s) => {
-    const sid = s.currentSessionId;
-    if (!sid) return s;
-    const updated = fn(ensureSessionState(s.sessionStates, sid), sid);
+    const updated = fn(ensureSessionState(s.sessionStates, sessionId), sessionId);
     return {
-      sessionStates: { ...s.sessionStates, [sid]: updated },
-      ...topLevelFromSession(updated),
+      sessionStates: { ...s.sessionStates, [sessionId]: updated },
     };
   });
 }

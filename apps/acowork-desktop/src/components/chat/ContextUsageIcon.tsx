@@ -51,36 +51,15 @@ function CircularProgressIcon({ usagePercent }: { usagePercent: number }) {
   );
 }
 
-export function ContextUsageIcon() {
+export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sessionId: string }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Selectors: each returns a primitive to avoid infinite re-render (shallow compare)
-  const currentAgentId = useChatStore((s) => s.currentAgentId);
-  const activeSessionId = useChatStore((s) => {
-    if (!s.currentAgentId) return null;
-    return s.agentStates[s.currentAgentId]?.activeSessionId ?? null;
-  });
-  const contextUsage = useChatStore((s) => {
-    if (!s.currentAgentId) return null;
-    const agent = s.agentStates[s.currentAgentId];
-    if (!agent?.activeSessionId) return null;
-    return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
-  });
-  const isCompacting = useChatStore((s) => {
-    if (!s.currentAgentId) return false;
-    const agent = s.agentStates[s.currentAgentId];
-    if (!agent?.activeSessionId) return false;
-    return agent.sessionStates[agent.activeSessionId]?.isCompacting ?? false;
-  });
-  const sessionStatus = useChatStore((s) => {
-    if (!s.currentAgentId) return null;
-    const agent = s.agentStates[s.currentAgentId];
-    if (!agent?.activeSessionId) return null;
-    return agent.sessionStates[agent.activeSessionId]?.sessionStatus ?? null;
-  });
+  const contextUsage = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.contextUsage ?? null);
+  const isCompacting = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.isCompacting ?? false);
+  const sessionStatus = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.sessionStatus ?? null);
   const compactContext = useChatStore((s) => s.compactContext);
 
   // Open popover on hover (not click), with a small delay before closing
@@ -115,13 +94,11 @@ export function ContextUsageIcon() {
   const canCompress =
     isIdle &&
     !isCompacting &&
-    contextUsage != null &&
-    currentAgentId != null &&
-    activeSessionId != null;
+    contextUsage != null;
 
   const handleCompress = () => {
-    if (!canCompress || !currentAgentId || !activeSessionId) return;
-    compactContext(currentAgentId, activeSessionId);
+    if (!canCompress) return;
+    compactContext(agentId, sessionId);
     setOpen(false);
   };
 

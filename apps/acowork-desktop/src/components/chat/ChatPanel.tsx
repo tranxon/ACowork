@@ -96,9 +96,22 @@ export function ChatPanel() {
   const currentModel = sessionState?.model ?? null;
   const currentProvider = sessionState?.provider ?? null;
 
-  // Global state and actions
-  const { wsMap, connectStream, sendMessage, sendStop, availableModels, setCurrentModel, setAvailableModels, continueExecution, resolveApproval, resolveApprovalByToolCallId } = useChatStore();
-  const currentSessionId = useSessionStore((s) => s.currentSessionId);
+  // Global state and actions — selectors to avoid full-store re-render
+  const wsMap = useChatStore((s) => s.wsMap);
+  const availableModels = useChatStore((s) => s.availableModels);
+  const isLoadingMore = useChatStore((s) => s.isLoadingMore);
+  // Stable function refs
+  const {
+    connectStream,
+    sendMessage,
+    sendStop,
+    setCurrentModel,
+    setAvailableModels,
+    continueExecution,
+    resolveApproval,
+    resolveApprovalByToolCallId,
+  } = useChatStore.getState();
+  const currentSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
   const [inputValue, setInputValue] = useState("");
@@ -303,7 +316,7 @@ export function ChatPanel() {
 
     // Remember the current session for the agent we're leaving (saved in store for remount survival)
     const leavingAgentId = lastInitAgentId;
-    const leavingSessionId = useSessionStore.getState().currentSessionId;
+    const leavingSessionId = leavingAgentId ? useChatStore.getState().getActiveSessionId(leavingAgentId) : null;
     if (leavingAgentId && leavingSessionId) {
       useSessionStore.getState().saveSessionForAgent(leavingAgentId, leavingSessionId);
     }
@@ -311,7 +324,7 @@ export function ChatPanel() {
     if (!isSameAgentRemount) {
       // Allow reload for new agent/session
       lastLoadedSessionId = null;
-      // Reset session state (sessions, currentSessionId, etc.)
+      // Reset session list state for the new agent
       useSessionStore.getState().reset();
     }
 
@@ -506,7 +519,7 @@ export function ChatPanel() {
     const activeSessId = agent?.activeSessionId;
     const sessState = activeSessId ? agent?.sessionStates[activeSessId] : undefined;
     const hasMoreMessages = sessState?.hasMoreMessages ?? false;
-    const currentSessionId = useSessionStore.getState().currentSessionId;
+    const currentSessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
     if (isLoadingMore || !hasMoreMessages || !currentSessionId) return;
 
     // Trigger when within 50px of the top
@@ -577,10 +590,10 @@ export function ChatPanel() {
         });
       }
       setQueuedMessages([]);
-      sendStop();
-    } else {
+      sendStop(selectedAgentId);
+    } else if (selectedAgentId) {
       // No queued messages: just stop
-      sendStop();
+      sendStop(selectedAgentId);
     }
   };
 
@@ -791,7 +804,7 @@ export function ChatPanel() {
   const handleQuestionAnswer = async (requestId: string, answer: string) => {
     if (!selectedAgentId) return;
     const agentId = String(selectedAgentId);
-    const sessionId = useSessionStore.getState().currentSessionId;
+    const sessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
     try {
       const url = `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/question`;
       await fetch(url, {
@@ -894,7 +907,7 @@ export function ChatPanel() {
             aria-label="Chat messages"
           >
             {/* Loading more indicator at top */}
-            {useChatStore.getState().isLoadingMore && (
+            {isLoadingMore && (
               <div className="flex items-center justify-center py-2">
                 <Loader className="h-4 w-4 animate-spin text-zinc-400 dark:text-zinc-500" />
                 <span className="ml-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">Loading more...</span>
@@ -919,7 +932,7 @@ export function ChatPanel() {
                 </div>
                 <button
                   onClick={() => {
-                    const sessionId = useSessionStore.getState().currentSessionId;
+                    const sessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
                     const agentId = useAgentStore.getState().selectedAgentId;
                     if (sessionId && agentId) {
                       useChatStore.getState().loadSessionMessages(agentId, sessionId);
@@ -1316,7 +1329,7 @@ export function ChatPanel() {
 
             <div className="flex shrink-0 items-center gap-1">
               {/* Context usage icon — shown when session is active */}
-              {currentSessionId && <ContextUsageIcon />}
+              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
 
               {/* Send/Stop button with tooltip above */}
               <Tooltip content={sending

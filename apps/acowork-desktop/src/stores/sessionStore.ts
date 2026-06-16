@@ -4,11 +4,9 @@ import { isSessionActive } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
-import { useDebugStore } from "./debugStore";
 
 interface SessionState {
   sessions: SessionInfo[];
-  currentSessionId: string | null;
   isLoading: boolean;
   isSessionPanelOpen: boolean;
   /** Latest session title per agent_id */
@@ -41,7 +39,7 @@ let fetchSessionId = 0;
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
-  currentSessionId: null,
+
   isLoading: false,
   isSessionPanelOpen: false,
   sessionTitles: {},
@@ -133,24 +131,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   switchSession: async (sessionId: string, agentId?: string) => {
-    // No-op if switching to the already-active session
-    if (sessionId === useSessionStore.getState().currentSessionId) return;
+    if (agentId && sessionId === useChatStore.getState().getActiveSessionId(agentId)) return;
 
-    // ① IMMEDIATELY set currentSessionId — closes the WS event vulnerability window.
-    //    WS events will now be filtered/routed to the new session.
-    set({ currentSessionId: sessionId });
-    // Also sync to debugStore so the debug panel can filter per-session events.
-    useDebugStore.getState().setCurrentSessionId(sessionId);
-
-    // ② Notify chatStore to activate this session (manages session-level state isolation)
     if (agentId) {
       useChatStore.getState().activateSession(agentId, sessionId);
     }
 
-    // ③ Cancel any in-flight session message loading
     useChatStore.getState().abortSessionLoad();
 
-    // ④ Notify Runtime to switch its active ConversationSession, and await the
+    // Notify Runtime to switch its active ConversationSession, and await the
     //    response which now includes the session's core metadata (model/provider/workspace_id).
     //    Apply them immediately so the UI is correct without waiting for WS events.
     if (agentId) {
@@ -228,10 +217,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       };
       set((state) => ({
         sessions: [newSession, ...state.sessions],
-        currentSessionId: data.session_id,
       }));
-      // Also sync to debugStore for per-session event filtering.
-      useDebugStore.getState().setCurrentSessionId(data.session_id);
 
       // Populate workspace for the new session from last_active in workspace list.
       if (lastActiveWs) {
@@ -254,20 +240,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       await resp.json();
 
-      // Remove the closed session from local state
-      const isCurrent = useSessionStore.getState().currentSessionId === sessionId;
+      const isCurrent = useChatStore.getState().getActiveSessionId(agentId) === sessionId;
       const remaining = useSessionStore.getState().sessions.filter((s) => s.session_id !== sessionId);
       const newCurrentId = isCurrent
         ? (remaining.length > 0 ? remaining[0].session_id : null)
-        : useSessionStore.getState().currentSessionId;
+        : useChatStore.getState().getActiveSessionId(agentId);
 
-      set({
-        sessions: remaining,
-        currentSessionId: newCurrentId,
-      });
-
-      // Sync debugStore so the debug panel stops polling the closed session.
-      useDebugStore.getState().setCurrentSessionId(newCurrentId);
+      set({ sessions: remaining });
 
       // Close tab if the closed session was open
       const openIds = useChatStore.getState().getOpenSessionIds(agentId);
@@ -300,20 +279,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as { deleted: boolean; session_id: string; new_session_id?: string };
 
-      // Remove the deleted session from local state
-      const isCurrent = useSessionStore.getState().currentSessionId === sessionId;
+      const isCurrent = useChatStore.getState().getActiveSessionId(agentId) === sessionId;
       const remaining = useSessionStore.getState().sessions.filter((s) => s.session_id !== sessionId);
       const newCurrentId = isCurrent
         ? (data.new_session_id || (remaining.length > 0 ? remaining[0].session_id : null))
-        : useSessionStore.getState().currentSessionId;
+        : useChatStore.getState().getActiveSessionId(agentId);
 
-      set({
-        sessions: remaining,
-        currentSessionId: newCurrentId,
-      });
-
-      // Sync debugStore so the debug panel stops polling the deleted session.
-      useDebugStore.getState().setCurrentSessionId(newCurrentId);
+      set({ sessions: remaining });
 
       // ADR-015: Close tab if the deleted session was open
       const openIds = useChatStore.getState().getOpenSessionIds(agentId);
@@ -363,7 +335,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     ++fetchSessionId;
     set((state) => ({
       sessions: [],
-      currentSessionId: null,
+
       isLoading: false,
       sessionTitles: {},
       agentSessionMap: state.agentSessionMap,

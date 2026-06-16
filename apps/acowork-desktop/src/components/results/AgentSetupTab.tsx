@@ -44,8 +44,12 @@ export function AgentSetupTab() {
   }, [iconOpen]);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
-  // MCP server activation
-  const { catalog, activeServers, loadCatalog, toggleServer, activationLoading } = useMcpStore();
+  // MCP server activation — per-agent selectors
+  const catalog = useMcpStore((s) => s.catalog);
+  const activeServers = useMcpStore((s) => selectedAgentId ? (s.activeServers[selectedAgentId] ?? []) : []);
+  const activationLoading = useMcpStore((s) => selectedAgentId ? (s.activationLoading[selectedAgentId] ?? false) : false);
+  const loadCatalog = useMcpStore((s) => s.loadCatalog);
+  const toggleServer = useMcpStore((s) => s.toggleServer);
 
   // Search provider configuration
   const [searchProviders, setSearchProviders] = useState<SearchProviderListItem[]>([]);
@@ -72,7 +76,9 @@ export function AgentSetupTab() {
           activeProvider: data.provider,
         });
         // Sync MCP and search config from the unified response
-        useMcpStore.setState({ agentId: selectedAgentId, activeServers: data.active_mcp_servers ?? [] });
+        useMcpStore.setState((s) => ({
+          activeServers: { ...s.activeServers, [selectedAgentId!]: data.active_mcp_servers ?? [] },
+        }));
         setActiveSearch(data.search_config?.providers ?? []);
       })
       .catch((err) => {
@@ -121,7 +127,9 @@ export function AgentSetupTab() {
               activeProvider: data.provider,
             });
             // Sync MCP and search config from the unified response
-            useMcpStore.setState({ agentId: selectedAgentId, activeServers: data.active_mcp_servers ?? [] });
+            useMcpStore.setState((s) => ({
+              activeServers: { ...s.activeServers, [selectedAgentId!]: data.active_mcp_servers ?? [] },
+            }));
             setActiveSearch(data.search_config?.providers ?? []);
           })
           .catch(() => { });
@@ -533,8 +541,8 @@ export function AgentSetupTab() {
                   <input
                     type="checkbox"
                     checked={isChecked}
-                    onChange={() => toggleServer(server.name)}
-                    disabled={activationLoading}
+                    onChange={() => selectedAgentId && toggleServer(selectedAgentId, server.name)}
+                    disabled={activationLoading || !selectedAgentId}
                     className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
                   />
                   <div className="flex-1 min-w-0">

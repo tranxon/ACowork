@@ -32,7 +32,6 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
   const { t } = useTranslation();
   const {
     sessions,
-    currentSessionId,
     isLoading,
     fetchSessions,
     switchSession,
@@ -40,6 +39,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
     deleteSession,
   } = useSessionStore();
 
+  const currentSessionId = useChatStore((s) => s.agentStates[agentId]?.activeSessionId ?? null);
   const [open, setOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);

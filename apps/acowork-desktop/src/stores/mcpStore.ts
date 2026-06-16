@@ -40,12 +40,10 @@ interface McpCatalogActions {
 // ── Per-agent activation types ───────────────────────────────────────
 
 interface McpActivationState {
-  /** Currently selected agent ID */
-  agentId: string | null;
-  /** Active MCP server names for the current agent */
-  activeServers: string[];
-  /** Loading state for activation */
-  activationLoading: boolean;
+  /** Active MCP server names per agent (agentId -> server names) */
+  activeServers: Record<string, string[]>;
+  /** Loading state per agent */
+  activationLoading: Record<string, boolean>;
 }
 
 interface McpActivationActions {
@@ -53,8 +51,8 @@ interface McpActivationActions {
   loadActiveServers: (agentId: string) => Promise<void>;
   /** Set active MCP servers for an agent (replaces the entire list) */
   setActiveServers: (agentId: string, serverNames: string[]) => Promise<void>;
-  /** Toggle a single MCP server on/off for the current agent */
-  toggleServer: (serverName: string) => Promise<void>;
+  /** Toggle a single MCP server on/off for an agent */
+  toggleServer: (agentId: string, serverName: string) => Promise<void>;
 }
 
 // ── Combined store ───────────────────────────────────────────────────
@@ -71,9 +69,8 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   error: null,
 
   // ── Activation state ──
-  agentId: null,
-  activeServers: [],
-  activationLoading: false,
+  activeServers: {},
+  activationLoading: {},
 
   // ── Catalog actions ──
 
@@ -175,20 +172,33 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   // ── Activation actions ──
 
   loadActiveServers: async (agentId: string) => {
-    set({ agentId, activationLoading: true, error: null });
+    set((s) => ({
+      activationLoading: { ...s.activationLoading, [agentId]: true },
+      error: null,
+    }));
     try {
       const resp = await fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/mcp-servers`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as AgentMcpServersResponse;
-      set({ activeServers: data.active_servers, activationLoading: false });
+      set((s) => ({
+        activeServers: { ...s.activeServers, [agentId]: data.active_servers },
+        activationLoading: { ...s.activationLoading, [agentId]: false },
+      }));
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      set({ error: message, activationLoading: false, activeServers: [] });
+      set((s) => ({
+        error: message,
+        activationLoading: { ...s.activationLoading, [agentId]: false },
+        activeServers: { ...s.activeServers, [agentId]: [] },
+      }));
     }
   },
 
   setActiveServers: async (agentId: string, serverNames: string[]) => {
-    set({ activationLoading: true, error: null });
+    set((s) => ({
+      activationLoading: { ...s.activationLoading, [agentId]: true },
+      error: null,
+    }));
     try {
       const resp = await fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/mcp-servers`, {
         method: "PUT",
@@ -199,21 +209,25 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
         throw new Error(err.error || `HTTP ${resp.status}`);
       }
-      set({ activeServers: serverNames, activationLoading: false });
+      set((s) => ({
+        activeServers: { ...s.activeServers, [agentId]: serverNames },
+        activationLoading: { ...s.activationLoading, [agentId]: false },
+      }));
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      set({ error: message, activationLoading: false });
+      set((s) => ({
+        error: message,
+        activationLoading: { ...s.activationLoading, [agentId]: false },
+      }));
     }
   },
 
-  toggleServer: async (serverName: string) => {
-    const { agentId, activeServers } = get();
-    if (!agentId) return;
-
-    const isActive = activeServers.includes(serverName);
+  toggleServer: async (agentId: string, serverName: string) => {
+    const currentActive = get().activeServers[agentId] ?? [];
+    const isActive = currentActive.includes(serverName);
     const newServers = isActive
-      ? activeServers.filter((s) => s !== serverName)
-      : [...activeServers, serverName];
+      ? currentActive.filter((s) => s !== serverName)
+      : [...currentActive, serverName];
 
     await get().setActiveServers(agentId, newServers);
   },

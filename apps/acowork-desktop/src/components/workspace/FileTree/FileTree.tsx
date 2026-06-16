@@ -169,6 +169,8 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
                             <FileTreeNode
                                 entry={node.entry}
                                 depth={node.depth}
+                                agentId={agentId}
+                                sessionId={sessionId}
                                 relPath={node.relPath}
                                 isExpanded={expandedPaths.has(node.relPath)}
                                 isLoading={isLoading}
