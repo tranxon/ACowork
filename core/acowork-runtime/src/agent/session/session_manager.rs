@@ -300,6 +300,14 @@ impl SessionManager {
             // at 80% threshold unreachable.
             let budget = self.core.context_trim_budget(m);
             session_state.history_mut().set_max_tokens(budget);
+            // Initialize reasoning_effort from model capabilities so the frontend
+            // shows the correct default value immediately on agent start.
+            let default_effort = self
+                .core
+                .get_model_capabilities(m)
+                .and_then(|c| c.default_reasoning_effort)
+                .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s));
+            session_state.set_reasoning_effort(default_effort);
         }
         if let Some(p) = initial_provider.as_ref() {
             session_state.set_provider(p.clone());

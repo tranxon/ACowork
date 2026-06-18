@@ -452,6 +452,11 @@ impl SessionTask {
             .history_mut()
             .set_protocol_type(protocol_type.clone());
 
+        // Emit initial session state snapshot so the frontend status panel shows
+        // correct model, provider, reasoning_effort and temperature immediately
+        // on agent/session start, without waiting for the first status transition.
+        agent_loop.emit_session_state();
+
         // Saved user message for debug resume re-execution.
         // When the user presses resume after the agent loop has exited
         // (e.g. after rewind was issued post-completion), SessionTask
