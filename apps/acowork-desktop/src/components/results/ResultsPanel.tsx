@@ -72,6 +72,18 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.ratio ?? null;
   });
+  const reasoningEffort = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.reasoningEffort ?? null;
+  });
+  const temperature = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.temperature ?? null;
+  });
   const openSessionCount = useChatStore((s) => {
     if (!selectedAgentId) return 0;
     const agent = s.agentStates[selectedAgentId];
@@ -423,6 +435,8 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                 <StatRow label="Provider" value={sessionProvider} />
               )}
               <StatRow label="Ch/Token" value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
+              <StatRow label="Thinking Level" value={reasoningEffort ?? "None"} />
+              <StatRow label="Temperature" value={temperature != null ? temperature.toFixed(2) : "0.70"} />
               <div className="flex justify-between py-1">
                 <span className="text-zinc-500">{t("resultsPanel.sessionStatusLabel")}</span>
                 <span className="flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300">

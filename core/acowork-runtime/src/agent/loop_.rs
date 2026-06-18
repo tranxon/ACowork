@@ -137,6 +137,12 @@ pub enum ChunkEvent {
         /// Current model chars/token ratio from API calibration.
         /// `None` before the first calibration.
         ratio: Option<f64>,
+        /// Current reasoning effort level for LLM inference.
+        /// `None` means use model default.
+        reasoning_effort: Option<String>,
+        /// Current temperature setting for LLM inference.
+        /// `None` means use agent config or global default (0.7).
+        temperature: Option<f32>,
     },
     /// Todo list updated — emitted after a `todo_write` tool call mutates
     /// SessionState.todos, so the frontend can render the current task list.

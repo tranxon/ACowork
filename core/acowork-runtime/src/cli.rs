@@ -1464,6 +1464,8 @@ async fn async_main(
                             provider,
                             workspace_id,
                             ratio,
+                            reasoning_effort,
+                            temperature,
                         } => {
                             let mut params = serde_json::json!({
                                 "status": status,
@@ -1480,6 +1482,12 @@ async fn async_main(
                             }
                             if let Some(r) = ratio {
                                 params["ratio"] = serde_json::json!(r);
+                            }
+                            if let Some(ref re) = reasoning_effort {
+                                params["reasoning_effort"] = serde_json::json!(re);
+                            }
+                            if let Some(t) = temperature {
+                                params["temperature"] = serde_json::json!(t);
                             }
                             relay_intent(&outbound_tx, "session_state_changed", &params).await;
                         }

@@ -363,6 +363,13 @@ impl SessionTask {
             runtime_overrides.shell_approval_threshold,
         );
 
+        // Sync agent-level temperature override to per-session state so it
+        // appears in session_state_changed events and is visible in the frontend.
+        let mut session = session;
+        if core_for_session.temperature_override.is_some() {
+            session.set_temperature(core_for_session.temperature_override);
+        }
+
         // Set initial workspace directory for tool execution.
         if let Some(dir) = initial_work_dir {
             core_for_session.current_work_dir = Some(dir);

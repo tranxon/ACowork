@@ -124,6 +124,9 @@ pub struct SessionState {
     /// When None, falls back to model capabilities default_reasoning_effort.
     /// Reset to None on model switch (so new model's default applies).
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    /// Per-session temperature override (set by frontend or agent config).
+    /// When None, falls back to agent-level config or global default (0.7).
+    pub(crate) temperature: Option<f32>,
 }
 
 impl SessionState {
@@ -147,6 +150,7 @@ impl SessionState {
             provider: None,
             model_ratio: None,
             reasoning_effort: None,
+            temperature: None,
         }
     }
 
@@ -289,6 +293,18 @@ impl SessionState {
     /// Set to None to clear the override and fall back to model default.
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
         self.reasoning_effort = effort;
+    }
+
+    /// Get the per-session temperature override.
+    /// Returns None if no override has been set (use agent config or global default).
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    /// Set the per-session temperature override.
+    /// Set to None to clear the override and fall back to agent config or global default.
+    pub fn set_temperature(&mut self, temperature: Option<f32>) {
+        self.temperature = temperature;
     }
 
     /// Get the per-session workspace_id (from JSONL metadata, persisted by

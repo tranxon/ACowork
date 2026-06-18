@@ -69,6 +69,8 @@ interface SessionChatState {
   ratio: number | null;
   /** Per-session reasoning effort override (frontend display only, source of truth is Runtime) */
   reasoningEffort: string | null;
+  /** Per-session temperature override (source of truth is Runtime) */
+  temperature: number | null;
   /** Context compaction in progress (both manual and auto triggers) */
   isCompacting: boolean;
   /** File tree expanded directory paths (persisted per-session) */
@@ -110,6 +112,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   provider: null,
   ratio: null,
   reasoningEffort: null,
+  temperature: null,
   isCompacting: false,
   treeExpandedPaths: [],
   attachedContext: [],
@@ -2102,6 +2105,10 @@ function handleMessageEvent(
             if (typeof data.provider === "string") sessionPatch.provider = data.provider as string;
             // Model chars/token ratio from API calibration (for status panel display).
             if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio as number;
+            // Reasoning effort level (thinking level) from Runtime session state.
+            if (typeof data.reasoning_effort === "string") sessionPatch.reasoningEffort = data.reasoning_effort as string;
+            // Temperature setting from Runtime session state.
+            if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature as number;
 
             // When status transitions FROM Streaming, clear transient streaming state
             const prev = getSessionState(state, agentId, sid);

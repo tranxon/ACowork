@@ -45,6 +45,8 @@ impl super::loop_::AgentLoop {
                 provider: self.session.provider().map(|s| s.to_string()),
                 workspace_id: self.session.workspace_id(),
                 ratio: self.session.model_ratio(),
+                reasoning_effort: self.session.reasoning_effort().map(|e| e.to_string()),
+                temperature: self.session.temperature(),
             })
         {
             tracing::warn!(
