@@ -472,7 +472,7 @@ mod tests {
         assert!(
             node.properties
                 .get(&"dormant_since".into())
-                .map_or(true, |v| v == &Value::Null),
+                .is_none_or(|v| v == &Value::Null),
             "dormant_since should be cleared after reactivation"
         );
 

@@ -162,15 +162,14 @@ impl ModelRatioStore {
         }
 
         // Auto-save
-        if let Some(ref path) = self.path {
-            if let Err(e) = self.save_to_json(path) {
+        if let Some(ref path) = self.path
+            && let Err(e) = self.save_to_json(path) {
                 tracing::warn!(
                     path = %path.display(),
                     error = %e,
                     "Failed to save model ratio store"
                 );
             }
-        }
     }
 
     /// Check if a model has been calibrated at least once.

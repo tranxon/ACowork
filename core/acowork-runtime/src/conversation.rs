@@ -1434,7 +1434,7 @@ mod tests {
         writeln!(file, "BROKEN METADATA LINE").unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (sessions, total) =
+        let (sessions, _total) =
             rt.block_on(async { scan_sessions_async(conv_dir, None, None).await.unwrap() });
 
         assert_eq!(

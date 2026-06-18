@@ -115,7 +115,7 @@ impl DebugObserverImpl {
 
             let state = {
                 let ctrl = self.ctrl.lock().await;
-                ctrl.state.clone()
+                ctrl.state
             };
             match state {
                 DebugState::Running => {
@@ -350,7 +350,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
                 req.context_builder
                     .environment_override()
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| crate::agent::context::detect_environment_text()),
+                    .unwrap_or_else(crate::agent::context::detect_environment_text),
                 req.model,
             ),
             tool_definitions: SectionContent::new(tool_defs_str, req.model),

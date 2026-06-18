@@ -7,6 +7,12 @@ use std::path::Path;
 
 pub struct FileWriteTool;
 
+impl Default for FileWriteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileWriteTool {
     pub fn new() -> Self {
         Self

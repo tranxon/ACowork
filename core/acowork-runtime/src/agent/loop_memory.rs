@@ -67,11 +67,10 @@ impl super::loop_::AgentLoop {
 
         // Update MemorySessionHandle so memory_recall tool can see the
         // current session_id for its own exclude_session_id filtering.
-        if let Some(ref handle) = self.core.memory_session {
-            if let Some(ref sid) = current_session_id {
+        if let Some(ref handle) = self.core.memory_session
+            && let Some(ref sid) = current_session_id {
                 handle.set_session_id(sid.clone());
             }
-        }
 
         let mut query =
             acowork_memory::MemoryQuery::auto_inject(user_message.to_string(), current_session_id);
@@ -192,14 +191,13 @@ impl super::loop_::AgentLoop {
                 // user confirmation. If ≥ 3 pending conflicts, inject a
                 // hint into the next turn's context to guide the Agent to
                 // naturally ask the user for disambiguation.
-                if let Ok(true) = store.should_trigger_confirmation() {
-                    if let Ok(Some(hint)) = store.generate_confirmation_hint() {
+                if let Ok(true) = store.should_trigger_confirmation()
+                    && let Ok(Some(hint)) = store.generate_confirmation_hint() {
                         tracing::info!(
                             "Injecting ambiguous conflict confirmation hint into context"
                         );
                         context_builder.set_ambiguous_confirmation_hint(hint);
                     }
-                }
 
                 // P3-3: Sample and evaluate retrieval quality via LLM Judge.
                 // Uses deterministic sampling (10% of retrievals) and evaluates
@@ -317,8 +315,8 @@ impl super::loop_::AgentLoop {
                 result.starts_with("Error:") || result.starts_with("Tool execution error:");
             let is_unknown = result.starts_with("Unknown tool:");
 
-            if is_error && !is_unknown {
-                if let Err(e) =
+            if is_error && !is_unknown
+                && let Err(e) =
                     manager.record_procedural_from_failure(store, &tc.function.name, result)
                 {
                     tracing::debug!(
@@ -327,7 +325,6 @@ impl super::loop_::AgentLoop {
                         "Failed to record ProceduralNode from tool failure (non-fatal)"
                     );
                 }
-            }
         }
     }
 
@@ -397,6 +394,7 @@ impl super::loop_::AgentLoop {
         fn zero_embedding(_text: &str) -> Vec<f32> {
             vec![0.0f32; acowork_grafeo::types::DEFAULT_EMBEDDING_DIM]
         }
+        #[allow(clippy::type_complexity)]
         let zero_embedding_arc: std::sync::Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> =
             std::sync::Arc::new(zero_embedding);
 
@@ -598,15 +596,14 @@ impl super::loop_::AgentLoop {
         for id in episodic_ids {
             if let Some(n) = db.get_node(id) {
                 episode_count += 1;
-                if let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp) {
-                    if let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
+                if let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp)
+                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
                         match earliest_time {
                             None => earliest_time = Some(dt),
                             Some(earliest) if dt < earliest => earliest_time = Some(dt),
                             _ => {}
                         }
                     }
-                }
             }
         }
 

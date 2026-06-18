@@ -150,11 +150,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)]
     fn mcp_notify_ref_some_works() {
         let (notifier, _rx) = McpConfigNotifier::new();
         let some_ref: McpNotifyRef = Some(Arc::new(notifier));
         assert!(some_ref.is_some());
-        some_ref.unwrap().notify();
+        some_ref.expect("checked is_some above").notify();
     }
 
     #[tokio::test]

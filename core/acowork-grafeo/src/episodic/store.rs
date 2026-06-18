@@ -75,11 +75,10 @@ impl GrafeoStore {
         params.insert("sid".to_string(), Value::from(session_id));
         let result = session.execute_with_params(gql, params)?;
 
-        if let Some(row) = result.rows().first() {
-            if let Some(Value::Int64(id)) = row.first() {
+        if let Some(row) = result.rows().first()
+            && let Some(Value::Int64(id)) = row.first() {
                 return Ok(NodeId::new(*id as u64));
             }
-        }
 
         // Session does not exist — create it.
         let id = self.db.create_node_with_props(

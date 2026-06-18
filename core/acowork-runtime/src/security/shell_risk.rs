@@ -466,8 +466,8 @@ pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
     }
 
     // Still fall back to the first command's name if no other reason was set
-    if max_reason.is_empty() {
-        if let Some(first) = sub_commands.first() {
+    if max_reason.is_empty()
+        && let Some(first) = sub_commands.first() {
             let (primary_cmd, _) = extract_primary_command(first.trim());
             max_reason = match max_risk {
                 ShellRisk::Low => format!("Low-risk command: {}", primary_cmd),
@@ -479,7 +479,6 @@ pub fn assess_base_risk(command: &str) -> ShellRiskAssessment {
                 ShellRisk::Blocked => format!("Blocked command: {}", primary_cmd),
             };
         }
-    }
 
     ShellRiskAssessment {
         risk: max_risk,

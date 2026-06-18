@@ -58,6 +58,8 @@ impl TripleExtractorLlm for ProviderLlmAdapter {
             temperature: Some(0.1), // Low temperature for structured extraction
             max_tokens: Some(2048), // Enough for triple arrays / classification JSON
             tools: None,            // No tool calling for extraction tasks
+            reasoning_effort: None,
+            thinking_mode: None,
         };
 
         let response = self

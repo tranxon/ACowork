@@ -273,8 +273,8 @@ impl GrafeoStore {
         confidence: f32,
     ) -> Result<Option<ProcessResult>> {
         // Step 1: Dedup check (only if embedding is available).
-        if let Some(ref embedding) = input.embedding {
-            if let Some(existing_id) =
+        if let Some(ref embedding) = input.embedding
+            && let Some(existing_id) =
                 self.find_duplicate_procedure(embedding, PROCEDURE_DEDUP_THRESHOLD)?
             {
                 // Reinforce the existing node: boost confidence.
@@ -292,7 +292,6 @@ impl GrafeoStore {
                     }));
                 }
             }
-        }
 
         // Step 2: Parse content into (trigger_condition, action_pattern).
         let (trigger, action) = parse_procedure_content(&input.content);
@@ -437,15 +436,14 @@ impl GrafeoStore {
 
                         // If we have an object in the input AND the existing
                         // node has an object, compare them.
-                        if let Some(obj) = object {
-                            if !existing_object.eq_ignore_ascii_case(obj) {
+                        if let Some(obj) = object
+                            && !existing_object.eq_ignore_ascii_case(obj) {
                                 // Same (subject, predicate), different object →
                                 // this is a knowledge UPDATE, not a duplicate.
                                 // Return None so the caller proceeds to conflict
                                 // detection, which will handle the update.
                                 return Ok(None);
                             }
-                        }
 
                         // Same (subject, predicate) and same (or absent) object →
                         // true duplicate.

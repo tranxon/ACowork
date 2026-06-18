@@ -339,11 +339,10 @@ impl GrafeoStore {
         let session = self.db.session();
         match session.execute("MATCH (n) RETURN count(n)") {
             Ok(result) => {
-                if let Some(row) = result.rows().first() {
-                    if let Some(Value::Int64(count)) = row.first() {
+                if let Some(row) = result.rows().first()
+                    && let Some(Value::Int64(count)) = row.first() {
                         return Ok(*count as usize);
                     }
-                }
                 Ok(0)
             }
             Err(e) => Err(crate::error::GrafeoError::Memory(format!(

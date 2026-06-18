@@ -187,7 +187,7 @@ impl Tool for MemoryRecallTool {
         let emb_deref = emb_provider.as_deref();
 
         match manager
-            .retrieve(&*store, &mut memory_query, emb_deref)
+            .retrieve(&store, &mut memory_query, emb_deref)
             .await
         {
             Ok(retrieval) => {

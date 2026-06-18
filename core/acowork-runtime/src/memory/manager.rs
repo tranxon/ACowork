@@ -210,8 +210,8 @@ impl MemoryManager {
         // ── Auto-generate embedding if needed ──
         // Timeout is handled by FallbackEmbeddingProvider internally
         // (200ms per attempt, then fallback to next provider).
-        if query.embedding.is_none() {
-            if let Some(provider) = embedding_provider {
+        if query.embedding.is_none()
+            && let Some(provider) = embedding_provider {
                 match provider.embed(&query.query_text).await {
                     Ok(vec) => {
                         tracing::debug!(
@@ -229,7 +229,6 @@ impl MemoryManager {
                     }
                 }
             }
-        }
 
         let k = if query.limit > 0 {
             query.limit
@@ -618,15 +617,14 @@ impl MemoryManager {
         let mut injected = self.inject(retrieval);
 
         // Check for pending ambiguous conflicts.
-        if let Ok(true) = store.should_trigger_confirmation() {
-            if let Ok(Some(hint)) = store.generate_confirmation_hint() {
+        if let Ok(true) = store.should_trigger_confirmation()
+            && let Ok(Some(hint)) = store.generate_confirmation_hint() {
                 let hint_line = format!("[Ambiguous] {}", hint);
                 let hint_tokens = estimate_tokens(&hint_line);
                 injected.formatted_text = format!("{}\n{}", injected.formatted_text, hint_line);
                 injected.token_count += hint_tokens;
                 injected.memory_count += 1;
             }
-        }
 
         injected
     }
@@ -1453,6 +1451,7 @@ mod tests {
     // =====================================================================
 
     #[tokio::test]
+    #[allow(clippy::field_reassign_with_default)]
     async fn test_retrieve_with_pagerank_boost() {
         let store = test_store();
         let emb = test_embedding();
@@ -1500,6 +1499,7 @@ mod tests {
     // =====================================================================
 
     #[tokio::test]
+    #[allow(clippy::field_reassign_with_default)]
     async fn test_retrieve_pagerank_disabled() {
         let store = test_store();
         let emb = test_embedding();
@@ -1535,6 +1535,7 @@ mod tests {
     // =====================================================================
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_inject_autobio_core_budget() {
         let retrieval = RetrievalResult {
             memories: vec![
@@ -1591,6 +1592,7 @@ mod tests {
     // =====================================================================
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_inject_autobio_history_budget() {
         let retrieval = RetrievalResult {
             memories: vec![
@@ -1652,6 +1654,7 @@ mod tests {
     // =====================================================================
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_inject_three_phase_budget_independence() {
         let retrieval = RetrievalResult {
             memories: vec![
@@ -2045,15 +2048,13 @@ mod tests {
                 if let Some(ts) = n
                     .get_property("created_at")
                     .and_then(grafeo_common::types::Value::as_timestamp)
-                {
-                    if let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
+                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
                         match earliest_time {
                             None => earliest_time = Some(dt),
                             Some(earliest) if dt < earliest => earliest_time = Some(dt),
                             _ => {}
                         }
                     }
-                }
             }
         }
 
@@ -2124,20 +2125,17 @@ mod tests {
 
         let mut earliest_time: Option<chrono::DateTime<chrono::Utc>> = None;
         for id in episodic_ids {
-            if let Some(n) = db.get_node(id) {
-                if let Some(ts) = n
+            if let Some(n) = db.get_node(id)
+                && let Some(ts) = n
                     .get_property("created_at")
                     .and_then(grafeo_common::types::Value::as_timestamp)
-                {
-                    if let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
+                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
                         match earliest_time {
                             None => earliest_time = Some(dt),
                             Some(earliest) if dt < earliest => earliest_time = Some(dt),
                             _ => {}
                         }
                     }
-                }
-            }
         }
 
         let span_days = (chrono::Utc::now() - earliest_time.unwrap()).num_days();

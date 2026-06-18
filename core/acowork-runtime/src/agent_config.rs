@@ -67,6 +67,7 @@ impl AgentMcpConfig {
 /// (see `load_agent_mcp_config` / `save_agent_mcp_config`) per the
 /// `agent_*.json` naming convention for per-agent config snapshots.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct AgentConfig {
     /// Max output tokens per request (None = use global default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,17 +90,6 @@ pub struct AgentConfig {
     pub shell_approval_threshold: Option<String>,
 }
 
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            max_output_tokens: None,
-            max_iterations: None,
-            temperature: None,
-            system_prompt_override: None,
-            shell_approval_threshold: None,
-        }
-    }
-}
 
 /// Filename for per-agent config in the workspace config directory.
 const AGENT_CONFIG_FILE: &str = "agent_config.json";

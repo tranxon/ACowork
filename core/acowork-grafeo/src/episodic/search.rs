@@ -44,7 +44,7 @@ impl GrafeoStore {
         }
         // Already sorted by the order nodes_by_label returns, but ensure
         // timestamp ordering anyway
-        episodes.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        episodes.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         episodes.truncate(limit);
         Ok(episodes)
     }
@@ -83,7 +83,7 @@ impl GrafeoStore {
         }
 
         // Sort by timestamp descending and apply limit
-        episodes.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        episodes.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
         episodes.truncate(limit);
         Ok(episodes)
     }

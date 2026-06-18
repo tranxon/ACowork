@@ -269,7 +269,7 @@ fn eval_abstraction() -> f32 {
     if store.process_memory_store(&proc_input).is_ok() {
         // Verify it can be found via search.
         let found = store.text_search_with_filter("Knowledge", "content", "type hints", 5, None);
-        if found.ok().map_or(false, |r| !r.is_empty()) {
+        if found.ok().is_some_and(|r| !r.is_empty()) {
             correct += 1;
         }
     }
@@ -291,13 +291,11 @@ fn eval_abstraction() -> f32 {
         metadata: HashMap::new(),
     };
 
-    if store.store_autobiographical(&autobio).is_ok() {
-        if let Ok(Some(found)) = store.find_autobiographical_by_key("name") {
-            if found.value == "Test User" {
+    if store.store_autobiographical(&autobio).is_ok()
+        && let Ok(Some(found)) = store.find_autobiographical_by_key("name")
+            && found.value == "Test User" {
                 correct += 1;
             }
-        }
-    }
 
     if total == 0 {
         return 0.0;

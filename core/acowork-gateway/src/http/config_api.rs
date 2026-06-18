@@ -224,11 +224,10 @@ pub async fn update_config(
     drop(gw);
 
     // Persist config to disk (so changes survive Gateway restart)
-    if let Some(ref cfg) = config_snapshot {
-        if let Err(e) = cfg.save() {
+    if let Some(ref cfg) = config_snapshot
+        && let Err(e) = cfg.save() {
             tracing::warn!("Failed to persist configuration: {}", e);
         }
-    }
 
     // Apply log file count change immediately
     if let Some(count) = body.log_file_count {
@@ -343,13 +342,13 @@ pub async fn delete_logs(
         // Only `gateway-*.log`; leave `embed.log` and any other sibling
         // log files alone (they belong to other processes).
         let log_dir = crate::config::GatewayConfig::project_data_dir().join("logs");
-        if log_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        if log_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&log_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if name.starts_with("gateway-")
-                        && path.extension().map_or(false, |ext| ext == "log")
+                        && path.extension().is_some_and(|ext| ext == "log")
                     {
                         if let Err(e) = std::fs::remove_file(&path) {
                             tracing::warn!("Failed to delete Gateway log {:?}: {}", path, e);
@@ -359,7 +358,6 @@ pub async fn delete_logs(
                     }
                 }
             }
-        }
         tracing::info!("Gateway logs cleaned from {:?}", log_dir);
     }
 

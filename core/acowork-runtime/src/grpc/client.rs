@@ -97,6 +97,7 @@ pub struct GatewayGrpcClient {
     /// MemoryXxxQuery here. The runtime main loop polls this channel:
     ///   - QueryConfig → handled locally (read agent_config.json)
     ///   - Memory queries → forwarded to the agent loop
+    ///
     /// Wrapped in Option to allow take_gateway_query_rx() extraction
     /// for tokio::select! without &mut self conflicts.
     gateway_query_rx: Option<mpsc::UnboundedReceiver<(u64, proto::server_message::Payload)>>,
@@ -287,6 +288,7 @@ impl GatewayGrpcClient {
     /// Convenience: connect with a specific connection role and send AgentHello.
     ///
     /// Returns the client and the bundled [`AgentHelloConfig`] from the handshake.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_and_register_with_role(
         endpoint: &str,
         agent_id: &str,
@@ -455,6 +457,7 @@ impl GatewayGrpcClient {
     /// `cached_provider_version` / `cached_mcp_version` are Runtime's
     /// locally-cached resource versions from `resource_cache.json`.
     /// Pass 0 on first start (never synced).
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_agent_hello(
         &self,
         agent_id: &str,

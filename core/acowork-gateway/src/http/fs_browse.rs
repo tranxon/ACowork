@@ -140,7 +140,7 @@ fn root_entries() -> Vec<FsBrowseEntry> {
     #[cfg(windows)]
     {
         // List available drive letters
-        for letter in 'A'..'Z' {
+        for letter in 'A'..='Z' {
             let drive = format!("{}:/", letter);
             if std::path::Path::new(&drive).is_dir() {
                 entries.push(FsBrowseEntry {
@@ -217,11 +217,9 @@ pub async fn browse_fs(
 
     // Normalize path for consistent output (strip Windows \\?\ prefix)
     let base_str = dir_path.to_string_lossy();
-    let normalized_base = if base_str.starts_with(r"\\?\") {
-        &base_str[4..]
-    } else {
-        base_str.as_ref()
-    };
+    let normalized_base = base_str
+        .strip_prefix(r"\\?\")
+        .unwrap_or(base_str.as_ref());
     let normalized_base = normalized_base.replace('\\', "/");
 
     for entry in read_dir {
@@ -238,7 +236,7 @@ pub async fn browse_fs(
         }
 
         let metadata = entry.metadata().ok();
-        let is_dir = metadata.as_ref().map_or(false, |m| m.is_dir());
+        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
 
         let abs_path = entry.path().to_string_lossy().replace('\\', "/");
 
@@ -274,8 +272,8 @@ pub async fn browse_fs(
     }
 
     // Sort: directories first, then files — both alphabetical (case-insensitive)
-    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.sort_by_key(|a| a.name.to_lowercase());
+    files.sort_by_key(|a| a.name.to_lowercase());
 
     let mut entries = dirs;
     entries.append(&mut files);

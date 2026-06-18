@@ -1078,11 +1078,10 @@ fn extract_method_hint(msg: &str) -> String {
     if let Some(idx) = msg.find("\"method\":") {
         let rest = &msg[idx + 9..]; // skip past "method":" 
         // Find the quoted value
-        if let Some(open) = rest.find('"') {
-            if let Some(close) = rest[open + 1..].find('"') {
+        if let Some(open) = rest.find('"')
+            && let Some(close) = rest[open + 1..].find('"') {
                 return rest[open + 1..open + 1 + close].to_string();
             }
-        }
     }
     // Check if it's a response (has "id" but no "method")
     if msg.contains("\"id\":") && !msg.contains("\"method\":") {

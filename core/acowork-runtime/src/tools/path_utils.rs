@@ -54,11 +54,9 @@ pub fn relative_path<'a>(path: &'a Path, base: &Path) -> Cow<'a, str> {
     {
         if let (Ok(canonical_path), Ok(canonical_base)) =
             (std::fs::canonicalize(path), std::fs::canonicalize(base))
-        {
-            if let Ok(rel) = canonical_path.strip_prefix(&canonical_base) {
+            && let Ok(rel) = canonical_path.strip_prefix(&canonical_base) {
                 return rel.to_string_lossy().into_owned().into();
             }
-        }
     }
 
     // Fallback: use file name only so glob filter can still match

@@ -568,12 +568,14 @@ impl HistoryManager {
             temperature: Some(0.3),
             max_tokens: Some(2048),
             tools: None,
+            reasoning_effort: None,
+            thinking_mode: None,
         };
 
         let response = provider
             .chat(request)
             .await
-            .map_err(|e| RuntimeError::Core(e))?;
+            .map_err(RuntimeError::Core)?;
 
         let summary = response.content.trim().to_string();
         if summary.is_empty() {
@@ -642,11 +644,10 @@ impl HistoryManager {
                         match self.messages[j].role {
                             MessageRole::User => break,
                             MessageRole::Assistant | MessageRole::Tool => {
-                                if let Some(ref tcs) = self.messages[j].tool_calls {
-                                    if tcs.iter().any(|tc| tail_tool_ids.contains(&tc.id)) {
+                                if let Some(ref tcs) = self.messages[j].tool_calls
+                                    && tcs.iter().any(|tc| tail_tool_ids.contains(&tc.id)) {
                                         expanded = j;
                                     }
-                                }
                             }
                             _ => {}
                         }
@@ -1084,8 +1085,8 @@ mod tests {
         // All Tool messages still present after sanitize must have matching
         // Assistant with tool_calls.
         for msg in &messages_clone {
-            if msg.role == MessageRole::Tool {
-                if let Some(ref tcid) = msg.tool_call_id {
+            if msg.role == MessageRole::Tool
+                && let Some(ref tcid) = msg.tool_call_id {
                     let has_call = messages_clone.iter().any(|m| {
                         m.tool_calls
                             .as_ref()
@@ -1093,7 +1094,6 @@ mod tests {
                     });
                     assert!(has_call, "Tool result {tcid} has matching Assistant");
                 }
-            }
         }
     }
 
@@ -1109,7 +1109,7 @@ mod tests {
         // 5 rounds of tool calls
         for i in 1..=5 {
             hm.append(ChatMessage::assistant_with_tools(
-                &format!("Round {i}"),
+                format!("Round {i}"),
                 vec![make_tool_call(&format!("tc_{i}"), "tool", "{}")],
             ));
             hm.append(make_tool_result(&format!("tc_{i}"), &format!("Result {i}")));

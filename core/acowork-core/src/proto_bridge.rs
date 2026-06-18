@@ -372,9 +372,9 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         request_id: snap_request_id.clone(),
                         model: model.clone(),
                         provider: provider.clone(),
-                        max_output_tokens: max_output_tokens.clone(),
-                        max_iterations: max_iterations.clone(),
-                        temperature: temperature.clone(),
+                        max_output_tokens: *max_output_tokens,
+                        max_iterations: *max_iterations,
+                        temperature: *temperature,
                         system_prompt_override: system_prompt_override.clone(),
                         shell_approval_threshold: shell_approval_threshold.clone(),
                         mcp_servers_json: mcp_json,
@@ -658,9 +658,9 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     .unwrap_or_default();
                 Some(proto::server_message::Payload::RuntimeConfigUpdate(
                     proto::RuntimeConfigUpdate {
-                        max_output_tokens: max_output_tokens.clone(),
-                        max_iterations: max_iterations.clone(),
-                        temperature: temperature.clone(),
+                        max_output_tokens: *max_output_tokens,
+                        max_iterations: *max_iterations,
+                        temperature: *temperature,
                         system_prompt_override: system_prompt_override.clone().unwrap_or_default(),
                         shell_approval_threshold: shell_approval_threshold
                             .clone()

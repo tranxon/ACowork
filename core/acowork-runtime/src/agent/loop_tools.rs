@@ -87,7 +87,6 @@ impl AgentLoop {
                 let tx = tx.clone();
                 let approval_handle = approval_handle.clone();
                 let approval_gate = approval_gate.clone();
-                let shell_threshold = shell_threshold.clone();
                 let work_dir = self.core.current_work_dir.clone();
                 tokio::spawn(async move {
                     // Shell risk check: if this is a shell command and risk >= threshold,

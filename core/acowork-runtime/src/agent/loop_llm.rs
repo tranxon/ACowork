@@ -246,12 +246,18 @@ impl AgentLoop {
                             let model_name = self.resolve_current_model(context_builder);
                             let caps = self.get_model_capabilities(&model_name);
                             let max_output_limit = self.core.max_output_tokens_limit_for_model(&model_name);
-                            let chat_request = context_builder.unwrap().build(
+                            let mut chat_request = context_builder.unwrap().build(
                                 &self.core.manifest,
                                 &self.session.history,
                                 caps.as_ref(),
                                 max_output_limit,
                             );
+                            // Preserve reasoning_effort from the original request
+                            // (already resolved in build_chat_request()).
+                            chat_request.reasoning_effort =
+                                self.last_reasoning_effort.clone();
+                            chat_request.thinking_mode =
+                                self.last_thinking_mode.clone();
                             return self
                                 .call_llm_streaming_no_retry(&chat_request)
                                 .await;

@@ -66,6 +66,8 @@ pub async fn evaluate_retrieval_llm(
         temperature: Some(0.0), // Deterministic judging
         max_tokens: Some(128),  // Short response
         tools: None,
+        reasoning_effort: None,
+    thinking_mode: None,
     };
 
     match provider.chat(request).await {

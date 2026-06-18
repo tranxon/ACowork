@@ -294,8 +294,8 @@ impl Tool for ContentSearchTool {
 
                 match output_mode {
                     "files_with_matches" => {
-                        if let Some(_) = content.lines().find(|line| re.is_match(line)) {
-                            if file_set.insert(rel_str.clone()) {
+                        if content.lines().find(|line| re.is_match(line)).is_some()
+                            && file_set.insert(rel_str.clone()) {
                                 results.push(rel_str);
                                 total_matches += 1;
                                 if results.len() >= max_results {
@@ -303,7 +303,6 @@ impl Tool for ContentSearchTool {
                                     break 'outer;
                                 }
                             }
-                        }
                     }
                     "count" => {
                         let count = content.lines().filter(|line| re.is_match(line)).count();
@@ -372,15 +371,12 @@ impl Tool for ContentSearchTool {
                                     .map(|pos| {
                                         match_indexes.get(pos + 1).copied().unwrap_or(usize::MAX)
                                     });
-                            if let Some(next) = next_idx {
-                                if next != usize::MAX
+                            if let Some(next) = next_idx
+                                && next != usize::MAX
                                     && next > match_line + context_after + context_before + 1
-                                {
-                                    if results.len() < max_results {
+                                    && results.len() < max_results {
                                         results.push("--".to_string());
                                     }
-                                }
-                            }
 
                             total_matches += 1;
                         }

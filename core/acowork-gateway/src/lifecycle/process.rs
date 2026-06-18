@@ -24,6 +24,7 @@ impl AgentChild {
 /// Launches `acowork-runtime` as a child process with the given parameters.
 /// A background tokio task is spawned to reap the child's exit status,
 /// preventing zombie processes on Unix.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_agent_process(
     agent_id: &str,
     install_path: &str,

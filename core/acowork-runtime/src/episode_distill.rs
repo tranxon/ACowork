@@ -140,19 +140,17 @@ fn extract_block(text: &str, tag: &str) -> Option<String> {
 pub fn strip_metadata_blocks(raw: &str) -> String {
     let mut text = raw.to_string();
     // Remove <entities>...</entities> block
-    if let Some(start) = text.find("<entities>") {
-        if let Some(end) = text[start..].find("</entities>") {
+    if let Some(start) = text.find("<entities>")
+        && let Some(end) = text[start..].find("</entities>") {
             let end = start + end + "</entities>".len();
             text.replace_range(start..end, "");
         }
-    }
     // Remove <triples>...</triples> block
-    if let Some(start) = text.find("<triples>") {
-        if let Some(end) = text[start..].find("</triples>") {
+    if let Some(start) = text.find("<triples>")
+        && let Some(end) = text[start..].find("</triples>") {
             let end = start + end + "</triples>".len();
             text.replace_range(start..end, "");
         }
-    }
     text.trim().to_string()
 }
 
@@ -399,12 +397,14 @@ async fn compact_with_llm(
         temperature: Some(0.3),
         max_tokens: Some(max_tokens),
         tools: None,
+        reasoning_effort: None,
+        thinking_mode: None,
     };
 
     let response = provider
         .chat(request)
         .await
-        .map_err(|e| RuntimeError::Core(e))?;
+        .map_err(RuntimeError::Core)?;
 
     // Trim whitespace but keep the full response as-is.
     let summary = response.content.trim().to_string();
@@ -512,6 +512,8 @@ mod tests {
             },
             family: None,
             knowledge_cutoff: None,
+            default_reasoning_effort: None,
+            thinking_mode: None,
         }
     }
 }

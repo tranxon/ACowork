@@ -566,8 +566,9 @@ pub async fn handle_context_usage_report(
 /// response.  Resource lists use version-driven diff sync:
 /// - provider_list / mcp_list / search_list are only sent when Runtime's cached version < Gateway's.
 /// - provider_key_vault / mcp_key_vault / search_key_vault are always sent in full (keys not versioned).
-/// This satisfies PRD GTW-05 and SEC-07: API keys are distributed via IPC,
-/// not environment variables.
+///   This satisfies PRD GTW-05 and SEC-07: API keys are distributed via IPC,
+///   not environment variables.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_agent_hello(
     agent_id: &str,
     version: &str,

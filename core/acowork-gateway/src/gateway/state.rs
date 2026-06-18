@@ -42,7 +42,6 @@ pub struct RunningAgentInfo {
 }
 
 /// Shared permission store type (same as IPC server)
-
 /// Gateway state — shared mutable state for the entire Gateway process
 pub struct GatewayState {
     /// Installed agents (agent_id → AgentInfo)

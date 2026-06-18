@@ -42,7 +42,7 @@ struct McpTransportState {
 impl McpTransportState {
     /// Replace the transport with a new one, returning the old transport.
     fn replace(&mut self, new: Box<dyn McpTransportConn>) -> Option<Box<dyn McpTransportConn>> {
-        std::mem::replace(&mut self.transport, Some(new))
+        self.transport.replace(new)
     }
 }
 
@@ -181,15 +181,14 @@ impl McpClient {
     pub async fn disconnect(&self) {
         self.is_alive.store(false, Ordering::SeqCst);
         let mut state = self.transport.lock().await;
-        if let Some(mut transport) = state.transport.take() {
-            if let Err(e) = transport.close().await {
+        if let Some(mut transport) = state.transport.take()
+            && let Err(e) = transport.close().await {
                 tracing::warn!(
                     "Error closing MCP server `{}`: {:#}",
                     self.meta.config.name,
                     e
                 );
             }
-        }
     }
 
     /// Whether the transport connection is believed to be alive.

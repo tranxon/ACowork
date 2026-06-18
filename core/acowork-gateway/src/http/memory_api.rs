@@ -282,8 +282,8 @@ pub async fn get_memory_stats(
             acowork_core::proto::MemoryStatsQuery {},
         );
 
-        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
-            if let Some(acowork_core::proto::client_message::Payload::MemoryStatsResult(result)) =
+        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await
+            && let Some(acowork_core::proto::client_message::Payload::MemoryStatsResult(result)) =
                 response.payload
             {
                 return Ok(Json(MemoryStatsResponse {
@@ -295,7 +295,6 @@ pub async fn get_memory_stats(
                     index_health: result.index_health,
                 }));
             }
-        }
     }
 
     // No gRPC connection or query failed — return empty stats
@@ -331,8 +330,8 @@ pub async fn delete_memory_node(
             acowork_core::proto::MemoryDeleteQuery { node_id },
         );
 
-        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
-            if let Some(acowork_core::proto::client_message::Payload::MemoryDeleteResult(result)) =
+        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await
+            && let Some(acowork_core::proto::client_message::Payload::MemoryDeleteResult(result)) =
                 response.payload
             {
                 return Ok(Json(DeleteNodeResponse {
@@ -341,7 +340,6 @@ pub async fn delete_memory_node(
                     message: result.message,
                 }));
             }
-        }
     }
 
     // No gRPC connection — return error
@@ -376,8 +374,8 @@ pub async fn trigger_consolidate(
             },
         );
 
-        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await {
-            if let Some(acowork_core::proto::client_message::Payload::MemoryConsolidateResult(
+        if let Some(response) = grpc_memory_roundtrip(grpc_mgr, &agent_id, proto_query).await
+            && let Some(acowork_core::proto::client_message::Payload::MemoryConsolidateResult(
                 result,
             )) = response.payload
             {
@@ -389,7 +387,6 @@ pub async fn trigger_consolidate(
                     message: result.message,
                 }));
             }
-        }
     }
 
     // No gRPC connection — return error

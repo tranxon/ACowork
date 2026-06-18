@@ -950,15 +950,14 @@ async fn kill_process_on_port(port: u16) {
                 for line in stdout.lines() {
                     if line.contains(&port_filter) && line.contains("LISTENING") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let Some(pid_str) = parts.last() {
-                            if let Ok(pid) = pid_str.parse::<u32>() {
+                        if let Some(pid_str) = parts.last()
+                            && let Ok(pid) = pid_str.parse::<u32>() {
                                 tracing::info!(pid, "Killing process holding debug port");
                                 let _ = tokio::process::Command::new("taskkill")
                                     .args(["/F", "/PID", &pid.to_string()])
                                     .output()
                                     .await;
                             }
-                        }
                     }
                 }
             }

@@ -55,6 +55,12 @@ const MAX_DOC_SIZE_BYTES: u64 = 50 * 1024 * 1024;
 /// Reads PDF, DOCX, PPTX, and XLSX files and extracts their text content.
 pub struct DocReaderTool;
 
+impl Default for DocReaderTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DocReaderTool {
     pub fn new() -> Self {
         Self

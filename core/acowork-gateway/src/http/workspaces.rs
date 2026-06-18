@@ -343,8 +343,8 @@ pub async fn set_current_workspace(
     }
 
     // When session_id is provided, push SetSessionWorkspace to Runtime
-    if let Some(ref session_id) = query.session_id {
-        if let Some(ref session_mgr) = state.session_mgr {
+    if let Some(ref session_id) = query.session_id
+        && let Some(ref session_mgr) = state.session_mgr {
             let push_tx = {
                 let mgr = session_mgr.lock().await;
                 mgr.find_by_agent_id(&agent_id)
@@ -371,7 +371,6 @@ pub async fn set_current_workspace(
                 }
             }
         }
-    }
 
     // Update select_count and last_selected_at for the selected workspace (if it's a user workspace)
     if !is_agent_home {
@@ -600,11 +599,9 @@ pub async fn list_tree(
     // produces on Windows. This prefix is not valid in file URIs and breaks
     // LSP document URIs (e.g. "file:////?/C:/..." instead of "file:///C:/...").
     let canonical_str = canonical_root.to_string_lossy();
-    let stripped = if canonical_str.starts_with(r"\\?\") {
-        &canonical_str[4..]
-    } else {
-        canonical_str.as_ref()
-    };
+    let stripped = canonical_str
+        .strip_prefix(r"\\?\")
+        .unwrap_or(canonical_str.as_ref());
     let root_str = stripped.replace('\\', "/");
     let mut dirs: Vec<TreeEntry> = Vec::new();
     let mut files: Vec<TreeEntry> = Vec::new();
@@ -623,7 +620,7 @@ pub async fn list_tree(
         }
 
         let metadata = entry.metadata().ok();
-        let is_dir = metadata.as_ref().map_or(false, |m| m.is_dir());
+        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
 
         if is_dir {
             // Count children for the expansion indicator
@@ -678,8 +675,8 @@ pub async fn list_tree(
     }
 
     // Sort: directories first, then files — both alphabetical (case-insensitive)
-    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.sort_by_key(|a| a.name.to_lowercase());
+    files.sort_by_key(|a| a.name.to_lowercase());
 
     let mut entries = dirs;
     entries.append(&mut files);
@@ -919,35 +916,30 @@ pub async fn write_file(
         resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
 
     // Verify parent directory exists (allow creating new files)
-    if let Some(parent) = abs_path.parent() {
-        if !parent.is_dir() {
+    if let Some(parent) = abs_path.parent()
+        && !parent.is_dir() {
             return Err(ApiError::bad_request(&format!(
                 "Parent directory does not exist: {}",
                 parent.display()
             )));
         }
-    }
 
     // Check write access for read-only workspaces
     {
         let gw = state.gateway_state.read().await;
         if let Some(info) = gw.running_agents.get(&agent_id) {
             let ws_id = query.workspace_id.as_deref().unwrap_or("");
-            if !ws_id.is_empty() && ws_id != "__agent_home__" {
-                if let Some(config) = info
+            if !ws_id.is_empty() && ws_id != "__agent_home__"
+                && let Some(config) = info
                     .workspace_config_json
                     .as_ref()
                     .and_then(|json| serde_json::from_str::<WorkspaceConfig>(json).ok())
-                {
-                    if let Some(dir) = config.additional_dirs.iter().find(|d| d.id == ws_id) {
-                        if dir.access == AccessLevel::ReadOnly {
+                    && let Some(dir) = config.additional_dirs.iter().find(|d| d.id == ws_id)
+                        && dir.access == AccessLevel::ReadOnly {
                             return Err(ApiError::bad_request(
                                 "Workspace is read-only, cannot write files",
                             ));
                         }
-                    }
-                }
-            }
         }
     }
 
@@ -1327,11 +1319,10 @@ fn run_search(
 
         // Skip files larger than 1 MiB — they are unlikely to be
         // human-readable source files and would slow down search.
-        if let Ok(meta) = entry.metadata() {
-            if meta.len() > 1_048_576 {
+        if let Ok(meta) = entry.metadata()
+            && meta.len() > 1_048_576 {
                 continue;
             }
-        }
 
         // Apply file filter if specified (comma-separated globs like "*.rs,*.toml")
         if let Some(glob) = include_glob {

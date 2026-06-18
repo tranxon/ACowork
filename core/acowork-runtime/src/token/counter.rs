@@ -43,8 +43,8 @@ pub fn estimate_image_tokens(
             if detail == Some("low") {
                 return 85;
             }
-            let tiles_w = (w + 511) / 512;
-            let tiles_h = (h + 511) / 512;
+            let tiles_w = w.div_ceil(512);
+            let tiles_h = h.div_ceil(512);
             85 + 170 * tiles_w * tiles_h
         }
         ProtocolType::Anthropic => {

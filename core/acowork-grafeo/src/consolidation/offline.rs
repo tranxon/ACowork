@@ -116,8 +116,8 @@ impl GrafeoStore {
         let mut result = self.run_offline_consolidation(config)?;
 
         // Step 2: Triple extraction from unconsolidated episodes (if LLM available).
-        if let Some(llm_ref) = llm {
-            if let Some(ref emb_fn) = embedding_fn {
+        if let Some(llm_ref) = llm
+            && let Some(ref emb_fn) = embedding_fn {
                 let episode_contents =
                     self.get_unconsolidated_episode_contents(config.batch_size)?;
                 if !episode_contents.is_empty() {
@@ -157,7 +157,6 @@ impl GrafeoStore {
                     }
                 }
             }
-        }
 
         // Step 4: Experience generalization (if embedding function provided)
         if let Some(ref emb_fn) = embedding_fn {
@@ -521,15 +520,14 @@ impl GrafeoStore {
         for id in node_ids {
             if let Some(n) = self.db.get_node(id) {
                 episode_count += 1;
-                if let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp) {
-                    if let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
+                if let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp)
+                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
                         match earliest_time {
                             None => earliest_time = Some(dt),
                             Some(earliest) if dt < earliest => earliest_time = Some(dt),
                             _ => {}
                         }
                     }
-                }
             }
         }
 
@@ -649,11 +647,10 @@ impl GrafeoStore {
         for node_id in node_ids {
             if let Some(node) = self.db.get_node(node_id) {
                 // Skip non-Active nodes.
-                if let Some(Value::String(s)) = node.properties.get(&"status".into()) {
-                    if s.as_str() != NodeStatus::Active.as_str() {
+                if let Some(Value::String(s)) = node.properties.get(&"status".into())
+                    && s.as_str() != NodeStatus::Active.as_str() {
                         continue;
                     }
-                }
 
                 // Read consolidated flag.
                 let is_consolidated = node

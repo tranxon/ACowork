@@ -69,6 +69,7 @@ use search_backends::WebSearchEngine;
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
 ///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
 ///   not per-project. No fallback: must always be set explicitly.
+#[allow(clippy::too_many_arguments)]
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,

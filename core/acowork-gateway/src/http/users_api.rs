@@ -247,11 +247,10 @@ pub async fn update_user(
     }
 
     // Hot push if the updated user is the active one
-    if updated_profile.is_active {
-        if let Some(pusher) = &state.pusher {
+    if updated_profile.is_active
+        && let Some(pusher) = &state.pusher {
             pusher.push_user_profile().await;
         }
-    }
 
     let version = {
         let gw = state.gateway_state.read().await;

@@ -20,16 +20,13 @@ pub fn extract_text(path: &Path, opts: &ExtractOptions) -> Result<String, String
     for i in 0..archive.len() {
         if let Ok(entry) = archive.by_index(i) {
             let name = entry.name().to_string();
-            if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
-                if let Some(num_str) = name
+            if name.starts_with("ppt/slides/slide") && name.ends_with(".xml")
+                && let Some(num_str) = name
                     .strip_prefix("ppt/slides/slide")
                     .and_then(|s| s.strip_suffix(".xml"))
-                {
-                    if let Ok(num) = num_str.parse::<usize>() {
+                    && let Ok(num) = num_str.parse::<usize>() {
                         slide_indices.push((i, num));
                     }
-                }
-            }
         }
     }
     slide_indices.sort_by_key(|(_, n)| *n);
@@ -97,11 +94,10 @@ fn extract_shape_text(xml_str: &str, buf: &mut Vec<u8>) -> String {
     loop {
         use quick_xml::events::Event;
         match reader.read_event_into(buf) {
-            Ok(Event::Start(ref e)) => {
-                if e.name().as_ref() == b"a:p" && !output.is_empty() && !output.ends_with('\n') {
+            Ok(Event::Start(ref e))
+                if e.name().as_ref() == b"a:p" && !output.is_empty() && !output.ends_with('\n') => {
                     output.push('\n');
                 }
-            }
             Ok(Event::Text(ref e)) => {
                 let text = e.unescape().unwrap_or_default();
                 output.push_str(&text);

@@ -105,10 +105,7 @@ pub async fn list_embedding_models(State(state): State<AppState>) -> impl IntoRe
         let entries: Vec<_> = gw
             .resource_cache
             .embedding_models
-            .models
-            .iter()
-            .cloned()
-            .collect();
+            .models.to_vec();
         (sr, ami, ep, entries)
     };
 
@@ -291,7 +288,7 @@ pub async fn select_model(
         .embed_process
         .as_ref()
         .and_then(|eps| eps.active_dimension);
-    let dimension_changed = current_dim.map_or(false, |cur| cur != new_dim);
+    let dimension_changed = current_dim.is_some_and(|cur| cur != new_dim);
     let current_model_id = gw
         .embed_process
         .as_ref()

@@ -409,6 +409,7 @@ mod tests {
                 path: "/tmp/agent-workdir".to_string(),
                 access: WorkspaceAccess::ReadWrite,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         let result = tool
@@ -431,6 +432,7 @@ mod tests {
                 path: "/tmp/agent-workdir".to_string(),
                 access: WorkspaceAccess::ReadWrite,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         let result = tool
@@ -456,6 +458,7 @@ mod tests {
                 path: "/tmp/agent-workdir".to_string(),
                 access: WorkspaceAccess::ReadWrite,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         let result = tool
@@ -475,6 +478,7 @@ mod tests {
                 path: "/tmp/agent-workdir".to_string(),
                 access: WorkspaceAccess::ReadWrite,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         // echo is not a filesystem tool, so no path check
@@ -495,6 +499,7 @@ mod tests {
                 path: "/tmp/agent-workdir".to_string(),
                 access: WorkspaceAccess::ReadWrite,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         // Path traversal via ".." resolves to /etc/passwd which is outside allowed dir
@@ -524,6 +529,7 @@ mod tests {
                 path: "/tmp/agent-workdir".to_string(),
                 access: WorkspaceAccess::ReadWrite,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         // Prefix-suffix attack: "/tmp/agent-workdir-eval" starts with "/tmp/agent-workdir"
@@ -554,6 +560,7 @@ mod tests {
                 path: "/tmp/agent-pkg".to_string(),
                 access: WorkspaceAccess::ReadOnly,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         let result = tool
@@ -601,6 +608,7 @@ mod tests {
                 path: "/tmp/agent-pkg".to_string(),
                 access: WorkspaceAccess::ReadOnly,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         let result = tool
@@ -649,6 +657,7 @@ mod tests {
                 path: "/tmp/agent-pkg".to_string(),
                 access: WorkspaceAccess::ReadOnly,
                 last_active: false,
+                prompt_file: None,
             }]),
         );
         let result = tool
@@ -676,12 +685,14 @@ mod tests {
                     path: "/tmp/agent-pkg".to_string(),
                     access: WorkspaceAccess::ReadOnly,
                     last_active: false,
+                    prompt_file: None,
                 },
                 WorkspaceDir {
                     id: "ws".to_string(),
                     path: "/tmp/agent-pkg/workspace".to_string(),
                     access: WorkspaceAccess::ReadWrite,
                     last_active: false,
+                    prompt_file: None,
                 },
             ]),
         );
@@ -709,12 +720,14 @@ mod tests {
                     path: "/tmp/agent-pkg".to_string(),
                     access: WorkspaceAccess::ReadWrite,
                     last_active: false,
+                    prompt_file: None,
                 },
                 WorkspaceDir {
                     id: "ro".to_string(),
                     path: "/tmp/agent-pkg/readonly".to_string(),
                     access: WorkspaceAccess::ReadOnly,
                     last_active: false,
+                    prompt_file: None,
                 },
             ]),
         );
@@ -752,12 +765,14 @@ mod tests {
                     path: "/tmp/agent-pkg".to_string(),
                     access: WorkspaceAccess::ReadWrite,
                     last_active: false,
+                    prompt_file: None,
                 },
                 WorkspaceDir {
                     id: "ro".to_string(),
                     path: "/tmp/agent-pkg/readonly".to_string(),
                     access: WorkspaceAccess::ReadOnly,
                     last_active: false,
+                    prompt_file: None,
                 },
             ]),
         );

@@ -90,13 +90,12 @@ impl std::fmt::Display for SearchBackendError {
 
 /// Ordered list of backends with API keys for fallback chain execution.
 pub struct WebSearchEngine {
-    backends: Vec<(
-        Box<dyn SearchBackend>,
-        Option<SearchKeyEntry>,
-        Option<String>,
-    )>, // (backend, key, base_url)
+    backends: Vec<SearchBackendEntry>,
     search_timeout: Duration,
 }
+
+/// A single backend entry in the fallback chain.
+type SearchBackendEntry = (Box<dyn SearchBackend>, Option<SearchKeyEntry>, Option<String>);
 
 impl WebSearchEngine {
     /// Create a new engine from configured providers.
@@ -106,11 +105,7 @@ impl WebSearchEngine {
     ///   Providers are tried in the given order (first = highest priority).
     /// * `search_timeout` - HTTP timeout applied to every search request.
     pub fn new(
-        backends: Vec<(
-            Box<dyn SearchBackend>,
-            Option<SearchKeyEntry>,
-            Option<String>,
-        )>,
+        backends: Vec<SearchBackendEntry>,
         search_timeout: Duration,
     ) -> Self {
         Self {

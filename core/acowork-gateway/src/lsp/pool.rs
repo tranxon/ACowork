@@ -52,6 +52,12 @@ pub struct LspPool {
     entries: Mutex<HashMap<PoolKey, Arc<LspProcessEntry>>>,
 }
 
+impl Default for LspPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LspPool {
     /// Create a new empty pool.
     pub fn new() -> Self {
@@ -132,8 +138,8 @@ impl LspPool {
 
         for (key, entry) in entries.iter() {
             let idle_since = *entry.last_idle_since.lock().await;
-            if let Some(since) = idle_since {
-                if since.elapsed() > timeout {
+            if let Some(since) = idle_since
+                && since.elapsed() > timeout {
                     tracing::info!(
                         "[LSP Pool] Evicting idle '{}' (PID {}), idle for {:?}",
                         entry.command,
@@ -142,7 +148,6 @@ impl LspPool {
                     );
                     to_remove.push(key.clone());
                 }
-            }
         }
 
         for key in to_remove {

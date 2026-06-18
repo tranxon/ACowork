@@ -454,11 +454,10 @@ pub async fn test_embed_model(port: u16) -> Result<EmbedTestResult, GatewayError
 /// what to do with the result (typically: inject into the embed
 /// child's dynamic-linker search path).
 fn locate_ort_lib_dir() -> Option<String> {
-    if let Ok(dir) = std::env::var("ORT_LIB_LOCATION") {
-        if !dir.is_empty() {
+    if let Ok(dir) = std::env::var("ORT_LIB_LOCATION")
+        && !dir.is_empty() {
             return Some(dir);
         }
-    }
     let cwd = std::env::current_dir().ok()?;
     let ort_base = cwd.join(".ort");
     let entries = std::fs::read_dir(&ort_base).ok()?;

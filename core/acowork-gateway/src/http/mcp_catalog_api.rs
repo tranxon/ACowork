@@ -301,14 +301,13 @@ pub async fn update_catalog_entry(
     let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
     // If the name is being changed, check for conflicts first
-    if body.config.name != name {
-        if catalog.iter().any(|c| c.name == body.config.name) {
+    if body.config.name != name
+        && catalog.iter().any(|c| c.name == body.config.name) {
             return Err(ApiError::bad_request(&format!(
                 "MCP server '{}' already exists in catalog",
                 body.config.name
             )));
         }
-    }
 
     // Find the existing entry index
     let idx = catalog.iter().position(|c| c.name == name).ok_or_else(|| {

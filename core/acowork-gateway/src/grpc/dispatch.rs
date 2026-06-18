@@ -249,11 +249,10 @@ pub async fn dispatch_grpc_request(
                 // to match the frontend's long-established streaming protocol.
                 // All other events pass through Runtime's original params verbatim.
                 let mut payload = params;
-                if event_type == crate::http::routes::BridgeEventType::Chunk {
-                    if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
+                if event_type == crate::http::routes::BridgeEventType::Chunk
+                    && let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
                         payload["delta"] = serde_json::Value::String(content.to_string());
                     }
-                }
 
                 if let Some(tx) = bridge_tx {
                     let event = BridgeEvent {

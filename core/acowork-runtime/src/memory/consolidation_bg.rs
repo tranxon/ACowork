@@ -140,6 +140,7 @@ async fn run_consolidation_loop(
         // The consolidation API requires a synchronous closure, so we bridge
         // async → sync via Handle::current() on a blocking thread.
         let emb_provider = embedding_provider.clone();
+        #[allow(clippy::type_complexity)]
         let embedding_fn: Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> = Arc::new(
             move |text: &str| -> Vec<f32> {
                 let provider = emb_provider.clone();
@@ -230,14 +231,12 @@ fn acquire_consolidation_lock(lock_path: &std::path::Path) -> bool {
 
     // Check if lock file exists and is recent (< 10 minutes old).
     if let Ok(metadata) = std::fs::metadata(lock_path) {
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(duration) = modified.elapsed() {
-                if duration.as_secs() < 600 {
+        if let Ok(modified) = metadata.modified()
+            && let Ok(duration) = modified.elapsed()
+                && duration.as_secs() < 600 {
                     // Lock file is recent — another agent is likely running.
                     return false;
                 }
-            }
-        }
         // Lock file is stale — remove it.
         let _ = std::fs::remove_file(lock_path);
     }

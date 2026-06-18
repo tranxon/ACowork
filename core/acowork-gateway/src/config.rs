@@ -32,11 +32,10 @@ use serde::{Deserialize, Serialize};
 /// config and data across `~/.config/` and `~/.local/share/` on Linux,
 /// `%APPDATA%` subdirs on Windows, and a single dir on macOS.
 pub(crate) fn project_root() -> PathBuf {
-    if let Ok(p) = std::env::var("ACOWORK_HOME") {
-        if !p.is_empty() {
+    if let Ok(p) = std::env::var("ACOWORK_HOME")
+        && !p.is_empty() {
             return PathBuf::from(p);
         }
-    }
 
     #[cfg(windows)]
     let home_var = std::env::var("USERPROFILE").ok();
@@ -224,7 +223,6 @@ impl GatewayConfig {
     pub(crate) fn migrate_legacy_layout() {
         let new_root = project_root();
         if new_root.exists() {
-            return;
         }
 
         #[cfg(not(windows))]
@@ -429,7 +427,7 @@ impl GatewayConfig {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| GatewayError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(GatewayError::Io)?;
         }
 
         let toml_str = toml::to_string_pretty(self)

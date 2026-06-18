@@ -15,6 +15,7 @@ pub type McpTransport = McpTransportDef;
 
 /// MCP client configuration (top-level, used by config file parsing).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub struct McpConfig {
     /// Enable MCP tool loading.
     #[serde(default)]
@@ -24,11 +25,3 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfigDef>,
 }
 
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            servers: Vec::new(),
-        }
-    }
-}

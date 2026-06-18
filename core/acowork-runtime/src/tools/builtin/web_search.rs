@@ -71,8 +71,7 @@ impl Tool for WebSearchTool {
             .as_u64()
             .map(|c| c as u32)
             .unwrap_or(5)
-            .max(1)
-            .min(10);
+            .clamp(1, 10);
 
         match self.engine.search(query, count).await {
             Ok(results) => {

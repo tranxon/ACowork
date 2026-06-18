@@ -13,6 +13,12 @@ const MAX_LINES_PER_CALL: usize = 200;
 /// File read tool — fragment reader, not a whole-file reader
 pub struct FileReadTool;
 
+impl Default for FileReadTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileReadTool {
     pub fn new() -> Self {
         Self
@@ -186,12 +192,7 @@ impl Tool for FileReadTool {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                let partial = s > 0 || e < total;
-                let summary = if partial {
-                    format!("\n[Lines {}-{} of {total}]", s + 1, e)
-                } else {
-                    format!("\n[Lines {}-{} of {total}]", s + 1, e)
-                };
+                let summary = format!("\n[Lines {}-{} of {total}]", s + 1, e);
 
                 let content = format!("{numbered}{summary}");
                 let (content, _truncated) = output::truncate_output(&content);

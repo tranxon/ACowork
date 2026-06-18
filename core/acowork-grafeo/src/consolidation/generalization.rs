@@ -17,6 +17,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Shared embedding function type used across consolidation pipelines.
+type EmbeddingFn = Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>;
+
 use chrono::{DateTime, Utc};
 use grafeo_common::types::Value;
 use serde::{Deserialize, Serialize};
@@ -476,7 +479,7 @@ impl GrafeoStore {
         &self,
         episodes: &[(String, String, String)],
         llm: Option<&dyn TripleExtractorLlm>,
-        embedding_fn: &Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>,
+        embedding_fn: &EmbeddingFn,
         min_observations: usize,
     ) -> Result<GeneralizationResult> {
         let config = GeneralizationConfig {
@@ -492,7 +495,7 @@ impl GrafeoStore {
         &self,
         episodes: &[(String, String, String)],
         llm: Option<&dyn TripleExtractorLlm>,
-        embedding_fn: &Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>,
+        embedding_fn: &EmbeddingFn,
         config: &GeneralizationConfig,
     ) -> Result<GeneralizationResult> {
         let patterns = if let Some(llm) = llm {
@@ -600,7 +603,7 @@ impl GrafeoStore {
     pub async fn run_generalization(
         &self,
         llm: Option<&dyn TripleExtractorLlm>,
-        embedding_fn: &Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>,
+        embedding_fn: &EmbeddingFn,
         config: &GeneralizationConfig,
     ) -> Result<GeneralizationResult> {
         let episodes = self.scan_episodes_for_pattern_extraction(config.max_episodes_scan)?;

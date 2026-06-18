@@ -506,23 +506,18 @@ impl<'de> Deserialize<'de> for Permission {
 /// Controls which risk levels require user confirmation before execution.
 /// Shared between Gateway (agent_config.rs) and Runtime (loop_tools.rs)
 /// to avoid duplicating type definitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellApprovalThreshold {
     /// Prompt for Low risk and above (most conservative).
     Low,
     /// Prompt for Medium risk and above (default).
+    #[default]
     Medium,
     /// Prompt for High risk only.
     High,
     /// Never prompt — auto-approve all shell commands.
     Never,
-}
-
-impl Default for ShellApprovalThreshold {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 impl ShellApprovalThreshold {

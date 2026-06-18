@@ -396,14 +396,13 @@ pub async fn update_agent_manifest_avatar(
     // (the client is the source of truth for the icon set), but we reject
     // obviously malformed values so a typo doesn't silently leak into the
     // built package.
-    if let Some(ref value) = new_builtin_avatar {
-        if !is_plausible_builtin_avatar_id(value) {
+    if let Some(ref value) = new_builtin_avatar
+        && !is_plausible_builtin_avatar_id(value) {
             return Err(ApiError::bad_request(&format!(
                 "Invalid builtin_avatar value '{}': expected 'icon-NN' or numeric 1-99",
                 value
             )));
         }
-    }
 
     let manifest_path = std::path::Path::new(&install_path).join("manifest.toml");
 
@@ -848,16 +847,12 @@ pub async fn uninstall_agent(
 /// Start agent request body
 #[derive(Debug, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct StartAgentRequest {
     /// Start in developer mode (enables Debug Protocol WebSocket)
     pub dev_mode: bool,
 }
 
-impl Default for StartAgentRequest {
-    fn default() -> Self {
-        Self { dev_mode: false }
-    }
-}
 
 /// `POST /api/agents/:id/start` — start an agent
 pub async fn start_agent(
@@ -985,8 +980,8 @@ pub async fn restart_agent_in_debug(
     }
 
     // Already in debug mode — no-op
-    if let Some(info) = gw.running_agents.get(&agent_id) {
-        if info.dev_mode && info.debug_port.is_some() {
+    if let Some(info) = gw.running_agents.get(&agent_id)
+        && info.dev_mode && info.debug_port.is_some() {
             return Ok(Json(MessageResponse {
                 message: format!(
                     "Agent {} is already in debug mode (port {})",
@@ -995,7 +990,6 @@ pub async fn restart_agent_in_debug(
                 ),
             }));
         }
-    }
 
     // Check gRPC session manager is available
     let grpc_mgr = state
@@ -1173,7 +1167,7 @@ fn read_system_prompt(install_path: &str) -> Option<String> {
             .filter(|p| {
                 p.is_file()
                     && p.extension()
-                        .map_or(false, |ext| ext == "md" || ext == "txt")
+                        .is_some_and(|ext| ext == "md" || ext == "txt")
             })
             .collect(),
         Err(_) => return None,
@@ -1264,7 +1258,7 @@ fn write_manifest_tools(install_path: &str, active_tools: &[String]) {
 
     // Append new [[tools]] entries
     for tool_name in active_tools {
-        lines.push(format!("[[tools]]"));
+        lines.push("[[tools]]".to_string());
         lines.push(format!("name = \"{}\"", tool_name));
     }
 
@@ -1372,8 +1366,8 @@ pub async fn get_agent_config(
 
     let effective = AgentConfigResponse {
         agent_id,
-        max_output_tokens: max_output_tokens,
-        max_iterations: max_iterations,
+        max_output_tokens,
+        max_iterations,
         temperature,
         system_prompt: None,
         // Use model snap fields for active model/provider in response
@@ -1799,20 +1793,17 @@ pub async fn get_agent_search_config(
         );
         if let Some(response) =
             crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
-        {
-            if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
+            && let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
                 response.payload
             {
                 // Parse search_config_json if available
-                if let Some(ref search_json) = snap.search_config_json {
-                    if let Ok(config) =
+                if let Some(ref search_json) = snap.search_config_json
+                    && let Ok(config) =
                         serde_json::from_str::<AgentSearchConfigResponse>(search_json)
                     {
                         providers = config.providers;
                     }
-                }
             }
-        }
     }
 
     Ok(Json(AgentSearchConfigResponse {

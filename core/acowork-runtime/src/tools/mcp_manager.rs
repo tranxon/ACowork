@@ -101,7 +101,7 @@ impl McpManager {
 
     /// Check whether any MCP servers are connected.
     pub fn is_connected(&self) -> bool {
-        self.registry.as_ref().map_or(false, |r| !r.is_empty())
+        self.registry.as_ref().is_some_and(|r| !r.is_empty())
     }
 
     /// Set the registry directly (used when MCP connection results are

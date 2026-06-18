@@ -101,15 +101,14 @@ impl CronStore {
     pub fn open(path: &Path) -> Result<Self, CronStoreError> {
         let db_path = path.with_extension("db");
         let json_path = path.with_extension("json");
-        if db_path.exists() && !json_path.exists() {
-            if let Err(e) = Self::migrate_from_sqlite(&db_path, &json_path) {
+        if db_path.exists() && !json_path.exists()
+            && let Err(e) = Self::migrate_from_sqlite(&db_path, &json_path) {
                 tracing::warn!(
                     "Failed to migrate cron store from {}: {}. Starting fresh.",
                     db_path.display(),
                     e
                 );
             }
-        }
 
         let entries = if json_path.exists() {
             let data = std::fs::read_to_string(&json_path).map_err(CronStoreError::Io)?;
@@ -139,11 +138,10 @@ impl CronStore {
     /// Check if the store is healthy.
     pub fn health_check(&self) -> Result<(), CronStoreError> {
         let inner = self.inner.lock().unwrap();
-        if let Some(ref path) = inner.path {
-            if path.exists() {
+        if let Some(ref path) = inner.path
+            && path.exists() {
                 let _ = std::fs::read_to_string(path).map_err(CronStoreError::Io)?;
             }
-        }
         Ok(())
     }
 
@@ -214,7 +212,7 @@ impl CronStore {
     /// Migrate data from an old cron_entries.db SQLite file to JSON.
     fn migrate_from_sqlite(db_path: &Path, json_path: &Path) -> Result<(), CronStoreError> {
         let conn = rusqlite::Connection::open(db_path)
-            .map_err(|e| CronStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            .map_err(|e| CronStoreError::Io(io::Error::other(e)))?;
 
         // Check columns: v1 schema has 6 cols, v2 has 12
         let has_v2_cols: bool = conn
@@ -246,7 +244,7 @@ impl CronStore {
     ) -> Result<Vec<StoredCronEntry>, CronStoreError> {
         let mut stmt = conn
             .prepare("SELECT id, agent_id, schedule, action, params FROM cron_entries")
-            .map_err(|e| CronStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            .map_err(|e| CronStoreError::Io(io::Error::other(e)))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(StoredCronEntry::simple(
@@ -257,7 +255,7 @@ impl CronStore {
                     &row.get::<_, String>(4)?,
                 ))
             })
-            .map_err(|e| CronStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            .map_err(|e| CronStoreError::Io(io::Error::other(e)))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -271,7 +269,7 @@ impl CronStore {
                         max_runs, run_count, expires_at
                  FROM cron_entries",
             )
-            .map_err(|e| CronStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            .map_err(|e| CronStoreError::Io(io::Error::other(e)))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(StoredCronEntry {
@@ -288,7 +286,7 @@ impl CronStore {
                     expires_at: row.get(10)?,
                 })
             })
-            .map_err(|e| CronStoreError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            .map_err(|e| CronStoreError::Io(io::Error::other(e)))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 }

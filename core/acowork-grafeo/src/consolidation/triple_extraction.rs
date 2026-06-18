@@ -10,6 +10,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Shared embedding function type used during triple extraction.
+type EmbeddingFn = Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -149,7 +152,7 @@ impl GrafeoStore {
         &self,
         episode_contents: &[(String, String)], // (episode_id, content)
         llm: &dyn TripleExtractorLlm,
-        embedding_fn: &Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>,
+        embedding_fn: &EmbeddingFn,
     ) -> Result<ExtractionResult> {
         if episode_contents.is_empty() {
             return Ok(ExtractionResult {
