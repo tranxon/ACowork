@@ -89,6 +89,10 @@ pub enum SessionMessage {
     SetWorkspacePromptFile { content: Option<String> },
     /// Update identity context from Gateway UserProfileUpdate push
     UpdateIdentityContext { identity_context: Option<String> },
+    /// Global provider list was updated (Gateway pushed new model capabilities).
+    /// Sessions should refresh state derived from model capabilities (reasoning_effort,
+    /// context window limits, etc.) and emit an updated status to the frontend.
+    ProviderListUpdated,
     /// Stop signal to stop the current agent loop iteration
     Stop { reason: String },
     /// Enable debug mode at runtime (after Gateway pushes EnableDebugMode).
@@ -191,6 +195,7 @@ impl std::fmt::Debug for SessionMessage {
                 .debug_struct("UpdateIdentityContext")
                 .field("has_identity", &identity_context.is_some())
                 .finish(),
+            SessionMessage::ProviderListUpdated => f.debug_struct("ProviderListUpdated").finish(),
             SessionMessage::Stop { reason } => {
                 f.debug_struct("Stop").field("reason", reason).finish()
             }
@@ -440,22 +445,6 @@ impl SessionTask {
             .session
             .history_mut()
             .set_protocol_type(protocol_type.clone());
-
-        // Initialize reasoning_effort from model capabilities default so the
-        // frontend status panel shows the correct initial value (not "None").
-        // This must run BEFORE emit_session_state so the first event already
-        // contains the correct value. Critical for resumed sessions where the
-        // JSONL metadata has model but no reasoning_effort persisted.
-        // If the model has no default, fall back to Medium (the Rust enum default).
-        if let Some(ref model) = agent_loop.session.model {
-            let default_effort = agent_loop
-                .core
-                .get_model_capabilities(model)
-                .and_then(|c| c.default_reasoning_effort)
-                .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s))
-                .unwrap_or_default();
-            agent_loop.session.set_reasoning_effort(Some(default_effort));
-        }
 
         // Emit initial session state snapshot so the frontend status panel shows
         // correct model, provider, reasoning_effort and temperature immediately
@@ -1141,6 +1130,21 @@ impl SessionTask {
                         "SessionTask: updating identity context"
                     );
                     context_builder.set_identity_context(identity_context.unwrap_or_default());
+                }
+                Some(SessionMessage::ProviderListUpdated) => {
+                    // Refresh reasoning_effort from the updated model capabilities.
+                    // This fixes the race where SessionTask started before the
+                    // initial provider list was pushed by Gateway.
+                    if let Some(ref model) = agent_loop.session.model {
+                        let default_effort = agent_loop
+                            .core
+                            .get_model_capabilities(model)
+                            .and_then(|c| c.default_reasoning_effort)
+                            .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s))
+                            .unwrap_or_default();
+                        agent_loop.session.set_reasoning_effort(Some(default_effort));
+                        agent_loop.emit_session_state();
+                    }
                 }
                 Some(SessionMessage::Stop { reason }) => {
                     tracing::info!(

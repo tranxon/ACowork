@@ -799,6 +799,11 @@ After installation, ask the user to re-enable the MCP server.",
             *list = provider_list;
         }
 
+        // Notify all active sessions to refresh state derived from model capabilities
+        // (reasoning_effort, context window limits, etc.). This handles the race where
+        // SessionTask started before the initial provider list was pushed by Gateway.
+        self.broadcast(SessionMessage::ProviderListUpdated);
+
         // Replace the shared key vault (in-memory only, never persisted).
         {
             let mut vault = self.core.provider_key_vault.write().unwrap();
