@@ -370,17 +370,6 @@ impl SessionTask {
             session.set_temperature(core_for_session.temperature_override);
         }
 
-        // Initialize reasoning_effort from model capabilities default so the
-        // frontend status panel shows the correct initial value (not "None").
-        // This matches the model switch behavior in the SessionMessage::ModelSwitch handler.
-        if let Some(ref model) = session.model {
-            let default_effort = core_for_session
-                .get_model_capabilities(model)
-                .and_then(|c| c.default_reasoning_effort)
-                .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s));
-            session.set_reasoning_effort(default_effort);
-        }
-
         // Set initial workspace directory for tool execution.
         if let Some(dir) = initial_work_dir {
             core_for_session.current_work_dir = Some(dir);
@@ -451,6 +440,20 @@ impl SessionTask {
             .session
             .history_mut()
             .set_protocol_type(protocol_type.clone());
+
+        // Initialize reasoning_effort from model capabilities default so the
+        // frontend status panel shows the correct initial value (not "None").
+        // This must run BEFORE emit_session_state so the first event already
+        // contains the correct value. Critical for resumed sessions where the
+        // JSONL metadata has model but no reasoning_effort persisted.
+        if let Some(ref model) = agent_loop.session.model {
+            let default_effort = agent_loop
+                .core
+                .get_model_capabilities(model)
+                .and_then(|c| c.default_reasoning_effort)
+                .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s));
+            agent_loop.session.set_reasoning_effort(default_effort);
+        }
 
         // Emit initial session state snapshot so the frontend status panel shows
         // correct model, provider, reasoning_effort and temperature immediately
