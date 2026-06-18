@@ -23,6 +23,7 @@ use crate::error::GatewayError;
 use crate::http::agent_config::{self, AgentConfigResponse, UpdateAgentConfigRequest};
 use crate::http::routes::{ApiError, AppState};
 use crate::lifecycle::process::is_process_alive;
+use crate::lifecycle::manager::SYSTEM_AGENT_ID;
 use acowork_core::AgentManifest;
 use acowork_core::protocol::GatewayResponse;
 use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
@@ -115,6 +116,12 @@ pub struct AgentListResponse {
     pub dev_mode: bool,
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
     pub debug_port: Option<u16>,
+    /// RFC3339 timestamp of the last user-driven interaction with this agent
+    /// (send_message / approval / question_answer / compact_context).
+    /// `None` for agents the user has never interacted with. Drives the
+    /// sidebar sort order: newest first within each running/stopped group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_interaction_at: Option<String>,
 }
 
 /// Agent detail response
@@ -164,10 +171,17 @@ pub struct AgentModelResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-/// `GET /api/agents` — list all installed agents
+/// `GET /api/agents` — list all installed agents.
+///
+/// Sort order (sidebar contract):
+/// 1. System agent (`com.acowork.system`) is always pinned to the top.
+/// 2. Running agents come before stopped agents.
+/// 3. Within each group, agents with `last_interaction_at` come first
+///    sorted newest-first; agents that have never been interacted with
+///    sink to the bottom of their group, ordered alphabetically by name.
 pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListResponse>> {
     let gw = state.gateway_state.read().await;
-    let agents: Vec<AgentListResponse> = gw
+    let mut agents: Vec<AgentListResponse> = gw
         .installed_agents
         .values()
         .map(|info| {
@@ -178,6 +192,9 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 .unwrap_or(false);
             let connected = running_info.map(|r| r.connected).unwrap_or(false);
             let ready = running_info.map(|r| r.ready).unwrap_or(false);
+            let last_interaction_at = gw
+                .get_interaction(&info.agent_id)
+                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
@@ -191,6 +208,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 ready,
                 dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
                 debug_port: running_info.and_then(|r| r.debug_port),
+                last_interaction_at,
             }
         })
         .collect();
@@ -203,7 +221,41 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             sr.connected
         );
     }
+    drop(gw);
+    sort_agent_list(&mut agents);
     Json(agents)
+}
+
+/// Stable sidebar sort. See [`list_agents`] docstring for ordering rules.
+fn sort_agent_list(agents: &mut [AgentListResponse]) {
+    agents.sort_by(|a, b| {
+        // 1) System agent always first.
+        let a_sys = a.agent_id == SYSTEM_AGENT_ID;
+        let b_sys = b.agent_id == SYSTEM_AGENT_ID;
+        if a_sys != b_sys {
+            return if a_sys {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
+        // 2) Running group above stopped group.
+        if a.running != b.running {
+            return if a.running {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
+        // 3) Within a group: by last_interaction_at DESC; None last;
+        //    fall back to name for stable, predictable ordering.
+        match (&a.last_interaction_at, &b.last_interaction_at) {
+            (Some(ta), Some(tb)) => tb.cmp(ta),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
 }
 
 /// `GET /api/agents/:id` — get agent detail
@@ -1890,11 +1942,14 @@ mod tests {
             ready: false,
             dev_mode: false,
             debug_port: None,
+            last_interaction_at: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));
         assert!(json.contains("Weather Agent"));
         assert!(json.contains("icon-05"));
+        // last_interaction_at is None and skipped on serialization.
+        assert!(!json.contains("last_interaction_at"));
     }
 
     #[test]
@@ -1924,5 +1979,98 @@ mod tests {
         assert!(!is_plausible_builtin_avatar_id(""));
         assert!(!is_plausible_builtin_avatar_id("0"));
         assert!(!is_plausible_builtin_avatar_id("100"));
+    }
+
+    fn entry(id: &str, name: &str, running: bool, ts: Option<&str>) -> AgentListResponse {
+        AgentListResponse {
+            agent_id: id.to_string(),
+            name: name.to_string(),
+            display_name: None,
+            role: None,
+            avatar: None,
+            builtin_avatar: None,
+            version: "1.0.0".to_string(),
+            running,
+            connected: false,
+            ready: false,
+            dev_mode: false,
+            debug_port: None,
+            last_interaction_at: ts.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn sort_pins_system_agent_first() {
+        let mut list = vec![
+            entry("com.acowork.alice", "Alice", true, None),
+            entry("com.acowork.system", "System", false, None),
+            entry("com.acowork.bob", "Bob", true, Some("2026-06-18T00:00:00Z")),
+        ];
+        sort_agent_list(&mut list);
+        assert_eq!(list[0].agent_id, "com.acowork.system");
+    }
+
+    #[test]
+    fn sort_groups_running_before_stopped() {
+        let mut list = vec![
+            entry("com.acowork.stopped1", "Stopped 1", false, Some("2026-06-18T10:00:00Z")),
+            entry("com.acowork.running1", "Running 1", true, None),
+            entry("com.acowork.stopped2", "Stopped 2", false, None),
+            entry("com.acowork.running2", "Running 2", true, Some("2026-06-18T09:00:00Z")),
+        ];
+        sort_agent_list(&mut list);
+        let order: Vec<&str> = list.iter().map(|a| a.agent_id.as_str()).collect();
+        // Running group first, within group time-bearing agents come before None ones;
+        // same rule for the stopped group.
+        assert_eq!(
+            order,
+            vec![
+                "com.acowork.running2",  // running, has time
+                "com.acowork.running1",  // running, no time (last in running group)
+                "com.acowork.stopped1",  // stopped, has time
+                "com.acowork.stopped2",  // stopped, no time (last overall)
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_orders_within_group_by_recency_then_name() {
+        let mut list = vec![
+            entry("com.acowork.zzz", "Zzz", true, None),
+            entry("com.acowork.aaa", "Aaa", true, None),
+            entry("com.acowork.bbb", "Bbb", true, Some("2026-06-18T01:00:00Z")),
+            entry("com.acowork.ccc", "Ccc", true, Some("2026-06-18T05:00:00Z")),
+        ];
+        sort_agent_list(&mut list);
+        let order: Vec<&str> = list.iter().map(|a| a.agent_id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "com.acowork.ccc", // 05:00 (newest)
+                "com.acowork.bbb", // 01:00
+                "com.acowork.aaa", // None, name Aaa first
+                "com.acowork.zzz", // None, name Zzz
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_falls_back_to_name_when_all_none() {
+        let mut list = vec![
+            entry("com.acowork.zzz", "Zzz", true, None),
+            entry("com.acowork.aaa", "Aaa", true, None),
+            entry("com.acowork.mmm", "Mmm", false, None),
+        ];
+        sort_agent_list(&mut list);
+        let order: Vec<&str> = list.iter().map(|a| a.agent_id.as_str()).collect();
+        // running group first (alphabetical), then stopped group
+        assert_eq!(
+            order,
+            vec![
+                "com.acowork.aaa",
+                "com.acowork.zzz",
+                "com.acowork.mmm",
+            ]
+        );
     }
 }

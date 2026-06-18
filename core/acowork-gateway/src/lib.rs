@@ -12,6 +12,7 @@ pub mod gateway;
 pub mod grpc;
 pub mod http;
 pub mod intent;
+pub mod interaction_store;
 pub mod ipc;
 pub mod lifecycle;
 pub mod lsp;

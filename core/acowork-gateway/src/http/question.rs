@@ -92,6 +92,12 @@ async fn handle_question_answer(
                 request_id = %request_id,
                 "Pushed question_answer to Runtime"
             );
+            // Record user interaction for /api/agents sort order.
+            state
+                .gateway_state
+                .write()
+                .await
+                .touch_interaction(&agent_id, chrono::Utc::now());
         } else {
             tracing::warn!(
                 agent_id = %agent_id,

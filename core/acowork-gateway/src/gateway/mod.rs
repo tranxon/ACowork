@@ -12,6 +12,7 @@ use crate::config::GatewayConfig;
 use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
+use crate::interaction_store::InteractionStore;
 use crate::ipc::global_push::GlobalResourcePusher;
 use crate::ipc::server::SharedState;
 use crate::lifecycle::manager::LifecycleManager;
@@ -50,9 +51,17 @@ impl Gateway {
         let grpc_addr = crate::grpc::server::default_grpc_addr();
         let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
 
+        // Wire up the per-agent interaction store. Keys are agent_id, so the
+        // timestamps survive agent stop/restart. Loaded eagerly so the
+        // /api/agents sort order is correct from the first request.
+        let interaction_store = InteractionStore::new(std::path::Path::new(&data_dir));
+        let mut state = GatewayState::new(&vault_dir);
+        state.interaction_store = Some(interaction_store.clone());
+        state.last_interactions = interaction_store.load();
+
         Ok(Self {
             config,
-            state: GatewayState::new(&vault_dir),
+            state,
             lifecycle: LifecycleManager::new(
                 idle_timeout,
                 gateway_grpc_endpoint,

@@ -103,6 +103,12 @@ async fn handle_approval(
                     allow_all_session,
                     "Pushed approval_decision to Runtime"
                 );
+                // Record user interaction for /api/agents sort order.
+                state
+                    .gateway_state
+                    .write()
+                    .await
+                    .touch_interaction(&agent_id, chrono::Utc::now());
             }
         } else {
             tracing::warn!(

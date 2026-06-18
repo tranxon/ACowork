@@ -4,10 +4,12 @@ use crate::budget::tracker::BudgetTracker;
 use crate::capability::registry::CapabilityRegistry;
 use crate::cron::CronScheduler;
 use crate::cron::store::CronStore;
+use crate::interaction_store::InteractionStore;
 use crate::lifecycle::embed::EmbedProcessState;
 use crate::rate::bucket::RateLimiter;
 use crate::resource_cache::ResourceCache;
 use crate::vault::VaultFacade;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 /// Information about an installed agent
@@ -69,6 +71,15 @@ pub struct GatewayState {
     pub resource_cache: ResourceCache,
     /// Embedding service process state (None if not started).
     pub embed_process: Option<EmbedProcessState>,
+    /// Last user-interaction timestamp per agent (`agent_id` -> UTC time).
+    /// In-memory mirror of the on-disk interaction store; source of truth
+    /// for the `GET /api/agents` sort order. Persists across agent
+    /// stop/restart because the key is the install id, not a run-instance.
+    pub last_interactions: HashMap<String, DateTime<Utc>>,
+    /// Disk-backed persistence for `last_interactions`. `None` means
+    /// in-memory only (tests, package-manager helpers). `Some` in the
+    /// real Gateway after `Gateway::run` initialises it from `data_dir`.
+    pub interaction_store: Option<InteractionStore>,
 }
 
 impl GatewayState {
@@ -87,6 +98,8 @@ impl GatewayState {
             ipc_sessions: None,
             resource_cache: ResourceCache::default(),
             embed_process: None,
+            last_interactions: HashMap::new(),
+            interaction_store: None,
         }
     }
 
@@ -175,6 +188,28 @@ impl GatewayState {
     /// Set rate limiter
     pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
         self.rate_limiter = Some(limiter);
+    }
+
+    /// Record a user-driven interaction for `agent_id` and persist
+    /// if a disk-backed store is attached. Best-effort: a save failure
+    /// is logged but does not propagate, so callers (HTTP handlers)
+    /// stay non-blocking on persistence hiccups.
+    pub fn touch_interaction(&mut self, agent_id: &str, when: DateTime<Utc>) {
+        self.last_interactions.insert(agent_id.to_string(), when);
+        if let Some(store) = &self.interaction_store
+            && let Err(e) = store.save(&self.last_interactions)
+        {
+            tracing::warn!(
+                error = %e,
+                agent_id,
+                "Failed to persist interaction store; in-memory state updated"
+            );
+        }
+    }
+
+    /// Look up the last user-interaction timestamp for `agent_id`.
+    pub fn get_interaction(&self, agent_id: &str) -> Option<DateTime<Utc>> {
+        self.last_interactions.get(agent_id).copied()
     }
 }
 

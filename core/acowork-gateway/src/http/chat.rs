@@ -281,6 +281,13 @@ pub async fn send_message(
                 );
                 return Err(ApiError::internal("Failed to deliver message to agent"));
             }
+            // Record user interaction so /api/agents sort can bubble this
+            // agent toward the top of the sidebar.
+            state
+                .gateway_state
+                .write()
+                .await
+                .touch_interaction(&agent_id, chrono::Utc::now());
         } else {
             tracing::warn!("Agent {} is running but has no IPC session", agent_id);
             return Err(ApiError::service_unavailable(&format!(
@@ -790,6 +797,12 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
         }
 
         if pushed_ok {
+            // Record user interaction for /api/agents sort order.
+            state
+                .gateway_state
+                .write()
+                .await
+                .touch_interaction(agent_id, chrono::Utc::now());
             let ack = serde_json::json!({
                 "type": "ack",
                 "agentId": agent_id,
@@ -886,6 +899,14 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
         let _ = socket.send(Message::Text(err.to_string().into())).await;
         return;
     }
+
+    // Record user interaction so /api/agents sort can bubble this agent
+    // toward the top of the sidebar.
+    state
+        .gateway_state
+        .write()
+        .await
+        .touch_interaction(agent_id, chrono::Utc::now());
 
     // Acknowledge message received — the actual Agent response
     // (chunk/tool_call/tool_result/done) will arrive via bridge_rx.

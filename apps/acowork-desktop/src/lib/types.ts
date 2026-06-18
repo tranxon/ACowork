@@ -60,6 +60,14 @@ export interface AgentInfo {
   ready: boolean;
   dev_mode: boolean;
   debug_port?: number;
+  /**
+   * RFC3339 timestamp of the last user-driven interaction with this agent
+   * (send_message / approval / question_answer / compact_context). Undefined
+   * for agents the user has never interacted with. The Gateway already
+   * returns agents in the canonical sidebar order; this field is exposed
+   * for tooltips and future "last active" UI affordances.
+   */
+  last_interaction_at?: string | null;
 }
 
 /** Agent detail response */
