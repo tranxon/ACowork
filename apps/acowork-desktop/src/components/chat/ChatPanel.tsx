@@ -543,25 +543,20 @@ export function ChatPanel() {
     thinkingWasShowingRef.current = showThinkingItem;
   }, [messages, virtualCount, virtualizer, selectedAgentId, currentSessionId, showThinkingItem]);
 
-  // Sticky-bottom: when the virtualizer re-measures a bottom item
-  // (e.g. thinking block content streams in), the scroll position drifts
-  // above the true bottom because the jump used estimateSize.  A
-  // ResizeObserver catches every height change and re-pins if the user
-  // was already near the bottom.
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    let prevHeight = container.scrollHeight;
-    const observer = new ResizeObserver(() => {
-      const newHeight = container.scrollHeight;
-      if (newHeight > prevHeight && pinnedToBottomRef.current) {
-        virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-      }
-      prevHeight = newHeight;
-    });
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, [virtualCount, virtualizer]);
+  // Sticky-bottom: when the virtualizer re-measures a bottom item (e.g.
+  // thinking block content streams in), the scroll position drifts above
+  // the true bottom because the initial jump used estimateSize.
+  //
+  // Watching virtualizer.getTotalSize() catches every re-measurement —
+  // useVirtualizer tracks measurements in React state, so getTotalSize()
+  // returns a new value after recalculation, triggering this effect before
+  // the next paint.
+  const totalSize = virtualizer.getTotalSize();
+  useLayoutEffect(() => {
+    if (pinnedToBottomRef.current && virtualCount > 0) {
+      virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+    }
+  }, [totalSize, virtualCount, virtualizer]);
 
   const scrollToBottom = useCallback(() => {
     pinnedToBottomRef.current = true;
