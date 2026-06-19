@@ -600,17 +600,34 @@ body {
   color: hsl(240 5% 75%);
 }
 
-/* Tables — clear borders and cell dividers */
+/* Tables — clear borders, rounded corners, cell dividers */
 .prose table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: 0.375rem;
+  overflow: hidden;
   width: 100%;
-  border: 1px solid var(--tw-prose-td-borders);
+  border-left: 1px solid var(--tw-prose-td-borders);
+  border-top: 1px solid var(--tw-prose-td-borders);
 }
 
 .prose th,
 .prose td {
-  border: 1px solid var(--tw-prose-td-borders);
+  border-right: 1px solid var(--tw-prose-td-borders);
+  border-bottom: 1px solid var(--tw-prose-td-borders);
   padding: 0.5em 0.75em;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.prose th:last-child,
+.prose td:last-child {
+  border-right: none;
+}
+
+.prose tr:last-child th,
+.prose tr:last-child td {
+  border-bottom: none;
 }
 
 .prose th {

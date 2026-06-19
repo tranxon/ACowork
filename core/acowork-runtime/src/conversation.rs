@@ -120,6 +120,25 @@ pub struct SessionMetadata {
     /// `None` means not set (use agent config or global default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Last reported `prompt_tokens` from an LLM API response.
+    ///
+    /// Persisted so the frontend can render the context-usage indicator
+    /// immediately on session resume, before any new LLM call has provided
+    /// fresh `usage`. `None` for sessions that have not yet completed an
+    /// LLM round, or for sessions written before this field was added.
+    ///
+    /// Only the raw value is stored; `usable_context`, `usage_percent`, and
+    /// `context_window` are *not* persisted because they are model-derived
+    /// and become stale on model switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_tokens: Option<u64>,
+    /// Last reported `completion_tokens` from an LLM API response.
+    ///
+    /// Persisted alongside `last_input_tokens` purely for UI continuity on
+    /// resume (so the "output tokens" stat does not visually reset to 0).
+    /// Not used in any window-budget decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_tokens: Option<u64>,
 }
 
 /// Commands sent to the background writer thread.
@@ -273,6 +292,11 @@ pub struct ConversationSession {
     reasoning_effort: std::sync::Mutex<Option<String>>,
     /// Per-session temperature override, persisted in JSONL metadata.
     temperature: std::sync::Mutex<Option<f32>>,
+    /// Last observed (input_tokens, output_tokens) from an LLM response.
+    /// Persisted into JSONL metadata so the UI can restore the
+    /// "context usage" indicator after a session resume.
+    /// `None` means no LLM call has been made (or persisted) yet.
+    last_tokens: std::sync::Mutex<Option<(u64, u64)>>,
     sender: mpsc::UnboundedSender<WriterCommand>,
     /// Path to the JSONL file (for session-level distillation on close).
     session_file_path: PathBuf,
@@ -312,6 +336,8 @@ impl ConversationSession {
             provider: config.provider.clone(),
             reasoning_effort: None,
             temperature: None,
+            last_input_tokens: None,
+            last_output_tokens: None,
         };
 
         // Write metadata as the first line — build complete line then single write
@@ -336,6 +362,7 @@ impl ConversationSession {
             provider: std::sync::Mutex::new(config.provider),
             reasoning_effort: std::sync::Mutex::new(None),
             temperature: std::sync::Mutex::new(None),
+            last_tokens: std::sync::Mutex::new(None),
             sender: tx,
             session_file_path: file_path,
         })
@@ -372,6 +399,14 @@ impl ConversationSession {
             provider: std::sync::Mutex::new(meta.provider.clone()),
             reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort.clone()),
             temperature: std::sync::Mutex::new(meta.temperature),
+            last_tokens: std::sync::Mutex::new(
+                match (meta.last_input_tokens, meta.last_output_tokens) {
+                    (Some(i), Some(o)) => Some((i, o)),
+                    (Some(i), None) => Some((i, 0)),
+                    (None, Some(o)) => Some((0, o)),
+                    (None, None) => None,
+                },
+            ),
             sender: tx,
             session_file_path: file_path,
         })
@@ -508,6 +543,8 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
+            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -554,6 +591,8 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
+            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -592,6 +631,8 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
+            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -646,6 +687,8 @@ impl ConversationSession {
             provider: provider.map(|s| s.to_string()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
+            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -684,6 +727,8 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: effort,
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
+            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -718,12 +763,58 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature,
+            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
+            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
         };
         self.update_metadata(metadata);
         tracing::info!(
             session_id = %self.session_id,
             "Session temperature persisted to JSONL"
         );
+    }
+
+    /// Return the last persisted (input_tokens, output_tokens) pair, if any.
+    ///
+    /// Used on resume to seed the frontend "context usage" indicator with
+    /// the same `prompt_tokens`/`completion_tokens` that the most recent LLM
+    /// response reported. Window-derived fields (`context_window`,
+    /// `usable_context`, `usage_percent`) are recomputed at resume time
+    /// from the *current* model capabilities — this getter only returns the
+    /// raw API-fact values.
+    pub fn last_tokens(&self) -> Option<(u64, u64)> {
+        self.last_tokens.lock().ok().and_then(|t| *t)
+    }
+
+    /// Persist the most recent LLM `usage` (input/output tokens) to JSONL
+    /// metadata so the context-usage indicator survives a session resume.
+    ///
+    /// Called from the agent loop right after a `ContextUsage` chunk is
+    /// emitted. Cheap (single metadata rewrite, debounced by the writer
+    /// thread) but still optional — failure is non-fatal.
+    pub fn update_last_tokens(&self, input_tokens: u64, output_tokens: u64) {
+        if let Ok(mut t) = self.last_tokens.lock() {
+            *t = Some((input_tokens, output_tokens));
+        }
+        let metadata = SessionMetadata {
+            version: CONVERSATION_FORMAT_VERSION,
+            session_id: self.session_id.clone(),
+            created_at: self.created_at.clone(),
+            agent_id: self.agent_id.clone(),
+            title: self.current_title.lock().ok().and_then(|t| t.clone()),
+            updated_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            message_count: None,
+            corrupted: false,
+            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
+            model: self.model.lock().ok().and_then(|m| m.clone()),
+            provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
+            last_input_tokens: Some(input_tokens),
+            last_output_tokens: Some(output_tokens),
+        };
+        self.update_metadata(metadata);
     }
 }
 
@@ -1055,6 +1146,8 @@ pub fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                last_input_tokens: None,
+                last_output_tokens: None,
             })
         }
     }
@@ -1324,6 +1417,8 @@ mod tests {
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                last_input_tokens: None,
+                last_output_tokens: None,
             };
             let mut file = std::fs::File::create(&path).unwrap();
             serde_json::to_writer(&mut file, &meta).unwrap();
@@ -1360,6 +1455,8 @@ mod tests {
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                last_input_tokens: None,
+                last_output_tokens: None,
             };
             serde_json::to_writer(&mut file, &meta).unwrap();
             writeln!(file).unwrap();
@@ -1562,6 +1659,8 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            last_input_tokens: None,
+            last_output_tokens: None,
         };
         let mut file = std::fs::File::create(&file_path).unwrap();
         serde_json::to_writer(&mut file, &meta).unwrap();
@@ -1599,6 +1698,8 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            last_input_tokens: None,
+            last_output_tokens: None,
         };
         let mut file = std::fs::File::create(&valid_path).unwrap();
         serde_json::to_writer(&mut file, &valid_meta).unwrap();
@@ -1644,5 +1745,43 @@ mod tests {
             "Missing 'corrupted' field should default to false"
         );
         assert_eq!(meta.session_id, "test");
+    }
+
+    #[test]
+    fn test_session_metadata_last_tokens_roundtrip() {
+        // Full round-trip: serialize with last tokens, deserialize, verify
+        let meta = SessionMetadata {
+            version: 2,
+            session_id: "roundtrip_test".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            agent_id: "com.test".to_string(),
+            title: Some("Test session".to_string()),
+            updated_at: None,
+            message_count: Some(5),
+            corrupted: false,
+            workspace_id: None,
+            model: Some("gpt-4".to_string()),
+            provider: Some("openai".to_string()),
+            reasoning_effort: None,
+            temperature: Some(0.7),
+            last_input_tokens: Some(45_000),
+            last_output_tokens: Some(1_200),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: SessionMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.last_input_tokens, Some(45_000));
+        assert_eq!(parsed.last_output_tokens, Some(1_200));
+        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.model.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn test_session_metadata_last_tokens_missing_defaults_to_none() {
+        // Old JSON without last_input_tokens / last_output_tokens.
+        // These fields have serde(default), so they must deserialize to None.
+        let old_json = r#"{"version":1,"session_id":"old","created_at":"2026-01-01T00:00:00Z","agent_id":"com.test","title":null,"updated_at":null,"message_count":0}"#;
+        let meta: SessionMetadata = serde_json::from_str(old_json).unwrap();
+        assert_eq!(meta.last_input_tokens, None, "should default to None");
+        assert_eq!(meta.last_output_tokens, None, "should default to None");
     }
 }

@@ -598,6 +598,18 @@ impl AgentLoop {
                     usage_percent = ctx_usage.usage_percent,
                     "ContextUsage: sending report"
                 );
+
+                // Persist the raw usage counts so the frontend context-usage
+                // indicator can be restored on session resume (loop-emit).
+                // Must happen BEFORE try_send_chunk moves ctx_usage, and uses
+                // ctx_usage.{input_tokens,output_tokens} (not usage.*) so the
+                // persisted value always matches what the frontend receives —
+                // even when prompt_tokens_reliable=false and input_tokens
+                // falls back to the local char-based estimate.
+                if let Some(ref conv) = self.session.conversation {
+                    conv.update_last_tokens(ctx_usage.input_tokens, ctx_usage.output_tokens);
+                }
+
                 if !self
                     .core
                     .try_send_chunk(ChunkEvent::ContextUsage(ctx_usage))

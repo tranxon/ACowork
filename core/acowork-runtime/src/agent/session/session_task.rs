@@ -466,6 +466,39 @@ impl SessionTask {
         // for reasoning_effort and hide the thinking level control.
         agent_loop.emit_session_state();
 
+        // Emit initial context-usage indicator for resumed sessions so the
+        // frontend can show input/output token counts without waiting for
+        // the first LLM round. Only fires when persisted last_tokens exist
+        // and model capabilities are available.
+        if let Some(ref conv) = agent_loop.session.conversation {
+            if let Some((input, output)) = conv.last_tokens() {
+                let model_name = agent_loop
+                    .session
+                    .model
+                    .as_deref()
+                    .unwrap_or("unknown");
+                if let Some(caps) = agent_loop.core.get_model_capabilities(model_name) {
+                    let max_output = agent_loop
+                        .core
+                        .max_output_tokens_limit_for_model(model_name);
+                    let ctx = crate::agent::context::build_context_usage_from_persisted(
+                        &caps,
+                        input,
+                        output,
+                        max_output,
+                    );
+                    if let Some(ref tx) = chunk_tx {
+                        let _ = tx
+                            .send(SessionChunkEvent {
+                                session_id: session_id.clone(),
+                                event: ChunkEvent::ContextUsage(ctx),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+
         // Saved user message for debug resume re-execution.
         // When the user presses resume after the agent loop has exited
         // (e.g. after rewind was issued post-completion), SessionTask

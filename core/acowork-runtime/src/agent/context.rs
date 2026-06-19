@@ -708,6 +708,64 @@ mod tests {
         let request = builder.build(&manifest, &history, None, 32_768);
         assert!(request.messages[0].content.contains("Alice"));
     }
+
+    /// Helper: build a simple ModelCapabilitiesInfo for testing.
+    fn test_caps(context_window: u64, max_output_tokens: u64) -> ModelCapabilitiesInfo {
+        ModelCapabilitiesInfo {
+            context_window,
+            max_output_tokens,
+            max_input_tokens: None,
+            supports_tool_calling: true,
+            supports_reasoning: None,
+            supports_attachment: None,
+            supports_temperature: None,
+            cost: None,
+            modalities: None,
+            name: None,
+            family: None,
+            knowledge_cutoff: None,
+            default_reasoning_effort: None,
+            thinking_mode: None,
+        }
+    }
+
+    #[test]
+    fn test_build_context_usage_from_persisted_matches_compute() {
+        let caps = test_caps(128_000, 16_384);
+        let max_output_limit = 32_768u64;
+
+        // Via compute_context_usage with real UsageInfo
+        let usage = acowork_core::providers::traits::UsageInfo {
+            prompt_tokens: 45_000,
+            completion_tokens: 1_200,
+            total_tokens: 46_200,
+            ..Default::default()
+        };
+        let fresh = compute_context_usage(&caps, &usage, max_output_limit);
+
+        // Via build_context_usage_from_persisted with same numbers
+        let persisted =
+            build_context_usage_from_persisted(&caps, 45_000, 1_200, max_output_limit);
+
+        assert_eq!(fresh.context_window, persisted.context_window);
+        assert_eq!(fresh.input_tokens, persisted.input_tokens);
+        assert_eq!(fresh.output_tokens, persisted.output_tokens);
+        assert_eq!(fresh.total_tokens, persisted.total_tokens);
+        assert_eq!(fresh.max_input_tokens, persisted.max_input_tokens);
+        assert_eq!(fresh.usable_context, persisted.usable_context);
+        assert_eq!(fresh.usage_percent, persisted.usage_percent);
+    }
+
+    #[test]
+    fn test_build_context_usage_from_persisted_zero_tokens() {
+        // New session with no token data yet → should produce 0 input/output
+        let caps = test_caps(200_000, 8_192);
+        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768);
+        assert_eq!(info.input_tokens, 0);
+        assert_eq!(info.output_tokens, 0);
+        assert_eq!(info.total_tokens, 0);
+        assert_eq!(info.usage_percent, 0);
+    }
 }
 
 /// Compute the total character count of a ChatRequest for token ratio calibration.
@@ -781,4 +839,29 @@ pub fn compute_context_usage(
         usable_context: usable,
         usage_percent: percent,
     }
+}
+
+/// Build a [`ContextUsageInfo`] from persisted last-token counts.
+///
+/// This produces the same structure as [`compute_context_usage`] but from
+/// the raw `last_input_tokens` / `last_output_tokens` values stored in
+/// JSONL metadata, filling zero for cache/reasoning breakdown fields.
+///
+/// Callers must supply the *current* [`ModelCapabilitiesInfo`] because
+/// window-derived fields (`context_window`, `usable_context`, `usage_percent`)
+/// are model-dependent and become stale if the user switched models between
+/// sessions.
+pub fn build_context_usage_from_persisted(
+    caps: &ModelCapabilitiesInfo,
+    last_input_tokens: u64,
+    last_output_tokens: u64,
+    max_output_tokens_limit: u64,
+) -> acowork_core::protocol::ContextUsageInfo {
+    let usage = acowork_core::providers::traits::UsageInfo {
+        prompt_tokens: last_input_tokens,
+        completion_tokens: last_output_tokens,
+        total_tokens: last_input_tokens + last_output_tokens,
+        ..Default::default()
+    };
+    compute_context_usage(caps, &usage, max_output_tokens_limit)
 }
