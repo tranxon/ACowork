@@ -18,7 +18,7 @@ import { emitAgentConfigRefresh } from "../../lib/refresh";
 import { syncAgentUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
-import { Bot, Play, Send, ChevronDown, ChevronRight, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, Wrench, AlertTriangle, X, Square, Copy, Plus, RefreshCw, Cpu, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry, ModelInfo, ModelEntry, ModelCapabilitiesMap } from "../../lib/types";
@@ -141,6 +141,7 @@ export function ChatPanel() {
   const [imageCapableModels, setImageCapableModels] = useState<ModelEntry[]>([]);
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
   const [todosCollapsed, setTodosCollapsed] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   // Auto-collapse todo list when all tasks are completed
   useEffect(() => {
@@ -158,6 +159,14 @@ export function ChatPanel() {
   const initAbortedRef = useRef(false);
   /** Tracks previous running state to detect genuine agent stop vs transient remount. */
   const wasRunningRef = useRef(false);
+  /** True immediately after the user sends a message — used to force-scroll to
+   *  bottom (jump, not smooth) in the next useLayoutEffect, even when the user
+   *  had scrolled far up into history. */
+  const userJustSentRef = useRef(false);
+  /** Tracks whether the thinking indicator was visible in the previous render.
+   *  When it transitions from false → true (first appearance in a turn),
+   *  we force-scroll to bottom so the expanded thinking content is visible. */
+  const thinkingWasShowingRef = useRef(false);
   /** True only during the first useEffect run of this mount. */
   const justMountedRef = useRef(true);
 
@@ -503,21 +512,43 @@ export function ChatPanel() {
 
     if (virtualCount > 0) {
       if (prevCount === 0) {
-        // Agent switch or initial load: jump to bottom instantly (before paint)
+         // Agent switch or initial load: jump to bottom instantly (before paint)
         virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
       } else if (virtualCount > prevCount) {
-        // New message arrived or thinking indicator appeared: smooth scroll to bottom
-        virtualizer.scrollToIndex(virtualCount - 1, { align: "end", behavior: "smooth" });
+        // New message arrived or thinking indicator appeared
+        if (userJustSentRef.current) {
+          // User just sent — jump to bottom so they see the response immediately,
+          // even if they had scrolled far up into history.
+          userJustSentRef.current = false;
+          virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+        } else if (!thinkingWasShowingRef.current && showThinkingItem) {
+          // Thinking block first appeared in this turn — jump to bottom so
+          // the expanded content is visible without manual scrolling.
+          virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+        } else {
+          // Auto-generated (streaming chunk, thinking toggle, etc.) — smooth scroll
+          virtualizer.scrollToIndex(virtualCount - 1, { align: "end", behavior: "smooth" });
+        }
       }
     }
 
     prevDisplayCountRef.current = virtualCount;
+    thinkingWasShowingRef.current = showThinkingItem;
   }, [messages, virtualCount, virtualizer, selectedAgentId, currentSessionId, showThinkingItem]);
 
-  // Scroll handler: load more messages when scrolled to top
+  const scrollToBottom = useCallback(() => {
+    virtualizer.scrollToIndex(virtualCount - 1, { align: "end", behavior: "smooth" });
+  }, [virtualizer, virtualCount]);
+
+  // Scroll handler: load more messages when scrolled to top,
+  // and show/hide the "scroll to bottom" button.
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container || !selectedAgentId) return;
+
+    // ── Scroll-to-bottom button visibility ──
+    const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    setShowScrollToBottom(distFromBottom > container.clientHeight);
 
     const { isLoadingMore } = useChatStore.getState();
     const agent = useChatStore.getState().agentStates[selectedAgentId];
@@ -569,6 +600,7 @@ export function ChatPanel() {
 
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
+    userJustSentRef.current = true;
     void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined, documents.length > 0 ? documents : undefined, imageParts.length > 0 ? imageParts : undefined).then(() => {
       clearActiveSkill();
     });
@@ -589,6 +621,7 @@ export function ChatPanel() {
       setInputValue("");
     } else if (queuedMessages.length > 0 && selectedAgentId) {
       // Click with queued messages: send all queued + stop current loop.
+      userJustSentRef.current = true;
       for (const msg of queuedMessages) {
         void sendMessage(msg, selectedAgentId, activeSkill?.name).then(() => {
           clearActiveSkill();
@@ -1071,6 +1104,7 @@ export function ChatPanel() {
                 <button
                   onClick={() => {
                     if (selectedAgentId) {
+                      userJustSentRef.current = true;
                       continueExecution(selectedAgentId);
                     }
                   }}
@@ -1095,6 +1129,16 @@ export function ChatPanel() {
             )}
             <div ref={messagesEndRef} />
           </div>
+          {/* Scroll-to-bottom button — visible when scrolled up > 1 screen */}
+          {showScrollToBottom && (
+            <button
+              onClick={scrollToBottom}
+              className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              aria-label="Scroll to bottom"
+            >
+              <ChevronsDown className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+            </button>
+          )}
         </div>
 
         {/* Todo list box — above the message queue, same collapsible style.
