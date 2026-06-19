@@ -434,7 +434,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               {sessionProvider && (
                 <StatRow label="Provider" value={sessionProvider} />
               )}
-              <StatRow label="Ch/Token" value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
+              <StatRow label="Characters/Token" value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
               {reasoningEffort != null && (
                 <StatRow label="Thinking Level" value={reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1)} />
               )}
