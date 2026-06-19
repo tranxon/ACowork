@@ -20,6 +20,7 @@ import { HarnessPage } from "../harness/HarnessPage";
 import { useChatStore } from "../../stores/chatStore";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
+import { Bot, MessagesSquare, Cpu } from "lucide-react";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -497,19 +498,22 @@ export function AppLayout() {
         )}
         {(resultsCollapsed || activeTab !== "status") && selectedAgent?.running && agentDisplayName && (
           <span className="flex items-center gap-[22px] truncate">
-            <span className="pl-1">
+            <span className="flex items-center gap-1 pl-1">
+              <Bot className="h-3 w-3 text-zinc-500 dark:text-zinc-500" aria-hidden="true" />
               <span className="text-zinc-500 dark:text-zinc-500">{t("statusBar.agent")}: </span>
               <span className="font-medium text-zinc-500 dark:text-zinc-400">{agentDisplayName}</span>
             </span>
-            <span>
+            <span className="flex items-center gap-1">
+              <MessagesSquare className="h-3 w-3 text-zinc-500 dark:text-zinc-500" aria-hidden="true" />
               <span className="text-zinc-500 dark:text-zinc-500">{t("statusBar.sessions")}: </span>
-              <span className="font-mono text-zinc-500 dark:text-zinc-400">{openSessionCount}</span>
+              <span className="tabular-nums text-zinc-500 dark:text-zinc-400">{openSessionCount}</span>
             </span>
             {contextUsage && (
-              <span>
+              <span className="flex items-center gap-1">
+                <Cpu className="h-3 w-3 text-zinc-500 dark:text-zinc-500" aria-hidden="true" />
                 <span className="text-zinc-500 dark:text-zinc-500">{t("statusBar.context")}: </span>
                 <span
-                  className="font-mono text-zinc-500 dark:text-zinc-400"
+                  className="tabular-nums text-zinc-500 dark:text-zinc-400"
                   style={{
                     color:
                       contextUsage.usage_percent >= 90
@@ -520,7 +524,7 @@ export function AppLayout() {
                   {contextUsage.usage_percent}%
                 </span>
                 <span className="text-zinc-400 dark:text-zinc-500"> | </span>
-                <span className="font-mono text-zinc-500 dark:text-zinc-400">
+                <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
                   {formatTokenCount(contextUsage.total_tokens)}/{formatTokenCount(contextUsage.context_window)}
                 </span>
               </span>

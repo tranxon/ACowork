@@ -34,6 +34,7 @@ message ClientMessage {
     MemoryDeleteResult      memory_delete_result   = 23;
     ConfigSnapshot          config_snapshot       = 35;
     UpdateWorkspaceConfig   update_workspace_config = 36;
+    SessionStateResult      session_state_result  = 37;
   }
 }
 
@@ -74,6 +75,7 @@ message ServerMessage {
     QueryConfig             query_config          = 33;
     WorkspaceConfigUpdate   workspace_config_update = 34;
     SetSessionWorkspace     set_session_workspace  = 35;
+    GetSessionStateQuery    get_session_state_query = 42;
     SearchConfigDelivery    search_config_delivery = 36;
     UpdateSearchConfig      update_search_config = 37;
     UserProfileUpdate       user_profile_update  = 38;
@@ -326,4 +328,40 @@ message MemoryDeleteResult {
 message EnableDebugMode {
   /// Debug WebSocket port (allocated by Gateway)
   uint32 debug_port = 1;
+}
+
+// ── Session State Pull API ────────────────────────────────────────────
+
+/// Gateway queries Runtime for the current state snapshot of a session.
+message GetSessionStateQuery {
+  /// The session ID to query.
+  string session_id = 1;
+  /// Opaque request identifier for correlation (matches SessionStateResult.request_id).
+  string request_id = 2;
+}
+
+/// Runtime responds with the session state snapshot.
+message SessionStateResult {
+  /// Echoed request_id from GetSessionStateQuery.
+  string request_id = 1;
+  /// Whether the session was found.
+  bool found = 2;
+  /// Session ID.
+  string session_id = 3;
+  /// Lifecycle status (JSON-serialized SessionStatus).
+  string status_json = 4;
+  /// Current model (empty string if not set).
+  string model = 5;
+  /// Current provider (empty string if not set).
+  string provider = 6;
+  /// Workspace ID (empty string if not set).
+  string workspace_id = 7;
+  /// Current model chars/token ratio (0.0 if not calibrated).
+  double ratio = 8;
+  /// Reasoning effort override (empty string if not set).
+  string reasoning_effort = 9;
+  /// Temperature override (NaN encoded as 0.0 when not set; use has_temperature flag).
+  float temperature = 10;
+  /// Whether temperature is set (distinguishes "not set" from 0.0).
+  bool has_temperature = 11;
 }

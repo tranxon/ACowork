@@ -90,6 +90,10 @@ pub fn agent_routes() -> Router<AppState> {
             "/api/agents/{id}/search-config",
             get(get_agent_search_config).put(update_agent_search_config),
         )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/state",
+            get(get_session_state),
+        )
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -1920,6 +1924,136 @@ pub async fn update_agent_search_config(
     Ok(Json(AgentSearchConfigResponse {
         agent_id,
         providers: req.providers,
+    }))
+}
+
+// ── Session State Pull API ────────────────────────────────────────────
+
+/// Response body for `GET /api/agents/{id}/sessions/{session_id}/state`.
+#[derive(Serialize)]
+pub struct SessionStateResponse {
+    pub session_id: String,
+    pub status: serde_json::Value,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub workspace_id: Option<String>,
+    pub ratio: Option<f64>,
+    pub reasoning_effort: Option<String>,
+    pub temperature: Option<f32>,
+}
+
+/// `GET /api/agents/{id}/sessions/{session_id}/state`
+///
+/// Queries the Runtime for the current state snapshot of a specific session.
+/// Returns 404 if the agent is not found or the session does not exist on
+/// the Runtime side.
+pub async fn get_session_state(
+    State(state): State<AppState>,
+    Path((agent_id, session_id)): Path<(String, String)>,
+) -> Result<Json<SessionStateResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!(
+        agent_id = %agent_id,
+        session_id = %session_id,
+        "Session state pull: GET /api/agents/{}/sessions/{}/state",
+        agent_id,
+        session_id
+    );
+
+    // Verify agent is installed
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
+        }
+    }
+
+    let grpc_mgr = match state.grpc_session_mgr.as_ref() {
+        Some(mgr) => mgr,
+        None => {
+            return Err(ApiError::not_found(&format!(
+                "Agent {} is not connected",
+                agent_id
+            )));
+        }
+    };
+
+    // Lock only for push, then release before awaiting response
+    let (request_id, rx) = {
+        let mut mgr = grpc_mgr.lock().await;
+        match mgr.send_session_state_request(&agent_id, &session_id) {
+            Some(h) => h,
+            None => {
+                return Err(ApiError::not_found(&format!(
+                    "Agent {} is not connected via gRPC",
+                    agent_id
+                )));
+            }
+        }
+    }; // Lock released here
+
+    let client_msg =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(_)) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Runtime dropped session state response sender"
+                );
+                return Err(ApiError::not_found(&format!(
+                    "Session {} not found (runtime dropped response)",
+                    session_id
+                )));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    request_id,
+                    "Session state request timed out"
+                );
+                grpc_mgr.lock().await.cleanup_pending(request_id);
+                return Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(ApiError {
+                        error: format!("Timed out waiting for session state from agent {}", agent_id),
+                        code: 504,
+                    }),
+                ));
+            }
+        };
+
+    let result = match client_msg.payload {
+        Some(acowork_core::proto::client_message::Payload::SessionStateResult(r)) => r,
+        _ => {
+            return Err(ApiError::internal(&format!(
+                "Unexpected response payload for session state query (session {})",
+                session_id
+            )));
+        }
+    };
+
+    if !result.found {
+        return Err(ApiError::not_found(&format!(
+            "Session {} not found on agent {}",
+            session_id, agent_id
+        )));
+    }
+
+    // Parse status_json back into a serde_json::Value for the response
+    let status_value: serde_json::Value = serde_json::from_str(&result.status_json)
+        .unwrap_or_else(|_| serde_json::Value::String(result.status_json.clone()));
+
+    Ok(Json(SessionStateResponse {
+        session_id: result.session_id,
+        status: status_value,
+        model: if result.model.is_empty() { None } else { Some(result.model) },
+        provider: if result.provider.is_empty() { None } else { Some(result.provider) },
+        workspace_id: if result.workspace_id.is_empty() { None } else { Some(result.workspace_id) },
+        ratio: if result.ratio == 0.0 { None } else { Some(result.ratio) },
+        reasoning_effort: if result.reasoning_effort.is_empty() { None } else { Some(result.reasoning_effort) },
+        temperature: if result.has_temperature { Some(result.temperature) } else { None },
     }))
 }
 

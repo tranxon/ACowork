@@ -117,6 +117,15 @@ pub struct AgentCore {
     /// None for CLI-only sessions (no SessionHandle).
     pub(crate) status_tx:
         Option<tokio::sync::watch::Sender<crate::agent::session_state::SessionStatus>>,
+    /// Shared session state snapshot for the Gateway pull API.
+    ///
+    /// Written by `AgentLoop::emit_session_state` on every status transition.
+    /// Read by `SessionManager::snapshot_session_state` to serve
+    /// `GET /api/agents/{id}/sessions/{session_id}/state` without
+    /// sending a new gRPC message to the Runtime.
+    /// None for CLI-only sessions.
+    pub(crate) snapshot_slot:
+        Option<Arc<std::sync::RwLock<Option<crate::agent::session_state::SessionStateSnapshot>>>>,
     /// Memory session handle — shared between agent loop and memory tools.
     /// Created at tool registry time, store initialized lazily.
     pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
@@ -187,6 +196,7 @@ impl AgentCore {
             approval_handle: None,
             shell_approval_threshold,
             status_tx: None,
+            snapshot_slot: None,
             embedding_provider: None,
             metrics_aggregator: Arc::new(std::sync::Mutex::new(MetricsAggregator::with_defaults(
                 1.0,
@@ -740,6 +750,7 @@ impl AgentCore {
             approval_handle: self.approval_handle.clone(),
             shell_approval_threshold: self.shell_approval_threshold,
             status_tx: None, // set separately by SessionTask
+            snapshot_slot: None, // set separately by SessionTask
             embedding_provider: self.embedding_provider.clone(),
             // P3-1: Metrics aggregator is shared across sessions via Arc clone.
             // This ensures LLM Judge evaluations from background tasks are
@@ -829,7 +840,7 @@ impl AgentCore {
     pub fn set_debug_mode(&mut self, observer: crate::debug::DebugObserverImpl) {
         tracing::info!(
             is_dev = crate::debug::observer::DebugObserver::is_dev_mode(&observer),
-            "[DBG-TRACE] AgentCore::set_debug_mode called (observer pipeline)"
+            "AgentCore::set_debug_mode called (observer pipeline)"
         );
         self.debug_observer = DebugObserverSlot::dev(observer);
     }

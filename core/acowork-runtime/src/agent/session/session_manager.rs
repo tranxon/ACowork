@@ -276,44 +276,9 @@ impl SessionManager {
             .and_then(|c| c.workspace_id())
             .map(|w| w.to_string());
 
-        // ADR-012: Read persisted model/provider from JSONL metadata.
-        // The frontend is responsible for always providing an initial model;
-        // we do NOT fall back to manifest fields.
-        let initial_model = conversation.as_ref().and_then(|c| c.model());
-        let initial_provider = conversation.as_ref().and_then(|c| c.provider());
-
         let (inbound_tx, inbound_rx) = mpsc::channel(self.config.inbound_channel_capacity);
 
-        let mut session_state = SessionState::new(
-            self.config.history_max_tokens,
-            self.config.per_session_budget.clone(),
-            conversation,
-        );
-
-        // ADR-012: Set per-session model/provider on SessionState (only if we have one).
-        if let Some(m) = initial_model.as_ref() {
-            session_state.set_model(m.clone());
-            // Update HistoryManager::max_tokens to the model's actual effective
-            // input budget rather than the static config.history_max_tokens (128K).
-            // Without this, trim_fifo would clamp history at 128K which may be
-            // far below the model's actual context window, making auto compaction
-            // at 80% threshold unreachable.
-            let budget = self.core.context_trim_budget(m);
-            session_state.history_mut().set_max_tokens(budget);
-            // Initialize reasoning_effort from model capabilities so the frontend
-            // shows the correct default value immediately on agent start.
-            // If the model has no default, fall back to Medium (the Rust enum default).
-            let default_effort = self
-                .core
-                .get_model_capabilities(m)
-                .and_then(|c| c.default_reasoning_effort)
-                .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s))
-                .unwrap_or_default();
-            session_state.set_reasoning_effort(Some(default_effort));
-        }
-        if let Some(p) = initial_provider.as_ref() {
-            session_state.set_provider(p.clone());
-        }
+        let session_state = self.build_initial_session_state(conversation);
 
         // Shared channel for bypass-injecting debug handles into AgentCore
         // while the agent loop is running (its message channel is blocked).
@@ -392,6 +357,13 @@ impl SessionManager {
         let (status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
         task.set_status_tx(status_tx);
 
+        // Create shared snapshot slot for the Gateway session state pull API.
+        // The slot is written by AgentLoop::emit_session_state and read by
+        // snapshot_session_state() without any message passing.
+        let snapshot_slot: Arc<std::sync::RwLock<Option<crate::agent::session_state::SessionStateSnapshot>>> =
+            Arc::new(std::sync::RwLock::new(None));
+        task.set_snapshot_slot(snapshot_slot.clone());
+
         // Register per-session urgent_stop Notify so fire_urgent_stop()
         // only wakes this session's tokio::select! branches.
         if let Some(notify) = task.urgent_stop_notify() {
@@ -411,6 +383,7 @@ impl SessionManager {
             status_rx,
             last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
             pending_debug_handles: pending_debug_handles.clone(),
+            snapshot_slot,
         };
 
         self.sessions.insert(session_id.clone(), handle);
@@ -447,6 +420,143 @@ impl SessionManager {
         // per-session replay is required — sessions query AgentCore directly.
 
         Ok(session_id)
+    }
+
+    /// Build a fully-initialized SessionState for a new or resumed session.
+    /// All per-session fields are set synchronously before this returns.
+    /// Caller must hold an Arc<AgentCore> with global_provider_list populated.
+    fn build_initial_session_state(
+        &self,
+        conversation: Option<ConversationSession>,
+    ) -> SessionState {
+        let initial_model = conversation.as_ref().and_then(|c| c.model());
+        let initial_provider = conversation.as_ref().and_then(|c| c.provider());
+
+        // Resume path: rebuild HistoryManager from the JSONL log so the LLM
+        // sees the prior conversation on the first new turn after cold-start.
+        // This is gated by ACOWORK_DISABLE_SESSION_RESUME=1 for ops debugging.
+        let restored = if std::env::var("ACOWORK_DISABLE_SESSION_RESUME")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                "ACOWORK_DISABLE_SESSION_RESUME set; skipping JSONL history restore"
+            );
+            None
+        } else {
+            conversation.as_ref().and_then(|conv| {
+                let path = conv.session_path();
+                match crate::agent::session::restorer::restore_history_from_jsonl(path) {
+                    Ok(outcome) if !outcome.messages.is_empty() => {
+                        tracing::info!(
+                            session_id = %conv.session_id(),
+                            replayed = outcome.replayed_entry_count,
+                            skipped = outcome.skipped_entry_count,
+                            had_compaction = outcome.had_compaction,
+                            messages = outcome.messages.len(),
+                            "Session resume: restored history from JSONL"
+                        );
+                        Some(outcome)
+                    }
+                    Ok(_) => {
+                        // New session or empty file — nothing to restore.
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %conv.session_id(),
+                            error = %e,
+                            "Session resume: failed to restore history; starting empty"
+                        );
+                        None
+                    }
+                }
+            })
+        };
+
+        let mut session_state = SessionState::new(
+            self.config.history_max_tokens,
+            self.config.per_session_budget.clone(),
+            conversation,
+        );
+
+        // ADR-012: Set per-session model/provider on SessionState (only if we have one).
+        if let Some(m) = initial_model.as_ref() {
+            session_state.set_model(m.clone());
+            // Update HistoryManager::max_tokens to the model's actual effective
+            // input budget rather than the static config.history_max_tokens (128K).
+            // Without this, trim_fifo would clamp history at 128K which may be
+            // far below the model's actual context window, making auto compaction
+            // at 80% threshold unreachable.
+            let budget = self.core.context_trim_budget(m);
+            session_state.history_mut().set_max_tokens(budget);
+
+            // Three-level priority chain for reasoning_effort:
+            // 1. Persisted session value (from JSONL metadata, via ConversationSession)
+            // 2. Provider capabilities default_reasoning_effort
+            // 3. None (provider does not support thinking control)
+            let persisted_effort = session_state
+                .conversation()
+                .and_then(|c| c.reasoning_effort());
+
+            if let Some(ref effort_str) = persisted_effort {
+                // Session already has a persisted value; restore it.
+                let effort = acowork_core::providers::traits::ReasoningEffort::from_str_loose(effort_str);
+                session_state.set_reasoning_effort(effort);
+            } else {
+                // No persisted value: initialize from provider capabilities default.
+                // None here means provider does not support thinking control.
+                let provider_default = self
+                    .core
+                    .get_model_capabilities(m)
+                    .and_then(|c| c.default_reasoning_effort);
+                let effort = provider_default
+                    .as_deref()
+                    .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose);
+                session_state.set_reasoning_effort(effort.clone());
+                // Write back to ConversationSession so future resumes have a value.
+                if let Some(conv) = session_state.conversation() {
+                    conv.update_reasoning_effort(provider_default);
+                }
+            }
+        }
+        if let Some(p) = initial_provider.as_ref() {
+            session_state.set_provider(p.clone());
+        }
+
+        // Propagate any cached temperature override to the session.
+        // Prefer runtime overrides pushed by Gateway, then the core template.
+        let temperature = self
+            .runtime_overrides
+            .temperature
+            .or(self.core.temperature_override);
+        if temperature.is_some() {
+            session_state.set_temperature(temperature);
+        }
+
+        // Install the restored history *after* set_max_tokens has been applied,
+        // so the lossless trim (if needed) operates against the model-correct
+        // budget. Trim is the safety net for the "resumed under a smaller
+        // model" case — it never invokes an LLM.
+        if let Some(outcome) = restored {
+            session_state.history_mut().load_restored(outcome.messages);
+            let dropped = session_state.history_mut().fit_to_budget_lossless();
+            if dropped > 0 {
+                tracing::warn!(
+                    dropped,
+                    "Session resume: history exceeded 80% budget under current model; \
+                     applied lossless tail-preserving trim"
+                );
+            }
+            // If a compaction summary was restored, the session is logically
+            // already in a "post-compaction" state — mark it so session-close
+            // tail distillation respects the boundary.
+            if outcome.had_compaction {
+                session_state.is_compacted = true;
+            }
+        }
+
+        session_state
     }
 
     /// Close a session by ID, sending a Close message and removing it.
@@ -799,10 +909,14 @@ After installation, ask the user to re-enable the MCP server.",
             *list = provider_list;
         }
 
-        // Notify all active sessions to refresh state derived from model capabilities
-        // (reasoning_effort, context window limits, etc.). This handles the race where
-        // SessionTask started before the initial provider list was pushed by Gateway.
-        self.broadcast(SessionMessage::ProviderListUpdated);
+        // Notify all active sessions so they emit an updated state to the frontend.
+        // The shared global_provider_list on AgentCore is already updated above,
+        // so sessions can query it on demand via get_model_capabilities.
+        let session_count = self.broadcast(SessionMessage::ProviderListUpdated).len();
+        tracing::debug!(
+            session_count = %session_count,
+            "ProviderListUpdated: broadcast to all active sessions"
+        );
 
         // Replace the shared key vault (in-memory only, never persisted).
         {
@@ -962,6 +1076,20 @@ After installation, ask the user to re-enable the MCP server.",
     /// Get the number of active sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Get the session state snapshot for a specific session.
+    ///
+    /// Returns the most recent `SessionStateSnapshot` written by the session's
+    /// AgentLoop, or `None` if the session is not found or no state has been
+    /// emitted yet (session just created before the first `emit_session_state`).
+    pub fn snapshot_session_state(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::agent::session_state::SessionStateSnapshot> {
+        self.sessions
+            .get(session_id)
+            .and_then(|handle| handle.snapshot())
     }
 
     /// Get the current status of all active sessions (ADR-014).
@@ -1383,11 +1511,11 @@ After installation, ask the user to re-enable the MCP server.",
                 .cloned()
                 .unwrap_or_else(|| handles.debug_ctrl.clone());
             let ctrl_ptr = Arc::as_ptr(&per_session_ctrl) as *const ();
-            tracing::info!(
+            tracing::debug!(
                 session_id = %sid,
                 ctrl_ptr = ?ctrl_ptr,
                 found_in_map = controllers.contains_key(sid),
-                "[DBG-TRACE] push_debug_mode: per-session controller resolved"
+                "push_debug_mode: per-session controller resolved"
             );
             // Extract notify handles from the per-session controller.
             // The debug server calls ctrl.resume_notify.notify_one() on this
@@ -1412,10 +1540,10 @@ After installation, ask the user to re-enable the MCP server.",
             {
                 let mut pending = session_handle.pending_debug_handles.lock().await;
                 *pending = Some(per_session_handles.clone());
-                tracing::info!(
+                tracing::debug!(
                     session_id = %sid,
                     ctrl_ptr = ?ctrl_ptr,
-                    "[DBG-TRACE] push_debug_mode: handles written to pending_debug_handles (bypass)"
+                    "push_debug_mode: handles written to pending_debug_handles (bypass)"
                 );
             }
 

@@ -167,10 +167,11 @@ fn map_anthropic_thinking(
 
     // None: reasoning_effort not set at all — omit thinking block entirely
     // so the model uses its own built-in default behavior.
+    // Auto: user chose to let the model decide — same behavior as None (omit block).
     // Off: user explicitly chose to disable thinking.
     let effort = match effort {
-        None => {
-            // No override — let the model decide its default behavior.
+        None | Some(ReasoningEffort::Auto) => {
+            // No override or Auto — let the model decide its default behavior.
             // For both extended and adaptive models, omitting thinking = model default.
             return (None, None, original_temperature);
         }

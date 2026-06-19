@@ -562,6 +562,7 @@ mod tests {
         vec![0.1f32; DEFAULT_EMBEDDING_DIM]
     }
 
+    #[allow(clippy::type_complexity)]
     fn test_embedding_arc() -> Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> {
         Arc::new(test_embedding_fn)
     }

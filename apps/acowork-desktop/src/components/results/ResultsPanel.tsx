@@ -435,7 +435,9 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                 <StatRow label="Provider" value={sessionProvider} />
               )}
               <StatRow label="Ch/Token" value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
-              <StatRow label="Thinking Level" value={reasoningEffort ?? "None"} />
+              {reasoningEffort != null && (
+                <StatRow label="Thinking Level" value={reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1)} />
+              )}
               <StatRow label="Temperature" value={temperature != null ? temperature.toFixed(2) : "0.70"} />
               <div className="flex justify-between py-1">
                 <span className="text-zinc-500">{t("resultsPanel.sessionStatusLabel")}</span>

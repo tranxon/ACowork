@@ -1306,10 +1306,8 @@ export function ChatPanel() {
                   onSelect={(m, p) => selectedAgentId && setCurrentModel(m, p, selectedAgentId)}
                 />
               )}
-              {/* Reasoning effort toggle — only when current model supports reasoning */}
-              {selectedAgent?.running && currentModel && availableModels.some(
-                (m) => m.name === currentModel && m.reasoning
-              ) && (
+              {/* Reasoning effort toggle — shown when session has a non-null reasoningEffort (null = provider doesn't support reasoning) */}
+              {selectedAgent?.running && currentReasoningEffort != null && (
                 <ReasoningEffortMenu
                   effort={currentReasoningEffort}
                   onChange={(e) => selectedAgentId && setReasoningEffort(e, selectedAgentId)}
@@ -2543,7 +2541,7 @@ function ModelMenu({
   );
 }
 
-/** Reasoning effort selector — popup with Off/Low/Medium/High/Max */
+/** Reasoning effort selector — popup with Auto/Off/Low/Medium/High */
 function ReasoningEffortMenu({
   effort,
   onChange,
@@ -2555,16 +2553,18 @@ function ReasoningEffortMenu({
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  const OPTIONS: { value: string; color: string }[] = [
-    { value: "Off", color: "#9ca3af" },
-    { value: "Low", color: "#3b82f6" },
-    { value: "Medium", color: "#8b5cf6" },
-    { value: "High", color: "#ef4444" },
-    { value: "Max", color: "#f59e0b" },
+  // Values are lowercase to match backend ReasoningEffort serde serialization.
+  const OPTIONS: { value: string; label: string; color: string }[] = [
+    { value: "auto", label: "Auto", color: "#22c55e" },
+    { value: "off", label: "Off", color: "#9ca3af" },
+    { value: "low", label: "Low", color: "#3b82f6" },
+    { value: "medium", label: "Medium", color: "#8b5cf6" },
+    { value: "high", label: "High", color: "#ef4444" },
   ];
 
-  const effortLabel = effort ?? "Off";
-  const currentColor = OPTIONS.find((o) => o.value === effortLabel)?.color ?? "#9ca3af";
+  const currentOpt = OPTIONS.find((o) => o.value === effort);
+  const effortLabel = currentOpt?.label ?? "Auto";
+  const currentColor = currentOpt?.color ?? "#22c55e";
 
   useEffect(() => {
     if (!open) return;
@@ -2597,7 +2597,7 @@ function ReasoningEffortMenu({
           style={{ width: "140px" }}
         >
           {OPTIONS.map((opt) => {
-            const isActive = opt.value === effortLabel;
+            const isActive = opt.value === effort;
             return (
               <button
                 key={opt.value}
@@ -2620,7 +2620,7 @@ function ReasoningEffortMenu({
                 <span
                   className={cn("font-medium", isActive && "text-[var(--color-accent)]")}
                 >
-                  {opt.value}
+                  {opt.label}
                 </span>
               </button>
             );

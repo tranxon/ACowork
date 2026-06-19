@@ -14,7 +14,16 @@ use tokio::sync::oneshot;
 use crate::error::Result;
 
 /// Format version for the JSONL conversation file.
-const CONVERSATION_FORMAT_VERSION: u32 = 1;
+///
+/// v2 (current): adds optional `kind` field to ConversationEntry.
+///   `kind="compaction"` marks an LLM-driven compaction event whose `content`
+///   is the summary text and whose `metadata` is a `CompactionEventMeta`.
+///   When `kind` is absent or `"message"`, the entry is a regular
+///   conversation message (role-based).
+const CONVERSATION_FORMAT_VERSION: u32 = 2;
+
+/// Entry kind discriminator for `ConversationEntry.kind`.
+pub const ENTRY_KIND_COMPACTION: &str = "compaction";
 
 /// A single line in the conversation JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,13 +32,46 @@ pub struct ConversationEntry {
     pub id: String,
     /// ISO 8601 timestamp with millisecond precision
     pub ts: String,
-    /// Message role: "user" | "assistant" | "thought" | "tool_call" | "tool_result" | "system"
+    /// For regular messages: "user" | "assistant" | "thought" | "tool_call" | "tool_result" | "system".
+    /// For compaction events: still set to "system" so legacy readers degrade gracefully,
+    /// but `kind` should be checked first.
     pub role: String,
-    /// Full message content
+    /// Full message content. For `kind="compaction"`, this carries the summary text.
     pub content: String,
-    /// Optional metadata (e.g. tool_call_id, tool_name)
+    /// Optional metadata (e.g. tool_call_id, tool_name, or `CompactionEventMeta`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Entry kind. `None` or `"message"` denotes a regular message (default).
+    /// `"compaction"` denotes an LLM-driven compaction event.
+    /// Added in JSONL v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// Structured metadata payload for `kind="compaction"` entries.
+///
+/// Stored in `ConversationEntry.metadata` as a JSON object so legacy
+/// readers can still parse the entry as opaque metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionEventMeta {
+    /// First entry id covered by the summary (inclusive).
+    /// May be empty if the compaction occurred before any message id was
+    /// recorded (e.g. forced manual trigger on an empty session — pathological).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub compacted_from_id: String,
+    /// Last entry id covered by the summary (inclusive).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub compacted_to_id: String,
+    /// Number of trailing rounds preserved in memory after compaction.
+    /// Used by the restorer to validate the replay window.
+    pub keep_last_rounds: usize,
+    /// Compaction model used (diagnostic only).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// History token estimate before compaction (diagnostic only).
+    pub before_tokens: u64,
+    /// History token estimate after compaction (diagnostic only).
+    pub after_tokens: u64,
 }
 
 /// Session metadata written as the first line of each JSONL file.
@@ -68,6 +110,16 @@ pub struct SessionMetadata {
     /// Per-session provider selection (ADR-012).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Per-session reasoning effort override.
+    /// Persisted so sessions restore the user's thinking-level preference on resume.
+    /// `None` means not set (use provider capability default on resume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Per-session temperature override.
+    /// Persisted so sessions restore the temperature preference on resume.
+    /// `None` means not set (use agent config or global default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
 }
 
 /// Commands sent to the background writer thread.
@@ -217,6 +269,10 @@ pub struct ConversationSession {
     model: std::sync::Mutex<Option<String>>,
     /// Per-session provider selection (ADR-012).
     provider: std::sync::Mutex<Option<String>>,
+    /// Per-session reasoning effort override, persisted in JSONL metadata.
+    reasoning_effort: std::sync::Mutex<Option<String>>,
+    /// Per-session temperature override, persisted in JSONL metadata.
+    temperature: std::sync::Mutex<Option<f32>>,
     sender: mpsc::UnboundedSender<WriterCommand>,
     /// Path to the JSONL file (for session-level distillation on close).
     session_file_path: PathBuf,
@@ -254,6 +310,8 @@ impl ConversationSession {
             workspace_id: config.workspace_id.clone(),
             model: config.model.clone(),
             provider: config.provider.clone(),
+            reasoning_effort: None,
+            temperature: None,
         };
 
         // Write metadata as the first line — build complete line then single write
@@ -276,6 +334,8 @@ impl ConversationSession {
             workspace_id: std::sync::Mutex::new(config.workspace_id),
             model: std::sync::Mutex::new(config.model),
             provider: std::sync::Mutex::new(config.provider),
+            reasoning_effort: std::sync::Mutex::new(None),
+            temperature: std::sync::Mutex::new(None),
             sender: tx,
             session_file_path: file_path,
         })
@@ -310,6 +370,8 @@ impl ConversationSession {
             workspace_id: std::sync::Mutex::new(meta.workspace_id.clone()),
             model: std::sync::Mutex::new(meta.model.clone()),
             provider: std::sync::Mutex::new(meta.provider.clone()),
+            reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort.clone()),
+            temperature: std::sync::Mutex::new(meta.temperature),
             sender: tx,
             session_file_path: file_path,
         })
@@ -326,9 +388,34 @@ impl ConversationSession {
             role: role.to_string(),
             content: content.to_string(),
             metadata,
+            kind: None,
         };
         if let Err(e) = self.sender.send(WriterCommand::AppendEntry(entry)) {
             tracing::error!("Failed to send message to conversation writer: {}", e);
+        }
+    }
+
+    /// Append a compaction event to the JSONL.
+    ///
+    /// Used by [`AgentLoop::compact_history_if_needed`] after a successful
+    /// LLM-driven compaction to mark the boundary between compacted and
+    /// surviving messages. The session restorer uses the most recent such
+    /// event to determine the replay window.
+    ///
+    /// The entry's `role` is set to `"system"` so legacy v1 readers (and any
+    /// frontend that ignores `kind`) treat it as a benign system note.
+    pub fn append_compaction_event(&self, summary: &str, meta: CompactionEventMeta) {
+        let metadata_value = serde_json::to_value(&meta).ok();
+        let entry = ConversationEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            role: "system".to_string(),
+            content: summary.to_string(),
+            metadata: metadata_value,
+            kind: Some(ENTRY_KIND_COMPACTION.to_string()),
+        };
+        if let Err(e) = self.sender.send(WriterCommand::AppendEntry(entry)) {
+            tracing::error!("Failed to send compaction event to conversation writer: {}", e);
         }
     }
 
@@ -419,6 +506,8 @@ impl ConversationSession {
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             model: self.model.lock().ok().and_then(|m| m.clone()),
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -463,6 +552,8 @@ impl ConversationSession {
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             model: self.model.lock().ok().and_then(|m| m.clone()),
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -499,6 +590,8 @@ impl ConversationSession {
             workspace_id: Some(workspace_id.to_string()),
             model: self.model.lock().ok().and_then(|m| m.clone()),
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -551,6 +644,8 @@ impl ConversationSession {
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             model: Some(model.to_string()),
             provider: provider.map(|s| s.to_string()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -558,6 +653,76 @@ impl ConversationSession {
             model = %model,
             provider = ?provider,
             "Session model/provider persisted to JSONL"
+        );
+    }
+
+    /// Return the persisted reasoning_effort string, if any.
+    pub fn reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort.lock().ok().and_then(|r| r.clone())
+    }
+
+    /// Persist the per-session reasoning_effort override to JSONL metadata.
+    ///
+    /// Updates in-memory state and rewrites the JSONL first line.
+    pub fn update_reasoning_effort(&self, effort: Option<String>) {
+        if let Ok(mut r) = self.reasoning_effort.lock() {
+            *r = effort.clone();
+        }
+        let metadata = SessionMetadata {
+            version: CONVERSATION_FORMAT_VERSION,
+            session_id: self.session_id.clone(),
+            created_at: self.created_at.clone(),
+            agent_id: self.agent_id.clone(),
+            title: self.current_title.lock().ok().and_then(|t| t.clone()),
+            updated_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            message_count: None,
+            corrupted: false,
+            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
+            model: self.model.lock().ok().and_then(|m| m.clone()),
+            provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            reasoning_effort: effort,
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
+        };
+        self.update_metadata(metadata);
+        tracing::info!(
+            session_id = %self.session_id,
+            "Session reasoning_effort persisted to JSONL"
+        );
+    }
+
+    /// Return the persisted temperature, if any.
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature.lock().ok().and_then(|t| *t)
+    }
+
+    /// Persist the per-session temperature override to JSONL metadata.
+    pub fn update_temperature(&self, temperature: Option<f32>) {
+        if let Ok(mut t) = self.temperature.lock() {
+            *t = temperature;
+        }
+        let metadata = SessionMetadata {
+            version: CONVERSATION_FORMAT_VERSION,
+            session_id: self.session_id.clone(),
+            created_at: self.created_at.clone(),
+            agent_id: self.agent_id.clone(),
+            title: self.current_title.lock().ok().and_then(|t| t.clone()),
+            updated_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            message_count: None,
+            corrupted: false,
+            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
+            model: self.model.lock().ok().and_then(|m| m.clone()),
+            provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature,
+        };
+        self.update_metadata(metadata);
+        tracing::info!(
+            session_id = %self.session_id,
+            "Session temperature persisted to JSONL"
         );
     }
 }
@@ -888,6 +1053,8 @@ pub fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
                 workspace_id: None,
                 model: None,
                 provider: None,
+                reasoning_effort: None,
+                temperature: None,
             })
         }
     }
@@ -1104,7 +1271,7 @@ mod tests {
 
         // First line is metadata
         let meta: SessionMetadata = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(meta.version, 1);
+        assert_eq!(meta.version, 2);
         assert_eq!(meta.session_id, session_id);
         assert_eq!(meta.agent_id, agent_id);
 
@@ -1155,6 +1322,8 @@ mod tests {
                 workspace_id: None,
                 model: None,
                 provider: None,
+                reasoning_effort: None,
+                temperature: None,
             };
             let mut file = std::fs::File::create(&path).unwrap();
             serde_json::to_writer(&mut file, &meta).unwrap();
@@ -1189,6 +1358,8 @@ mod tests {
                 workspace_id: None,
                 model: None,
                 provider: None,
+                reasoning_effort: None,
+                temperature: None,
             };
             serde_json::to_writer(&mut file, &meta).unwrap();
             writeln!(file).unwrap();
@@ -1200,6 +1371,7 @@ mod tests {
                     role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
                     content: format!("Message {}", i),
                     metadata: None,
+                    kind: None,
                 };
                 serde_json::to_writer(&mut file, &entry).unwrap();
                 writeln!(file).unwrap();
@@ -1336,6 +1508,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 metadata: None,
+                kind: None,
             };
             serde_json::to_writer(&mut file, &entry).unwrap();
             writeln!(file).unwrap();
@@ -1387,6 +1560,8 @@ mod tests {
             workspace_id: None,
             model: None,
             provider: None,
+            reasoning_effort: None,
+            temperature: None,
         };
         let mut file = std::fs::File::create(&file_path).unwrap();
         serde_json::to_writer(&mut file, &meta).unwrap();
@@ -1422,6 +1597,8 @@ mod tests {
             workspace_id: None,
             model: None,
             provider: None,
+            reasoning_effort: None,
+            temperature: None,
         };
         let mut file = std::fs::File::create(&valid_path).unwrap();
         serde_json::to_writer(&mut file, &valid_meta).unwrap();

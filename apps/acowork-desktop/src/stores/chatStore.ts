@@ -304,7 +304,7 @@ interface ChatStore {
   trimMessagesTo: (agentId: string, count: number) => void;
   setCurrentModel: (model: string, provider: string, agentId: string) => void;
   setAvailableModels: (models: ModelEntry[]) => void;
-  /** Set per-session reasoning effort override (Off/Low/Medium/High/Max) */
+  /** Set per-session reasoning effort override (auto/off/low/medium/high) */
   setReasoningEffort: (effort: string, agentId: string) => void;
   getWs: (agentId: string) => WebSocket | undefined;
   continueExecution: (agentId: string) => Promise<void>;
@@ -350,6 +350,8 @@ interface ChatStore {
   removeAttachedContext: (agentId: string, sessionId: string, id: string) => void;
   /** Clear all attached chat context for a session */
   clearAttachedContext: (agentId: string, sessionId: string) => void;
+  /** ADR-015 Phase 5: Pull initial session state from backend (model/provider/status/ratio/etc.) */
+  fetchSessionState: (agentId: string, sessionId: string) => Promise<void>;
 }
 
 function toWsUrl(httpUrl: string, agentId: string): string {
@@ -1379,6 +1381,46 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   clearAttachedContext: (agentId: string, sessionId: string) => {
     set((state) => updateSessionState(state, agentId, sessionId, { attachedContext: [] }));
+  },
+
+  // ADR-015 Phase 5: Pull initial session state from backend.
+  // Maps the /api/agents/{id}/sessions/{sid}/state response to SessionChatState fields.
+  // Errors are non-fatal — warns and returns without blocking startup.
+  fetchSessionState: async (agentId: string, sessionId: string) => {
+    try {
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/state`,
+      );
+      if (!resp.ok) {
+        console.warn(`[ChatStore] fetchSessionState HTTP ${resp.status} for session ${sessionId}`);
+        return;
+      }
+      const data = await resp.json() as {
+        session_id: string;
+        status?: string;
+        model?: string | null;
+        provider?: string | null;
+        workspace_id?: string | null;
+        ratio?: number | null;
+        reasoning_effort?: string | null;
+        temperature?: number | null;
+      };
+      const sessionPatch: Partial<SessionChatState> = {};
+      if (typeof data.model === "string" && data.model) sessionPatch.model = data.model;
+      if (typeof data.provider === "string" && data.provider) sessionPatch.provider = data.provider;
+      if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio;
+      if (typeof data.reasoning_effort === "string" && data.reasoning_effort) sessionPatch.reasoningEffort = data.reasoning_effort;
+      if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature;
+      if (Object.keys(sessionPatch).length > 0) {
+        set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
+      }
+      // Sync workspace to workspaceStore if present
+      if (typeof data.workspace_id === "string" && data.workspace_id) {
+        useWorkspaceStore.getState().setSessionWorkspaceLocal(sessionId, data.workspace_id);
+      }
+    } catch (e) {
+      console.warn("[ChatStore] fetchSessionState failed:", e);
+    }
   },
 }));
 

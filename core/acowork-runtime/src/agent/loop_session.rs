@@ -10,7 +10,7 @@
 
 use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole};
 
-use crate::agent::session_state::SessionStatus;
+use crate::agent::session_state::{SessionStateSnapshot, SessionStatus};
 use crate::error::Result;
 
 impl super::loop_::AgentLoop {
@@ -49,14 +49,31 @@ impl super::loop_::AgentLoop {
                 temperature: self.session.temperature(),
             })
         {
-            tracing::warn!(
+            tracing::debug!(
                 "SessionStateChanged event dropped (channel full/closed), status={:?}. Pull repair will correct frontend.",
                 status
             );
         }
         // Update watch channel for SessionHandle reads
         if let Some(ref tx) = self.core.status_tx {
-            let _ = tx.send(status);
+            let _ = tx.send(status.clone());
+        }
+        // Update shared snapshot slot for Gateway pull API
+        if let Some(ref slot) = self.core.snapshot_slot {
+            let status_json = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
+            let snapshot = SessionStateSnapshot {
+                session_id: self.core.session_id.clone().unwrap_or_default(),
+                status_json,
+                model: self.session.model().map(|s| s.to_string()),
+                provider: self.session.provider().map(|s| s.to_string()),
+                workspace_id: self.session.workspace_id(),
+                ratio: self.session.model_ratio(),
+                reasoning_effort: self.session.reasoning_effort().map(|e| e.to_string()),
+                temperature: self.session.temperature(),
+            };
+            if let Ok(mut guard) = slot.write() {
+                *guard = Some(snapshot);
+            }
         }
     }
 

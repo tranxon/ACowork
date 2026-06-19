@@ -423,11 +423,11 @@ impl DebugProtocolServer {
                     "No debug session available — create a session first".to_string(),
                 )
             })?;
-        tracing::info!(
+        tracing::debug!(
             method = %method,
             explicit_session_id = ?explicit_session_id,
             resolved_session_id = %session_id,
-            "[DBG-TRACE] route_method: session resolution"
+            "route_method: session resolution"
         );
         let ctrl_arc = self
             .sessions
@@ -554,12 +554,12 @@ impl DebugProtocolServer {
                 };
                 let result = serde_json::to_value(state)
                     .map_err(|e| MethodError::internal(e.to_string()))?;
-                tracing::info!(
+                tracing::debug!(
                     session_id = %session_id,
                     ctrl_ptr = ?ctrl_ptr,
                     iteration = ctrl.iteration,
                     dbg_state = %serde_json::to_string(&current_state).unwrap_or_default().trim_matches('"'),
-                    "[DBG-TRACE] Debug: getState response"
+                    "Debug: getState response"
                 );
                 Ok(JsonRpcResponse::success(id.clone(), result))
             }

@@ -89,7 +89,7 @@ async fn is_gateway_on_port(host: &str, port: u16) -> bool {
 /// This is purely for housekeeping — mutual exclusion is now handled
 /// by probing the HTTP port (see `is_gateway_on_port`). If the file
 /// exists, it is simply removed; no PID liveness check is performed.
-fn cleanup_stale_pidfile(data_dir: &Path) {
+pub fn cleanup_stale_pidfile(data_dir: &Path) {
     let pid_path = data_dir.join("gateway.pid");
     if pid_path.exists() {
         match std::fs::remove_file(&pid_path) {

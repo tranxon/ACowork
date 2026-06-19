@@ -1248,6 +1248,7 @@ fn is_gateway_query_payload(msg: &proto::ServerMessage) -> bool {
             | Some(ServerPayload::MemoryConsolidateQuery(_))
             | Some(ServerPayload::MemoryDeleteQuery(_))
             | Some(ServerPayload::QueryConfig(_))
+            | Some(ServerPayload::GetSessionStateQuery(_))
     )
 }
 

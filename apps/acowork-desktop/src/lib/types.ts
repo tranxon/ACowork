@@ -119,7 +119,7 @@ export interface ModelCapabilitiesInfo {
   supports_tool_calling?: boolean;
   /** Whether the model supports reasoning/thinking */
   supports_reasoning?: boolean;
-  /** Default reasoning effort level from model capabilities (Off/Low/Medium/High/Max) */
+  /** Default reasoning effort level from model capabilities (auto/off/low/medium/high) */
   default_reasoning_effort?: string;
   /** Whether the model supports file attachments */
   supports_attachment?: boolean;
@@ -373,7 +373,7 @@ export interface ModelEntry {
   tool_call?: boolean;
   /** Whether the model supports reasoning/thinking */
   reasoning?: boolean;
-  /** Default reasoning effort level from model capabilities (Off/Low/Medium/High/Max) */
+  /** Default reasoning effort level from model capabilities (auto/off/low/medium/high) */
   default_reasoning_effort?: string;
   /** Input modalities (e.g. "text", "image") */
   input_modalities?: string[];

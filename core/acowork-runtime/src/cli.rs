@@ -1,12 +1,10 @@
 //! CLI definitions for Agent Runtime
-use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::InboundMessage;
-use crate::agent::session::{SessionManager, SessionManagerConfig, SessionMessage};
+use crate::agent::session::{SessionManager, SessionMessage};
 use crate::agent_config::AgentMcpConfig;
 use crate::config::RuntimeConfig;
-use crate::error::{Result, RuntimeError};
-use acowork_core::protocol::{McpListItem, ProtocolType, ProviderListItem};
-use acowork_core::tools::traits::Tool;
+use crate::error::Result;
+use acowork_core::protocol::{McpListItem, ProviderListItem};
 use clap::Parser;
 use std::sync::Arc;
 
@@ -199,32 +197,32 @@ impl Cli {
 /// (for use when Gateway reports "same version, no update needed").
 /// API keys are NEVER stored in this file — they come from the live provider_key_vault.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct RuntimeResourceCache {
+pub(crate) struct RuntimeResourceCache {
     #[serde(default)]
-    provider_list_version: u64,
+    pub(crate) provider_list_version: u64,
     #[serde(default)]
-    mcp_list_version: u64,
+    pub(crate) mcp_list_version: u64,
     #[serde(default)]
-    search_list_version: u64,
+    pub(crate) search_list_version: u64,
     #[serde(default)]
-    user_profile_version: u64,
+    pub(crate) user_profile_version: u64,
     /// Cached provider list (without api keys — keys come from vault).
     /// None when no cache exists yet (first start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    providers: Option<Vec<ProviderListItem>>,
+    pub(crate) providers: Option<Vec<ProviderListItem>>,
     /// Cached MCP server list (without auth tokens — tokens come from vault).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    mcps: Option<Vec<McpListItem>>,
+    pub(crate) mcps: Option<Vec<McpListItem>>,
 }
 
 /// Resource cache file path in agent workspace config directory.
-fn resource_cache_path(work_dir: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn resource_cache_path(work_dir: &std::path::Path) -> std::path::PathBuf {
     work_dir.join("config").join("resource_cache.json")
 }
 
 /// Read the full runtime resource cache (versions + cached lists).
 /// Returns default (versions=0, no lists) if file is missing or corrupt.
-fn read_resource_cache(work_dir: &std::path::Path) -> RuntimeResourceCache {
+pub(crate) fn read_resource_cache(work_dir: &std::path::Path) -> RuntimeResourceCache {
     let path = resource_cache_path(work_dir);
     match std::fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str::<RuntimeResourceCache>(&raw).unwrap_or_else(|e| {
@@ -240,7 +238,7 @@ fn read_resource_cache(work_dir: &std::path::Path) -> RuntimeResourceCache {
 }
 
 /// Save the runtime resource cache to disk.
-fn save_resource_cache(work_dir: &std::path::Path, cache: &RuntimeResourceCache) {
+pub(crate) fn save_resource_cache(work_dir: &std::path::Path, cache: &RuntimeResourceCache) {
     let path = resource_cache_path(work_dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -265,7 +263,7 @@ fn save_resource_cache(work_dir: &std::path::Path, cache: &RuntimeResourceCache)
 }
 
 /// Returns Some((client, config)) on success, None on failure (graceful fallback to standalone mode).
-async fn connect_gateway_client(
+pub(crate) async fn connect_gateway_client(
     endpoint: &str,
 
     agent_id: &str,
@@ -309,1291 +307,62 @@ async fn connect_gateway_client(
     }
 }
 
-/// Async entry point after tokio runtime is initialized
+/// Async entry point after tokio runtime is initialized.
+///
+/// Acts as the top-level phase orchestrator.  All logic lives in the
+/// `startup::` sub-modules; this function merely sequences them.
 async fn async_main(
     config: RuntimeConfig,
     log_reload_handle: Option<LogReloadHandle>,
 ) -> Result<()> {
-    use crate::agent::context::ContextBuilder;
-    use crate::agent::loop_::AgentLoop;
-    use crate::embedding::ollama::OllamaEmbeddingProvider;
-    use crate::embedding::remote::RemoteEmbeddingProvider;
-    use crate::embedding::{EmbeddingConfig, EmbeddingProvider, FallbackEmbeddingProvider};
-    use crate::package::loader::load_package;
-    use crate::package::prompt_builder::build_system_prompt_with_mode;
-    use crate::tools::builtin;
-    use crate::tools::registry::ToolRegistry;
+    use crate::startup::{
+        phase_a_init_agent, phase_b_init_session, phase_c_spawn_subsystems, phase_d_run,
+    };
 
-    // Step 0 (DevMode): Start debug protocol server as early as possible.
-    //
-    // Step 1: Load .agent package (before Gateway connection so we know agent_id)
-    tracing::info!(path = %config.package_path, "Loading .agent package");
-    let loaded = load_package(std::path::Path::new(&config.package_path))?;
-    tracing::info!(
+    // Phase A: per-agent initialization (package, gateway, provider, tools, embedding).
+    let mut agent_ctx = phase_a_init_agent(&config).await?;
 
-        agent_id = %loaded.manifest.agent_id,
-        name = %loaded.manifest.name,
-        "Package loaded successfully"
+    if agent_ctx.grpc_client.is_some() {
+        // ── Gateway mode ────────────────────────────────────────────────────
+        // Phase B: per-session initialization (conversation, AgentCore, SessionManager).
+        let mut session_ctx = phase_b_init_session(&mut agent_ctx, &config).await?;
 
-    );
+        // Phase C: spawn subsystems (chunk_relay, MCP auto-connect, DevMode).
+        let handles =
+            phase_c_spawn_subsystems(&mut agent_ctx, &mut session_ctx, &config).await?;
 
-    // Step 2: Connect to Gateway gRPC if socket path is provided
-    //
-    // The AgentHelloResult now bundles LLM config, workspace context, and
-    // runtime overrides in a single atomic response — no separate push
-    // messages are needed during handshake.
-    let mut grpc_client: Option<crate::grpc::client::GatewayGrpcClient> = None;
-    let mut hello_config: Option<crate::grpc::client::AgentHelloConfig> = None;
-    if let Some(endpoint) = config.get_gateway_address()
-        && let Some((client, cfg)) = connect_gateway_client(
-            endpoint,
-            &loaded.manifest.agent_id,
-            &loaded.manifest.version,
-            &config.work_dir,
-        )
-        .await
-        {
-            // Persist resource versions + lists for next startup's diff sync.
-            // Preserve old cached lists if GW didn't send new ones (version match).
-            let prov_list = cfg.provider_list.clone();
-            let mcp_list_data = cfg.mcp_list.clone();
-            let prov_ver = cfg.provider_list_version;
-            let mcp_ver = cfg.mcp_list_version;
-            let search_ver = cfg.search_list_version;
-            let old_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
-            let new_cache = RuntimeResourceCache {
-                provider_list_version: prov_ver,
-                mcp_list_version: mcp_ver,
-                search_list_version: search_ver,
-                user_profile_version: cfg.user_profile_version,
-                providers: prov_list.or(old_cache.providers),
-                mcps: mcp_list_data.or(old_cache.mcps),
-            };
-            grpc_client = Some(client);
-            hello_config = Some(cfg);
-            save_resource_cache(std::path::Path::new(&config.work_dir), &new_cache);
-        };
-    if grpc_client.is_some() {
-        tracing::info!("Gateway gRPC client initialized");
+        // Phase D: announce ready + run Gateway message loop.
+        phase_d_run(&mut agent_ctx, session_ctx, handles, &config, log_reload_handle).await
     } else {
-        tracing::info!("Running in standalone mode (no Gateway)");
-    }
-
-    // Step 3: Build system prompt
-    let skill_mode = resolve_skill_mode(&loaded.manifest, &config.work_dir);
-    let system_prompt = build_system_prompt_with_mode(&loaded.package_dir, skill_mode)?;
-    tracing::debug!(prompt_len = system_prompt.len(), "System prompt built");
-
-    // Step 3.5: Load skill registry for command-based skill injection
-    // SkillRegistry is needed in the Gateway loop to inject skill instructions
-    // into user messages when a command (e.g., "meeting-notes") is specified.
-    let skills_dir = loaded.package_dir.join("skills");
-    let skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-
-                skills_dir = %skills_dir.display(),
-                error = %e,
-                "Failed to load skills registry, proceeding without skills"
-
-            );
-            crate::skills::parser::SkillRegistry::new()
-        });
-
-    // Step 3: Initialize LLM Provider
-    //
-    // In Gateway mode: the bundled AgentHelloConfig contains LLM config,
-    //   workspace context, and runtime overrides — all delivered atomically
-    //   in the AgentHelloResult response.
-    //
-    // In Standalone mode: no Gateway provider available (development only).
-    // Per-session provider/model resolution after LLMConfigDelivery elimination.
-    // We only retain `gateway_current_provider_id` to detect a startup vs.
-    // resumed-session provider mismatch — capabilities and per-model output
-    // limits are now queried on demand via `AgentCore::get_model_capabilities`
-    // and `AgentCore::max_output_tokens_limit_for_model`.
-    let mut gateway_current_provider_id: Option<String> = None;
-
-    // FIXME(Task10): Process provider_list, mcp_list, key_vault from AgentHelloConfig.
-    // In Gateway mode: use AgentHelloConfig (provider_list + key_vault).
-    // provider_list is Some when GW version differs from Runtime cached version.
-    // When None (version match), fall back to locally-cached provider list from disk.
-    // Provider key vault is always delivered fresh and never persisted to disk.
-    let resource_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
-
-    // ADR-012: Per-session model — no global agent_model.json.
-    // Cold start: provider/model come from resource_cache.providers.
-    let (provider, resolved_model, available_models, protocol_type) = {
-        if let Some(ref cfg) = hello_config {
-            let provider_list = cfg
-                .provider_list
-                .as_ref()
-                .or(resource_cache.providers.as_ref());
-            if let Some(providers) = provider_list {
-                // Check if a provider has an API key in the vault.
-                // A provider without an API key cannot be used.
-                let has_api_key = |prov_id: &str| -> bool {
-                    cfg.provider_key_vault
-                        .iter()
-                        .any(|k| k.provider_id == prov_id)
-                };
-
-                // Use the first available provider with an API key.
-                // Provider/model selection is governed by resource_cache.providers,
-                // not by manifest fields.
-                let chosen_prov = providers.iter().find(|p| has_api_key(&p.id));
-                if let Some(prov) = chosen_prov {
-                    // Capture current provider ID for compact_model lookup at distillation time
-                    gateway_current_provider_id = Some(prov.id.clone());
-
-                    // Resolve API key from fresh key vault (never cached to disk).
-                    let api_key = cfg
-                        .provider_key_vault
-                        .iter()
-                        .find(|k| k.provider_id == prov.id)
-                        .map(|k| k.api_key.as_str());
-                    let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-
-                    // ADR-012: Model is per-session. Use the first model from the provider list.
-                    // The session initialization will use the model from JSONL metadata
-                    // or Gateway LLMConfigDelivery.
-                    let model_id = prov
-                        .models
-                        .first()
-                        .map(|m| m.id.clone())
-                        .unwrap_or_else(|| "default".to_string());
-
-                    let timeouts = Some(crate::providers::router::ProviderTimeouts::from(&config));
-                    let provider = crate::providers::router::create_provider(
-                        &prov.id,
-                        &prov.protocol_type,
-                        api_key,
-                        Some(&prov.base_url),
-                        timeouts,
-                    );
-                    tracing::info!(
-                        provider = %prov.id,
-                        model = %model_id,
-                        num_models = available.len(),
-                        has_api_key = api_key.is_some(),
-                        source = "manifest",
-                        "Provider initialized from AgentHelloConfig"
-                    );
-
-                    (provider, model_id, available, prov.protocol_type.clone())
-                } else {
-                    tracing::warn!(
-                        available = ?providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-                        "No provider with API key found, using noop"
-                    );
-                    let p = crate::providers::router::create_noop_provider();
-                    (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
-                }
-            } else {
-                tracing::warn!("No provider list available from Gateway or cache, using noop");
-                let p = crate::providers::router::create_noop_provider();
-                (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
-            }
-        } else {
-            // Standalone mode: no Gateway, fall through to noop provider.
-            let p = crate::providers::router::create_noop_provider();
-            (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
-        }
-    };
-
-    // ── Build FallbackEmbeddingProvider (3-tier chain) ──
-    // Provider 1: ONNX local (highest priority, 500ms timeout)
-    //   — acowork-embed process at http://127.0.0.1:18080/v1
-    //   — only added if embed_endpoint is provided via AgentHello
-    // Provider 2: Ollama local (200ms timeout)
-    // Provider 3: Remote API (last resort, 5s timeout)
-    let mut embedding_providers: Vec<(Box<dyn EmbeddingProvider>, u64)> = Vec::new();
-
-    // Provider 1: ONNX local (if embed_endpoint is available from AgentHello)
-    // The Gateway delivers embed_endpoint/model_id/dimension via AgentHelloResult,
-    // which is the standard mechanism (same as provider_list delivery).
-    // Fallback: check env vars for development/testing.
-    let embed_endpoint = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.embed_endpoint.clone())
-        .or_else(|| std::env::var("ACOWORK_EMBED_ENDPOINT").ok());
-    let embed_model_id = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.embed_model_id.clone())
-        .or_else(|| std::env::var("ACOWORK_EMBED_MODEL").ok())
-        .unwrap_or_else(|| "bge-small-zh-v1.5".to_string());
-    let embed_dimension = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.embed_dimension)
-        .or_else(|| {
-            std::env::var("ACOWORK_EMBED_DIMENSION")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        })
-        .unwrap_or(512);
-
-    if let Some(ref endpoint) = embed_endpoint {
-        match RemoteEmbeddingProvider::try_with_config(
-            endpoint,
-            None, // No API key for local ONNX service
-            &embed_model_id,
-            embed_dimension,
-        ) {
-            Ok(provider) => {
-                tracing::info!(
-                    endpoint = %endpoint,
-                    model = %embed_model_id,
-                    dim = embed_dimension,
-                    "ONNX embedding provider configured"
-                );
-                embedding_providers.push((Box::new(provider), 500));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to create ONNX embedding provider, skipping"
-                );
-            }
-        }
-    }
-
-    // Provider 2: Ollama local (always attempted)
-    let ollama_primary = OllamaEmbeddingProvider::try_new().map_err(|e| {
-        RuntimeError::Config(format!("Failed to create Ollama embedding provider: {e}"))
-    })?;
-    let ollama_dim = ollama_primary.dimension();
-    embedding_providers.push((Box::new(ollama_primary), 200));
-
-    // Provider 3: Remote API fallback
-    let (base_url, api_key, model, dim) = {
-        let providers = hello_config
-            .as_ref()
-            .and_then(|cfg| cfg.provider_list.as_deref())
-            .unwrap_or(&[]);
-        let key_vault = hello_config
-            .as_ref()
-            .map(|cfg| cfg.provider_key_vault.as_slice())
-            .unwrap_or(&[]);
-
-        let mut selected: Option<(String, Option<String>, String, usize)> = None;
-        'outer: for p in providers {
-            for m in &p.models {
-                if m.capabilities.family.as_deref() == Some("text-embedding") {
-                    let api_key = key_vault
-                        .iter()
-                        .find(|k| k.provider_id == p.id)
-                        .map(|k| k.api_key.clone());
-                    let dim = if m.capabilities.max_output_tokens > 0 {
-                        m.capabilities.max_output_tokens as usize
-                    } else {
-                        ollama_dim
-                    };
-                    selected = Some((p.base_url.clone(), api_key, m.id.clone(), dim));
-                    break 'outer;
-                }
-            }
-        }
-
-        match selected {
-            Some((url, key, name, dim)) => {
-                tracing::info!(model = %name, dim, "Selected embedding model from provider list");
-                (url, key, name, dim)
-            }
-            None => {
-                let url = providers
-                    .first()
-                    .map(|p| p.base_url.clone())
-                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-                let key = key_vault.first().map(|k| k.api_key.clone());
-                tracing::info!(
-                    "No embedding model found in provider list, \
-                     defaulting to text-embedding-3-small"
-                );
-                (url, key, "text-embedding-3-small".to_string(), ollama_dim)
-            }
-        }
-    };
-
-    let remote_fallback =
-        RemoteEmbeddingProvider::try_with_config(&base_url, api_key.as_deref(), &model, dim)
-            .map_err(|e| {
-                RuntimeError::Config(format!("Failed to create remote embedding provider: {e}"))
-            })?;
-    embedding_providers.push((Box::new(remote_fallback), 5000));
-
-    let fallback_emb = Arc::new(FallbackEmbeddingProvider::with_providers(
-        embedding_providers,
-        EmbeddingConfig::default(),
-    ));
-    let emb_provider: Arc<dyn EmbeddingProvider> = fallback_emb;
-    tracing::info!(
-        dim = emb_provider.dimension(),
-        name = emb_provider.name(),
-        "Embedding provider initialized"
-    );
-
-    // Step 4: Build tool registry + activate by manifest
-    let workspace_resolver: crate::tools::workspace_resolver::SharedResolver =
-        Arc::new(std::sync::RwLock::new(
-            crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
-        ));
-    // Determine if any search provider is configured at startup.
-    // When no providers are configured, skip web_search to avoid wasting
-    // LLM calls on a tool that always returns "Provider not configured".
-    let has_search_providers = hello_config
-        .as_ref()
-        .map(|c| !c.search_key_vault.is_empty())
-        .unwrap_or(false);
-
-    // Create shared memory session handle — tools and AgentCore share
-    // the same handle. GrafeoStore is lazily initialized later via
-    // init_memory_store(); session_id is updated per-turn in loop_.rs.
-    let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(Some(
-        emb_provider.clone(),
-    )));
-
-    // Create MCP config change notifier — tools call notify() after
-    // writing to agent_mcp.json, and the main loop receives the signal
-    // via the watch receiver (passed to run_gateway_loop).
-    let mcp_notifier = Arc::new(crate::mcp_notify::McpConfigNotifier::default());
-
-    let mut registry = ToolRegistry::new();
-    for tool in builtin::all_builtin_tools(
-        &workspace_resolver,
-        &config.agent_id,
-        config.tool_http_timeout_ms,
-        has_search_providers,
-        None, // GrafeoStore not yet initialized — tool uses fallback path
-        Some(memory_session.clone()), // Shared session handle for memory_recall
-        Some(mcp_notifier.clone()), // MCP config change notifier
-        config.work_dir.clone(), // Agent home for MCP config persistence
-    ) {
-        registry.register(tool);
-    }
-
-    let active_tools = registry.activate(&loaded.manifest, &workspace_resolver, 60);
-    tracing::info!(
-        total = registry.all().len(),
-        active = active_tools.len(),
-        "Tools activated"
-    );
-
-    // Step 5: Build tool definitions for LLM context
-    let tool_specs: Vec<(String, serde_json::Value)> = active_tools
-        .iter()
-        .map(|t| {
-            let spec = t.spec();
-            let serialized = serde_json::to_value(&spec).unwrap_or_default();
-            tracing::warn!(
-
-                tool = %spec.name,
-                has_parameters = serialized.get("parameters").is_some(),
-                has_input_schema = serialized.get("input_schema").is_some(),
-                "DEBUG: Tool spec serialized fields check"
-
-            );
-
-            (spec.name.clone(), serialized)
-        })
-        .collect();
-    let tool_definitions: Vec<serde_json::Value> =
-        tool_specs.iter().map(|(_, v)| v.clone()).collect();
-
-    // Build full tool specs from ALL registered tools.
-    // `full_tool_specs` is the complete pool used by SessionManager for
-    // MCP tool merging and tool definition rebuilding.
-    let full_tool_specs: Vec<(String, serde_json::Value)> = registry
-        .all()
-        .iter()
-        .map(|t| {
-            let spec = t.spec();
-            let serialized = serde_json::to_value(&spec).unwrap_or_default();
-            (spec.name.clone(), serialized)
-        })
-        .collect();
-    tracing::info!(
-        active_specs = tool_specs.len(),
-        full_specs = full_tool_specs.len(),
-        "Tool specs: active vs full registry"
-    );
-
-    // Step 6: Build context builder
-    // User identity is delivered via AgentHelloResult (Gateway IPC),
-    // formatted from the active UserProfile. Falls back to None in standalone mode.
-    let identity_context: Option<String> = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.user_identity.as_ref())
-        .map(crate::agent::session::session_manager::format_user_profile_context);
-
-    // Clone tool_definitions and identity_context for SessionManagerConfig
-    // (Gateway mode) before they are moved into the standalone ContextBuilder.
-    let tool_definitions_for_session = tool_definitions.clone();
-    let identity_context_for_session = identity_context.clone();
-    let mut context_builder = ContextBuilder::new(system_prompt.clone())
-        .with_identity(identity_context)
-        .with_tools(tool_definitions);
-
-    // Apply the resolved model as override so ContextBuilder always has a model.
-    context_builder = context_builder.with_override_model(resolved_model.clone());
-
-    // Step 6.5: ADR-012 — model is per-session, no global agent_model.json.
-    tracing::info!(
-        provider = %provider.name(),
-        model = %resolved_model,
-        available_count = available_models.len(),
-        "Final model selection after per-agent preference resolution"
-    );
-
-    // Step 7: Create budget (unlimited for standalone mode)
-    let budget = acowork_core::Budget {
-        daily_tokens: None,
-        monthly_tokens: None,
-        daily_cost_usd: None,
-        monthly_cost_usd: None,
-        exceeded_action: "warn".to_string(),
-    };
-
-    // Step 8: Create AgentLoop with optional streaming chunk channel
-    // In Gateway mode, each StreamEvent::Content delta is forwarded through
-    // the on_chunk mpsc channel, then relayed to Gateway via StreamChunk.
-    // Tool events (ToolCall/ToolResult) are also routed through on_chunk
-    // for ordering guarantee with content chunks.
-    let (chunk_tx, chunk_rx) = if grpc_client.is_some() {
-        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::SessionChunkEvent>(256);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
-
-    // Step 2.5: Initialize conversation session
-    let work_dir_path = std::path::Path::new(&config.work_dir);
-    let conversations_dir = work_dir_path.join("conversations");
-    std::fs::create_dir_all(&conversations_dir)?;
-
-    // find_latest_session expects the conversations directory (it scans it directly).
-    // ConversationSession::new/resume expect the workspace root (they join "conversations" internally).
-    let conversation_session =
-        if let Some(latest_id) = crate::conversation::find_latest_session(&conversations_dir) {
-            tracing::info!(session_id = %latest_id, "Resuming latest conversation session");
-            Some(crate::conversation::ConversationSession::resume(
-                work_dir_path,
-                &latest_id,
-            )?)
-        } else {
-            let new_id = crate::conversation::generate_session_id();
-            tracing::info!(session_id = %new_id, "Creating new conversation session");
-            Some(crate::conversation::ConversationSession::new(
-                work_dir_path,
-                &new_id,
-                crate::conversation::SessionConfig {
-                    agent_id: config.agent_id.clone(),
-                    workspace_id: None,
-                    model: None,
-                    provider: None,
-                },
-            )?)
-        };
-
-    // ADR-012: Validate the resumed session's model/provider against the
-    // cached provider list (resource_cache.providers).  If the provider ID
-    // or model name no longer exists in the cache, or the provider has no
-    // API key, fall back to the first model of the first available provider.
-    if let Some(ref conv) = conversation_session {
-        let session_model = conv.model();
-        let session_provider = conv.provider();
-
-        // A session provider is valid when:
-        // 1. It exists in the cached provider list
-        // 2. The model exists within that provider's models
-        // 3. Either it has an API key in the vault, or it is the same
-        //    provider that was already resolved at startup.
-        let is_valid = match (&session_model, &session_provider) {
-            (Some(model), Some(provider_id)) => {
-                let in_cache = resource_cache.providers.as_ref().is_none_or(|providers| {
-                    providers
-                        .iter()
-                        .any(|p| p.id == *provider_id && p.models.iter().any(|m| m.id == *model))
-                });
-                if !in_cache {
-                    false
-                } else {
-                    // Same provider as startup-resolved → already has API key.
-                    gateway_current_provider_id.as_deref() == Some(provider_id.as_str())
-                        || hello_config.as_ref().is_some_and(|cfg| {
-                            cfg.provider_key_vault
-                                .iter()
-                                .any(|k| k.provider_id == *provider_id)
-                        })
-                }
-            }
-            _ => true,
-        };
-
-        if !is_valid {
-            let fallback_model = resource_cache
-                .providers
-                .as_ref()
-                .and_then(|p| p.first())
-                .and_then(|p| p.models.first())
-                .map(|m| m.id.clone());
-
-            if let Some(ref fallback) = fallback_model {
-                tracing::warn!(
-                    session_id = %conv.session_id(),
-                    invalid_model = ?session_model,
-                    invalid_provider = ?session_provider,
-                    fallback = %fallback,
-                    "Session model/provider invalid, falling back"
-                );
-                conv.update_model_provider(fallback, None);
-            }
-        }
-    }
-
-    // Spawn background session scan
-    let conversations_dir_clone = conversations_dir.clone();
-    let _session_scan_handle = tokio::spawn(async move {
-        let handle = crate::conversation::scan_sessions_async(conversations_dir_clone, None, None);
-        let (sessions, _) = handle.await.unwrap_or((Vec::new(), 0));
-        tracing::info!(count = sessions.len(), "Background session scan complete");
-    });
-
-    // ADR-012: Per-session model — no global override_model in SessionManagerConfig.
-    // Model is initialized per-session from resource_cache or restored from JSONL.
-
-    // Step 9: Run the appropriate loop based on connection mode
-    if let Some(mut client) = grpc_client {
-        // Gateway mode: create SessionManager for multi-session routing
-        tracing::info!("Running in Gateway mode with SessionManager");
-
-        // Extract reconnect parameters before spawning tasks
-        let agent_id = config.agent_id.clone();
-        let version = loaded.manifest.version.clone();
-        let socket_path = config
-            .get_gateway_address()
-            .expect("gateway address must be set in Gateway mode")
-            .to_string();
-
-        // Build shared AgentCore for all sessions
-        let mut core = Arc::new(AgentCore::new(
-            config.clone(),
-            loaded.manifest.clone(),
-            provider,
-            active_tools,
-            chunk_tx.clone(),
-        ));
-
-        // Save the startup-resolved provider ID before it's consumed by
-        // Arc::get_mut below.  We may need it later to detect a mismatch
-        // between the startup provider and a resumed session's provider.
-        let startup_provider_id = gateway_current_provider_id.clone();
-
-        // Inject the global provider list and key vault into the shared core.
-        // Source of truth: AgentHelloConfig (fresh from Gateway). When the GW
-        // didn't send a new list (version match), fall back to the on-disk
-        // resource cache. Provider API keys live in the in-memory key vault
-        // and are never persisted to disk.
-        //
-        // Arc::get_mut only succeeds when the refcount is 1, so we must use
-        // `&mut core` directly (not `core.clone()` which bumps refcount to 2).
-        if let Some(c) = Arc::get_mut(&mut core) {
-            let providers_for_init: Option<&Vec<acowork_core::protocol::ProviderListItem>> =
-                hello_config
-                    .as_ref()
-                    .and_then(|cfg| cfg.provider_list.as_ref())
-                    .or(resource_cache.providers.as_ref());
-
-            if let Some(providers) = providers_for_init {
-                // Populate provider_compact_models for distillation lookups.
-                for p in providers {
-                    c.provider_compact_models
-                        .insert(p.id.clone(), p.compact_model.clone());
-                }
-                // Replace the shared global provider list under RwLock.
-                {
-                    let mut list = c.global_provider_list.write().unwrap();
-                    *list = providers.clone();
-                }
-                tracing::info!(
-                    provider_count = providers.len(),
-                    compact_count = c.provider_compact_models.len(),
-                    "Populated AgentCore.global_provider_list from hello_config / resource cache"
-                );
-            }
-
-            if let Some(ref cfg) = hello_config {
-                c.provider_list_version = cfg.provider_list_version;
-                let mut vault = c.provider_key_vault.write().unwrap();
-                vault.clear();
-                for entry in &cfg.provider_key_vault {
-                    vault.insert(entry.provider_id.clone(), entry.api_key.clone());
-                }
-                tracing::info!(
-                    version = c.provider_list_version,
-                    key_count = vault.len(),
-                    "Populated AgentCore provider_key_vault from hello_config"
-                );
-            }
-
-            // Inject shared MemorySessionHandle so tools can access
-            // the Grafeo store once initialized and session_id at runtime.
-            c.memory_session = Some(memory_session);
-
-            // Inject embedding provider (built from LLM provider registry)
-            // so init_memory_store can use the correct vector dimension.
-            c.embedding_provider = Some(emb_provider.clone());
-
-            // Initialize Grafeo memory store at agent workspace
-            c.init_memory_store(work_dir_path);
-        }
-
-        let session_manager_config = SessionManagerConfig {
-            inbound_channel_capacity: 64,
-            system_prompt: system_prompt.clone(),
-            per_session_budget: budget,
-            history_max_tokens: config.history_max_tokens,
-            chunk_tx,
-            tool_definitions: tool_definitions_for_session,
-            full_tool_specs: full_tool_specs.clone(),
-            identity_context: identity_context_for_session,
-            protocol_type: protocol_type.clone(),
-        };
-        let mut session_manager = SessionManager::new(core, session_manager_config);
-
-        // Inject the shared WorkspaceResolver into SessionManager so that
-        // set_session_workspace() can resolve workspace_id → path and send
-        // SetWorkDir to sessions automatically.
-        session_manager.set_resolver(workspace_resolver.clone());
-
-        // Set the default workspace for new sessions from last_active in agent_workspaces.json
-        // This makes new sessions inherit the user's last selected workspace instead of agent home.
-        if let Some(ws_id) = workspace_resolver
-            .read()
-            .unwrap()
-            .last_active_workspace_id()
-        {
-            let ws_id_owned = ws_id.to_owned();
-            session_manager.set_default_workspace_id(&ws_id_owned);
-            tracing::info!(
-                default_workspace_id = %ws_id_owned,
-                "SessionManager: initialized default workspace from last_active"
-            );
-        }
-
-        // Create initial session with the resumed/created conversation
-        //
-        // Capture the resumed session's model/provider before moving
-        // conversation_session into create_session_with_id_and_conversation.
-        // If the session's provider differs from the startup-resolved provider,
-        // we need to rebuild the Provider with the correct base_url + API key.
-        let resumed_model: Option<String> = conversation_session.as_ref().and_then(|c| c.model());
-        let resumed_provider: Option<String> =
-            conversation_session.as_ref().and_then(|c| c.provider());
-
-        let initial_session_id = if let Some(conv) = conversation_session {
-            let sid = conv.session_id().to_string();
-            session_manager
-                .create_session_with_id_and_conversation(sid.clone(), Some(conv))
-                .await?;
-            sid
-        } else {
-            session_manager.create_session().await?
-        };
-        tracing::info!(initial_session_id = %initial_session_id, "Initial session created");
-
-        // If the resumed session's provider differs from the startup-resolved
-        // provider, rebuild the Provider with the session's provider info
-        // (base_url + API key from the cached provider list + key vault).
-        // This handles the case where the session's provider differs from
-        // the startup-resolved provider (e.g. session saved with different provider).
-        if let (Some(sm), Some(sp)) = (&resumed_model, &resumed_provider)
-            && startup_provider_id.as_deref() != Some(sp.as_str()) {
-                tracing::info!(
-                    session_id = %initial_session_id,
-                    session_provider = %sp,
-                    session_model = %sm,
-                    startup_provider = ?startup_provider_id,
-                    "Session provider differs from startup, dispatching ModelSwitch to rebuild Provider"
-                );
-                // Route a ModelSwitch to the resumed session — the SessionTask
-                // will rebuild the per-session Provider via
-                // `AgentCore::build_provider_for(provider_id)` using the global
-                // provider list and key vault populated above.
-                if let Err(e) = session_manager.route_model_switch(
-                    &initial_session_id,
-                    sm.clone(),
-                    Some(sp.clone()),
-                ) {
-                    tracing::warn!(
-                        error = %e,
-                        session_id = %initial_session_id,
-                        "route_model_switch failed for resumed session"
-                    );
-                }
-            }
-
-        // Step 9.5: Apply workspace context and runtime overrides from AgentHelloResult
-        //
-        // In the atomic handshake design (Plan B), Gateway bundles all startup
-        // configuration into AgentHelloResult — no separate push messages are
-        // sent during handshake. We must consume these fields here so that:
-        //   1. Workspace context is broadcast to the initial session.
-        //   2. Runtime overrides are cached on SessionManager (so sessions
-        //      created *after* this point also inherit them) and broadcast
-        //      to the initial session.
-        // Without this, the agent would start with no workspace info and
-        // runtime overrides would fall back to defaults until a hot-reload
-        // ── Workspace Context (self-formatted from agent_workspaces.json) ──
-        // Runtime reads its own workspace config and formats the LLM context text.
-        // Gateway is a pure pass-through for workspace CRUD (no persistence).
-        //
-        // Per-session workspace defaults to the last_active workspace from config,
-        // or "__agent_home__" if none is set. The initial session receives its
-        // per-session context immediately; the global workspace_context cache is
-        // set as a fallback for sessions created later.
-        {
-            let config_path = std::path::Path::new(&config.work_dir)
-                .join("config")
-                .join("agent_workspaces.json");
-            if config_path.exists() {
-                if let Ok(config_json) = std::fs::read_to_string(&config_path) {
-                    // Send per-session workspace context to the initial session
-                    session_manager.update_session_workspace_context(
-                        &initial_session_id,
-                        &workspace_resolver.read().unwrap(),
-                    );
-
-                    // Cache the formatted context as a fallback for sessions created later
-                    let context_text =
-                        crate::tools::workspace_resolver::format_workspace_context_from_json(
-                            &config_json,
-                            &config.work_dir,
-                        );
-                    session_manager.set_workspace_context(context_text);
-                }
-            } else {
-                // No config file yet — send per-session context + empty fallback
-                session_manager.update_session_workspace_context(
-                    &initial_session_id,
-                    &workspace_resolver.read().unwrap(),
-                );
-                let fallback = crate::tools::workspace_resolver::format_workspace_context_from_json(
-                    r#"{"version":"1.0.0","additional_dirs":[]}"#,
-                    &config.work_dir,
-                );
-                session_manager.set_workspace_context(fallback);
-            }
-        }
-
-        if let Some(ref _cfg) = hello_config {
-            // ── Per-agent config loaded from workspace/config/agent_config.json ─
-            // (Phase 5 refactor: this replaces the old AgentHelloResult.runtime_* fields.)
-            // On first start (no config file), create a default with empty overrides;
-            // subsequent starts load any user-customized values.
-            let work_dir_path = std::path::Path::new(&config.work_dir);
-            let agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
-                .unwrap_or_default()
-                .unwrap_or_default();
-
-            // If this is first start, persist the default config so the file exists.
-            let is_first_start = !std::path::Path::new(&config.work_dir)
-                .join("config")
-                .join("agent_config.json")
-                .exists();
-
-            if is_first_start {
-                let _ = crate::agent_config::save_agent_config(work_dir_path, &agent_cfg);
-            }
-
-            let has_overrides = agent_cfg.max_output_tokens.is_some()
-                || agent_cfg.max_iterations.is_some()
-                || agent_cfg.temperature.is_some()
-                || agent_cfg.system_prompt_override.is_some()
-                || agent_cfg.shell_approval_threshold.is_some();
-            if has_overrides {
-                tracing::info!(
-                    max_output_tokens = ?agent_cfg.max_output_tokens,
-                    max_iterations = ?agent_cfg.max_iterations,
-                    temperature = ?agent_cfg.temperature,
-                    "Applying runtime config overrides from workspace agent_config.json"
-                );
-                session_manager.apply_runtime_config_override(
-                    agent_cfg.max_output_tokens,
-                    agent_cfg.max_iterations,
-                    agent_cfg.temperature,
-                    agent_cfg.system_prompt_override.clone(),
-                    agent_cfg.shell_approval_threshold.clone(),
-                );
-            }
-
-            // ADR-012: Per-session model — no global agent_model.json anymore.
-            // Model is initialized per-session and persisted in JSONL SessionMetadata.
-        }
-
-        // ── DevMode: start Debug Protocol server at startup when --dev-mode ──
-        // When the Gateway spawns the Runtime with --dev-mode --debug-port,
-        // the debug WebSocket server must be started here so the frontend can
-        // connect immediately.  This is the "start in debug" path (agent was
-        // stopped).  The "restart in debug" path (agent already running) uses
-        // EnableDebugMode gRPC push handled in process_gateway_recv instead.
-        if config.dev_mode {
-            let debug_port = config.debug_port as u32;
-            tracing::info!(
-                debug_port = debug_port,
-                "DevMode enabled at startup — starting Debug Protocol server"
-            );
-            session_manager.enable_debug_mode(debug_port).await;
-        }
-
-        // ── Sync agent_mcp.json from Gateway catalog at startup ──
-        // The AgentHello handshake delivers the latest mcp_list from Gateway.
-        // We must update agent_mcp.json's catalog portion BEFORE auto-connect
-        // so that MCP connections use the freshest config (e.g. --stdio flags,
-        // updated env vars). Without this, a stale agent_mcp.json from a
-        // previous session would be used for connections.
-        if let Some(ref cfg) = hello_config
-            && let Some(ref mcp_list) = cfg.mcp_list {
-                use acowork_core::protocol::McpServerConfigDef;
-                let catalog: Vec<McpServerConfigDef> = mcp_list
-                    .iter()
-                    .map(|item| McpServerConfigDef {
-                        name: item.id.clone(),
-                        transport: item.transport.clone(),
-                        url: item.url.clone(),
-                        command: item.command.clone(),
-                        args: item.args.clone(),
-                        env: item.env.clone(),
-                        headers: item.headers.clone(),
-                        tool_timeout_secs: item.tool_timeout_secs,
-                    })
-                    .collect();
-                let work_dir_path = std::path::Path::new(&config.work_dir);
-                if let Err(e) = crate::agent_config::save_agent_mcp_config_catalog(
-                    work_dir_path,
-                    &catalog,
-                ) {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to sync agent_mcp.json catalog from AgentHello mcp_list"
-                    );
-                } else {
-                    tracing::info!(
-                        catalog_count = catalog.len(),
-                        "Synced agent_mcp.json catalog from AgentHello mcp_list"
-                    );
-                }
-            }
-
-        // ── MCP server auto-connect at startup (background, non-blocking) ──
-        // Spawn MCP connect in a background task. Results are sent through an
-        // mpsc channel and applied asynchronously inside run_gateway_loop's
-        // tokio::select!.  This ensures the Gateway message loop starts
-        // immediately without waiting for MCP connection timeouts (30s/server).
-        // AgentReady was already sent above — the agent appears connected
-        // instantly, and MCP tools become available later when ready.
-        let mcp_startup_rx: Option<
-            tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
-        > = {
-            let mcp_configs = crate::agent_config::load_merged_mcp_configs(std::path::Path::new(
-                &config.work_dir,
-            ));
-            if !mcp_configs.is_empty() {
-                let (tx, rx) =
-                    tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);
-                tracing::info!(
-                    mcp_count = mcp_configs.len(),
-                    "Auto-connecting to persisted MCP servers at startup (background)"
-                );
-                tokio::spawn(async move {
-                    // Connect to MCP servers (this is the slow part — up to 30s timeout).
-                    let (registry, failures) =
-                        acowork_mcp::client::McpRegistry::connect_all(&mcp_configs)
-                            .await
-                            .expect("connect_all is non-fatal and should never fail");
-                    let registry = std::sync::Arc::new(registry);
-
-                    // Build tool wrappers and specs from the registry (fast, sync).
-                    let mut wrappers = Vec::new();
-                    let mut specs = Vec::new();
-                    for prefixed_name in registry.tool_names() {
-                        if let Some(def) = registry.get_tool_def(&prefixed_name) {
-                            let wrapper = acowork_mcp::wrapper::McpToolWrapper::new(
-                                prefixed_name.clone(),
-                                def,
-                                registry.clone(),
-                            );
-                            let tool_spec = wrapper.spec();
-                            let serialized = serde_json::to_value(&tool_spec).unwrap_or_default();
-                            specs.push((tool_spec.name.clone(), serialized));
-                            wrappers.push(wrapper);
-                        }
-                    }
-
-                    // Send results to run_gateway_loop for async application.
-                    let _ = tx.send((registry, wrappers, specs, failures)).await;
-                });
-                Some(rx)
-            } else {
-                None
-            }
-        };
-
-        // Step 9.8: Send workspace config snapshot to Gateway (in-memory cache only).
-        // Gateway does NOT persist workspace config — it caches this for HTTP API responses
-        // (list_workspaces, etc.) and discards it when the agent disconnects.
-        {
-            let config_path = std::path::Path::new(&config.work_dir)
-                .join("config")
-                .join("agent_workspaces.json");
-            let config_json = if config_path.exists() {
-                std::fs::read_to_string(&config_path)
-                    .unwrap_or_else(|_| r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string())
-            } else {
-                r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string()
-            };
-            let msg = acowork_core::proto::ClientMessage {
-                request_id: 0,
-                payload: Some(
-                    acowork_core::proto::client_message::Payload::UpdateWorkspaceConfig(
-                        acowork_core::proto::UpdateWorkspaceConfig { config_json },
-                    ),
-                ),
-            };
-            if client.outbound_sender().send(msg).await.is_err() {
-                tracing::warn!("Failed to send UpdateWorkspaceConfig snapshot to Gateway");
-            } else {
-                tracing::info!("Workspace config snapshot sent to Gateway");
-            }
-        }
-
-        // Step 10: Notify Gateway that the agent is ready to receive messages.
-        // The Desktop App polls GET /api/agents for ready=true before
-        // establishing WebSocket connections for chat streaming.
-        {
-            let agent_ready_msg = acowork_core::proto::ClientMessage {
-                request_id: 0,
-
-                payload: Some(acowork_core::proto::client_message::Payload::AgentReady(
-                    acowork_core::proto::AgentReadyRequest {
-                        agent_id: agent_id.clone(),
-                    },
-                )),
-            };
-            if client
-                .outbound_sender()
-                .send(agent_ready_msg)
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    "Failed to send AgentReady to Gateway — stream may already be closed"
-                );
-            } else {
-                tracing::info!("AgentReady sent to Gateway for agent={}", agent_id);
-            }
-        }
-
-        // Spawn chunk relay task: consumes ChunkEvent from mpsc channel and
-        // forwards each event to Gateway via the shared main gRPC connection.
-        // No separate connection needed — gRPC HTTP/2 is full-duplex.
-        let agent_id_for_relay = agent_id.clone();
-        let chunk_relay = if let Some(mut chunk_rx) = chunk_rx {
-            let outbound_tx = client.outbound_sender();
-            Some(tokio::spawn(async move {
-                tracing::info!("Chunk relay started (shared gRPC connection)");
-                while let Some(session_event) = chunk_rx.recv().await {
-                    let sid = &session_event.session_id;
-                    let agent_id = &agent_id_for_relay;
-                    match session_event.event {
-                        crate::agent::loop_::ChunkEvent::ReasoningStarted => {
-                            let params = serde_json::json!({
-                                "session_id": sid,
-                            });
-                            relay_stream_chunk(&outbound_tx, "agent_reasoning_started", &params)
-                                .await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::Delta(delta) => {
-                            let params = serde_json::json!({
-                                "content": delta,
-                                "session_id": sid,
-                            });
-                            relay_stream_chunk(&outbound_tx, "agent_chunk", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::ReasoningDelta(delta) => {
-                            let params = serde_json::json!({
-                                "reasoning_content": delta,
-                                "session_id": sid,
-                            });
-                            relay_stream_chunk(&outbound_tx, "agent_chunk", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::ContextUsage(ctx_info) => {
-                            let msg = acowork_core::proto::ClientMessage {
-
-                                request_id: 0,
-                                payload: Some(acowork_core::proto::client_message::Payload::ContextUsageReport(
-                                    acowork_core::proto::ContextUsageReportRequest {
-                                        agent_id: agent_id.clone(),
-                                        context: Some((&ctx_info).into()),
-                                    },
-                                )),
-
-                            };
-                            if outbound_tx.send(msg).await.is_err() {
-                                tracing::debug!(
-                                    "Context usage report send failed — main connection may be closed"
-                                );
-                            }
-                        }
-
-                        crate::agent::loop_::ChunkEvent::CompactingStarted => {
-                            let params = serde_json::json!({
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "compacting_started", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::CompactingEnded => {
-                            let params = serde_json::json!({
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "compacting_ended", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::ToolCall { name, args, id } => {
-                            let parsed_args: serde_json::Value = serde_json::from_str(&args)
-                                .unwrap_or_else(|_| serde_json::json!({ "raw": args }));
-                            let params = serde_json::json!({
-                                "name": name,
-                                "params": parsed_args,
-                                "tool_call_id": id,
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "agent_tool_call", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::ToolResult {
-                            name,
-                            result,
-                            tool_call_id,
-                        } => {
-                            let parsed_result: serde_json::Value = serde_json::from_str(&result)
-                                .unwrap_or_else(|_| serde_json::json!({ "content": result }));
-                            let params = serde_json::json!({
-                                "name": name,
-                                "result": parsed_result,
-                                "tool_call_id": tool_call_id,
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "agent_tool_result", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::IterationLimitPaused {
-                            iteration,
-                            max_iterations,
-                        } => {
-                            let params = serde_json::json!({
-                                "iteration": iteration,
-                                "max_iterations": max_iterations,
-                                "message": format!("Iteration limit reached ({}/{}). Click Continue to keep going.", iteration, max_iterations),
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "iteration_limit_paused", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::ToolApprovalNeeded {
-                            request_id,
-                            tool_name,
-                            action,
-                            risk_level,
-                            reason,
-                            tool_call_id,
-                            approval_timeout_secs,
-                        } => {
-                            let params = serde_json::json!({
-                                "request_id": request_id,
-                                "agent_id": agent_id,
-                                "tool_name": tool_name,
-                                "action": action,
-                                "risk_level": risk_level,
-                                "reason": reason,
-                                "session_id": sid,
-                                "tool_call_id": tool_call_id,
-                                "approval_timeout_secs": approval_timeout_secs,
-                            });
-                            relay_intent(&outbound_tx, "tool_approval_needed", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::Done {
-                            content,
-                            message_id,
-                        } => {
-                            let params = serde_json::json!({
-                                "content": content,
-                                "message_id": message_id,
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "agent_response", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::Error {
-                            message,
-                            message_id,
-                        } => {
-                            let params = serde_json::json!({
-                                "content": message,
-                                "message_id": message_id,
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "agent_error", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::Stopped { content } => {
-                            let params = serde_json::json!({
-                                "content": content,
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "agent_stopped", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::SessionStateChanged {
-                            status,
-                            model,
-                            provider,
-                            workspace_id,
-                            ratio,
-                            reasoning_effort,
-                            temperature,
-                        } => {
-                            let mut params = serde_json::json!({
-                                "status": status,
-                                "session_id": sid,
-                            });
-                            if let Some(ref m) = model {
-                                params["model"] = serde_json::json!(m);
-                            }
-                            if let Some(ref p) = provider {
-                                params["provider"] = serde_json::json!(p);
-                            }
-                            if let Some(ref w) = workspace_id {
-                                params["workspace_id"] = serde_json::json!(w);
-                            }
-                            if let Some(r) = ratio {
-                                params["ratio"] = serde_json::json!(r);
-                            }
-                            if let Some(ref re) = reasoning_effort {
-                                params["reasoning_effort"] = serde_json::json!(re);
-                            }
-                            if let Some(t) = temperature {
-                                params["temperature"] = serde_json::json!(t);
-                            }
-                            relay_intent(&outbound_tx, "session_state_changed", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::TodoListUpdated { todos } => {
-                            let params = serde_json::json!({
-                                "todos": todos,
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "todo_list_updated", &params).await;
-                        }
-
-                        crate::agent::loop_::ChunkEvent::AskQuestion {
-                            request_id,
-                            question,
-                            options,
-                            title,
-                            timeout_seconds,
-                        } => {
-                            let params = serde_json::json!({
-                                "request_id": request_id,
-                                "question": question,
-                                "options": options,
-                                "title": title,
-                                "timeout_seconds": timeout_seconds,
-                                "agent_id": agent_id,
-                                "session_id": sid,
-                            });
-                            relay_intent(&outbound_tx, "ask_question", &params).await;
-                        }
-                    }
-                }
-
-                tracing::debug!("Chunk relay task ended");
-            }))
-        } else {
-            None
-        };
-
-        // MCP auto-connect runs in background; results are received inside
-        // run_gateway_loop via mcp_startup_rx.  No blocking here — the Gateway
-        // message loop starts immediately.
-
-        // Runtime MCP connect channel — used by RuntimeConfigUpdate and
-        // mcp_config_rx handlers to spawn background MCP connections
-        // without blocking the Gateway message loop (avoids session timeout).
-        let (mcp_runtime_tx, mcp_runtime_rx) =
-            tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);
-
-        // Extract gateway query receiver before passing client to the loop.
-        // This avoids &mut self conflicts when tokio::select! polls both
-        // recv_message() and the gateway query channel.
-        let gateway_query_rx = client.take_gateway_query_rx();
-        let result = run_gateway_loop(
-            &mut session_manager,
-            &mut client,
-            gateway_query_rx,
-            config.work_dir.clone(),
-            socket_path.clone(),
-            agent_id.clone(),
-            version.clone(),
-            log_reload_handle,
-            skill_registry,
-            workspace_resolver.clone(),
-            initial_session_id,
-            config.session_idle_timeout_secs,
-            mcp_notifier.subscribe(),
-            mcp_startup_rx,
-            mcp_runtime_tx,
-            mcp_runtime_rx,
-        )
-        .await;
-
-        // Chunk relay task will end when chunk_rx is dropped (all senders dropped)
-        if let Some(handle) = chunk_relay {
-            let _ = handle.await;
-        }
-
-        result
-    } else {
-        // Standalone mode: create AgentLoop and run interactive stdin chat loop
+        // ── Standalone mode ──────────────────────────────────────────────────
+        use crate::agent::loop_::AgentLoop;
         tracing::info!("Running in standalone mode");
         let (mut agent_loop, _inbound_tx) = AgentLoop::new(
             config.clone(),
-            loaded.manifest.clone(),
-            provider,
-            active_tools,
-            budget,
-            chunk_tx,
-            conversation_session,
+            agent_ctx.loaded.manifest.clone(),
+            agent_ctx.provider.clone(),
+            agent_ctx.active_tools.clone(),
+            agent_ctx.budget.clone(),
+            agent_ctx.chunk_tx.clone(),
+            None, // no conversation session in standalone cold-start
         );
 
-        // Inject embedding provider and memory session before store init.
-        agent_loop.core.embedding_provider = Some(emb_provider.clone());
-        agent_loop.core.memory_session = Some(memory_session);
-
-        // Initialize Grafeo memory store at agent workspace
+        agent_loop.core.embedding_provider = Some(agent_ctx.emb_provider.clone());
+        agent_loop.core.memory_session = Some(agent_ctx.memory_session.clone());
+        let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
 
-        // Standalone mode: per-model capabilities/output-limits are queried on
-        // demand from AgentCore (see `get_model_capabilities` /
-        // `max_output_tokens_limit_for_model`). No global injection needed.
-        let _ = &gateway_current_provider_id; // currently unused in standalone
-        run_chat_loop(&mut agent_loop, &mut context_builder).await
+        let _ = &agent_ctx.gateway_current_provider_id; // unused in standalone
+        let mut ctx_builder = agent_ctx
+            .context_builder
+            .take()
+            .expect("context_builder must be Some");
+        run_chat_loop(&mut agent_loop, &mut ctx_builder).await
     }
 }
+
+
+
 
 /// Build the runtime provider with multi-provider routing support.
 ///
@@ -1727,7 +496,7 @@ async fn run_chat_loop(
 /// Messages are forwarded to the appropriate SessionHandle's inbound channel
 /// and the loop immediately returns to recv the next message.
 #[allow(clippy::too_many_arguments)]
-async fn run_gateway_loop(
+pub(crate) async fn run_gateway_loop(
     session_manager: &mut SessionManager,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     mut gateway_query_rx: Option<
@@ -1897,7 +666,42 @@ async fn run_gateway_loop(
                                 // refresh, etc.). The task holds cloned Arc/Sender handles.
                                 let store_opt = session_manager.memory_store().cloned();
                                 let outbound = grpc_client.outbound_sender();
-                                tokio::spawn(spawn_memory_query_handler(
+
+                                // Handle GetSessionStateQuery inline — the snapshot is
+                                // a cheap RwLock read that never blocks.
+                                if let ServerPayload::GetSessionStateQuery(ref q) = payload {
+                                    let snapshot = session_manager.snapshot_session_state(&q.session_id);
+                                    let result = if let Some(snap) = snapshot {
+                                        proto::SessionStateResult {
+                                            request_id: q.request_id.clone(),
+                                            found: true,
+                                            session_id: snap.session_id,
+                                            status_json: snap.status_json,
+                                            model: snap.model.unwrap_or_default(),
+                                            provider: snap.provider.unwrap_or_default(),
+                                            workspace_id: snap.workspace_id.unwrap_or_default(),
+                                            ratio: snap.ratio.unwrap_or(0.0),
+                                            reasoning_effort: snap.reasoning_effort.unwrap_or_default(),
+                                            temperature: snap.temperature.unwrap_or(0.0),
+                                            has_temperature: snap.temperature.is_some(),
+                                        }
+                                    } else {
+                                        proto::SessionStateResult {
+                                            request_id: q.request_id.clone(),
+                                            found: false,
+                                            session_id: q.session_id.clone(),
+                                            ..Default::default()
+                                        }
+                                    };
+                                    let response = proto::ClientMessage {
+                                        request_id,
+                                        payload: Some(proto::client_message::Payload::SessionStateResult(result)),
+                                    };
+                                    if let Err(e) = outbound.send(response).await {
+                                        tracing::error!("Failed to send SessionStateResult: {}", e);
+                                    }
+                                } else {
+                                    tokio::spawn(spawn_memory_query_handler(
 
                                     store_opt,
                                     outbound,
@@ -1905,6 +709,7 @@ async fn run_gateway_loop(
                                     payload,
 
                                 ));
+                                }
                             }
                         }
                         None => {
@@ -3798,7 +2603,7 @@ async fn handle_get_session_messages(
 /// StreamChunk is the lightweight path for real-time streaming deltas
 /// (agent_reasoning_started, agent_chunk). These go directly to the
 /// WebSocket bridge without requiring an IntentSend round-trip.
-async fn relay_stream_chunk(
+pub(crate) async fn relay_stream_chunk(
     outbound_tx: &tokio::sync::mpsc::Sender<acowork_core::proto::ClientMessage>,
     action: &str,
     params: &serde_json::Value,
@@ -3827,7 +2632,7 @@ async fn relay_stream_chunk(
 /// IntentSend is the full-round-trip path for discrete events
 /// (tool_call, tool_result, agent_response, etc.) that may require
 /// ack/nack handling downstream.
-async fn relay_intent(
+pub(crate) async fn relay_intent(
     outbound_tx: &tokio::sync::mpsc::Sender<acowork_core::proto::ClientMessage>,
     action: &str,
     params: &serde_json::Value,
@@ -3940,7 +2745,7 @@ struct AgentSkillsOverride {
 /// Resolve the effective skill mode by merging manifest default with user override.
 ///
 /// Priority: `{work_dir}/.agent_skills.json` > manifest `[skills]` default.
-fn resolve_skill_mode(
+pub(crate) fn resolve_skill_mode(
     manifest: &acowork_core::AgentManifest,
 
     work_dir: &str,

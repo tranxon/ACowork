@@ -25,6 +25,13 @@ import { emitAgentConfigRefresh } from "./refresh";
 export async function syncAgentUI(agentId: string) {
     await useAgentStore.getState().waitForAgentReady(agentId);
     useChatStore.getState().connectStream(agentId, getGatewayUrl());
+
+    // ADR-015 Phase 5: Pull initial session state for the active session
+    const activeSid = useChatStore.getState().getActiveSessionId(agentId);
+    if (activeSid) {
+        await useChatStore.getState().fetchSessionState(agentId, activeSid);
+    }
+
     useWorkspaceStore.getState().fetchWorkspaces(agentId);
     emitAgentConfigRefresh(agentId);
 }

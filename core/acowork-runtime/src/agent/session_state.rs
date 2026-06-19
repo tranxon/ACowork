@@ -15,6 +15,35 @@ use crate::agent::loop_detector::LoopDetector;
 use crate::conversation::ConversationSession;
 use acowork_core::providers::traits::ReasoningEffort;
 
+/// Lightweight snapshot of per-session runtime state.
+///
+/// Written by `AgentLoop::emit_session_state` on every status transition
+/// and at iteration checkpoints. Read by `SessionManager::snapshot_session_state`
+/// to serve the Gateway HTTP `GET /api/agents/{id}/sessions/{session_id}/state`
+/// endpoint without a gRPC round-trip to the Runtime process.
+///
+/// Uses `Arc<std::sync::RwLock<...>>` so reads are lock-free on the happy path
+/// and writes are isolated to the emit call site.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionStateSnapshot {
+    /// Session identifier.
+    pub session_id: String,
+    /// JSON-serialized `SessionStatus` (same format as `SessionStateChanged` event).
+    pub status_json: String,
+    /// Currently active model, if any.
+    pub model: Option<String>,
+    /// Currently active provider, if any.
+    pub provider: Option<String>,
+    /// Workspace ID associated with the session, if any.
+    pub workspace_id: Option<String>,
+    /// Calibrated chars/token ratio, if available.
+    pub ratio: Option<f64>,
+    /// Reasoning effort override string, if set.
+    pub reasoning_effort: Option<String>,
+    /// Temperature override, if set.
+    pub temperature: Option<f32>,
+}
+
 /// A single item in the session-level todo list.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TodoItem {

@@ -90,8 +90,8 @@ pub enum SessionMessage {
     /// Update identity context from Gateway UserProfileUpdate push
     UpdateIdentityContext { identity_context: Option<String> },
     /// Global provider list was updated (Gateway pushed new model capabilities).
-    /// Sessions should refresh state derived from model capabilities (reasoning_effort,
-    /// context window limits, etc.) and emit an updated status to the frontend.
+    /// Sessions should emit an updated status to the frontend so the UI
+    /// reflects the latest available models and providers.
     ProviderListUpdated,
     /// Stop signal to stop the current agent loop iteration
     Stop { reason: String },
@@ -406,6 +406,19 @@ impl SessionTask {
         self.agent_loop.core.status_tx = Some(tx);
     }
 
+    /// Set the shared snapshot slot for the Gateway pull API.
+    ///
+    /// Called by SessionManager after creating the SessionTask, before spawning.
+    /// The slot is a shared `Arc<RwLock<Option<SessionStateSnapshot>>>` that
+    /// `AgentLoop::emit_session_state` writes to on every status transition,
+    /// and `SessionManager::snapshot_session_state` reads from.
+    pub(crate) fn set_snapshot_slot(
+        &mut self,
+        slot: Arc<std::sync::RwLock<Option<crate::agent::session_state::SessionStateSnapshot>>>,
+    ) {
+        self.agent_loop.core.snapshot_slot = Some(slot);
+    }
+
     /// Return the per-session urgent_stop Notify so SessionManager can
     /// route fire_urgent_stop() to only the target session.
     /// Returns None in standalone mode (where urgent_stop is not initialized).
@@ -446,9 +459,11 @@ impl SessionTask {
             .history_mut()
             .set_protocol_type(protocol_type.clone());
 
-        // Emit initial session state snapshot so the frontend status panel shows
-        // correct model, provider, reasoning_effort and temperature immediately
-        // on agent/session start, without waiting for the first status transition.
+        // Emit initial session state so the snapshot_slot is populated
+        // before the frontend's first fetchSessionState pull request.
+        // Without this, the slot stays None until the first status transition
+        // or ProviderListUpdated message, causing the frontend to see null
+        // for reasoning_effort and hide the thinking level control.
         agent_loop.emit_session_state();
 
         // Saved user message for debug resume re-execution.
@@ -1033,15 +1048,22 @@ impl SessionTask {
                     // Update context builder for next iteration
                     context_builder.set_override_model(model.clone());
                     // Reset reasoning_effort to new model's default (clear user override).
-                    // This ensures model switch doesn't carry over the previous model's effort.
-                    // If the model has no default, fall back to Medium (the Rust enum default).
-                    let default_effort = agent_loop
+                    // Three-level priority chain:
+                    // 1. provider capabilities default_reasoning_effort
+                    // 2. None (provider does not support thinking control)
+                    // No persisted session value applies on model switch — the model changed.
+                    let provider_default = agent_loop
                         .core
                         .get_model_capabilities(&model)
-                        .and_then(|c| c.default_reasoning_effort)
-                        .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s))
-                        .unwrap_or_default();
-                    agent_loop.session.set_reasoning_effort(Some(default_effort));
+                        .and_then(|c| c.default_reasoning_effort);
+                    let default_effort = provider_default
+                        .as_deref()
+                        .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose);
+                    agent_loop.session.set_reasoning_effort(default_effort);
+                    // Persist new effort to ConversationSession so resume is consistent.
+                    if let Some(conv) = agent_loop.session.conversation() {
+                        conv.update_reasoning_effort(provider_default);
+                    }
                 }
                 Some(SessionMessage::ReasoningEffort { effort }) => {
                     let parsed = acowork_core::providers::traits::ReasoningEffort::from_str_loose(&effort);
@@ -1052,6 +1074,10 @@ impl SessionTask {
                         "SessionTask: reasoning effort override"
                     );
                     agent_loop.session.set_reasoning_effort(parsed);
+                    // Persist to JSONL so the override survives session resume.
+                    if let Some(conv) = agent_loop.session.conversation() {
+                        conv.update_reasoning_effort(Some(effort));
+                    }
                 }
                 Some(SessionMessage::UpdateRuntimeConfig {
                     max_output_tokens,
@@ -1132,19 +1158,13 @@ impl SessionTask {
                     context_builder.set_identity_context(identity_context.unwrap_or_default());
                 }
                 Some(SessionMessage::ProviderListUpdated) => {
-                    // Refresh reasoning_effort from the updated model capabilities.
-                    // This fixes the race where SessionTask started before the
-                    // initial provider list was pushed by Gateway.
-                    if let Some(ref model) = agent_loop.session.model {
-                        let default_effort = agent_loop
-                            .core
-                            .get_model_capabilities(model)
-                            .and_then(|c| c.default_reasoning_effort)
-                            .and_then(|s| acowork_core::providers::traits::ReasoningEffort::from_str_loose(&s))
-                            .unwrap_or_default();
-                        agent_loop.session.set_reasoning_effort(Some(default_effort));
-                        agent_loop.emit_session_state();
-                    }
+                    // The shared global_provider_list on AgentCore is already updated
+                    // (written by SessionManager before broadcasting this message).
+                    // Just emit session state so the frontend sees the latest info.
+                    // Reasoning_effort is NOT reset here — it was correctly initialized
+                    // at session creation in build_initial_session_state, and the user
+                    // may have explicitly overridden it via ReasoningEffort messages.
+                    agent_loop.emit_session_state();
                 }
                 Some(SessionMessage::Stop { reason }) => {
                     tracing::info!(
@@ -1159,7 +1179,7 @@ impl SessionTask {
                 Some(SessionMessage::EnableDebugMode(handles)) => {
                     tracing::info!(
                         session_id = %session_id,
-                        "[DBG-TRACE] SessionTask: injecting debug mode into existing session"
+                        "SessionTask: injecting debug mode into existing session"
                     );
                     // Create a DevMode observer from the handles and inject it
                     // into AgentCore (ADR-013: Observer Pipeline).

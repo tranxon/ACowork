@@ -87,3 +87,6 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 mockito = { workspace = true }
 tempfile = { workspace = true }
+reqwest = { workspace = true, features = ["json", "multipart"] }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }

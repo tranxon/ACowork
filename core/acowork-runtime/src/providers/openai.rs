@@ -89,15 +89,18 @@ impl OpenAIProvider {
 /// omitting the field lets the model use its own default, which is typically
 /// "medium" for o-series models. To honor the user's intent of "minimum
 /// reasoning", we map `Off` to `"low"` (the lowest universally-supported value).
-fn openai_reasoning_str(effort: &ReasoningEffort) -> &'static str {
+/// `Auto` means the user wants the model to decide; the field is also omitted.
+fn openai_reasoning_str(effort: &ReasoningEffort) -> Option<&'static str> {
     match effort {
+        // Auto: let the model decide, do not send the field.
+        ReasoningEffort::Auto => None,
         // No disable protocol — collapse to the lowest available effort.
-        ReasoningEffort::Off => "low",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
+        ReasoningEffort::Off => Some("low"),
+        ReasoningEffort::Low => Some("low"),
+        ReasoningEffort::Medium => Some("medium"),
+        ReasoningEffort::High => Some("high"),
         // Most OpenAI-compatible APIs cap at "high".
-        ReasoningEffort::Max => "high",
+        ReasoningEffort::Max => Some("high"),
     }
 }
 
@@ -493,7 +496,8 @@ impl Provider for OpenAIProvider {
         let reasoning = request
             .reasoning_effort
             .as_ref()
-            .map(|e| openai_reasoning_str(e).to_string());
+            .and_then(|e| openai_reasoning_str(e))
+            .map(|s| s.to_string());
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
@@ -590,7 +594,8 @@ impl Provider for OpenAIProvider {
         let reasoning = request
             .reasoning_effort
             .as_ref()
-            .map(|e| openai_reasoning_str(e).to_string());
+            .and_then(|e| openai_reasoning_str(e))
+            .map(|s| s.to_string());
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),

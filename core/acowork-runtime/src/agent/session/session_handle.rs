@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use super::session_task::SessionMessage;
 use crate::agent::inbound::InboundMessage;
-use crate::agent::session_state::SessionStatus;
+use crate::agent::session_state::{SessionStateSnapshot, SessionStatus};
 use crate::debug::DebugHandles;
 
 /// External handle for interacting with a running SessionTask.
@@ -50,6 +50,13 @@ pub struct SessionHandle {
     /// pick them up at the start of each iteration without going through
     /// the SessionTask message channel (which is blocked on .run()).
     pub(crate) pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>>,
+    /// Shared snapshot slot for the Gateway session state pull API.
+    ///
+    /// Written by `AgentLoop::emit_session_state` on every status transition.
+    /// Read by `SessionManager::snapshot_session_state` to serve the HTTP
+    /// `GET /api/agents/{id}/sessions/{session_id}/state` handler.
+    pub(crate) snapshot_slot:
+        Arc<std::sync::RwLock<Option<SessionStateSnapshot>>>,
 }
 
 impl SessionHandle {
@@ -110,5 +117,17 @@ impl SessionHandle {
             .last_active_at
             .lock()
             .expect("last_active_at mutex poisoned")
+    }
+
+    /// Read the current session state snapshot (for the Gateway pull API).
+    ///
+    /// Returns a clone of the snapshot written by the last `emit_session_state`
+    /// call. Returns `None` if no state has been emitted yet (session just
+    /// created and the AgentLoop has not run its first status transition).
+    pub fn snapshot(&self) -> Option<SessionStateSnapshot> {
+        self.snapshot_slot
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 }

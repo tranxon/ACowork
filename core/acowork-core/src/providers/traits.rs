@@ -465,12 +465,15 @@ pub struct FunctionCall {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    /// Let the model decide its own reasoning depth — no parameter is sent to the LLM.
+    /// Displayed in the frontend; the control is shown and "Auto" is selected by default.
+    #[default]
+    Auto,
     /// Disable thinking/reasoning entirely.
     Off,
     /// Light reasoning — fast responses with minimal thinking.
     Low,
     /// Balanced reasoning — good trade-off between speed and depth.
-    #[default]
     Medium,
     /// Deep reasoning — thorough analysis, slower responses.
     High,
@@ -483,6 +486,7 @@ impl ReasoningEffort {
     /// Returns `None` if the string does not match any known variant.
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
             "off" | "none" => Some(Self::Off),
             "low" => Some(Self::Low),
             "medium" | "med" => Some(Self::Medium),
@@ -493,9 +497,11 @@ impl ReasoningEffort {
     }
 
     /// Convert to the OpenAI-compatible API string value.
-    /// Returns `None` for `Off` (field should be omitted).
+    /// Returns `None` for `Auto` (no parameter sent) and `Off` (omit field).
     pub fn to_openai_str(&self) -> Option<&'static str> {
         match self {
+            // Auto and Off both result in omitting the field; provider uses its own default.
+            Self::Auto => None,
             Self::Off => None,
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
@@ -509,6 +515,7 @@ impl ReasoningEffort {
 impl std::fmt::Display for ReasoningEffort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Auto => write!(f, "auto"),
             Self::Off => write!(f, "off"),
             Self::Low => write!(f, "low"),
             Self::Medium => write!(f, "medium"),

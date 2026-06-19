@@ -224,6 +224,35 @@ impl AgentLoop {
                         .history
                         .replace_middle_with_summary(&stripped, KEEP_LAST_ROUNDS);
 
+                    // Recompute usage after compaction (used both for the
+                    // JSONL event payload and the stage-3 emergency check).
+                    let new_tokens = self.session.history.token_count();
+                    let new_usage = if budget > 0 {
+                        (new_tokens as f64 / budget as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    // Persist the compaction event into the JSONL session log.
+                    // The session restorer uses the most recent such event to
+                    // anchor the replay window on cold-start resume.
+                    if let Some(ref conversation) = self.session.conversation {
+                        let meta = crate::conversation::CompactionEventMeta {
+                            // Range tracking is best-effort; we don't currently
+                            // know the precise from/to entry ids without
+                            // threading them through. Leaving them empty is
+                            // acceptable — the restorer only needs the event's
+                            // *position* in the log, not the id range.
+                            compacted_from_id: String::new(),
+                            compacted_to_id: String::new(),
+                            keep_last_rounds: KEEP_LAST_ROUNDS,
+                            model: compact_model.clone(),
+                            before_tokens: current_tokens,
+                            after_tokens: new_tokens,
+                        };
+                        conversation.append_compaction_event(&stripped, meta);
+                    }
+
                     // Write compaction summary to Grafeo
                     let session_id = self
                         .session
@@ -251,14 +280,6 @@ impl AgentLoop {
                     // Checks ProceduralNode success/fail rates and creates
                     // Limitation autobiographical nodes for low-performing skills.
                     self.self_evaluate_skill_performance();
-
-                    // Recompute usage after compaction for stage 3 check
-                    let new_tokens = self.session.history.token_count();
-                    let new_usage = if budget > 0 {
-                        (new_tokens as f64 / budget as f64) * 100.0
-                    } else {
-                        0.0
-                    };
 
                     tracing::info!(
                         removed,
@@ -397,10 +418,13 @@ impl AgentLoop {
         let caps = self.get_model_capabilities(current_model);
         let max_output_limit = self.core.max_output_tokens_limit_for_model(current_model);
 
-        // Resolve reasoning_effort: prefer per-session override (set by frontend
-        // toggle), fall back to model capabilities default_reasoning_effort.
-        // The session override is reset to None on model switch so new model's
-        // default takes effect.
+        // Resolve reasoning_effort: read from per-session state (initialized from
+        // the three-level priority chain in build_initial_session_state).
+        // None  = provider does not support thinking control (frontend hides control).
+        // Some(Auto) = provider supports it but no parameter sent to LLM (model decides).
+        // Some(Low/Medium/High/...) = explicit level sent to LLM.
+        // The fallback to caps.default_reasoning_effort is kept for safety in case
+        // the session state was not initialized yet (e.g. direct AgentLoop usage).
         let reasoning_effort = self
             .session
             .reasoning_effort()
