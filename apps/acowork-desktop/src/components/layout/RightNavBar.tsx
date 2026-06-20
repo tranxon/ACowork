@@ -3,8 +3,10 @@ import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon"
 import { OutlineDatabaseIcon, FilledDatabaseIcon } from "../common/DatabaseIcon";
 import { OutlineFolderOpenIcon, FilledFolderOpenIcon } from "../common/FolderOpenIcon";
 import { OutlineGaugeIcon, FilledGaugeIcon } from "../common/GaugeIcon";
+import { OutlineBugIcon, FilledBugIcon } from "../common/BugIcon";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Bug, Wrench } from "lucide-react";
+import { Wrench } from "lucide-react";
+import type { ComponentType } from "react";
 
 type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
 
@@ -19,7 +21,7 @@ interface RightNavBarProps {
 interface NavItem {
   tab: PanelTab;
   /** Lucide icon component. Omitted for tabs that render a custom icon (e.g. setup). */
-  icon?: typeof Bug;
+  icon?: ComponentType<{ className?: string; fill?: string; strokeWidth?: number }>;
   i18nKey: string;
   show: boolean;
 }
@@ -34,7 +36,12 @@ export function RightNavBar({ activeTab, onTabChange, isDebugMode, agentRunning,
     // path collapses both lids into one solid blob, losing the "open"
     // visual). `icon` is intentionally omitted.
     { tab: "workspace", i18nKey: "resultsPanel.workspace", show: true },
-    { tab: "debug", icon: Bug, i18nKey: "resultsPanel.debug", show: isDebugMode },
+    // debug uses the shared FilledBugIcon/OutlineBugIcon so the filled
+    // state preserves the central spine line via SVG mask. Without the
+    // mask, the spine (M12 20v-9, fully inside the body) would be
+    // drowned by `fill="currentColor"` and the bug would lose its
+    // segmented look. `icon` is intentionally omitted.
+    { tab: "debug", i18nKey: "resultsPanel.debug", show: isDebugMode },
     // status uses the shared FilledGaugeIcon/OutlineGaugeIcon so the
     // filled state preserves the needle via SVG mask. Lucide's Activity
     // (heartbeat zigzag) had almost no body to fill — it just turned
@@ -112,6 +119,17 @@ export function RightNavBar({ activeTab, onTabChange, isDebugMode, agentRunning,
                   <FilledGaugeIcon className="h-5 w-5" />
                 ) : (
                   <OutlineGaugeIcon className="h-5 w-5" />
+                )
+              ) : tab === "debug" ? (
+                // Bug: use the shared icon so the filled state preserves
+                // the central spine line via SVG mask. Lucide's Bug spine
+                // (M12 20v-9) sits fully inside the body — a naïve fill
+                // would drown it and erase the segmented look. The mask
+                // carves it as a negative-space groove.
+                isActive ? (
+                  <FilledBugIcon className="h-5 w-5" />
+                ) : (
+                  <OutlineBugIcon className="h-5 w-5" />
                 )
               ) : Icon ? (
                 <Icon
