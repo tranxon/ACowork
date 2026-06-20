@@ -156,10 +156,10 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
                 </button>
             </div>
 
-            {/* Code content */}
+            {/* Code content — lighter shade so the title bar above grounds the block */}
             {!collapsed && (
                 <div
-                    className="overflow-x-auto whitespace-pre-wrap bg-zinc-200 p-3 font-mono leading-relaxed dark:bg-zinc-900/60"
+                    className="overflow-x-auto whitespace-pre-wrap bg-zinc-100 p-3 font-mono leading-relaxed dark:bg-zinc-700"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                     dangerouslySetInnerHTML={{ __html: highlighted }}
                 />
