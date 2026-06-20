@@ -17,7 +17,7 @@
      `bg-chat-body` / `border-chat-border` / `bg-chat-badge` with no
      `dark:` prefix needed. */
   --color-chat-bubble: hsl(240 5.9% 90.6% / 0.5); /* = zinc-200/50 — message surface */
-  --color-chat-title:  hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — block title */
+  --color-chat-title:  hsl(240 4.8% 86.1%);   /* = zinc-300 — block title */
   --color-chat-body:   hsl(0 0% 98%);            /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
   --color-chat-badge:  hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — sender-role label pill */
