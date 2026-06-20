@@ -96,45 +96,55 @@ function FilledDocsIcon({ className }: { className?: string }) {
   );
 }
 
-/** Outline Projects icon - light mode (bg: #D8D9DC) */
-function OutlineProjectsIconLight({ className }: { className?: string }) {
+/**
+ * Outline Kanban-board icon — the classic project-management visual:
+ * an outer frame containing three columns of varying heights (Todo / Doing / Done).
+ * `isDark` is accepted for API compatibility with the call site but the outline
+ * variant looks identical in both themes (stroke uses currentColor).
+ */
+function OutlineProjectsIcon({ className }: { className?: string; isDark?: boolean }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="16" cy="11" r="3" />
-      <path d="M16 15c-3 0-5.5 1.2-5.5 3V21h11v-3c0-1.8-2-3-5.5-3z" />
-      <circle cx="9" cy="8" r="3" fill="#D8D9DC" />
-      <path d="M9 12c-3 0-5.5 1.2-5.5 3V18h11v-3c0-1.8-2-3-5.5-3z" fill="#D8D9DC" />
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* Board frame */}
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      {/* Three column cards of different heights */}
+      <line x1="8"  y1="8"  x2="8"  y2="14" />
+      <line x1="12" y1="8"  x2="12" y2="17" />
+      <line x1="16" y1="8"  x2="16" y2="12" />
     </svg>
   );
 }
 
-/** Outline Projects icon - dark mode (bg: #3D3D3F) */
-function OutlineProjectsIconDark({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="16" cy="11" r="3" />
-      <path d="M16 15c-3 0-5.5 1.2-5.5 3V21h11v-3c0-1.8-2-3-5.5-3z" />
-      <circle cx="9" cy="8" r="3" fill="#3D3D3F" />
-      <path d="M9 12c-3 0-5.5 1.2-5.5 3V18h11v-3c0-1.8-2-3-5.5-3z" fill="#3D3D3F" />
-    </svg>
-  );
-}
-
-/** Outline Kanban/project board icon */
-function OutlineProjectsIcon({ className, isDark }: { className?: string; isDark?: boolean }) {
-  return isDark ? <OutlineProjectsIconDark className={className} /> : <OutlineProjectsIconLight className={className} />;
-}
-
-/** Filled Kanban/project board icon */
+/**
+ * Filled Kanban-board icon — solid filled board with white columns "carved" out,
+ * matching the FilledDocsIcon style (solid currentColor shape + white inner strokes).
+ */
 function FilledProjectsIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.75">
-      {/* Right person (behind) */}
-      <circle cx="16" cy="11" r="3" />
-      <path d="M16 15c-3 0-5.5 1.2-5.5 3V21h11v-3c0-1.8-2-3-5.5-3z" />
-      {/* Left person (front) */}
-      <circle cx="9" cy="8" r="3" />
-      <path d="M9 12c-3 0-5.5 1.2-5.5 3V18h11v-3c0-1.8-2-3-5.5-3z" />
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* Solid board frame — same stroke width as outline version, so the outer
+          visual bounds match exactly (the 0.875 stroke half-extends the fill). */}
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      {/* Three column cards carved out in white, varying heights (Todo / Doing / Done) */}
+      <line x1="8"  y1="8"  x2="8"  y2="14" stroke="white" />
+      <line x1="12" y1="8"  x2="12" y2="17" stroke="white" />
+      <line x1="16" y1="8"  x2="16" y2="12" stroke="white" />
     </svg>
   );
 }

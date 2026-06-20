@@ -1,8 +1,10 @@
 import { NavButton } from "../common/NavButton";
 import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon";
 import { OutlineDatabaseIcon, FilledDatabaseIcon } from "../common/DatabaseIcon";
+import { OutlineFolderOpenIcon, FilledFolderOpenIcon } from "../common/FolderOpenIcon";
+import { OutlineGaugeIcon, FilledGaugeIcon } from "../common/GaugeIcon";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Bug, Activity, FolderKanban, Wrench } from "lucide-react";
+import { Bug, Wrench } from "lucide-react";
 
 type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
 
@@ -26,9 +28,20 @@ export function RightNavBar({ activeTab, onTabChange, isDebugMode, agentRunning,
   const { t } = useTranslation();
 
   const items: NavItem[] = [
-    { tab: "workspace", icon: FolderKanban, i18nKey: "resultsPanel.workspace", show: true },
+    // workspace uses the shared FilledFolderOpenIcon/OutlineFolderOpenIcon
+    // so the filled state preserves the open-folder seam via SVG mask (a
+    // naïve `fill="currentColor"` on lucide's single self-intersecting
+    // path collapses both lids into one solid blob, losing the "open"
+    // visual). `icon` is intentionally omitted.
+    { tab: "workspace", i18nKey: "resultsPanel.workspace", show: true },
     { tab: "debug", icon: Bug, i18nKey: "resultsPanel.debug", show: isDebugMode },
-    { tab: "status", icon: Activity, i18nKey: "resultsPanel.status", show: true },
+    // status uses the shared FilledGaugeIcon/OutlineGaugeIcon so the
+    // filled state preserves the needle via SVG mask. Lucide's Activity
+    // (heartbeat zigzag) had almost no body to fill — it just turned
+    // into three small filled triangles, giving a weak selected state.
+    // Gauge has a solid half-disc body that fills cleanly, and the
+    // needle is preserved as a negative-space groove. `icon` omitted.
+    { tab: "status", i18nKey: "resultsPanel.status", show: true },
     // memory uses the shared FilledDatabaseIcon/OutlineDatabaseIcon so the
     // middle disk-separator line stays visible on selection; `icon` is
     // intentionally omitted.
@@ -75,6 +88,30 @@ export function RightNavBar({ activeTab, onTabChange, isDebugMode, agentRunning,
                   <FilledDatabaseIcon className="h-5 w-5" />
                 ) : (
                   <OutlineDatabaseIcon className="h-5 w-5" />
+                )
+              ) : tab === "workspace" ? (
+                // Open-folder: use the shared icon so the filled state
+                // preserves the front-lid seam via SVG mask. Lucide's
+                // FolderOpen is a single self-intersecting path that, when
+                // filled, collapses the two lids into one blob and erases
+                // the "open" visual. The mask carves grooves along the
+                // front-lid top edge and left scoop slant to keep the
+                // open-folder silhouette readable in the active state.
+                isActive ? (
+                  <FilledFolderOpenIcon className="h-5 w-5" />
+                ) : (
+                  <OutlineFolderOpenIcon className="h-5 w-5" />
+                )
+              ) : tab === "status" ? (
+                // Gauge: use the shared icon so the filled state keeps
+                // the needle visible via SVG mask. Lucide's Activity
+                // zigzag had no real body to fill (just three little
+                // triangles) — Gauge has a solid half-disc that fills
+                // cleanly while the needle is carved as negative space.
+                isActive ? (
+                  <FilledGaugeIcon className="h-5 w-5" />
+                ) : (
+                  <OutlineGaugeIcon className="h-5 w-5" />
                 )
               ) : Icon ? (
                 <Icon
