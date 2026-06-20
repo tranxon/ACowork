@@ -18,7 +18,7 @@
      `dark:` prefix needed. */
   --color-chat-bubble: hsl(240 5.9% 90.6% / 0.5); /* = zinc-200/50 — message surface */
   --color-chat-title:  hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — block title */
-  --color-chat-body:   hsl(240 4.8% 95.9%);       /* = zinc-100, #f4f4f5 — block body */
+  --color-chat-body:   hsl(0 0% 98%);            /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
   --color-chat-badge:  hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — sender-role label pill */
 
@@ -151,8 +151,8 @@
 
   /* Chat palette (dark) — auto-flips the @theme light values (5 tokens) */
   --color-chat-bubble: hsl(240 3.8% 15.7%);  /* = zinc-800, #27272a — message surface */
-  --color-chat-title:  hsl(240 5.9% 10%);    /* = zinc-900, #18181b — block title */
-  --color-chat-body:   hsl(240 5.2% 26.1%);  /* = zinc-700, #3f3f46 — block body */
+  --color-chat-title:  hsl(240 5.2% 26.1%);  /* = zinc-700, #3f3f46 — block title (lighter than body) */
+  --color-chat-body:   hsl(240 5.9% 10%);    /* = zinc-900, #18181b — block body (darker, closer to panel) */
   --color-chat-border: hsl(240 5.2% 26.1%);  /* = zinc-700, #3f3f46 — container border */
   --color-chat-badge:  hsl(240 5.2% 26.1%);  /* = zinc-700, #3f3f46 — sender-role label pill */
 
@@ -668,6 +668,11 @@ body {
   border-bottom: 1px solid var(--tw-prose-th-borders);
   font-weight: 600;
   color: hsl(240 5% 12%);
+}
+
+.dark .prose th {
+  color: hsl(240 5% 85%);
+  /* match .dark .prose --tw-prose-body — title text was invisible against zinc-900 bg */
 }
 
 .prose tbody tr:nth-child(even) {
