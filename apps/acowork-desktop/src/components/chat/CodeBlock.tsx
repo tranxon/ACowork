@@ -120,7 +120,7 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
     return (
         <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700">
             {/* Title bar */}
-            <div className="flex items-center justify-between border-b border-zinc-200 bg-zinc-100 px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="flex items-center justify-between border-b border-zinc-200 bg-zinc-100 px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-700">
                 <div className="flex items-center gap-1.5">
                     <button
                         onClick={() => setCollapsed(!collapsed)}
@@ -159,7 +159,7 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
             {/* Code content */}
             {!collapsed && (
                 <div
-                    className="overflow-x-auto whitespace-pre-wrap bg-zinc-200/40 p-3 font-mono leading-relaxed dark:bg-zinc-900/60"
+                    className="overflow-x-auto whitespace-pre-wrap bg-zinc-200 p-3 font-mono leading-relaxed dark:bg-zinc-900/60"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                     dangerouslySetInnerHTML={{ __html: highlighted }}
                 />

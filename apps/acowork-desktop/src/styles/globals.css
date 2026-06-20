@@ -274,7 +274,7 @@ body {
 
 /* Code blocks — softer background, proper padding & scrolling */
 .prose pre {
-  background-color: hsl(240 5% 88%);
+  background-color: hsl(240 5% 92%);
   border: 1px solid hsl(240 5% 80%);
   border-radius: var(--radius-md);
   padding: 0.75em 1em;
@@ -284,7 +284,7 @@ body {
 }
 
 .dark .prose pre {
-  background-color: hsl(240 5% 22%);
+  background-color: hsl(240 5% 18%);
   border: 1px solid hsl(240 5% 28%);
 }
 
@@ -631,20 +631,21 @@ body {
 }
 
 .prose th {
-  background-color: hsl(240 5% 88%);
+  background-color: hsl(240 5% 96%);
   border-color: var(--tw-prose-th-borders);
+  border-bottom: 1px solid var(--tw-prose-th-borders);
   font-weight: 600;
   color: hsl(240 5% 12%);
 }
 
 .dark .prose th {
-  background-color: hsl(240 5% 24%);
+  background-color: hsl(240 5% 30%);
   color: hsl(240 5% 90%);
 }
 
 /* Table body — subtle zebra striping for readability */
 .prose tbody tr:nth-child(even) {
-  background-color: hsl(240 5% 97%);
+  background-color: hsl(240 5% 99%);
 }
 
 .dark .prose tbody tr:nth-child(even) {
