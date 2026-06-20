@@ -214,7 +214,12 @@ impl AgentLoop {
             match self
                 .session
                 .history
-                .compact_via_llm(provider.as_ref(), &compact_model, system_prompt)
+                .compact_via_llm(
+                    provider.as_ref(),
+                    &compact_model,
+                    system_prompt,
+                    self.session.identity_context(),
+                )
                 .await
             {
                 Ok(summary) => {

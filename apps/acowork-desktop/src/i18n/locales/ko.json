@@ -177,7 +177,7 @@
         "chooseIcon": "아이콘 선택",
         "agentName": "Agent 이름",
         "maxOutputTokens": "최대 출력 토큰 수",
-        "gatewayLimit": "（게이트웨이 제한）",
+        "defaultModelLimit": "（기본 모델 제한）",
         "leaveEmptyDefault": "비워두면 런타임 기본값 사용",
         "maxIterations": "최대 반복 횟수 (실행당)",
         "defaultIterations": "50（기본값）",

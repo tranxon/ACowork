@@ -2574,6 +2574,7 @@ async fn handle_get_session_messages(
                     role: m.role,
                     content: m.content,
                     metadata: m.metadata,
+                    kind: m.kind,
                 })
                 .collect();
             let data = serde_json::json!({

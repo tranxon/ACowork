@@ -66,6 +66,6 @@ pub struct UpdateAgentConfigRequest {
 
 /// Default global values used as fallback when no override exists.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
-pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
+pub const DEFAULT_MAX_ITERATIONS: u32 = 200;
 pub const DEFAULT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_SHELL_APPROVAL_THRESHOLD: ShellApprovalThreshold = ShellApprovalThreshold::Medium;

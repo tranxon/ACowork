@@ -154,6 +154,7 @@ impl From<&protocol::ConversationEntryDto> for proto::ConversationEntryDto {
                 .as_ref()
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            kind: e.kind.clone().unwrap_or_default(),
         }
     }
 }
@@ -170,6 +171,7 @@ impl From<proto::ConversationEntryDto> for protocol::ConversationEntryDto {
             } else {
                 serde_json::from_str(&e.metadata_json).ok()
             },
+            kind: if e.kind.is_empty() { None } else { Some(e.kind) },
         }
     }
 }
@@ -921,6 +923,7 @@ mod tests {
             role: "user".to_string(),
             content: "Hello".to_string(),
             metadata: Some(serde_json::json!({"tool_name": "bash"})),
+            kind: None,
         };
 
         let proto_msg: proto::ConversationEntryDto = (&original).into();
@@ -929,6 +932,34 @@ mod tests {
         assert_eq!(restored.id, original.id);
         assert_eq!(restored.role, original.role);
         assert_eq!(restored.content, original.content);
+        assert!(restored.metadata.is_some());
+        assert!(restored.kind.is_none());
+    }
+
+    #[test]
+    fn test_conversation_entry_dto_roundtrip_with_kind() {
+        let original = protocol::ConversationEntryDto {
+            id: "msg-002".to_string(),
+            ts: "2026-05-03T14:30:22.123Z".to_string(),
+            role: "system".to_string(),
+            content: "<summary>compacted u1..a2</summary>".to_string(),
+            metadata: Some(serde_json::json!({
+                "compacted_from_id": "id-1",
+                "compacted_to_id": "id-9",
+                "keep_last_rounds": 3,
+                "before_tokens": 1000u64,
+                "after_tokens": 200u64,
+            })),
+            kind: Some("compaction".to_string()),
+        };
+
+        let proto_msg: proto::ConversationEntryDto = (&original).into();
+        let restored: protocol::ConversationEntryDto = proto_msg.into();
+
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.role, original.role);
+        assert_eq!(restored.content, original.content);
+        assert_eq!(restored.kind.as_deref(), Some("compaction"));
         assert!(restored.metadata.is_some());
     }
 }

@@ -1,31 +1,16 @@
 import { useEffect, useMemo } from "react";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { pickDeterministicBuiltinIconId, pickRandomBuiltinIconId } from "../../lib/avatar";
+import { BUILTIN_ICONS } from "../../lib/builtinIcons";
 import type { BoringAvatarVariant } from "../../lib/types";
 
-// ── Built-in icons (bundled JPG assets) ────────────────────────────────
-// JPG files live at src/assets/builtin-icons/icon-XX.jpg.
-// Vite resolves each path to a hashed, cache-friendly URL at build time.
-
-const ICON_URL_MAP = import.meta.glob<string>(
-  "../../assets/builtin-icons/icon-*.jpg",
-  { eager: true, query: "?url", import: "default" },
-);
-
-const BUILTIN_ICONS: Record<string, string> = Object.fromEntries(
-  Object.entries(ICON_URL_MAP)
-    .map(([path, url]) => {
-      const match = path.match(/icon-\d+/);
-      return match ? [match[0], url as unknown as string] : null;
-    })
-    .filter((entry): entry is [string, string] => entry !== null)
-    .sort(([a], [b]) => a.localeCompare(b)),
-);
-
-/** Extract built-in icon IDs for selection UI */
-export const BUILTIN_ICON_IDS = Object.keys(BUILTIN_ICONS);
-
-export const AGENT_DEFAULT_PALETTE = ["#6366F1", "#8B5CF6", "#EC4899", "#F59E0B", "#10B981", "#06B6D4", "#F97316", "#EF4444"];
+// ── Re-exports for back-compat ──────────────────────────────────────────
+// The icon catalogue (BUILTIN_ICONS, BUILTIN_ICON_IDS, AGENT_DEFAULT_PALETTE)
+// is defined in `lib/builtinIcons.ts` as a leaf module so the user-profile
+// store can read it without creating a circular import. We re-export the
+// values from here so existing consumers (ProfileTab, AgentSetupTab,
+// agentProfileStore) keep working unchanged.
+export { BUILTIN_ICONS, BUILTIN_ICON_IDS, AGENT_DEFAULT_PALETTE } from "../../lib/builtinIcons";
 
 // ── Built-in icon wrapper ────────────────────────────────────────────────
 
@@ -92,5 +77,3 @@ export function UserAvatar({
 
   return <BuiltinIconAvatar iconId={iconId} size={size} className={className} />;
 }
-
-export { BUILTIN_ICONS };

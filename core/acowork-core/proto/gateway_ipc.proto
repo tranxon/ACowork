@@ -253,7 +253,7 @@ message StreamChunk             { string target = 1; string action = 2; string p
 message ContextUsageInfo        { uint64 context_window = 1; uint64 input_tokens = 2; uint64 output_tokens = 3; uint64 total_tokens = 4; uint64 max_input_tokens = 5; uint64 usable_context = 6; uint32 usage_percent = 7; }
 message CronEntryInfo           { string id = 1; string agent_id = 2; string schedule = 3; string action = 4; string params_json = 5; }
 message SessionInfoDto          { string session_id = 1; string created_at = 2; uint32 message_count = 3; string title = 4; bool corrupted = 5; string status_json = 6; string workspace_id = 7; string model = 8; string provider = 9; }
-message ConversationEntryDto    { string id = 1; string ts = 2; string role = 3; string content = 4; string metadata_json = 5; }
+message ConversationEntryDto    { string id = 1; string ts = 2; string role = 3; string content = 4; string metadata_json = 5; string kind = 6; }
 
 // ── Memory API messages (Gateway → Runtime queries) ──────────────────────
 

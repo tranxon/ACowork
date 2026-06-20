@@ -179,7 +179,7 @@
         "chooseIcon": "アイコンを選択",
         "agentName": "Agent名",
         "maxOutputTokens": "最大出力トークン数",
-        "gatewayLimit": "（ゲートウェイ制限）",
+        "defaultModelLimit": "（デフォルトモデル制限）",
         "leaveEmptyDefault": "空欄の場合はランタイムのデフォルト値を使用",
         "maxIterations": "最大反復回数（実行ごと）",
         "defaultIterations": "50（デフォルト）",

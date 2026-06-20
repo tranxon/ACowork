@@ -1143,9 +1143,17 @@ pub struct ConversationEntryDto {
     pub role: String,
     /// Full message content
     pub content: String,
-    /// Optional metadata (e.g. tool_call_id, tool_name)
+    /// Optional metadata (e.g. tool_call_id, tool_name, or `CompactionEventMeta`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Entry kind. `None` or `"message"` denotes a regular role-based message.
+    /// `"compaction"` denotes an LLM-driven compaction summary event whose
+    /// `content` carries the summary text and `metadata` carries
+    /// `CompactionEventMeta`. Mirrors `ConversationEntry.kind` from the
+    /// JSONL v2 schema and is transparently propagated to the frontend so
+    /// the UI can render compaction events as folded summary cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// Cron entry info (for IPC responses, S5.8 enhanced)

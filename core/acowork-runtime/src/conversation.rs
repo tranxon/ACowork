@@ -139,6 +139,19 @@ pub struct SessionMetadata {
     /// Not used in any window-budget decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_tokens: Option<u64>,
+    /// Byte offset of the most recent compaction marker relative to the
+    /// **start of the data section** (i.e. `absolute_offset - meta_end`,
+    /// where `meta_end` = metadata line byte length + 1).
+    ///
+    /// This is a relative offset so that metadata rewrites (which shift
+    /// every data line by the same Δ when the first line changes length)
+    /// do not invalidate it.  Callers recover the absolute offset via
+    /// `meta_end + last_compaction_offset`.
+    ///
+    /// `None` if no compaction has occurred (legacy session, or session
+    /// written before this field was added).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction_offset: Option<u64>,
 }
 
 /// Commands sent to the background writer thread.
@@ -157,6 +170,15 @@ pub struct ConversationWriter {
     /// Path to the JSONL file (needed for atomic rename in rewrite_metadata)
     path: PathBuf,
     receiver: mpsc::UnboundedReceiver<WriterCommand>,
+    /// Byte offset where the data section starts (= metadata line length + 1
+    /// for the newline).  Updated after every `rewrite_metadata` call so the
+    /// writer can compute compaction offsets relative to the data start.
+    meta_end: u64,
+    /// Byte offset of the most recent compaction marker, relative to
+    /// `meta_end` (i.e. `absolute_offset - meta_end`).  Persisted into
+    /// metadata on the next `UpdateMetadata` command.  `None` if no
+    /// compaction has been written during this writer's lifetime.
+    last_compaction_offset: Option<u64>,
 }
 
 impl ConversationWriter {
@@ -165,11 +187,14 @@ impl ConversationWriter {
         file: std::fs::File,
         path: PathBuf,
         receiver: mpsc::UnboundedReceiver<WriterCommand>,
+        meta_end: u64,
     ) -> Self {
         Self {
             file,
             path,
             receiver,
+            meta_end,
+            last_compaction_offset: None,
         }
     }
 
@@ -178,11 +203,41 @@ impl ConversationWriter {
         while let Some(cmd) = self.receiver.blocking_recv() {
             match cmd {
                 WriterCommand::AppendEntry(entry) => {
-                    if let Err(e) = self.write_entry(&entry) {
+                    let is_compaction = entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION);
+                    // Capture absolute offset before writing (seek(End(0))
+                    // positions us at the byte where the entry will land).
+                    let abs_offset = if is_compaction {
+                        match self.file.seek(std::io::SeekFrom::End(0)) {
+                            Ok(pos) => Some(pos),
+                            Err(e) => {
+                                tracing::error!("Failed to seek for compaction entry: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Err(e) = self.write_entry(&entry, abs_offset.is_some())
+                    {
                         tracing::error!("Failed to write conversation entry: {}", e);
+                    } else if let Some(abs) = abs_offset {
+                        // Entry successfully written — record the relative offset.
+                        // The entry body + newline will be written *after* the
+                        // seek, so `abs` is the exact byte position of the
+                        // compaction marker in the file.
+                        self.last_compaction_offset = Some(abs - self.meta_end);
+                        tracing::debug!(
+                            abs_offset = abs,
+                            meta_end = self.meta_end,
+                            relative = abs - self.meta_end,
+                            "Recorded compaction offset"
+                        );
                     }
                 }
-                WriterCommand::UpdateMetadata(meta) => {
+                WriterCommand::UpdateMetadata(mut meta) => {
+                    // Inject the current compaction offset so it gets persisted
+                    // alongside whatever triggered this update.
+                    meta.last_compaction_offset = self.last_compaction_offset;
                     if let Err(e) = self.rewrite_metadata(&meta) {
                         tracing::error!("Failed to rewrite session metadata: {}", e);
                     }
@@ -203,9 +258,18 @@ impl ConversationWriter {
     /// Builds the complete line in memory first, then issues a single
     /// `write_all` call so the OS can apply atomicity for small writes.
     /// Follows up with `sync_data` to flush to disk.
-    fn write_entry(&mut self, entry: &ConversationEntry) -> std::io::Result<()> {
-        // Always seek to end for append; handles resume where file position may be at 0
-        self.file.seek(std::io::SeekFrom::End(0))?;
+    ///
+    /// If `already_positioned` is `true`, the file cursor is already at the
+    /// end (set by the caller who captured the pre-write absolute offset).
+    fn write_entry(
+        &mut self,
+        entry: &ConversationEntry,
+        already_positioned: bool,
+    ) -> std::io::Result<()> {
+        if !already_positioned {
+            // Seek to end for append; handles resume where file position may be at 0
+            self.file.seek(std::io::SeekFrom::End(0))?;
+        }
         // Build the complete line in memory first to ensure atomic write
         let mut line = serde_json::to_string(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -251,6 +315,11 @@ impl ConversationWriter {
             .read(true)
             .append(true)
             .open(&original_path)?;
+
+        // Update meta_end — the new metadata line may have a different byte
+        // length, which shifts every data line by Δ (keeping stored relative
+        // compaction offsets valid without recomputation).
+        self.meta_end = new_meta.len() as u64 + 1;
 
         Ok(())
     }
@@ -338,6 +407,7 @@ impl ConversationSession {
             temperature: None,
             last_input_tokens: None,
             last_output_tokens: None,
+            last_compaction_offset: None,
         };
 
         // Write metadata as the first line — build complete line then single write
@@ -347,8 +417,9 @@ impl ConversationSession {
         file.write_all(line.as_bytes())?;
         file.sync_data()?;
 
+        let meta_end = line.len() as u64;
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(file, file_path.clone(), rx);
+        let writer = ConversationWriter::new(file, file_path.clone(), rx, meta_end);
         std::thread::spawn(move || writer.run());
 
         Ok(Self {
@@ -376,7 +447,7 @@ impl ConversationSession {
         let conversations_dir = work_dir.join("conversations");
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
 
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&file_path)?;
@@ -384,8 +455,10 @@ impl ConversationSession {
         // Read existing metadata to get agent_id
         let meta = read_session_metadata(&file_path)?;
 
+        let meta_end = metadata_end_offset(&mut file)?;
+
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(file, file_path.clone(), rx);
+        let writer = ConversationWriter::new(file, file_path.clone(), rx, meta_end);
         std::thread::spawn(move || writer.run());
 
         Ok(Self {
@@ -545,6 +618,7 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
             last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
+            last_compaction_offset: None,
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -593,6 +667,7 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
             last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
+            last_compaction_offset: None,
         };
         self.update_metadata(metadata);
         // Track current title for dedup
@@ -633,6 +708,7 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
             last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
+            last_compaction_offset: None,
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -689,6 +765,7 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
             last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
+            last_compaction_offset: None,
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -729,6 +806,7 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
             last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
+            last_compaction_offset: None,
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -765,6 +843,7 @@ impl ConversationSession {
             temperature,
             last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
             last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
+            last_compaction_offset: None,
         };
         self.update_metadata(metadata);
         tracing::info!(
@@ -813,6 +892,7 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             last_input_tokens: Some(input_tokens),
             last_output_tokens: Some(output_tokens),
+            last_compaction_offset: None,
         };
         self.update_metadata(metadata);
     }
@@ -869,6 +949,276 @@ pub struct PaginatedMessages {
 
 /// Chunk size for backward reading (8 KB).
 const BACKWARD_READ_CHUNK: usize = 8 * 1024;
+
+/// Maximum raw entries to read per display-group page.
+///
+/// Frontend collapses consecutive `thought`/`tool_call`/`tool_result` entries
+/// into a single visual "explore group".  Pagination should count these
+/// display groups, not raw JSONL lines.  This cap ensures we read enough raw
+/// lines to produce the requested number of display groups without
+/// pathological I/O on malformed (intentionally huge) files.
+const MAX_RAW_PER_DISPLAY_PAGE: usize = 500;
+
+/// Count display groups in a chronological sequence of entries.
+///
+/// Consecutive entries with role `thought`, `tool_call`, or `tool_result`
+/// are collapsed into a single display group (matching the frontend
+/// `displayMessages` explore-group logic).
+///
+/// **Compaction marker special case**: an entry with `kind="compaction"`
+/// always counts as its own group (1) and breaks any in-progress tool
+/// sequence on either side, so it is rendered as a standalone summary card
+/// in the UI without being merged into adjacent tool/explore blocks.
+fn count_display_groups(entries: &[ConversationEntry]) -> usize {
+    let mut groups = 0usize;
+    let mut in_tool_sequence = false;
+    for e in entries {
+        if e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION) {
+            groups += 1;
+            in_tool_sequence = false;
+            continue;
+        }
+        match e.role.as_str() {
+            "thought" | "tool_call" | "tool_result" => {
+                if !in_tool_sequence {
+                    groups += 1;
+                    in_tool_sequence = true;
+                }
+            }
+            _ => {
+                groups += 1;
+                in_tool_sequence = false;
+            }
+        }
+    }
+    groups
+}
+
+/// Trim entries from the **beginning** so that at most `max_groups` display
+/// groups remain (counting from the newest end).
+///
+/// Entries must be in chronological order (oldest → newest).
+/// Returns the split index: `entries[split_idx..]` contains exactly
+/// `max_groups` display groups (or fewer if the total is already ≤ max).
+///
+/// Compaction markers (`kind="compaction"`) are treated as standalone groups
+/// and never merged with adjacent tool sequences.
+fn trim_oldest_display_groups(entries: &[ConversationEntry], max_groups: usize) -> usize {
+    let total = count_display_groups(entries);
+    if total <= max_groups {
+        return 0;
+    }
+
+    // Walk from the newest end, counting groups backwards.
+    let mut group_count = 0usize;
+    let mut in_tool = false;
+    for (i, e) in entries.iter().enumerate().rev() {
+        let is_compaction = e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION);
+        let in_tool_seq = !is_compaction
+            && matches!(e.role.as_str(), "thought" | "tool_call" | "tool_result");
+        if is_compaction {
+            group_count += 1;
+            in_tool = false;
+        } else if in_tool_seq {
+            if !in_tool {
+                group_count += 1;
+                in_tool = true;
+            }
+        } else {
+            group_count += 1;
+            in_tool = false;
+        }
+        if group_count == max_groups {
+            // If we landed inside a tool sequence, walk back toward older
+            // entries to find the sequence start so the whole group is kept.
+            // A compaction marker breaks the sequence, so stop at it.
+            if in_tool {
+                let mut first = i;
+                while first > 0
+                    && entries[first - 1].kind.as_deref() != Some(ENTRY_KIND_COMPACTION)
+                    && matches!(
+                        entries[first - 1].role.as_str(),
+                        "thought" | "tool_call" | "tool_result"
+                    )
+                {
+                    first -= 1;
+                }
+                return first;
+            }
+            return i;
+        }
+    }
+    0
+}
+
+/// Trim entries from the **end** so that at most `max_groups` display
+/// groups remain (counting from the oldest end).
+///
+/// Entries must be in chronological order (oldest → newest).
+/// Returns the number of entries to keep: `entries[..keep_count]`.
+///
+/// Compaction markers (`kind="compaction"`) are treated as standalone groups
+/// and never merged with adjacent tool sequences.
+fn trim_newest_display_groups(entries: &[ConversationEntry], max_groups: usize) -> usize {
+    let total = count_display_groups(entries);
+    if total <= max_groups {
+        return entries.len();
+    }
+
+    let mut group_count = 0usize;
+    let mut in_tool = false;
+    for (i, e) in entries.iter().enumerate() {
+        let is_compaction = e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION);
+        let in_tool_seq = !is_compaction
+            && matches!(e.role.as_str(), "thought" | "tool_call" | "tool_result");
+        if is_compaction {
+            group_count += 1;
+            in_tool = false;
+        } else if in_tool_seq {
+            if !in_tool {
+                group_count += 1;
+                in_tool = true;
+            }
+        } else {
+            group_count += 1;
+            in_tool = false;
+        }
+        if group_count == max_groups {
+            // Include trailing tool-sequence entries that form the same group
+            // (but stop at a compaction marker, which is its own group).
+            let mut keep = i + 1;
+            while keep < entries.len()
+                && entries[keep].kind.as_deref() != Some(ENTRY_KIND_COMPACTION)
+                && matches!(entries[keep].role.as_str(), "thought" | "tool_call" | "tool_result")
+            {
+                keep += 1;
+            }
+            return keep;
+        }
+    }
+    entries.len()
+}
+
+/// A parsed entry together with its file byte offset and raw line length.
+struct ParsedLine {
+    entry: ConversationEntry,
+    offset: u64,
+    /// Length of the raw (trimmed) line as it appears in the JSONL file.
+    /// Needed for forward-pagination cursor calculation (byte offset after
+    /// this line = offset + raw_line_len + 1 for the newline).
+    raw_line_len: usize,
+}
+
+/// Locate the byte offset of the most recent `kind="compaction"` entry
+/// in a JSONL conversation file.
+///
+/// Returns `Some(offset)` where `offset` is the byte position of the start
+/// of the compaction line. Callers can treat it as a logical lower bound
+/// for the **context path** — anything strictly before `offset` is
+/// "compacted away" and should not enter the LLM context window.
+///
+/// **Not used by the display path** (`read_messages_paginated`), which
+/// shows the full conversation history including pre-compaction entries.
+/// The compaction boundary is only enforced by
+/// `restore_history_from_jsonl` in
+/// `core/acowork-runtime/src/agent/session/restorer.rs`.
+///
+/// Returns `Ok(None)` if no compaction marker exists in the file.
+///
+/// **Algorithm**: reads the file backward in 8 KB chunks, splitting on
+/// newlines and attempting `serde_json::from_str::<ConversationEntry>` on
+/// each line from newest → oldest. Stops at the first compaction match.
+/// Worst case is O(file_len) (no compaction in file), but in practice the
+/// last compaction sits near the tail because compaction triggers when the
+/// LLM context approaches its budget, so the scan terminates quickly.
+fn locate_last_compaction_offset(
+    file: &mut std::fs::File,
+    meta_end: u64,
+    file_len: u64,
+) -> std::io::Result<Option<u64>> {
+    if file_len <= meta_end {
+        return Ok(None);
+    }
+
+    let buf_end = file_len;
+    let mut accumulated: Vec<u8> = Vec::new();
+    // `buf_start` tracks the file offset corresponding to accumulated[0].
+    let mut buf_start = buf_end;
+
+    loop {
+        if buf_start <= meta_end {
+            break;
+        }
+        let chunk_start = buf_start.saturating_sub(BACKWARD_READ_CHUNK as u64).max(meta_end);
+        let to_read = (buf_start - chunk_start) as usize;
+        file.seek(SeekFrom::Start(chunk_start))?;
+        let mut chunk = vec![0u8; to_read];
+        file.read_exact(&mut chunk)?;
+        let mut new_buf = chunk;
+        new_buf.extend_from_slice(&accumulated);
+        accumulated = new_buf;
+        buf_start = chunk_start;
+
+        // Scan complete lines from newest → oldest. A "complete" line has
+        // a newline boundary on both ends (or starts at buf_start when
+        // buf_start == meta_end, indicating we've read everything).
+        let text = String::from_utf8_lossy(&accumulated);
+        let bytes = text.as_bytes();
+        // Split the buffer into segments by '\n'; remember each segment's
+        // start offset in the file.
+        let mut seg_offsets: Vec<(u64, usize, usize)> = Vec::new(); // (file_offset, byte_start_in_buf, byte_len)
+        let mut seg_start_in_buf: usize = 0;
+        let mut seg_file_offset: u64 = buf_start;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                let len = i - seg_start_in_buf;
+                seg_offsets.push((seg_file_offset, seg_start_in_buf, len));
+                seg_start_in_buf = i + 1;
+                seg_file_offset = buf_start + (i as u64) + 1;
+            }
+        }
+        // Trailing segment without newline (only at end-of-file).
+        if seg_start_in_buf < bytes.len() {
+            let len = bytes.len() - seg_start_in_buf;
+            seg_offsets.push((seg_file_offset, seg_start_in_buf, len));
+        }
+
+        // Walk newest → oldest. Skip the very first (oldest) segment of
+        // the buffer **unless** we've already reached buf_start == meta_end:
+        // it may be a partial line whose head lives in an earlier chunk.
+        let oldest_safe_idx = if buf_start == meta_end { 0 } else { 1 };
+        for (file_off, byte_start, byte_len) in seg_offsets.iter().rev() {
+            // Bounds: the "first" (oldest) slice may be incomplete; skip it
+            // unless we've fully reached meta_end.
+            let idx_from_oldest = seg_offsets
+                .iter()
+                .position(|s| s.0 == *file_off)
+                .unwrap_or(0);
+            if idx_from_oldest < oldest_safe_idx {
+                continue;
+            }
+
+            let line = std::str::from_utf8(&bytes[*byte_start..*byte_start + *byte_len])
+                .ok()
+                .map(|s| s.trim());
+            let Some(line) = line else { continue };
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<ConversationEntry>(line) {
+                if entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION) {
+                    return Ok(Some(*file_off));
+                }
+            }
+        }
+
+        if buf_start == meta_end {
+            break;
+        }
+    }
+
+    Ok(None)
+}
 
 /// A line with its byte offset in the file.
 #[derive(Clone)]
@@ -1148,6 +1498,7 @@ pub fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
                 temperature: None,
                 last_input_tokens: None,
                 last_output_tokens: None,
+                last_compaction_offset: None,
             })
         }
     }
@@ -1183,39 +1534,114 @@ pub fn read_messages_paginated(
         });
     }
 
+    // Display path: show the full conversation history.
+    //
+    // The compaction boundary is only enforced on the **context path**
+    // (`restore_history_from_jsonl`), which controls what enters the LLM
+    // context window. The display path must show every entry so that
+    // reopening a session restores the visual scene the user last saw —
+    // including pre-compaction messages, with CompactionCard acting as a
+    // visual separator.
+    //
+    // `meta_end` (the byte offset where the data section begins) is the
+    // only lower bound we need: it skips the metadata header line.
+    let data_start = meta_end;
+
     if direction == "forward" {
-        read_messages_forward(&mut file, cursor, limit, meta_end, file_len)
+        read_messages_forward(&mut file, cursor, limit, data_start, file_len)
     } else {
-        read_messages_backward(&mut file, cursor, limit, meta_end, file_len)
+        read_messages_backward(&mut file, cursor, limit, data_start, file_len)
     }
 }
 
-/// Backward pagination: read the most recent `limit` messages, or older
-/// messages before the cursor offset.
+/// Resolve the active replay window lower bound for the **context path**.
+///
+/// Tries the metadata `last_compaction_offset` hint first (O(1)).  Falls
+/// back to scanning the JSONL file (O(N)) for legacy sessions.
+///
+/// **Not used by the display path** (`read_messages_paginated`), which
+/// shows the full conversation history.  This function is retained for
+/// the restorer's future O(1) optimization — currently the restorer
+/// does its own linear scan in `restore_history_from_jsonl`.
+fn read_active_lower(file: &mut std::fs::File, meta_end: u64) -> std::io::Result<u64> {
+    // Read and parse the metadata line.
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(file.try_clone()?);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line)?;
+
+    if let Ok(meta) = serde_json::from_str::<SessionMetadata>(first_line.trim()) {
+        if let Some(relative) = meta.last_compaction_offset {
+            let abs = meta_end + relative;
+            tracing::debug!(
+                meta_end = meta_end,
+                relative = relative,
+                abs = abs,
+                "Using persisted compaction offset from metadata"
+            );
+            return Ok(abs);
+        }
+    }
+
+    // Legacy path: scan the file for the compaction marker.
+    let file_len = file.metadata()?.len();
+    locate_last_compaction_offset(file, meta_end, file_len).map(|opt| opt.unwrap_or(meta_end))
+}
+
+/// Backward pagination: read the most recent `limit` **display groups**,
+/// or older groups before the cursor offset.
+///
+/// Consecutive `thought`/`tool_call`/`tool_result` entries count as one
+/// group because the frontend collapses them into a single visual item.
+///
+/// `data_start` is the byte offset where the data section begins (i.e.
+/// `meta_end`). Entries strictly before `data_start` are the metadata
+/// header and are always skipped. The display path shows the full
+/// conversation history — compaction boundary enforcement is only for
+/// the context path (`restore_history_from_jsonl`).
 fn read_messages_backward(
     file: &mut std::fs::File,
     cursor: Option<String>,
     limit: u32,
-    meta_end: u64,
+    data_start: u64,
     file_len: u64,
 ) -> Result<PaginatedMessages> {
-    let end_offset = cursor
+    let raw_end = cursor
         .as_deref()
         .and_then(parse_offset_cursor)
         .unwrap_or(file_len);
+    // Cursor below the data section start means we've reached the
+    // beginning of the conversation history — no more pages.
+    if raw_end <= data_start {
+        return Ok(PaginatedMessages {
+            messages: Vec::new(),
+            cursor: None,
+            has_more: false,
+        });
+    }
+    let end_offset = raw_end;
 
-    let line_offsets = read_lines_backward(file, end_offset, limit as usize)?;
+    // Read enough raw lines to satisfy `limit` display groups.  Cap at
+    // MAX_RAW_PER_DISPLAY_PAGE so we never scan the entire file on a huge
+    // session just for one page.
+    let raw_limit = std::cmp::min(limit as usize * 10, MAX_RAW_PER_DISPLAY_PAGE);
+    let line_offsets = read_lines_backward(file, end_offset, raw_limit)?;
 
-    // Parse lines into ConversationEntry, skipping invalid JSON
-    let mut messages = Vec::new();
-    let mut first_valid_offset = None;
+    // Parse lines into entries, keeping byte offsets for cursor tracking.
+    // Drop any line whose offset falls below `data_start` — those belong
+    // to the metadata header and must not be exposed.
+    let mut parsed: Vec<ParsedLine> = Vec::new();
     for lo in &line_offsets {
+        if lo.offset < data_start {
+            continue;
+        }
         match serde_json::from_str::<ConversationEntry>(&lo.content) {
             Ok(entry) => {
-                if first_valid_offset.is_none() {
-                    first_valid_offset = Some(lo.offset);
-                }
-                messages.push(entry);
+                parsed.push(ParsedLine {
+                    entry,
+                    offset: lo.offset,
+                    raw_line_len: lo.content.len(),
+                });
             }
             Err(e) => {
                 tracing::warn!("Skipping invalid JSONL line: {}", e);
@@ -1223,50 +1649,77 @@ fn read_messages_backward(
         }
     }
 
-    let first_offset = first_valid_offset.unwrap_or(meta_end);
+    // Build a temporary slice of entries for grouping logic.
+    let entries: Vec<ConversationEntry> = parsed.iter().map(|p| p.entry.clone()).collect();
 
-    // has_more: the first message's offset is still after metadata,
-    // meaning there are older messages beyond this page
-    let has_more = first_offset > meta_end;
+    // Trim to `limit` display groups from the newest end.
+    let kept_start = trim_oldest_display_groups(&entries, limit as usize);
+    let kept = &parsed[kept_start..];
 
-    // next_cursor: byte offset of the first (oldest) message in this page
-    let next_cursor = if has_more {
-        Some(format!("offset:{}", first_offset))
-    } else {
-        None
-    };
+    // Cursor: byte offset of the oldest entry we kept.
+    let page_start_offset = kept
+        .first()
+        .map(|p| p.offset)
+        .unwrap_or(data_start);
+    // `has_more` is true only if there is still room above `data_start`.
+    // Once we reach the data section start (the metadata header boundary),
+    // there is nothing older to offer.
+    let has_more = page_start_offset > data_start;
+
+    let messages: Vec<ConversationEntry> = kept.iter().map(|p| p.entry.clone()).collect();
 
     Ok(PaginatedMessages {
         messages,
-        cursor: next_cursor,
+        cursor: if has_more {
+            Some(format!("offset:{}", page_start_offset))
+        } else {
+            None
+        },
         has_more,
     })
 }
 
-/// Forward pagination: read `limit` messages starting from cursor offset.
+/// Forward pagination: read `limit` **display groups** starting from cursor offset.
+///
+/// Consecutive `thought`/`tool_call`/`tool_result` entries count as one group.
+///
+/// `data_start` is the byte offset where the data section begins (i.e.
+/// `meta_end`). Cursor values below it are clamped up to it so the
+/// caller never reads the metadata header. The display path shows the
+/// full conversation history — compaction boundary enforcement is only
+/// for the context path (`restore_history_from_jsonl`).
 fn read_messages_forward(
     file: &mut std::fs::File,
     cursor: Option<String>,
     limit: u32,
-    meta_end: u64,
+    data_start: u64,
     file_len: u64,
 ) -> Result<PaginatedMessages> {
-    let start_offset = cursor
+    let raw_start = cursor
         .as_deref()
         .and_then(parse_offset_cursor)
-        .unwrap_or(meta_end);
+        .unwrap_or(data_start);
+    // Clamp cursor up to data section start to skip the metadata header.
+    let start_offset = raw_start.max(data_start);
 
-    let line_offsets = read_lines_forward(file, start_offset, limit as usize)?;
+    // Read enough raw lines to satisfy `limit` display groups.
+    let raw_limit = std::cmp::min(limit as usize * 10, MAX_RAW_PER_DISPLAY_PAGE);
+    let line_offsets = read_lines_forward(file, start_offset, raw_limit)?;
 
-    // Parse lines into ConversationEntry
-    let mut messages = Vec::new();
-    let mut last_line_end = start_offset;
+    // Parse lines into entries with offsets.
+    // Drop any line whose offset somehow falls below `data_start` (defensive).
+    let mut parsed: Vec<ParsedLine> = Vec::new();
     for lo in &line_offsets {
+        if lo.offset < data_start {
+            continue;
+        }
         match serde_json::from_str::<ConversationEntry>(&lo.content) {
             Ok(entry) => {
-                // End of this line = offset + content length + newline
-                last_line_end = lo.offset + lo.content.len() as u64 + 1u64;
-                messages.push(entry);
+                parsed.push(ParsedLine {
+                    entry,
+                    offset: lo.offset,
+                    raw_line_len: lo.content.len(),
+                });
             }
             Err(e) => {
                 tracing::warn!("Skipping invalid JSONL line: {}", e);
@@ -1274,18 +1727,28 @@ fn read_messages_forward(
         }
     }
 
+    let entries: Vec<ConversationEntry> = parsed.iter().map(|p| p.entry.clone()).collect();
+
+    // Trim to `limit` display groups from the oldest end.
+    let kept_end = trim_newest_display_groups(&entries, limit as usize);
+    let kept = &parsed[..kept_end];
+
+    // Cursor: byte offset right after the last kept entry.
+    let last_entry = kept.last();
+    let last_line_end = last_entry.map_or(start_offset, |p| {
+        p.offset + p.raw_line_len as u64 + 1u64
+    });
     let has_more = last_line_end < file_len;
 
-    // next_cursor: byte offset at the end of the last message
-    let next_cursor = if has_more {
-        Some(format!("offset:{}", last_line_end))
-    } else {
-        None
-    };
+    let messages: Vec<ConversationEntry> = kept.iter().map(|p| p.entry.clone()).collect();
 
     Ok(PaginatedMessages {
         messages,
-        cursor: next_cursor,
+        cursor: if has_more {
+            Some(format!("offset:{}", last_line_end))
+        } else {
+            None
+        },
         has_more,
     })
 }
@@ -1419,6 +1882,7 @@ mod tests {
                 temperature: None,
                 last_input_tokens: None,
                 last_output_tokens: None,
+                last_compaction_offset: None,
             };
             let mut file = std::fs::File::create(&path).unwrap();
             serde_json::to_writer(&mut file, &meta).unwrap();
@@ -1457,6 +1921,7 @@ mod tests {
                 temperature: None,
                 last_input_tokens: None,
                 last_output_tokens: None,
+                last_compaction_offset: None,
             };
             serde_json::to_writer(&mut file, &meta).unwrap();
             writeln!(file).unwrap();
@@ -1661,6 +2126,7 @@ mod tests {
             temperature: None,
             last_input_tokens: None,
             last_output_tokens: None,
+            last_compaction_offset: None,
         };
         let mut file = std::fs::File::create(&file_path).unwrap();
         serde_json::to_writer(&mut file, &meta).unwrap();
@@ -1700,6 +2166,7 @@ mod tests {
             temperature: None,
             last_input_tokens: None,
             last_output_tokens: None,
+            last_compaction_offset: None,
         };
         let mut file = std::fs::File::create(&valid_path).unwrap();
         serde_json::to_writer(&mut file, &valid_meta).unwrap();
@@ -1766,11 +2233,13 @@ mod tests {
             temperature: Some(0.7),
             last_input_tokens: Some(45_000),
             last_output_tokens: Some(1_200),
+            last_compaction_offset: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: SessionMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.last_input_tokens, Some(45_000));
         assert_eq!(parsed.last_output_tokens, Some(1_200));
+        assert_eq!(parsed.last_compaction_offset, None, "field should default to None");
         assert_eq!(parsed.version, 2);
         assert_eq!(parsed.model.as_deref(), Some("gpt-4"));
     }
@@ -1783,5 +2252,359 @@ mod tests {
         let meta: SessionMetadata = serde_json::from_str(old_json).unwrap();
         assert_eq!(meta.last_input_tokens, None, "should default to None");
         assert_eq!(meta.last_output_tokens, None, "should default to None");
+    }
+
+    // ── display group pagination tests ────────────────────────────
+
+    /// Helper: write a JSONL file with metadata + given entries, return the path.
+    fn write_test_jsonl(dir: &TempDir, session_id: &str, entries: &[ConversationEntry]) -> PathBuf {
+        let conv_dir = dir.path().join("conversations");
+        std::fs::create_dir_all(&conv_dir).unwrap();
+        let file_path = conv_dir.join(format!("{}.jsonl", session_id));
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        let meta = SessionMetadata {
+            version: 2,
+            session_id: session_id.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            agent_id: "com.test".to_string(),
+            title: None,
+            updated_at: None,
+            message_count: Some(entries.len() as u32),
+            corrupted: false,
+            workspace_id: None,
+            model: None,
+            provider: None,
+            reasoning_effort: None,
+            temperature: None,
+            last_input_tokens: None,
+            last_output_tokens: None,
+            last_compaction_offset: None,
+        };
+        serde_json::to_writer(&mut file, &meta).unwrap();
+        writeln!(file).unwrap();
+        for e in entries {
+            serde_json::to_writer(&mut file, e).unwrap();
+            writeln!(file).unwrap();
+        }
+        file_path
+    }
+
+    fn make_entry(id: &str, role: &str, content: &str) -> ConversationEntry {
+        ConversationEntry {
+            id: id.to_string(),
+            ts: chrono::Utc::now().to_rfc3339(),
+            role: role.to_string(),
+            content: content.to_string(),
+            metadata: None,
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn display_group_count_plain_messages() {
+        // user, assistant, user, assistant, user → 5 groups
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "assistant", "a1"),
+        ];
+        assert_eq!(count_display_groups(&entries), 2);
+    }
+
+    #[test]
+    fn display_group_collapses_tool_sequence() {
+        // user, thought, tool_call, tool_result, assistant
+        // → user, {tool sequence}, assistant = 3 groups
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "thought", "thinking…"),
+            make_entry("3", "tool_call", "{…}"),
+            make_entry("4", "tool_result", "result"),
+            make_entry("5", "assistant", "done"),
+        ];
+        assert_eq!(count_display_groups(&entries), 3);
+    }
+
+    #[test]
+    fn display_group_multiple_tool_bursts() {
+        // user, thought, tc, tr, thought, tc, tr, assistant, user, thought, tc, tr, assistant
+        // → u1, {t1,tc1,tr1,t2,tc2,tr2}, a1, u2, {t3,tc3,tr3}, a2 = 6 groups
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "thought", "t1"),
+            make_entry("3", "tool_call", "tc1"),
+            make_entry("4", "tool_result", "tr1"),
+            make_entry("5", "thought", "t2"),
+            make_entry("6", "tool_call", "tc2"),
+            make_entry("7", "tool_result", "tr2"),
+            make_entry("8", "assistant", "a1"),
+            make_entry("9", "user", "u2"),
+            make_entry("10", "thought", "t3"),
+            make_entry("11", "tool_call", "tc3"),
+            make_entry("12", "tool_result", "tr3"),
+            make_entry("13", "assistant", "a2"),
+        ];
+        assert_eq!(count_display_groups(&entries), 6);
+    }
+
+    #[test]
+    fn backward_limit_respects_display_groups() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "thought", "t1"),
+            make_entry("3", "tool_call", "tc1"),
+            make_entry("4", "tool_result", "tr1"),
+            make_entry("5", "assistant", "a1"),
+            make_entry("6", "user", "u2"),
+            make_entry("7", "thought", "t2"),
+            make_entry("8", "tool_call", "tc2"),
+            make_entry("9", "tool_result", "tr2"),
+            make_entry("10", "assistant", "a2"),
+        ];
+        // 6 display groups: u1, {t1,tc1,tr1}, a1, u2, {t2,tc2,tr2}, a2
+        let path = write_test_jsonl(&dir, "sess-groups", &entries);
+
+        // limit=6 groups → all 10 raw entries
+        let page = read_messages_paginated(&path, None, 6, "backward").unwrap();
+        assert_eq!(page.messages.len(), 10, "6 groups → all entries");
+        assert!(!page.has_more);
+
+        // limit=2 groups → keep newest 2: u2 + {t2,tc2,tr2} + a2 = wait...
+        // Actually: limit=2 from NEWEST means we keep the LAST 2 groups.
+        // Groups (oldest→newest): u1, G1, a1, u2, G2, a2
+        // Last 2: G2 + a2 = 4 raw entries (t2, tc2, tr2, a2)
+        let page = read_messages_paginated(&path, None, 2, "backward").unwrap();
+        assert_eq!(page.messages.len(), 4, "2 groups → 4 entries");
+        assert!(page.has_more);
+        assert_eq!(page.messages[0].content, "t2");
+        assert_eq!(page.messages[3].content, "a2");
+    }
+
+    #[test]
+    fn user_message_visible_with_tool_heavy_conversation() {
+        // Simulates the user's scenario: 1 user message + many tool calls + assistant.
+        let dir = TempDir::new().unwrap();
+        let mut entries = vec![make_entry("1", "user", "user-msg")];
+        // 20 tool rounds (thought + tool_call + tool_result = 60 entries)
+        for i in 0..20 {
+            entries.push(make_entry(
+                &format!("t{}", i * 3 + 2), "thought", &format!("think-{}", i),
+            ));
+            entries.push(make_entry(
+                &format!("t{}", i * 3 + 3), "tool_call", &format!("call-{}", i),
+            ));
+            entries.push(make_entry(
+                &format!("t{}", i * 3 + 4), "tool_result", &format!("result-{}", i),
+            ));
+        }
+        entries.push(make_entry("last", "assistant", "final-reply"));
+        // Total: 62 raw entries, 3 display groups (user, {tool seq}, assistant)
+
+        let path = write_test_jsonl(&dir, "sess-heavy", &entries);
+
+        // limit=50 display groups (frontend default) — more than the 3 groups we have
+        let page = read_messages_paginated(&path, None, 50, "backward").unwrap();
+        assert_eq!(page.messages.len(), 62, "all entries should be in one page");
+        assert!(!page.has_more);
+        // User message must be present
+        assert!(
+            page.messages.iter().any(|m| m.role == "user" && m.content == "user-msg"),
+            "user message must be visible"
+        );
+    }
+
+    #[test]
+    fn trim_oldest_keeps_exact_groups() {
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "thought", "t1"),
+            make_entry("3", "tool_call", "tc1"),
+            make_entry("4", "tool_result", "tr1"),
+            make_entry("5", "assistant", "a1"),
+            make_entry("6", "user", "u2"),
+        ];
+        // 4 groups: u1, {t1,tc1,tr1}, a1, u2
+        let split = trim_oldest_display_groups(&entries, 2);
+        // Keep last 2 groups: a1, u2 → entries[4..]
+        assert_eq!(split, 4);
+        assert_eq!(entries[split].content, "a1");
+    }
+
+    fn make_compaction_entry(id: &str, summary: &str) -> ConversationEntry {
+        ConversationEntry {
+            id: id.to_string(),
+            ts: chrono::Utc::now().to_rfc3339(),
+            role: "system".to_string(),
+            content: summary.to_string(),
+            metadata: Some(serde_json::json!({
+                "compacted_from_id": "first-id",
+                "compacted_to_id": "last-id",
+                "keep_last_rounds": 3,
+                "model": "test-model",
+                "before_tokens": 1000u64,
+                "after_tokens": 200u64,
+            })),
+            kind: Some(ENTRY_KIND_COMPACTION.to_string()),
+        }
+    }
+
+    #[test]
+    fn display_group_compaction_is_standalone() {
+        // user, thought, tool_call, [COMPACTION], tool_result, assistant
+        // The compaction marker BREAKS the tool sequence into two halves.
+        // Groups: user, {thought,tool_call}, COMPACTION, {tool_result}, assistant = 5
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "thought", "t1"),
+            make_entry("3", "tool_call", "tc1"),
+            make_compaction_entry("4", "<summary>compacted u1..tc1</summary>"),
+            make_entry("5", "tool_result", "tr1"),
+            make_entry("6", "assistant", "a1"),
+        ];
+        assert_eq!(count_display_groups(&entries), 5);
+
+        // Compaction adjacent to plain user/assistant is also its own group.
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "assistant", "a1"),
+            make_compaction_entry("3", "<summary>...</summary>"),
+            make_entry("4", "user", "u2"),
+            make_entry("5", "assistant", "a2"),
+        ];
+        // Groups: u1, a1, COMPACTION, u2, a2 = 5
+        assert_eq!(count_display_groups(&entries), 5);
+    }
+
+    #[test]
+    fn pagination_shows_full_history_with_compaction() {
+        // 4 pre-compaction entries + compaction marker + 2 post-compaction entries.
+        // Display path must show ALL entries — compaction boundary is only
+        // enforced on the context path (restorer), not the display path.
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "old-u1"),
+            make_entry("2", "assistant", "old-a1"),
+            make_entry("3", "user", "old-u2"),
+            make_entry("4", "assistant", "old-a2"),
+            make_compaction_entry("5", "<summary>compacted old-u1..old-a2</summary>"),
+            make_entry("6", "user", "new-u3"),
+            make_entry("7", "assistant", "new-a3"),
+        ];
+        let path = write_test_jsonl(&dir, "sess-compaction", &entries);
+
+        // limit large enough to span the entire file
+        let page = read_messages_paginated(&path, None, 50, "backward").unwrap();
+        // Expect: all 7 entries (4 pre-compaction + compaction + 2 post-compaction)
+        assert_eq!(page.messages.len(), 7, "display path must show full history");
+        assert!(!page.has_more, "no more pages — entire file consumed");
+
+        // Pre-compaction content must appear.
+        assert!(
+            page.messages.iter().any(|m| m.content == "old-u1"),
+            "pre-compaction history must be visible in display path"
+        );
+
+        // Compaction marker must appear at the correct position (index 4).
+        assert_eq!(
+            page.messages[4].kind.as_deref(),
+            Some(ENTRY_KIND_COMPACTION),
+            "compaction marker must be at index 4"
+        );
+
+        // Post-compaction content must appear.
+        assert_eq!(page.messages[5].content, "new-u3");
+        assert_eq!(page.messages[6].content, "new-a3");
+    }
+
+    #[test]
+    fn pagination_has_more_true_at_compaction_boundary() {
+        // Tight limit so the first page does NOT include the compaction marker;
+        // the cursor returned must allow paging past the compaction boundary
+        // to reach pre-compaction history (display path shows everything).
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "old-u1"),
+            make_entry("2", "assistant", "old-a1"),
+            make_compaction_entry("3", "<summary>...</summary>"),
+            make_entry("4", "user", "new-u2"),
+            make_entry("5", "assistant", "new-a2"),
+            make_entry("6", "user", "new-u3"),
+            make_entry("7", "assistant", "new-a3"),
+        ];
+        let path = write_test_jsonl(&dir, "sess-cap-boundary", &entries);
+
+        // limit=2 groups → keep last 2 groups (new-u3, new-a3)
+        let page1 = read_messages_paginated(&path, None, 2, "backward").unwrap();
+        assert_eq!(page1.messages.len(), 2);
+        assert_eq!(page1.messages[0].content, "new-u3");
+        assert_eq!(page1.messages[1].content, "new-a3");
+        assert!(page1.has_more, "more entries ahead (compaction + pre-compaction)");
+
+        // Page 2 with the cursor should bring back everything before page1:
+        // old-u1, old-a1, COMPACTION, new-u2, new-a2 (5 entries).
+        let page2 = read_messages_paginated(
+            &path,
+            page1.cursor.clone(),
+            50,
+            "backward",
+        )
+        .unwrap();
+        assert!(
+            page2.messages.iter().any(|m| m.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)),
+            "page 2 must include the compaction marker"
+        );
+        assert!(
+            page2.messages.iter().any(|m| m.content.starts_with("old-")),
+            "page 2 must include pre-compaction history"
+        );
+        assert!(!page2.has_more, "no more pages — reached data section start");
+    }
+
+    #[test]
+    fn forward_pagination_with_stale_cursor() {
+        // Forward pagination with a stale cursor pointing at offset 0
+        // (below the data section start). The cursor should be clamped
+        // up to `data_start` (meta_end), and all entries including
+        // pre-compaction history should be returned.
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "old-u1"),
+            make_entry("2", "assistant", "old-a1"),
+            make_compaction_entry("3", "<summary>...</summary>"),
+            make_entry("4", "user", "new-u2"),
+            make_entry("5", "assistant", "new-a2"),
+        ];
+        let path = write_test_jsonl(&dir, "sess-forward-clamp", &entries);
+
+        // Stale cursor pointing at offset 0 (below data section start).
+        let stale_cursor = Some("offset:0".to_string());
+        let page = read_messages_paginated(&path, stale_cursor, 50, "forward").unwrap();
+        // Expect: all 5 entries (old-u1, old-a1, compaction, new-u2, new-a2)
+        assert_eq!(page.messages.len(), 5, "forward pagination must show full history");
+        assert!(
+            page.messages.iter().any(|m| m.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)),
+            "compaction marker must appear"
+        );
+        assert!(
+            page.messages.iter().any(|m| m.content.starts_with("old-")),
+            "pre-compaction history must be visible in forward pagination"
+        );
+    }
+
+    #[test]
+    fn pagination_without_compaction_is_unchanged() {
+        // Regression: existing behavior (no compaction in file) must be preserved.
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "u1"),
+            make_entry("2", "assistant", "a1"),
+            make_entry("3", "user", "u2"),
+            make_entry("4", "assistant", "a2"),
+        ];
+        let path = write_test_jsonl(&dir, "sess-no-compaction", &entries);
+
+        let page = read_messages_paginated(&path, None, 50, "backward").unwrap();
+        assert_eq!(page.messages.len(), 4);
+        assert!(!page.has_more);
     }
 }

@@ -652,11 +652,18 @@ impl HistoryManager {
     /// Formats all messages as text, wraps them in the COMPACT_PROMPT
     /// template, and sends to the configured Compact Model.
     /// Returns the plain-text summary (no JSON parsing).
+    ///
+    /// `identity_context` is the user's `UserProfile` formatted as text
+    /// (see [`super::session::session_manager::format_user_profile_context`]).
+    /// When `Some`, it is embedded into the system prompt so the LLM writes
+    /// the summary in the user's preferred language. Pass `None` when the
+    /// session has no user profile yet (default → English summary).
     pub async fn compact_via_llm(
         &self,
         provider: &dyn Provider,
         model_name: &str,
         system_prompt: &str,
+        identity_context: Option<&str>,
     ) -> std::result::Result<String, RuntimeError> {
         let messages_text = crate::episode_distill::format_messages(&self.messages);
         if messages_text.is_empty() {
@@ -666,13 +673,17 @@ impl HistoryManager {
         }
 
         let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
+        // Inject identity into the system prompt so the LLM knows the user's
+        // preferred language. No-op if identity is None / empty.
+        let full_system_prompt =
+            crate::prompt::build_compaction_system_prompt(system_prompt, identity_context);
 
         let request = ChatRequest {
             model: model_name.to_string(),
             messages: vec![
                 ChatMessage {
                     role: MessageRole::System,
-                    content: system_prompt.to_string(),
+                    content: full_system_prompt,
                     ..Default::default()
                 },
                 ChatMessage::user(prompt),
@@ -1376,5 +1387,174 @@ mod tests {
         let len_before = messages_clone.len();
         HistoryManager::sanitize_messages(&mut messages_clone);
         assert_eq!(messages_clone.len(), len_before, "No orphans after fix");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // compact_via_llm language-aware system-prompt tests
+    //
+    // These verify that the user's identity_context (containing the
+    // `Language: zh-CN` field) is embedded into the system message sent to
+    // the compact model, so the LLM writes the summary in the user's
+    // preferred language.
+    // ─────────────────────────────────────────────────────────────────────
+
+    use acowork_core::providers::traits::ChatResponse;
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal Provider that captures the most recent `ChatRequest` and
+    /// returns a canned summary. Used to assert what `compact_via_llm`
+    /// actually sends to the LLM.
+    struct CaptureProvider {
+        captured: Arc<Mutex<Option<ChatRequest>>>,
+        canned: String,
+    }
+
+    impl CaptureProvider {
+        fn new(canned: impl Into<String>) -> Self {
+            Self {
+                captured: Arc::new(Mutex::new(None)),
+                canned: canned.into(),
+            }
+        }
+        fn last_request(&self) -> ChatRequest {
+            self.captured
+                .lock()
+                .unwrap()
+                .take()
+                .expect("provider was never called")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CaptureProvider {
+        fn name(&self) -> &str {
+            "capture"
+        }
+
+        async fn chat(
+            &self,
+            request: ChatRequest,
+        ) -> acowork_core::error::Result<ChatResponse> {
+            *self.captured.lock().unwrap() = Some(request);
+            Ok(ChatResponse {
+                content: self.canned.clone(),
+                ..Default::default()
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> acowork_core::error::Result<
+            Box<dyn futures_core::Stream<Item = acowork_core::providers::traits::StreamEvent> + Send>,
+        > {
+            Err(acowork_core::error::AcoworkError::Provider(
+                acowork_core::providers::traits::ProviderError::unknown(
+                    "CaptureProvider does not support streaming".to_string(),
+                ),
+            ))
+        }
+
+        async fn chat_token_count(
+            &self,
+            _messages: &[ChatMessage],
+        ) -> acowork_core::error::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    fn build_history_with_messages() -> HistoryManager {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_message(MessageRole::User, "用户：你好"));
+        hm.append(make_message(
+            MessageRole::Assistant,
+            "你好！有什么可以帮你的吗？",
+        ));
+        hm
+    }
+
+    #[tokio::test]
+    async fn compact_via_llm_without_identity_keeps_system_prompt_unchanged() {
+        let hm = build_history_with_messages();
+        let provider = CaptureProvider::new("<summary>hello</summary>");
+
+        let result = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "compact_via_llm should succeed");
+
+        let req = provider.last_request();
+        // Two messages: system + user
+        assert_eq!(req.messages.len(), 2);
+        assert_eq!(req.messages[0].role, MessageRole::System);
+        assert_eq!(
+            req.messages[0].content,
+            crate::prompt::COMPACTION_SYSTEM_PROMPT,
+            "with identity=None, system prompt must be the base prompt unchanged"
+        );
+        // User message keeps the unmodified COMPACT_PROMPT template
+        assert!(req.messages[1].content.contains("<summary>"));
+    }
+
+    #[tokio::test]
+    async fn compact_via_llm_with_identity_embeds_language_directive_into_system() {
+        let hm = build_history_with_messages();
+        let provider = CaptureProvider::new("<summary>summary text</summary>");
+
+        let identity =
+            "- Display Name: 大鱼\n- Language: zh-CN\n- Timezone: Asia/Shanghai\n- City: 上海";
+
+        let result = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                Some(identity),
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let req = provider.last_request();
+        assert_eq!(req.messages.len(), 2);
+        let system = &req.messages[0].content;
+        assert_eq!(system[0..crate::prompt::COMPACTION_SYSTEM_PROMPT.len()].to_string(), crate::prompt::COMPACTION_SYSTEM_PROMPT,
+            "system prompt must start with the original base prompt");
+        // Identity text embedded verbatim — the LLM reads it directly
+        assert!(system.contains(identity), "identity text must be embedded verbatim");
+        assert!(system.contains("Language"), "language directive must be present");
+        assert!(system.contains("preferred language"), "language directive must be present");
+        // The original COMPACT_PROMPT body must NOT be polluted — it stays
+        // in the user message untouched.
+        assert!(req.messages[1].content.contains("You are a conversation summarization assistant"));
+        assert!(!req.messages[0].content.contains("You are a conversation summarization assistant"),
+            "the inner COMPACT_PROMPT instructions must remain in the user message, not leak into system");
+    }
+
+    #[tokio::test]
+    async fn compact_via_llm_with_empty_identity_keeps_system_prompt_unchanged() {
+        let hm = build_history_with_messages();
+        let provider = CaptureProvider::new("ok");
+
+        let result = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                Some("   \n\t  "),
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let req = provider.last_request();
+        assert_eq!(
+            req.messages[0].content,
+            crate::prompt::COMPACTION_SYSTEM_PROMPT,
+            "whitespace-only identity must not append the directive"
+        );
     }
 }

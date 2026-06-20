@@ -179,7 +179,7 @@
         "chooseIcon": "Choose icon",
         "agentName": "Agent Name",
         "maxOutputTokens": "Max Output Tokens",
-        "gatewayLimit": "(gateway limit)",
+        "defaultModelLimit": "(default model limit)",
         "leaveEmptyDefault": "Leave empty to use runtime default",
         "maxIterations": "Max Iterations (per run)",
         "defaultIterations": "50 (default)",

@@ -179,7 +179,7 @@
         "chooseIcon": "选择图标",
         "agentName": "Agent 名称",
         "maxOutputTokens": "最大输出 Token 数",
-        "gatewayLimit": "（网关限制）",
+        "defaultModelLimit": "（默认模型限制）",
         "leaveEmptyDefault": "留空使用运行时默认值",
         "maxIterations": "最大迭代次数（每次运行）",
         "defaultIterations": "50（默认）",

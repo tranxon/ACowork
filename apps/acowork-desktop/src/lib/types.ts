@@ -250,7 +250,7 @@ export interface TodoItem {
 }
 
 /** Chat message types */
-export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "document_upload" | "error";
+export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "document_upload" | "error" | "compaction";
 
 /** Chat message in the UI */
 export interface ChatMessage {
@@ -299,6 +299,25 @@ export interface ChatMessage {
   }>;
   /** Image data URLs attached to a user message (rendered inline in the user bubble) */
   imageUrls?: string[];
+  /** For type=compaction: structured metadata parsed from CompactionEventMeta */
+  compactionMeta?: CompactionEventMeta;
+}
+
+/** Compaction event metadata (mirrors backend `CompactionEventMeta`).
+ *  Carried inside `ConversationEntry.metadata` when `kind === "compaction"`. */
+export interface CompactionEventMeta {
+  /** First entry id covered by the summary (inclusive) */
+  compacted_from_id?: string;
+  /** Last entry id covered by the summary (inclusive) */
+  compacted_to_id?: string;
+  /** Number of trailing rounds preserved in memory after compaction */
+  keep_last_rounds: number;
+  /** Compaction model used (diagnostic only) */
+  model?: string;
+  /** History token estimate before compaction (diagnostic only) */
+  before_tokens: number;
+  /** History token estimate after compaction (diagnostic only) */
+  after_tokens: number;
 }
 
 /** Token usage stats */
@@ -590,6 +609,10 @@ export interface ConversationEntry {
   role: "user" | "assistant" | "think" | "thought" | "tool_call" | "tool_result" | "system";
   content: string;
   metadata?: Record<string, unknown>;
+  /** Entry kind. `undefined`/`"message"` denotes a regular role-based message.
+   *  `"compaction"` denotes an LLM-driven compaction summary event whose
+   *  `content` is the summary text and `metadata` is `CompactionEventMeta`. */
+  kind?: string;
 }
 
 /** Metadata for document upload entries in conversation history */

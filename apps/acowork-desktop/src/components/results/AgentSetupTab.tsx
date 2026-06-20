@@ -227,7 +227,7 @@ export function AgentSetupTab() {
               maxTokens: v === "" ? 0 : Math.max(0, parseInt(v, 10) || 0),
             });
           }}
-          placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.gatewayLimit")}`}
+          placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
           className="rounded-md bg-white dark:bg-zinc-800"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">

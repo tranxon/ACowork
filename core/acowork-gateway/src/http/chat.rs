@@ -1172,6 +1172,10 @@ pub struct MessageEntryResponse {
     /// Optional metadata
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Entry kind. `None`/`"message"` denotes a regular role-based message.
+    /// `"compaction"` denotes an LLM-driven compaction summary event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// Response for creating a session
@@ -1304,6 +1308,7 @@ pub async fn get_session_messages(
             role: m.role,
             content: m.content,
             metadata: m.metadata,
+            kind: m.kind,
         })
         .collect();
 

@@ -21,7 +21,7 @@
  *   shows the same icon that the install hook will eventually persist.
  */
 
-import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
+import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "./builtinIcons";
 import { getGatewayUrl } from "./config";
 
 /** Build the Gateway URL that serves the agent's packaged avatar (if any). */

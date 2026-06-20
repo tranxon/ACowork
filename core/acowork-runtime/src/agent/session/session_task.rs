@@ -446,6 +446,11 @@ impl SessionTask {
             .with_identity(identity_context.clone())
             .with_tools(tool_definitions.clone());
 
+        // Mirror the identity onto SessionState so compaction paths
+        // (loop_context / loop_session) can inject the user's preferred
+        // language into the compact model's system prompt.
+        agent_loop.session.set_identity_context(identity_context.clone());
+
         // ADR-012: Apply per-session model from SessionState.
         // For new sessions, model is set from resource_cache during creation.
         // For resumed sessions, model is restored from JSONL metadata.
@@ -1188,7 +1193,12 @@ impl SessionTask {
                         has_context = identity_context.is_some(),
                         "SessionTask: updating identity context"
                     );
-                    context_builder.set_identity_context(identity_context.unwrap_or_default());
+                    let next = identity_context.unwrap_or_default();
+                    context_builder.set_identity_context(next.clone());
+                    // Keep SessionState in sync so compaction sees the latest value.
+                    agent_loop.session.set_identity_context(
+                        if next.is_empty() { None } else { Some(next) },
+                    );
                 }
                 Some(SessionMessage::ProviderListUpdated) => {
                     // The shared global_provider_list on AgentCore is already updated

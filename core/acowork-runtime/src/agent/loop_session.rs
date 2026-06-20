@@ -171,6 +171,10 @@ impl super::loop_::AgentLoop {
                     });
                 let model_name = self.resolve_distill_model(&combined_text);
                 let distill_max_tokens = self.core.config.distill_max_tokens;
+                // Snapshot user identity (small text block) so the spawned
+                // task is independent of `self` and so the summary is written
+                // in the user's preferred language.
+                let identity_context = self.session.identity_context().map(String::from);
 
                 tracing::info!(
                     session_id = %session_id,
@@ -188,6 +192,7 @@ impl super::loop_::AgentLoop {
                         provider.as_ref(),
                         &model_name,
                         distill_max_tokens,
+                        identity_context.as_deref(),
                     )
                     .await
                     {

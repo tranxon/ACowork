@@ -545,7 +545,7 @@ impl AgentLoop {
 
             // ①-⑧ Execute single iteration (shared with debug mode)
             // With iteration-level retry for retryable stream errors.
-            const MAX_ITERATION_RETRIES: u32 = 2;
+            const MAX_ITERATION_RETRIES: u32 = 3;
             let mut iteration_retries = 0u32;
             let iteration_result = loop {
                 match self

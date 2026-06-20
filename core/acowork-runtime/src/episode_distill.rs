@@ -171,11 +171,18 @@ impl EpisodeDistiller {
     ///
     /// Returns the summary text (not a structured DistilledEpisode) so the
     /// caller can both write it to Grafeo and insert it into in-memory history.
+    ///
+    /// `identity_context` is the user's `UserProfile` formatted as text.
+    /// When `Some`, it is embedded into the system prompt so the LLM writes
+    /// the summary in the user's preferred language (see
+    /// [`crate::prompt::build_compaction_system_prompt`]). Pass `None` when
+    /// the session has no user profile yet (default → English summary).
     pub async fn compact_full_context(
         messages: &[ChatMessage],
         provider: &dyn Provider,
         model_name: &str,
         distill_max_tokens: u32,
+        identity_context: Option<&str>,
     ) -> Result<String> {
         let messages_text = format_messages(messages);
         if messages_text.is_empty() {
@@ -184,20 +191,30 @@ impl EpisodeDistiller {
             ));
         }
         let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-        compact_with_llm(&prompt, provider, model_name, distill_max_tokens).await
+        compact_with_llm(&prompt, provider, model_name, distill_max_tokens, identity_context).await
     }
 
     /// Compact a specific slice of in-memory messages (e.g. tail after last compaction).
     ///
     /// Same as `compact_full_context` but takes a slice reference for convenience
-    /// when the caller already has the exact message range.
+    /// when the caller already has the exact message range. `identity_context` is
+    /// threaded through for the same language-aware reason as in
+    /// [`Self::compact_full_context`].
     pub async fn compact_messages(
         messages: &[ChatMessage],
         provider: &dyn Provider,
         model_name: &str,
         distill_max_tokens: u32,
+        identity_context: Option<&str>,
     ) -> Result<String> {
-        Self::compact_full_context(messages, provider, model_name, distill_max_tokens).await
+        Self::compact_full_context(
+            messages,
+            provider,
+            model_name,
+            distill_max_tokens,
+            identity_context,
+        )
+        .await
     }
 
     /// Distill an entire conversation session upon close.
@@ -205,6 +222,11 @@ impl EpisodeDistiller {
     /// Reads the JSONL file and produces a session-level natural-language summary.
     /// If the session content is shorter than `min_distill_chars`, the raw text is
     /// used directly as summary — no LLM call is made.
+    ///
+    /// `identity_context` is threaded into the system prompt when an LLM call
+    /// is made so the summary lands in the user's preferred language. When the
+    /// raw-text fallback path is taken, no LLM is invoked and identity is not
+    /// consulted (the raw conversation text is used as-is).
     pub async fn distill_on_session_end(
         session_path: &Path,
         session_id: &str,
@@ -212,6 +234,7 @@ impl EpisodeDistiller {
         model_name: &str,
         min_distill_chars: usize,
         distill_max_tokens: u32,
+        identity_context: Option<&str>,
     ) -> Result<DistilledEpisode> {
         let messages_text = read_jsonl_content(session_path)?;
         if messages_text.is_empty() {
@@ -229,7 +252,14 @@ impl EpisodeDistiller {
             messages_text
         } else {
             let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-            compact_with_llm(&prompt, provider, model_name, distill_max_tokens).await?
+            compact_with_llm(
+                &prompt,
+                provider,
+                model_name,
+                distill_max_tokens,
+                identity_context,
+            )
+            .await?
         };
 
         Ok(DistilledEpisode {
@@ -385,15 +415,33 @@ fn read_jsonl_content(path: &Path) -> Result<String> {
 /// Send a compaction prompt to the LLM and return the plain-text response.
 ///
 /// Per [ADR-011], the LLM outputs natural language — no JSON parsing needed.
+///
+/// When `identity_context` is `Some`, the standard [`COMPACTION_SYSTEM_PROMPT`]
+/// is augmented with the user's identity so the summary is written in their
+/// preferred language. See
+/// [`crate::prompt::build_compaction_system_prompt`].
 async fn compact_with_llm(
     prompt: &str,
     provider: &dyn Provider,
     model_name: &str,
     max_tokens: u32,
+    identity_context: Option<&str>,
 ) -> Result<String> {
+    let system_prompt = crate::prompt::build_compaction_system_prompt(
+        crate::prompt::COMPACTION_SYSTEM_PROMPT,
+        identity_context,
+    );
+
     let request = ChatRequest {
         model: model_name.to_string(),
-        messages: vec![ChatMessage::user(prompt)],
+        messages: vec![
+            ChatMessage {
+                role: MessageRole::System,
+                content: system_prompt,
+                ..Default::default()
+            },
+            ChatMessage::user(prompt),
+        ],
         temperature: Some(0.3),
         max_tokens: Some(max_tokens),
         tools: None,

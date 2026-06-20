@@ -26,6 +26,7 @@ import { ThinkBlock } from "./ThinkBlock";
 import { ExploreBlock } from "./ExploreBlock";
 import { CodeBlock } from "./CodeBlock";
 import { ContextUsageIcon } from "./ContextUsageIcon";
+import { CompactionCard } from "./CompactionCard";
 
 /** ReactMarkdown component overrides — code blocks with title bar */
 const markdownComponents = {
@@ -201,8 +202,11 @@ export function ChatPanel() {
         exploreBuffer.push(msg);
       } else if (msg.type === 'thought') {
         exploreBuffer.push(msg);
-      } else if (msg.type === 'document_upload' || msg.type === 'system') {
-        // Document upload and system messages: flush explore, pass through as-is
+      } else if (msg.type === 'document_upload' || msg.type === 'system' || msg.type === 'compaction') {
+        // Document upload, system messages, and compaction summary cards:
+        // flush explore, pass through as-is. compaction must NOT be merged
+        // into a tool/explore group — it is a standalone visual unit and
+        // also a logical "context boundary" between rounds.
         flushExplore();
         grouped.push(msg);
       } else if (msg.type === 'assistant') {
@@ -1781,6 +1785,18 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             {message.content}
           </div>
         </div>
+      </MessageContentWrapper>
+    );
+  }
+
+  if (message.type === "compaction") {
+    return (
+      <MessageContentWrapper>
+        <CompactionCard
+          summary={message.content}
+          meta={message.compactionMeta}
+          timestampMs={message.timestamp}
+        />
       </MessageContentWrapper>
     );
   }

@@ -1467,7 +1467,42 @@ function updateSessionTitleFromMessages(messages: ChatMessage[], sessionId: stri
 
 // ── Conversation entry conversion ─────────────────────────────────────
 
+/** Strip leading/trailing `<summary>...</summary>` tags from a compaction
+ *  summary string (the LLM is instructed to wrap output in those tags;
+ *  we don't need them in the UI). Returns the inner text trimmed. If the
+ *  tags aren't present, returns the original input trimmed. */
+function stripSummaryTags(text: string): string {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^<summary>([\s\S]*?)<\/summary>$/i);
+  return (match ? match[1] : trimmed).trim();
+}
+
 function convertConversationEntry(entry: ConversationEntry, agentId: string): ChatMessage {
+  // Compaction events: rendered as a folded summary card. Mirrors the
+  // backend `kind="compaction"` JSONL marker. Detected BEFORE role-based
+  // mapping because the underlying role is "system" but we render it
+  // distinctly.
+  if (entry.kind === "compaction") {
+    const meta = (entry.metadata ?? {}) as Record<string, unknown>;
+    const agentInfo = getAgentSenderInfo(agentId);
+    return {
+      id: entry.id,
+      type: "compaction",
+      content: stripSummaryTags(entry.content),
+      timestamp: new Date(entry.ts).getTime(),
+      senderDisplayName: agentInfo.senderDisplayName,
+      senderRole: agentInfo.senderRole,
+      compactionMeta: {
+        compacted_from_id: meta.compacted_from_id as string | undefined,
+        compacted_to_id: meta.compacted_to_id as string | undefined,
+        keep_last_rounds: (meta.keep_last_rounds as number) ?? 0,
+        model: meta.model as string | undefined,
+        before_tokens: (meta.before_tokens as number) ?? 0,
+        after_tokens: (meta.after_tokens as number) ?? 0,
+      },
+    };
+  }
+
   const base: ChatMessage = {
     id: entry.id,
     type: (entry.role === "think" ? "thought" : entry.role) as ChatMessage["type"],

@@ -156,6 +156,18 @@ pub struct SessionState {
     /// Per-session temperature override (set by frontend or agent config).
     /// When None, falls back to agent-level config or global default (0.7).
     pub(crate) temperature: Option<f32>,
+    /// Per-session user identity context (formatted `UserProfile` text).
+    ///
+    /// Mirrors the value held by [`crate::agent::context::ContextBuilder`]
+    /// and is updated whenever the SessionTask receives an
+    /// `UpdateIdentityContext` message. Stored on `SessionState` so the
+    /// compaction paths ([`crate::agent::loop_context`],
+    /// [`crate::agent::loop_session`]) can inject the user's preferred
+    /// language into the compact model's system prompt without having to
+    /// thread `ContextBuilder` through every call site.
+    ///
+    /// `None` means "no profile yet" — default English summary is fine.
+    pub(crate) identity_context: Option<String>,
 }
 
 impl SessionState {
@@ -180,6 +192,7 @@ impl SessionState {
             model_ratio: None,
             reasoning_effort: None,
             temperature: None,
+            identity_context: None,
         }
     }
 
@@ -341,5 +354,19 @@ impl SessionState {
     /// Returns None if no conversation is attached or no workspace has been set.
     pub fn workspace_id(&self) -> Option<String> {
         self.conversation.as_ref().and_then(|c| c.workspace_id())
+    }
+
+    /// User identity context (formatted `UserProfile` text), if a profile
+    /// has been pushed from the Gateway. Used by the compaction paths to
+    /// write summaries in the user's preferred language.
+    pub fn identity_context(&self) -> Option<&str> {
+        self.identity_context.as_deref()
+    }
+
+    /// Set the user identity context. Called by `SessionTask` on session
+    /// creation (mirroring the value passed to `ContextBuilder`) and on
+    /// every `UpdateIdentityContext` broadcast from the SessionManager.
+    pub fn set_identity_context(&mut self, ctx: Option<String>) {
+        self.identity_context = ctx;
     }
 }
