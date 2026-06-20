@@ -119,8 +119,8 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
 
     return (
         <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700">
-            {/* Title bar */}
-            <div className="flex items-center justify-between border-b border-zinc-200 bg-zinc-100 px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-700">
+            {/* Title bar — darker shade grounds the block as a 'labeled section' */}
+            <div className="flex items-center justify-between border-b border-zinc-200 bg-zinc-200 px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-900/60">
                 <div className="flex items-center gap-1.5">
                     <button
                         onClick={() => setCollapsed(!collapsed)}

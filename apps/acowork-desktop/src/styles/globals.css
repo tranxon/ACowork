@@ -631,7 +631,7 @@ body {
 }
 
 .prose th {
-  background-color: hsl(240 5% 96%);
+  background-color: hsl(240 5% 92%);
   border-color: var(--tw-prose-th-borders);
   border-bottom: 1px solid var(--tw-prose-th-borders);
   font-weight: 600;
@@ -639,17 +639,19 @@ body {
 }
 
 .dark .prose th {
-  background-color: hsl(240 5% 30%);
+  background-color: hsl(240 5% 18%);
   color: hsl(240 5% 90%);
 }
 
-/* Table body — subtle zebra striping for readability */
+/* Table body — subtle zebra striping for readability.
+   th (title) is one shade deeper than td (body) so the header row
+   visually grounds the table; the body is a touch lighter. */
 .prose tbody tr:nth-child(even) {
-  background-color: hsl(240 5% 99%);
+  background-color: hsl(240 5% 96%);
 }
 
 .dark .prose tbody tr:nth-child(even) {
-  background-color: hsl(240 5% 12%);
+  background-color: hsl(240 5% 30%);
 }
 
 /* Horizontal rules — refined */
