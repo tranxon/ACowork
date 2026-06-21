@@ -353,6 +353,8 @@ export function AgentList({ width }: AgentListProps) {
                             <span className="zzz-n">z</span>
                             <span className="zzz-n">z</span>
                             <span className="zzz-n">z</span>
+                            <span className="zzz-n">z</span>
+                            <span className="zzz-n">z</span>
                           </span>
                         ) : (sessionTitle || "Untitled session")}
                       </span>
