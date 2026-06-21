@@ -1118,11 +1118,35 @@ After installation, ask the user to re-enable the MCP server.",
     }
 
     /// Per-session model is owned by SessionState, not SessionManager.
-    /// This method is kept as a stub returning `None` so legacy ConfigSnapshot
-    /// code paths can still compile; callers should query the target session
-    /// directly via `SessionState.model` instead.
+    ///
+    /// Returns the model from the most recently active session's snapshot.
+    /// Falls back to the first model in `global_provider_list` (which mirrors
+    /// the startup model selection in `agent_init.rs`). Returns `None` only
+    /// when no provider is configured at all.
     pub fn current_model_name(&self) -> Option<String> {
-        None
+        // 1. Try the most recently active session that has a model set.
+        let from_session = self
+            .sessions
+            .values()
+            .filter_map(|handle| {
+                let snap = handle.snapshot_slot.read().ok()?;
+                let model = snap.as_ref()?.model.clone()?;
+                let ts = *handle.last_active_at.lock().ok()?;
+                Some((ts, model))
+            })
+            .max_by_key(|(ts, _)| *ts)
+            .map(|(_, model)| model);
+
+        if from_session.is_some() {
+            return from_session;
+        }
+
+        // 2. Fall back to the first model from the provider list (startup default).
+        let list = self.core.global_provider_list.read().unwrap();
+        list.iter()
+            .flat_map(|p| p.models.iter())
+            .next()
+            .map(|m| m.id.clone())
     }
 
     /// Access the Grafeo memory store from the shared core.

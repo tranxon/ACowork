@@ -591,15 +591,11 @@ impl Gateway {
             gw.ipc_sessions = Some(session_mgr.clone());
         }
 
-        // Rebuild resource cache from Vault and MCP catalog at startup.
-        // provider_list.json / mcp_list.json are only persisted when explicitly
-        // modified via HTTP API; they won't exist if Gateway never saved them.
-        // Always rebuilding ensures the in-memory cache reflects current Vault
-        // state before any Runtime connects (AgentHello version-driven diff sync).
-        // This also prevents version rollback when cache files are lost between restarts.
+        // Rebuild resource cache from MCP catalog at startup.
+        // provider_list.json is loaded by load_resource_cache() above;
+        // it is the source of truth for provider config. No rebuild needed.
         {
             let mut gw = shared_state.write().await;
-            crate::resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir_path).await;
             if let Ok(catalog) = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir_path) {
                 crate::resource_cache::rebuild_and_save_mcp_cache(
                     &mut gw,

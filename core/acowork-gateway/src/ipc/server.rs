@@ -772,17 +772,20 @@ pub struct ResolvedLlmConfig {
 
 /// Resolve the LLM configuration to deliver to an Agent.
 ///
+/// Config (base_url, models, capabilities, compact_model) comes from
+/// provider_list.json (resource_cache). API key comes from Vault.
+///
 /// Priority:
-/// 1. Gateway config `default_provider` + `default_model` → look up in Vault
-/// 2. First key stored in Vault (with its default_model)
+/// 1. Gateway config `default_provider` + `default_model`
+/// 2. First provider in provider_list.json
 /// 3. None (Agent has no provider configured)
 ///
 /// Model resolution order (within the chosen provider):
 /// 1. Gateway config `default_model` (explicit user choice)
-/// 2. Vault entry's `default_model` (set when adding the provider key)
+/// 2. Provider config's models[0]
 /// 3. None — Agent Runtime uses the first model from the provider list
 pub async fn resolve_llm_config_for_agent(
-    agent_id: &str,
+    _agent_id: &str,
     state: &SharedState,
 ) -> Option<ResolvedLlmConfig> {
     let state_guard = state.read().await;
@@ -803,110 +806,74 @@ pub async fn resolve_llm_config_for_agent(
     let provider_name = if let Some(name) = default_provider {
         Some(name.to_string())
     } else {
-        // Fall back to first key in Vault
-        state_guard.vault.list_providers().first().cloned()
+        // Fall back to first provider in resource cache
+        state_guard
+            .resource_cache
+            .provider_list
+            .providers
+            .first()
+            .map(|p| p.id.clone())
     };
 
     let provider_name = match provider_name {
         Some(name) => name,
         None => {
-            tracing::info!("No provider configured in Vault, cannot deliver LLM config");
+            tracing::info!("No provider configured, cannot deliver LLM config");
             return None;
         }
     };
 
-    // Retrieve the provider entry from Vault
-    match state_guard.vault.get_provider(&provider_name) {
-        Ok(entry) => {
-            // Model resolution: per-agent preference > config default > Vault default > None
-            // 1. Per-agent model preference is owned by the Agent Runtime
-            //    (workspace/config/agent_model.json). The Gateway will query it via
-            //    QueryConfig IPC when the Runtime is connected.
-            let (per_agent_model, per_agent_provider): (Option<String>, Option<String>) =
-                (None, None);
+    // Look up provider config from resource_cache (provider_list.json).
+    let provider_config = state_guard
+        .resource_cache
+        .provider_list
+        .providers
+        .iter()
+        .find(|p| p.id == provider_name)
+        .cloned();
 
-            // 2. Cross-provider resolution: if the per-agent preference
-            //    specifies a DIFFERENT provider than the default, look up
-            //    THAT provider's vault entry so we can validate the model
-            //    against the correct model list and deliver the correct
-            //    api_key/base_url to the Agent Runtime.
-            //
-            //    Pre-clone default entry data so the if-else branches
-            //    don't fight over `entry` borrows.
-            let default_entry = entry.clone();
-            let default_provider_name = provider_name.clone();
-            let (effective_entry, effective_models, effective_provider_name) =
-                if let Some(ref ap) = per_agent_provider {
-                    if ap != &default_provider_name {
-                        // Per-agent model is from a different provider
-                        match state_guard.vault.get_provider(ap) {
-                            Ok(alt_entry) => {
-                                tracing::info!(
-                                    agent = %agent_id,
-                                    default_provider = %default_provider_name,
-                                    per_agent_provider = %ap,
-                                    "Using per-agent provider for model resolution"
-                                );
-                                let models = alt_entry.models.clone();
-                                (alt_entry, models, ap.clone())
-                            }
-                            Err(_) => {
-                                // Per-agent provider no longer in vault, fall back to default
-                                tracing::warn!(
-                                    agent = %agent_id,
-                                    per_agent_provider = %ap,
-                                    "Per-agent provider not found in Vault, falling back to default"
-                                );
-                                (
-                                    default_entry.clone(),
-                                    default_entry.models.clone(),
-                                    default_provider_name,
-                                )
-                            }
-                        }
-                    } else {
-                        (
-                            default_entry.clone(),
-                            default_entry.models.clone(),
-                            default_provider_name,
-                        )
-                    }
-                } else {
-                    (
-                        default_entry.clone(),
-                        default_entry.models.clone(),
-                        default_provider_name,
-                    )
-                };
-
-            // 3. Validate per-agent model against effective provider's models
-            let per_agent_model = per_agent_model.filter(|m| effective_models.contains(m));
-
-            let model = per_agent_model
-                .or(config_default_model.map(|m| m.to_string()))
-                .or(effective_entry.default_model.clone());
-            // model is None when neither config nor Vault has a preference —
-            // Agent Runtime will use the first model from the provider list
-
-            Some(ResolvedLlmConfig {
-                provider: effective_provider_name,
-                model: model.clone(),
-                api_key: effective_entry.api_key,
-                base_url: effective_entry.base_url,
-                models: effective_models,
-                all_model_capabilities: vec![], // Filled by caller via lookup_model_capabilities
-                compact_model: effective_entry.compact_model.clone(),
-            })
-        }
-        Err(e) => {
+    let provider_config = match provider_config {
+        Some(cfg) => cfg,
+        None => {
             tracing::warn!(
-                "Failed to get provider '{}' from Vault: {}",
-                provider_name,
-                e
+                "Provider '{}' not found in resource cache",
+                provider_name
             );
-            None
+            return None;
         }
-    }
+    };
+
+    let models: Vec<String> = provider_config
+        .models
+        .iter()
+        .map(|m| m.id.clone())
+        .collect();
+
+    // Model resolution: gateway config default_model > provider's models[0]
+    let model = config_default_model
+        .map(|m| m.to_string())
+        .or_else(|| provider_config.models.first().map(|m| m.id.clone()));
+
+    // Get API key from Vault.
+    let api_key = state_guard
+        .vault
+        .get_key(&provider_name)
+        .ok()
+        .unwrap_or_default();
+
+    Some(ResolvedLlmConfig {
+        provider: provider_name,
+        model,
+        api_key,
+        base_url: if provider_config.base_url.is_empty() {
+            None
+        } else {
+            Some(provider_config.base_url)
+        },
+        models,
+        all_model_capabilities: provider_config.models,
+        compact_model: provider_config.compact_model,
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

@@ -1,119 +1,31 @@
-//! Vault integration — facade for Key distribution
+//! Vault integration — facade for API key distribution
 //!
 //! Wraps acowork-vault crate and adds Gateway-specific key distribution logic.
 //! All API keys are stored encrypted on disk via acowork_vault::Vault.
 //!
+//! Vault ONLY stores encrypted API keys. All non-secret provider configuration
+//! (base_url, models, capabilities, compact_model) is stored in
+//! provider_list.json via the resource_cache module.
+//!
 //! Storage format (encrypted):
 //!   Legacy: plain text API key string
-//!   Current: JSON { "api_key": "...", "base_url": "...", "default_model": "...", "models": ["..."] }
+//!   Current: JSON { "api_key": "..." }
 //! The `get_key` method handles both formats transparently.
 
 use crate::error::GatewayError;
 use acowork_core::providers::vault_key_candidates;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-/// Model capabilities stored alongside a provider entry
+/// Provider entry stored in Vault — only the encrypted API key.
 ///
-/// Mirrors `acowork_core::protocol::ModelCapabilitiesInfo` for Vault storage.
-/// Implements `From<StoredModelCapabilities> for ModelCapabilitiesInfo` to avoid
-/// manual field-by-field conversion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredModelCapabilities {
-    /// Context window size (total tokens: input + output)
-    pub context_window: u64,
-    /// Maximum output tokens the model can generate
-    pub max_output_tokens: u64,
-    /// Maximum input tokens (from models.dev limit.input)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_input_tokens: Option<u64>,
-    /// Whether the model supports tool/function calling
-    #[serde(default = "default_true")]
-    pub supports_tool_calling: bool,
-    /// Whether the model supports reasoning/thinking
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_reasoning: Option<bool>,
-    /// Whether the model supports file attachments
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_attachment: Option<bool>,
-    /// Whether the model supports temperature parameter
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_temperature: Option<bool>,
-    /// Pricing information
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<acowork_core::protocol::ModelCostInfo>,
-    /// Supported modalities
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modalities: Option<acowork_core::protocol::ModelModalities>,
-    /// Model display name
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Model family
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family: Option<String>,
-    /// Knowledge cutoff date
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub knowledge_cutoff: Option<String>,
-    /// Default reasoning effort level for this model (user-configured).
-    /// Values: "off", "low", "medium", "high", "max".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_reasoning_effort: Option<String>,
-    /// Anthropic thinking mode: "extended" or "adaptive".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_mode: Option<String>,
-}
-
-/// Default value for serde boolean fields
-fn default_true() -> bool {
-    true
-}
-
-impl From<StoredModelCapabilities> for acowork_core::protocol::ModelCapabilitiesInfo {
-    fn from(c: StoredModelCapabilities) -> Self {
-        Self {
-            context_window: c.context_window,
-            max_output_tokens: c.max_output_tokens,
-            max_input_tokens: c.max_input_tokens,
-            supports_tool_calling: c.supports_tool_calling,
-            supports_reasoning: c.supports_reasoning,
-            supports_attachment: c.supports_attachment,
-            supports_temperature: c.supports_temperature,
-            cost: c.cost,
-            modalities: c.modalities,
-            name: c.name,
-            family: c.family,
-            knowledge_cutoff: c.knowledge_cutoff,
-            default_reasoning_effort: c.default_reasoning_effort,
-            thinking_mode: c.thinking_mode,
-        }
-    }
-}
-
-/// Full provider configuration stored in Vault
+/// All other provider configuration (base_url, models, capabilities,
+/// compact_model) is stored in provider_list.json, NOT in the Vault.
+/// See `resource_cache.rs` for provider configuration management.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderEntry {
     /// API key for the provider
     pub api_key: String,
-    /// Base URL override (empty = use default)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// Default model for this provider (empty = use model from manifest)
-    /// Kept for backward compatibility — prefer using `models` instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_model: Option<String>,
-    /// Available models for this provider (user-selected from models.dev).
-    /// `models[0]` is the default/active model, consistent with `default_model`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    /// User-overridden model capabilities per model name (optional).
-    /// Keyed by model name, e.g. { "MiniMax-M2.7": { ... }, "MiniMax-Text-02": { ... } }.
-    /// When present, takes precedence over models.dev / offline data.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
-    /// Compact model for LLM summarization (ADR-010). None = use current model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compact_model: Option<String>,
 }
 
 /// Key entry for HTTP API listing (masked preview)
@@ -191,39 +103,13 @@ impl VaultFacade {
         std::path::Path::new(&self.vault_dir)
     }
 
-    /// Store a provider entry (encrypted on disk)
+    /// Store a provider API key (encrypted on disk).
     ///
-    /// Stores the full provider configuration as JSON:
-    /// `{ "api_key": "...", "base_url": "...", "models": ["..."] }`
+    /// Stores only the API key. Provider configuration (base_url, models, etc.)
+    /// is managed separately via provider_list.json.
     pub fn store_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
-        self.store_provider(
-            provider,
-            None,
-            &[],
-            api_key,
-            &std::collections::HashMap::new(),
-            None,
-        )
-    }
-
-    /// Store a full provider entry with optional base_url, models list, and capabilities
-    pub fn store_provider(
-        &mut self,
-        provider: &str,
-        base_url: Option<&str>,
-        models: &[String],
-        api_key: &str,
-        capabilities: &std::collections::HashMap<String, StoredModelCapabilities>,
-        compact_model: Option<&str>,
-    ) -> Result<(), GatewayError> {
-        let default_model = models.first().cloned();
         let entry = ProviderEntry {
             api_key: api_key.to_string(),
-            base_url: base_url.map(|s| s.to_string()),
-            default_model,
-            models: models.to_vec(),
-            model_capabilities: capabilities.clone(),
-            compact_model: compact_model.map(|s| s.to_string()),
         };
         let json = serde_json::to_string(&entry).map_err(|e| {
             GatewayError::Vault(format!("Failed to serialize provider entry: {}", e))
@@ -237,10 +123,11 @@ impl VaultFacade {
         Ok(())
     }
 
-    /// Get the full provider entry (decrypted)
+
+    /// Get the API key for a provider (decrypted).
     ///
     /// Handles both the current JSON format and the legacy plain-text format.
-    /// Legacy entries (plain API key) are returned with base_url=None, default_model=None.
+    /// Legacy entries (plain API key) are returned as-is.
     ///
     /// If the provider is not found under its canonical ID, falls back to
     /// trying legacy alias names (e.g. "zhipuai" → try "glm", "zhipu").
@@ -257,11 +144,6 @@ impl VaultFacade {
                     // Legacy format: plain text API key
                     return Ok(ProviderEntry {
                         api_key: raw.to_string(),
-                        base_url: None,
-                        default_model: None,
-                        models: Vec::new(),
-                        model_capabilities: HashMap::new(),
-                        compact_model: None,
                     });
                 }
                 Err(_) => continue, // Try next candidate
@@ -499,51 +381,24 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_store_provider_full_config() {
-        let dir = temp_vault_dir("store_provider");
+    fn test_vault_store_and_get_full() {
+        let dir = temp_vault_dir("store_get_full");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault
-            .store_provider(
-                "deepseek",
-                Some("https://api.deepseek.com/v1"),
-                &["deepseek-chat".to_string()],
-                "sk-abc",
-                &std::collections::HashMap::new(),
-                None,
-            )
-            .unwrap();
-        let entry = vault.get_provider("deepseek").unwrap();
-        assert_eq!(entry.api_key, "sk-abc");
-        assert_eq!(
-            entry.base_url,
-            Some("https://api.deepseek.com/v1".to_string())
-        );
-        assert_eq!(entry.default_model, Some("deepseek-chat".to_string()));
-        assert_eq!(entry.models, vec!["deepseek-chat"]);
+        vault.store_key("deepseek", "sk-abc").unwrap();
+        let key = vault.get_key("deepseek").unwrap();
+        assert_eq!(key, "sk-abc");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_vault_store_provider_minimal() {
-        let dir = temp_vault_dir("store_provider_min");
+    fn test_vault_store_and_get_empty_key() {
+        let dir = temp_vault_dir("store_get_empty");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        vault
-            .store_provider(
-                "openai",
-                None,
-                &[],
-                "sk-test",
-                &std::collections::HashMap::new(),
-                None,
-            )
-            .unwrap();
-        let entry = vault.get_provider("openai").unwrap();
-        assert_eq!(entry.api_key, "sk-test");
-        assert_eq!(entry.base_url, None);
-        assert_eq!(entry.default_model, None);
-        assert!(entry.models.is_empty());
+        vault.store_key("ollama", "").unwrap();
+        let key = vault.get_key("ollama").unwrap();
+        assert_eq!(key, "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -552,13 +407,11 @@ mod tests {
         let dir = temp_vault_dir("legacy");
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
-        // Store using old API (plain key)
+        // Store using the API (JSON format)
         vault.store_key("openai", "sk-legacy-key").unwrap();
-        // Retrieve using new API — should work with legacy format
+        // Retrieve — should work
         let entry = vault.get_provider("openai").unwrap();
         assert_eq!(entry.api_key, "sk-legacy-key");
-        assert_eq!(entry.base_url, None);
-        assert_eq!(entry.default_model, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

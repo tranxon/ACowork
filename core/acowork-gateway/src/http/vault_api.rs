@@ -1,9 +1,12 @@
 //! Vault HTTP API handlers
 //!
-//! - GET    /api/vault/keys         — list keys (masked)
-//! - POST   /api/vault/keys         — add a key
-//! - DELETE /api/vault/keys/:provider — delete a key
-//! - PUT    /api/vault/keys/:provider — update a key
+//! API key management (stored in encrypted Vault) combined with
+//! provider configuration management (stored in provider_list.json).
+//!
+//! - GET    /api/vault/keys         — list keys (masked) + config
+//! - POST   /api/vault/keys         — add a key + config
+//! - DELETE /api/vault/keys/:provider — delete a key + config
+//! - PUT    /api/vault/keys/:provider — update a key + config
 
 use axum::{
     Json, Router,
@@ -12,12 +15,10 @@ use axum::{
     routing::{delete, get},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::http::models_api;
 use crate::http::routes::{ApiError, AppState};
 use crate::resource_cache;
-use crate::vault::StoredModelCapabilities;
 use std::path::PathBuf;
 
 /// Build the vault router
@@ -40,7 +41,10 @@ pub fn vault_routes() -> Router<AppState> {
 
 // ── Response types ────────────────────────────────────────────────────
 
-/// Masked key entry (first 3 + last 3 chars visible)
+/// Masked key entry with provider config (first 3 + last 3 chars visible).
+///
+/// Config fields (base_url, models, compact_model) are read from
+/// provider_list.json, NOT from Vault.
 #[derive(Serialize)]
 pub struct VaultKeyEntryResponse {
     pub provider: String,
@@ -48,15 +52,12 @@ pub struct VaultKeyEntryResponse {
     /// Configured base URL (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Configured default model (if any)
+    /// Configured default model (models[0])
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     /// Selected models list (may be empty)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
-    /// User-overridden model capabilities per model name
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
     /// Compact model for LLM summarization (ADR-010). None = use current model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_model: Option<String>,
@@ -65,7 +66,14 @@ pub struct VaultKeyEntryResponse {
     pub local: bool,
 }
 
-/// Add key request (supports full provider configuration)
+/// Default max output tokens when gateway config doesn't specify a limit.
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
+
+/// Add key request.
+///
+/// `key` → stored in encrypted Vault.
+/// `base_url`, `models`, `compact_model` → stored in provider_list.json.
+/// Model capabilities are always sourced from offline_providers.json (models.dev).
 #[derive(Deserialize)]
 pub struct AddKeyRequest {
     pub provider: String,
@@ -73,46 +81,34 @@ pub struct AddKeyRequest {
     /// Optional base URL override (e.g. "https://api.deepseek.com/v1")
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Optional default model for this provider (e.g. "deepseek-chat")
-    /// Kept for backward compatibility — prefer using `models` instead.
+    /// Optional default model (fallback if `models` is empty)
     #[serde(default)]
     pub default_model: Option<String>,
     /// Selected models for this provider (from models.dev).
-    /// models[0] is the default/active model. Takes precedence over default_model.
+    /// models[0] is the default/active model.
     #[serde(default)]
     pub models: Vec<String>,
-    /// Per-model capabilities.
-    /// Each key is a model ID matching the `models` list.
-    #[serde(default)]
-    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
     /// Compact model for LLM summarization (ADR-010). None = use current model.
     #[serde(default)]
     pub compact_model: Option<String>,
 }
 
-/// Update key request (supports partial updates — key is optional)
+/// Update key request (supports partial updates — key and config are optional).
 #[derive(Deserialize)]
 pub struct UpdateKeyRequest {
     /// API key. If None or empty, the existing key is preserved.
-    /// This prevents the masked key_preview from overwriting the real key.
     #[serde(default)]
     pub key: Option<String>,
-    /// Optional base URL override (e.g. "https://api.deepseek.com/v1")
+    /// Optional base URL override
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Optional default model for this provider (e.g. "deepseek-chat")
-    /// Kept for backward compatibility — prefer using `models` instead.
+    /// Optional default model (fallback if `models` is empty)
     #[serde(default)]
     pub default_model: Option<String>,
     /// Selected models for this provider (from models.dev).
-    /// models[0] is the default/active model. Takes precedence over default_model.
     #[serde(default)]
     pub models: Vec<String>,
-    /// Per-model capabilities (partial update).
-    /// When present, each model entry replaces the existing one.
-    #[serde(default)]
-    pub model_capabilities: std::collections::HashMap<String, StoredModelCapabilities>,
-    /// Compact model for LLM summarization (ADR-010). None = use current model.
+    /// Compact model for LLM summarization (ADR-010).
     #[serde(default)]
     pub compact_model: Option<String>,
 }
@@ -148,50 +144,52 @@ pub struct UpdateSearchKeyRequest {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-/// `GET /api/vault/keys` — list stored keys (masked)
+/// `GET /api/vault/keys` — list stored keys (masked) with provider config.
+///
+/// Key previews come from Vault. Config (base_url, models, compact_model)
+/// comes from provider_list.json (resource_cache).
 pub async fn list_keys(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<VaultKeyEntryResponse>>, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
-    let entries = gw
+
+    // Build key_preview lookup from Vault (only for key masking, not authority).
+    // resource_cache.provider_list is the source of truth for which providers exist.
+    let key_previews: std::collections::HashMap<String, String> = gw
         .vault
         .list_keys()
-        .map_err(|e| ApiError::internal(&format!("Failed to list keys: {}", e)))?;
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|e| (e.provider, e.key_preview))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let response: Vec<VaultKeyEntryResponse> = entries
+    // Iterate resource_cache as source of truth for which providers exist.
+    let response: Vec<VaultKeyEntryResponse> = gw
+        .resource_cache
+        .provider_list
+        .providers
         .iter()
-        .map(|k| {
-            // Try to get the full provider entry for base_url/default_model/models/capabilities
-            let (base_url, default_model, models, model_capabilities, compact_model) =
-                match gw.vault.get_provider(&k.provider) {
-                    Ok(entry) => (
-                        entry.base_url.clone(),
-                        entry.default_model.clone(),
-                        entry.models.clone(),
-                        entry.model_capabilities.clone(),
-                        entry.compact_model.clone(),
-                    ),
-                    Err(_) => (
-                        None,
-                        None,
-                        Vec::new(),
-                        std::collections::HashMap::new(),
-                        None,
-                    ),
-                };
-            let is_local = models_api::is_local_provider(&k.provider);
+        .map(|cfg| {
+            let is_local = models_api::is_local_provider(&cfg.id);
+            let key_preview = if is_local {
+                "(local)".to_string()
+            } else {
+                key_previews.get(&cfg.id).cloned().unwrap_or_default()
+            };
             VaultKeyEntryResponse {
-                provider: k.provider.clone(),
-                key_preview: if is_local {
-                    "(local)".to_string()
+                provider: cfg.id.clone(),
+                key_preview,
+                base_url: if cfg.base_url.is_empty() {
+                    None
                 } else {
-                    k.key_preview.clone()
+                    Some(cfg.base_url.clone())
                 },
-                base_url,
-                default_model,
-                models,
-                model_capabilities,
-                compact_model,
+                default_model: cfg.models.first().map(|m| m.id.clone()),
+                models: cfg.models.iter().map(|m| m.id.clone()).collect(),
+                compact_model: cfg.compact_model.clone(),
                 local: is_local,
             }
         })
@@ -200,7 +198,11 @@ pub async fn list_keys(
     Ok(Json(response))
 }
 
-/// `POST /api/vault/keys` — add a key (with optional base_url and default_model)
+/// `POST /api/vault/keys` — add a key and provider config.
+///
+/// API key → stored in encrypted Vault.
+/// Config (base_url, models, compact_model) → built from request + offline
+/// capabilities, stored in provider_list.json via resource_cache.
 pub async fn add_key(
     State(state): State<AppState>,
     Json(body): Json<AddKeyRequest>,
@@ -215,50 +217,62 @@ pub async fn add_key(
             "base_url must start with http:// or https://",
         ));
     }
-    // Validate provider name is not empty
     if body.provider.is_empty() {
         return Err(ApiError::bad_request("provider must not be empty"));
     }
-    // Validate API key is not empty (skip for local providers, which don't need keys)
     let is_local = models_api::is_local_provider(&body.provider);
     if !is_local && body.key.is_empty() {
         return Err(ApiError::bad_request("key must not be empty"));
     }
-    // Per-model capabilities map; individual validation is done per-entry downstream
 
     let mut gw = state.gateway_state.write().await;
-    // Local providers use a placeholder key (no real API key needed)
+
+    // 1. Store API key in encrypted Vault.
     let effective_key = if is_local {
         "local".to_string()
     } else {
         body.key.clone()
     };
-    // Resolve models: prefer `models` field; fallback to `default_model` for backward compat
-    let resolved_models = if !body.models.is_empty() {
+    gw.vault
+        .store_key(&body.provider, &effective_key)
+        .map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
+
+    // 2. Resolve models list.
+    let resolved_models: Vec<String> = if !body.models.is_empty() {
         body.models.clone()
     } else if let Some(ref m) = body.default_model {
         vec![m.clone()]
     } else {
         vec![]
     };
-    gw.vault
-        .store_provider(
-            &body.provider,
-            body.base_url.as_deref(),
-            &resolved_models,
-            &effective_key,
-            &body.model_capabilities,
-            body.compact_model.as_deref(),
-        )
-        .map_err(|e| ApiError::internal(&format!("Failed to store key: {}", e)))?;
 
-    // Rebuild provider_list cache so AgentHello picks up the new provider.
+    // 3. Build ProviderListItem (capabilities from offline_providers.json).
+    let max_output_tokens = gw
+        .config
+        .as_ref()
+        .map(|c| c.max_output_tokens_limit)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+    let item = resource_cache::build_provider_list_item(
+        &body.provider,
+        body.base_url.as_deref(),
+        &resolved_models,
+        body.compact_model.as_deref(),
+        max_output_tokens,
+    );
+
+    // 4. Add to in-memory provider list (replace if already exists).
+    resource_cache::remove_provider_from_memory(&mut gw, &body.provider);
+    gw.resource_cache
+        .provider_list
+        .providers
+        .push(item);
+
+    // 5. Persist to disk and bump version.
     let data_dir = get_data_dir_from_gw(&gw);
-    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir).await;
-    drop(gw); // Release write lock before hot-push (which acquires read lock)
+    resource_cache::persist_provider_cache(&mut gw, &data_dir);
+    drop(gw);
 
-    // Hot-push resource version change to all connected agents
-    // so they pick up the new provider without requiring a Gateway restart.
+    // 6. Hot-push to running agents.
     if let Some(ref pusher) = state.pusher {
         pusher.push_llm_config().await;
     }
@@ -271,36 +285,46 @@ pub async fn add_key(
     ))
 }
 
-/// `DELETE /api/vault/keys/:provider` — delete a key
+/// `DELETE /api/vault/keys/:provider` — delete a key and provider config.
 pub async fn remove_key(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     let mut gw = state.gateway_state.write().await;
+
+    // 1. Remove API key from Vault.
     gw.vault.remove_key(&provider).map_err(|e| {
         ApiError::not_found(&format!("Key not found for provider '{}': {}", provider, e))
     })?;
 
-    // Rebuild provider_list cache after removal.
+    // 2. Remove from in-memory provider list.
+    resource_cache::remove_provider_from_memory(&mut gw, &provider);
+
+    // 3. Persist to disk.
     let data_dir = get_data_dir_from_gw(&gw);
-    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir).await;
+    resource_cache::persist_provider_cache(&mut gw, &data_dir);
+    drop(gw);
+
+    // 4. Hot-push.
+    if let Some(ref pusher) = state.pusher {
+        pusher.push_llm_config().await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("Key removed for provider: {}", provider),
     }))
 }
 
-/// `PUT /api/vault/keys/:provider` — update a key (supports partial updates)
+/// `PUT /api/vault/keys/:provider` — update a key and/or provider config.
 ///
-/// If `key` is not provided or empty, the existing API key is preserved.
-/// This prevents the masked key_preview from overwriting the real key
-/// when the user only changes base_url or models.
+/// If `key` is None/empty, the existing Vault key is preserved.
+/// If `models` is empty and `default_model` is None, existing models are
+/// preserved from provider_list.json.
 pub async fn update_key(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Json(body): Json<UpdateKeyRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
-    // Validate base_url format if provided
     if let Some(ref url) = body.base_url
         && !url.is_empty()
         && !url.starts_with("http://")
@@ -311,91 +335,102 @@ pub async fn update_key(
         ));
     }
 
-    // Per-model capabilities map; individual validation downstream
-
     let mut gw = state.gateway_state.write().await;
 
-    // Resolve the API key: use provided key, or preserve existing key if not specified
+    // 1. Update API key in Vault (preserve existing if not provided).
     let api_key = match body.key {
         Some(ref k) if !k.is_empty() => k.clone(),
-        _ => {
-            // No new key provided — preserve existing key from Vault
-            match gw.vault.get_provider(&provider) {
-                Ok(entry) => entry.api_key,
-                Err(e) => {
-                    return Err(ApiError::not_found(&format!(
-                        "Provider '{}' not found in Vault: {}",
-                        provider, e
-                    )));
-                }
+        _ => match gw.vault.get_provider(&provider) {
+            Ok(entry) => entry.api_key,
+            Err(e) => {
+                return Err(ApiError::not_found(&format!(
+                    "Provider '{}' not found in Vault: {}",
+                    provider, e
+                )));
             }
-        }
+        },
     };
+    // Only re-store if the key actually changed; otherwise skip to avoid
+    // unnecessary Vault re-serialization.
+    if body.key.as_ref().map_or(false, |k| !k.is_empty()) {
+        gw.vault
+            .store_key(&provider, &api_key)
+            .map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
+    }
 
-    // Resolve models: prefer `models` field; fallback to `default_model` for backward compat;
-    // if neither is provided, preserve existing models from Vault
-    let resolved_models = if !body.models.is_empty() {
+    // 2. Resolve models: provided > default_model > existing from cache.
+    let resolved_models: Vec<String> = if !body.models.is_empty() {
         body.models.clone()
     } else if let Some(ref m) = body.default_model {
         vec![m.clone()]
     } else {
-        // Preserve existing models from Vault if not specified in update request
-        match gw.vault.get_provider(&provider) {
-            Ok(entry) if !entry.models.is_empty() => entry.models.clone(),
-            _ => vec![],
-        }
+        // Preserve existing models from provider_list.json cache.
+        gw.resource_cache
+            .provider_list
+            .providers
+            .iter()
+            .find(|p| p.id == provider)
+            .map(|p| p.models.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default()
     };
 
-    // Resolve base_url: use provided value, or preserve existing if not specified
+    // 3. Resolve base_url: provided > existing from cache.
     let resolved_base_url = if body.base_url.is_some() {
         body.base_url.clone()
     } else {
-        match gw.vault.get_provider(&provider) {
-            Ok(entry) => entry.base_url.clone(),
-            Err(_) => None,
-        }
+        gw.resource_cache
+            .provider_list
+            .providers
+            .iter()
+            .find(|p| p.id == provider)
+            .and_then(|p| {
+                if p.base_url.is_empty() {
+                    None
+                } else {
+                    Some(p.base_url.clone())
+                }
+            })
     };
 
-    // Resolve capabilities: use provided value, or preserve existing if not specified
-    let resolved_capabilities = if !body.model_capabilities.is_empty() {
-        body.model_capabilities.clone()
-    } else {
-        // Preserve existing capabilities from Vault if not specified in update request
-        match gw.vault.get_provider(&provider) {
-            Ok(entry) => entry.model_capabilities.clone(),
-            Err(_) => std::collections::HashMap::new(),
-        }
-    };
-
-    // Resolve compact_model: use provided value, or preserve existing if not specified
+    // 4. Resolve compact_model: provided > existing from cache.
     let resolved_compact_model = if body.compact_model.is_some() {
         body.compact_model.clone()
     } else {
-        match gw.vault.get_provider(&provider) {
-            Ok(entry) => entry.compact_model.clone(),
-            Err(_) => None,
-        }
+        gw.resource_cache
+            .provider_list
+            .providers
+            .iter()
+            .find(|p| p.id == provider)
+            .and_then(|p| p.compact_model.clone())
     };
 
-    // Remove old entry, store new with full config
-    let _ = gw.vault.remove_key(&provider);
-    gw.vault
-        .store_provider(
-            &provider,
-            resolved_base_url.as_deref(),
-            &resolved_models,
-            &api_key,
-            &resolved_capabilities,
-            resolved_compact_model.as_deref(),
-        )
-        .map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
+    // 5. Rebuild ProviderListItem (capabilities from offline_providers.json).
+    let max_output_tokens = gw
+        .config
+        .as_ref()
+        .map(|c| c.max_output_tokens_limit)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+    let item = resource_cache::build_provider_list_item(
+        &provider,
+        resolved_base_url.as_deref(),
+        &resolved_models,
+        resolved_compact_model.as_deref(),
+        max_output_tokens,
+    );
 
-    // Rebuild provider_list cache after update.
+    // 6. Replace in in-memory list.
+    resource_cache::remove_provider_from_memory(&mut gw, &provider);
+    gw.resource_cache
+        .provider_list
+        .providers
+        .push(item);
+
+    // 7. Persist to disk.
     let data_dir = get_data_dir_from_gw(&gw);
-    resource_cache::rebuild_and_save_provider_cache(&mut gw, &data_dir).await;
-    drop(gw); // Release write lock before hot-push (which acquires read lock)
+    resource_cache::persist_provider_cache(&mut gw, &data_dir);
+    drop(gw);
 
-    // Hot-push resource version change to all connected agents
+    // 8. Hot-push.
     if let Some(ref pusher) = state.pusher {
         pusher.push_llm_config().await;
     }

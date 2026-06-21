@@ -396,46 +396,34 @@ pub fn save_embedding_models(data_dir: &Path, list: &EmbeddingModelsFile) -> Res
     Ok(())
 }
 
-// ── Building ───────────────────────────────────────────────────────────
+// ── Provider list manipulation ────────────────────────────────────────
 
-/// Rebuild provider_list.json from all Vault provider entries + models.dev data.
+/// Build a `ProviderListItem` from user-provided configuration.
 ///
-/// Called by vault_api.rs handlers after add/update/delete provider key.
-/// Updates the in-memory `gw.resource_cache.provider_list` and persists to disk.
-pub(crate) async fn rebuild_and_save_provider_cache(
-    gw: &mut crate::gateway::state::GatewayState,
-    data_dir: &Path,
-) {
-    let max_output_tokens = gw
-        .config
-        .as_ref()
-        .map(|c| c.max_output_tokens_limit)
-        .unwrap_or(32_768);
+/// Capabilities are sourced from offline_providers.json (models.dev).
+/// Protocol type and default base_url are also looked up from offline data.
+/// User-provided `base_url` overrides the default when present.
+pub(crate) fn build_provider_list_item(
+    name: &str,
+    base_url_override: Option<&str>,
+    model_ids: &[String],
+    compact_model: Option<&str>,
+    max_output_tokens: u64,
+) -> ProviderListItem {
+    let (protocol_type, api_base_url) =
+        crate::http::models_api::lookup_protocol_info(name, None);
+    let base_url = base_url_override
+        .filter(|u| !u.is_empty())
+        .map(|u| u.to_string())
+        .or(api_base_url)
+        .unwrap_or_default();
 
-    let provider_names = gw.vault.list_providers();
-    let mut providers = Vec::with_capacity(provider_names.len());
-
-    for name in &provider_names {
-        let entry = match gw.vault.get_provider(name) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        // Look up protocol type and base API URL from offline data.
-        // Note: lookup_protocol_info is sync (uses offline data).
-        let (protocol_type, api_base_url) =
-            crate::http::models_api::lookup_protocol_info(name, None);
-        let base_url = entry.base_url.clone().or(api_base_url).unwrap_or_default();
-
-        // Build model list with capabilities.
-        // Priority: user-stored capabilities > models.dev lookup > minimal fallback.
-        let mut models = Vec::with_capacity(entry.models.len());
-        for model_id in &entry.models {
-            let capabilities = if let Some(cap) = entry.model_capabilities.get(model_id) {
-                acowork_core::protocol::ModelCapabilitiesInfo::from(cap.clone())
-            } else {
-                crate::http::models_api::lookup_model_capabilities(name, model_id).unwrap_or(
-                    acowork_core::protocol::ModelCapabilitiesInfo {
+    let models: Vec<ProviderModelEntry> = model_ids
+        .iter()
+        .map(|model_id| {
+            let capabilities =
+                crate::http::models_api::lookup_model_capabilities(name, model_id)
+                    .unwrap_or(acowork_core::protocol::ModelCapabilitiesInfo {
                         context_window: 128_000,
                         max_output_tokens: 16_384,
                         max_input_tokens: None,
@@ -450,35 +438,50 @@ pub(crate) async fn rebuild_and_save_provider_cache(
                         knowledge_cutoff: None,
                         default_reasoning_effort: None,
                         thinking_mode: None,
-                    },
-                )
-            };
-            models.push(ProviderModelEntry {
+                    });
+            ProviderModelEntry {
                 id: model_id.clone(),
                 capabilities,
                 max_output_tokens_limit: max_output_tokens,
-            });
-        }
+            }
+        })
+        .collect();
 
-        providers.push(ProviderListItem {
-            id: name.clone(),
-            base_url,
-            protocol_type,
-            models,
-            compact_model: entry.compact_model.clone(),
-        });
+    ProviderListItem {
+        id: name.to_string(),
+        base_url,
+        protocol_type,
+        models,
+        compact_model: compact_model.map(|s| s.to_string()),
     }
+}
 
+/// Persist the current in-memory `provider_list` to disk and bump its version.
+///
+/// Callers MUST modify `gw.resource_cache.provider_list.providers` BEFORE
+/// calling this function. This function only saves and bumps the version.
+pub(crate) fn persist_provider_cache(
+    gw: &mut crate::gateway::state::GatewayState,
+    data_dir: &Path,
+) {
     let new_version = gw.resource_cache.provider_list.version.wrapping_add(1);
-    let new_list = ProviderListFile {
-        version: new_version,
-        providers,
-    };
+    gw.resource_cache.provider_list.version = new_version;
+    let list = gw.resource_cache.provider_list.clone();
 
-    if let Err(e) = save_provider_list(data_dir, &new_list) {
-        tracing::error!(error = %e, "Failed to save provider_list.json after vault change");
+    if let Err(e) = save_provider_list(data_dir, &list) {
+        tracing::error!(error = %e, "Failed to save provider_list.json");
     }
-    gw.resource_cache.provider_list = new_list;
+}
+
+/// Remove a provider from the in-memory provider list (caller must persist afterwards).
+pub(crate) fn remove_provider_from_memory(
+    gw: &mut crate::gateway::state::GatewayState,
+    provider_name: &str,
+) {
+    gw.resource_cache
+        .provider_list
+        .providers
+        .retain(|p| p.id != provider_name);
 }
 
 /// Rebuild mcp_list.json from MCP catalog entries and update in-memory cache.

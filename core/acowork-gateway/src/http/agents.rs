@@ -1098,9 +1098,10 @@ pub async fn restart_agent_in_debug(
 
 /// `GET /api/agents/:id/model` — get the current active model for an agent
 ///
-/// Reads the per-agent model preference from the workspace `agent_model.json` file.
-/// If no per-agent preference exists, falls back to the Gateway config default_model,
-/// then the Vault entry's default_model (models[0]).
+/// Queries the Runtime for per-agent model/provider preferences (stored in
+/// workspace/config/agent_model.json). Gateway does NOT decide defaults —
+/// default model/provider selection is session-level logic owned by the Runtime.
+/// If the Runtime has no preference configured, returns empty strings.
 pub async fn get_agent_model(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1115,43 +1116,16 @@ pub async fn get_agent_model(
         )));
     }
 
-    // Resolve provider and models from Gateway config / Vault
-    let default_provider = gw
-        .config
-        .as_ref()
-        .and_then(|c| c.default_provider.as_deref())
-        .map(|s| s.to_string())
-        .or_else(|| gw.vault.list_providers().first().cloned());
-
-    let provider_name = match default_provider {
-        Some(name) => name,
-        None => return Err(ApiError::not_found("No provider configured in Vault")),
-    };
-
-    let vault_entry = gw
-        .vault
-        .get_provider(&provider_name)
-        .map_err(|e| ApiError::internal(&format!("Vault error: {}", e)))?;
-
-    let config_default_model = gw.config.as_ref().and_then(|c| c.default_model.as_deref());
-
-    // Gateway-level default model (config > Vault default_model)
-    let gateway_model = config_default_model
-        .map(|m| m.to_string())
-        .or(vault_entry.default_model.clone())
-        .unwrap_or_default();
-
-    // Per-agent model preference is owned by the Agent Runtime
-    // (workspace/config/agent_model.json). The Gateway queries it via
-    // QueryConfig IPC when the Runtime is connected.
-    let (active_model, active_provider) = {
+    // Query Runtime for per-agent model/provider preferences.
+    let (active_model, active_provider): (Option<String>, Option<String>) =
         if let Some(ref grpc_mgr) = state.grpc_session_mgr {
             let query = acowork_core::proto::server_message::Payload::QueryConfig(
                 acowork_core::proto::QueryConfig {
                     request_id: uuid::Uuid::new_v4().to_string(),
                 },
             );
-            match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
+            match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
+            {
                 Some(response) => {
                     if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(
                         snap,
@@ -1166,39 +1140,38 @@ pub async fn get_agent_model(
             }
         } else {
             (None, None)
+        };
+
+    // If Runtime has no preference, return empty — let the Runtime/Session decide defaults.
+    let provider = match active_provider {
+        Some(ref ap) if !ap.is_empty() => ap.clone(),
+        _ => {
+            return Ok(Json(AgentModelResponse {
+                provider: String::new(),
+                model: String::new(),
+                available_models: Vec::new(),
+            }));
         }
     };
 
-    // Resolve vault entry: prefer per-agent provider, fallback to default
-    let (resolved_vault_entry, resolved_provider_name) = if let Some(ref ap) = active_provider {
-        if ap != &provider_name {
-            // Per-agent model is from a different provider; look up that provider's vault entry
-            match gw.vault.get_provider(ap) {
-                Ok(entry) => (entry, ap.clone()),
-                Err(_) => {
-                    // Per-agent provider no longer exists in vault, fall back to default
-                    (vault_entry, provider_name.clone())
-                }
-            }
-        } else {
-            (vault_entry, provider_name.clone())
-        }
-    } else {
-        (vault_entry, provider_name.clone())
-    };
+    // Look up provider config from resource_cache for available_models.
+    let available_models: Vec<String> = gw
+        .resource_cache
+        .provider_list
+        .providers
+        .iter()
+        .find(|p| p.id == provider)
+        .map(|cfg| cfg.models.iter().map(|m| m.id.clone()).collect())
+        .unwrap_or_default();
 
-    // Use per-agent preference if available and valid in the CORRECT provider's models
-    let resolved_model = match active_model {
-        Some(ref m) if resolved_vault_entry.models.contains(m) => m.clone(),
-        _ => gateway_model,
-    };
-
-    let resolved_provider = active_provider.unwrap_or(resolved_provider_name);
+    let model = active_model
+        .filter(|m| available_models.contains(m))
+        .unwrap_or_default();
 
     Ok(Json(AgentModelResponse {
-        provider: resolved_provider,
-        model: resolved_model,
-        available_models: resolved_vault_entry.models,
+        provider,
+        model,
+        available_models,
     }))
 }
 
