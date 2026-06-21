@@ -2195,9 +2195,22 @@ function handleMessageEvent(
             // Temperature setting from Runtime session state.
             if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature as number;
 
-            // When status transitions FROM Streaming, clear transient streaming state
+            // When status transitions FROM Streaming, clear transient streaming state.
+            // IMPORTANT: Before clearing thinkingMessageId, stamp endTime on the thinking
+            // message so the ThinkBlock timer stops. Without this, the done event (which
+            // arrives AFTER session_state_changed) cannot find the message to stamp endTime,
+            // causing the reasoning duration timer to tick indefinitely.
             const prev = getSessionState(state, agentId, sid);
             if (prev.sessionStatus?.status === "streaming" && status.status !== "streaming") {
+              // Stamp endTime on any open thinking message before clearing its ID
+              if (prev.thinkingMessageId) {
+                const endTime = Date.now();
+                sessionPatch.messages = prev.messages.map((msg) =>
+                  msg.id === prev.thinkingMessageId && !msg.endTime
+                    ? { ...msg, endTime }
+                    : msg,
+                );
+              }
               sessionPatch.streamingMessageId = null;
               sessionPatch.streamBuffer = "";
               sessionPatch.isReasoning = false;
