@@ -562,6 +562,11 @@ pub struct ChatResponse {
     /// Unix timestamp ms when reasoning/think finished (set by streaming loop)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_finished_at: Option<i64>,
+    /// Finish reason from the LLM API (e.g. "stop", "length", "tool_calls").
+    /// Captured from streaming `choices[].finish_reason` for diagnostics.
+    /// Helps distinguish model-initiated stop vs token-limit truncation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 }
 
 /// Usage information

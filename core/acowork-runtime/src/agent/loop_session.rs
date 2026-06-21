@@ -241,6 +241,44 @@ impl super::loop_::AgentLoop {
     ) -> super::loop_::IterationResult {
         let content = response.content.clone();
 
+        // Diagnostic: log detailed response summary for post-mortem analysis
+        let reasoning_len = response
+            .reasoning_content
+            .as_ref()
+            .map(|r| r.len())
+            .unwrap_or(0);
+        let reasoning_tokens = response
+            .usage
+            .as_ref()
+            .map(|u| u.reasoning_tokens)
+            .unwrap_or(0);
+        let completion_tokens = response
+            .usage
+            .as_ref()
+            .map(|u| u.completion_tokens)
+            .unwrap_or(0);
+        if content.is_empty() {
+            tracing::warn!(
+                iteration,
+                finish_reason = ?response.finish_reason,
+                reasoning_len,
+                reasoning_tokens,
+                completion_tokens,
+                has_reasoning = response.reasoning_content.is_some(),
+                "Empty text response — model may have exhausted token budget on reasoning"
+            );
+        } else {
+            tracing::info!(
+                iteration,
+                content_len = content.len(),
+                reasoning_len,
+                reasoning_tokens,
+                completion_tokens,
+                finish_reason = ?response.finish_reason,
+                "Agent returned text response"
+            );
+        }
+
         // Persist think block + assistant response to JSONL
         if let Some(ref conversation) = self.session.conversation {
             super::loop_session::persist_think_to_conversation(conversation, response);
@@ -257,7 +295,12 @@ impl super::loop_::AgentLoop {
         // session-close distillation.
         self.session.turn_counter += 1;
 
-        tracing::info!(iteration, "Agent returned text response");
+        // Note: the primary "Agent returned text response" log is now
+        // emitted above with full diagnostic fields. The legacy log here
+        // is kept for backward compatibility with existing log parsers.
+        if content.is_empty() {
+            tracing::info!(iteration, "Agent returned EMPTY text response");
+        }
 
         // Debug: enter AppendHistory phase and push step event
         self.core

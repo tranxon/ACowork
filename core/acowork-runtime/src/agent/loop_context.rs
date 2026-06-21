@@ -542,6 +542,8 @@ impl AgentLoop {
                 local_estimate,
                 api_prompt_tokens = usage.prompt_tokens,
                 api_completion_tokens = usage.completion_tokens,
+                api_reasoning_tokens = usage.reasoning_tokens,
+                api_content_tokens = usage.completion_tokens.saturating_sub(usage.reasoning_tokens),
                 api_total_tokens = usage.total_tokens,
                 "Context usage: local estimate vs API ground truth"
             );

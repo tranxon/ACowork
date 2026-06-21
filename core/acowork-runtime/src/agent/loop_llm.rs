@@ -76,6 +76,7 @@ impl AgentLoop {
         let mut accumulated_reasoning_content = String::new();
         let mut tool_calls: Option<Vec<ToolCall>> = None;
         let mut usage = None;
+        let mut finish_reason: Option<String> = None;
         let mut reasoning_started_at: Option<i64> = None;
         let mut reasoning_finished_at: Option<i64> = None;
         let mut reasoning_in_progress = false;
@@ -175,6 +176,10 @@ impl AgentLoop {
                     if reasoning_in_progress {
                         reasoning_finished_at = Some(Utc::now().timestamp_millis());
                     }
+                    // Capture finish_reason for diagnostics
+                    if resp.finish_reason.is_some() {
+                        finish_reason = resp.finish_reason;
+                    }
                     // Use final response data; prefer stream-accumulated content
                     if accumulated_content.is_empty() {
                         accumulated_content = resp.content;
@@ -223,6 +228,15 @@ impl AgentLoop {
                         }
                     }
                     usage = resp.usage;
+                    // Diagnostic: log stream completion summary
+                    tracing::info!(
+                        finish_reason = ?finish_reason,
+                        content_len = accumulated_content.len(),
+                        reasoning_len = accumulated_reasoning_content.len(),
+                        has_tool_calls = tool_calls.is_some(),
+                        tool_call_count = tool_calls.as_ref().map(|t| t.len()).unwrap_or(0),
+                        "LLM stream Finished event received"
+                    );
                     break;
                 }
                 StreamEvent::Error(e) => {
@@ -363,6 +377,7 @@ impl AgentLoop {
             usage,
             reasoning_started_at,
             reasoning_finished_at,
+            finish_reason,
         })
     }
 }
@@ -382,6 +397,7 @@ fn build_stopped_response(content: String, reasoning_content: String) -> ChatRes
         usage: None,
         reasoning_started_at: None,
         reasoning_finished_at: None,
+        finish_reason: Some("stopped".to_string()),
     }
 }
 

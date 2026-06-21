@@ -808,6 +808,30 @@ impl AgentLoop {
 
         // ── ④ Text response → early return ──
         if !has_tool_calls {
+            // Guard: log empty response before exiting the loop.
+            // This can happen when a thinking model exhausts its token budget
+            // on reasoning and produces neither content nor tool_calls.
+            if response.content.is_empty() && response.reasoning_content.is_some() {
+                let reasoning_tokens = response
+                    .usage
+                    .as_ref()
+                    .map(|u| u.reasoning_tokens)
+                    .unwrap_or(0);
+                let completion_tokens = response
+                    .usage
+                    .as_ref()
+                    .map(|u| u.completion_tokens)
+                    .unwrap_or(0);
+                tracing::error!(
+                    iteration,
+                    finish_reason = ?response.finish_reason,
+                    reasoning_tokens,
+                    completion_tokens,
+                    "LLM returned empty content with reasoning — \
+                     model likely exhausted output budget on thinking. \
+                     The loop will exit with an empty response."
+                );
+            }
             return Ok(self.handle_text_response(&response, iteration).await);
         }
 

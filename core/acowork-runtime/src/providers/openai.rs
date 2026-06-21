@@ -237,6 +237,9 @@ struct StreamChunk {
 #[derive(Debug, Deserialize)]
 struct StreamChoice {
     delta: StreamDelta,
+    /// OpenAI protocol: "stop" | "length" | "tool_calls" | null (intermediate chunks)
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,6 +484,7 @@ fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> Cha
         usage: usage_info,
         reasoning_started_at: None,
         reasoning_finished_at: None,
+        finish_reason: None,
     }
 }
 
@@ -744,6 +748,10 @@ impl OpenAIProvider {
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
+            // Track usage and finish_reason across SSE chunks so we can
+            // emit a single Finished event at stream end with both.
+            let mut tracked_usage: Option<UsageInfo> = None;
+            let mut tracked_finish_reason: Option<String> = None;
 
             use futures_util::StreamExt;
             loop {
@@ -755,11 +763,28 @@ impl OpenAIProvider {
                             buffer = buffer[newline_pos + 1..].to_string();
 
                             if line.trim() == "data: [DONE]" {
+                                // Emit final Finished event with accumulated data
+                                let _ = tx
+                                    .send(Some(StreamEvent::Finished(ChatResponse {
+                                        content: String::new(),
+                                        tool_calls: None,
+                                        usage: tracked_usage,
+                                        finish_reason: tracked_finish_reason,
+                                        ..Default::default()
+                                    })))
+                                    .await;
                                 let _ = tx.send(None).await;
                                 return;
                             }
 
-                            for event in parse_sse_line(&line) {
+                            let (events, usage, finish_reason) = parse_sse_line(&line);
+                            if usage.is_some() {
+                                tracked_usage = usage;
+                            }
+                            if finish_reason.is_some() {
+                                tracked_finish_reason = finish_reason;
+                            }
+                            for event in events {
                                 if tx.send(Some(event)).await.is_err() {
                                     return; // receiver dropped
                                 }
@@ -774,7 +799,7 @@ impl OpenAIProvider {
                         return;
                     }
                     Ok(None) => {
-                        // Stream ended normally
+                        // Stream ended normally (no [DONE] marker)
                         break;
                     }
                     Err(_) => {
@@ -794,6 +819,17 @@ impl OpenAIProvider {
                     }
                 }
             }
+            // Stream ended without [DONE] — emit Finished with accumulated data
+            // (common with OpenAI-compatible APIs like MiniMax).
+            let _ = tx
+                .send(Some(StreamEvent::Finished(ChatResponse {
+                    content: String::new(),
+                    tool_calls: None,
+                    usage: tracked_usage,
+                    finish_reason: tracked_finish_reason,
+                    ..Default::default()
+                })))
+                .await;
             let _ = tx.send(None).await;
         });
 
@@ -822,32 +858,45 @@ impl Stream for ChannelStream {
     }
 }
 
-/// Parse a single SSE line into one or more StreamEvents.
-fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
+/// Parse a single SSE line into stream events, optional usage data, and optional finish_reason.
+///
+/// Returns `(events, usage, finish_reason)`:
+/// - `events`: Content, ReasoningContent, ToolCallStart, ToolCallChunk events
+/// - `usage`: extracted usage info from the final usage chunk (if present)
+/// - `finish_reason`: from the last choice with a non-null finish_reason
+///
+/// The caller (sse_to_stream) is responsible for emitting the `Finished` event
+/// at stream end, combining usage + finish_reason into a single ChatResponse.
+fn parse_sse_line(line: &str) -> (Vec<StreamEvent>, Option<UsageInfo>, Option<String>) {
     let line = line.trim();
     tracing::debug!(
         line = %line.chars().take(500).collect::<String>(),
         "SSE raw line received"
     );
     if line.is_empty() || line == ":" {
-        return Vec::new();
+        return (Vec::new(), None, None);
     }
 
     let Some(data) = line.strip_prefix("data: ") else {
-        return Vec::new();
+        return (Vec::new(), None, None);
     };
     if data == "[DONE]" {
-        return Vec::new();
+        return (Vec::new(), None, None);
     }
 
     let Some(chunk) = serde_json::from_str::<StreamChunk>(data).ok() else {
-        return Vec::new();
+        return (Vec::new(), None, None);
     };
 
-    // If the final streaming chunk includes usage info (requested via
-    // stream_options.include_usage), emit a Finished event so the
-    // agent loop can compute context usage. This is the standard
-    // OpenAI behavior: the last chunk before [DONE] contains usage.
+    // Extract finish_reason from the last choice that has one.
+    let finish_reason = chunk
+        .choices
+        .iter()
+        .rev()
+        .find_map(|c| c.finish_reason.clone());
+
+    // If the chunk includes usage info (requested via stream_options.include_usage),
+    // extract it for the caller to include in the final Finished event.
     if let Some(usage) = chunk.usage {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let completion = usage.completion_tokens.unwrap_or(0);
@@ -861,10 +910,9 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
             .as_ref()
             .and_then(|d| d.reasoning_tokens)
             .unwrap_or(0);
-        return vec![StreamEvent::Finished(ChatResponse {
-            content: String::new(),
-            tool_calls: None,
-            usage: Some(acowork_core::providers::traits::UsageInfo {
+        return (
+            Vec::new(),
+            Some(UsageInfo {
                 prompt_tokens: prompt,
                 completion_tokens: completion,
                 total_tokens: prompt + completion,
@@ -872,8 +920,8 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
                 cache_write_tokens: 0,
                 reasoning_tokens: reasoning,
             }),
-            ..Default::default()
-        })];
+            finish_reason,
+        );
     }
 
     let mut events = Vec::new();
@@ -964,7 +1012,7 @@ fn parse_sse_line(line: &str) -> Vec<StreamEvent> {
         }
     }
 
-    events
+    (events, None, finish_reason)
 }
 
 #[cfg(test)]
