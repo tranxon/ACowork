@@ -24,7 +24,7 @@
 //!
 //! 4. **`find_by_id()`**: look up a workspace by its ID.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -320,36 +320,6 @@ fn fallback_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
 
 // ── Persistence & Formatting ───────────────────────────────────────────────
 
-/// Full workspace directory entry with all metadata (for serialization + formatting).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceDirFull {
-    pub id: String,
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-    pub access: WorkspaceAccess,
-    pub added_at: String,
-    /// Whether this was the last active workspace when the user last selected it.
-    /// Used as the default workspace for new sessions.
-    #[serde(default)]
-    pub last_active: bool,
-    #[serde(default)]
-    pub select_count: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_selected_at: Option<String>,
-    /// Prompt file to inject into system prompt (e.g. "CLAUDE.md", "AGENTS.md").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_file: Option<String>,
-}
-
-/// Full workspace config (mirrors Gateway's WorkspaceConfig for file persistence).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceConfigFull {
-    pub version: String,
-    #[serde(default)]
-    pub additional_dirs: Vec<WorkspaceDirFull>,
-}
-
 /// Write workspace config JSON to `agent_workspaces.json` atomically (tmp + rename).
 ///
 /// On Windows, `std::fs::rename` fails if the target file exists and is open
@@ -478,87 +448,9 @@ pub fn format_workspace_context_for_session(
     buf
 }
 
-/// Legacy: format workspace context from the raw config JSON.
-/// Kept for backward compatibility during transition.
-/// Prefer `format_workspace_context_for_session` for session-aware formatting.
-pub fn format_workspace_context_from_json(config_json: &str, install_path: &str) -> String {
-    let config: WorkspaceConfigFull = match serde_json::from_str(config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to parse workspace config JSON for formatting");
-            return format_workspace_context_fallback(install_path);
-        }
-    };
-    format_workspace_context_full_legacy(&config.additional_dirs, install_path)
-}
-
 /// Escape special characters for Markdown table cells.
 fn escape_md(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ").replace('\r', "")
-}
-
-/// Legacy: format workspace context with the old `last_active` logic.
-fn format_workspace_context_full_legacy(
-    workspaces: &[WorkspaceDirFull],
-    install_path: &str,
-) -> String {
-    let mut buf = String::new();
-    buf.push_str("## Workspace Environment\n\n");
-
-    if workspaces.is_empty() {
-        buf.push_str(&format!(
-            "Current Working Directory: {} (agent home)\n",
-            escape_md(install_path)
-        ));
-        buf.push_str("No additional workspaces have been configured.\n");
-        return buf;
-    }
-
-    let active = workspaces.iter().find(|w| w.last_active);
-    if let Some(current) = active {
-        let alias = current.alias.as_deref().unwrap_or("-");
-        buf.push_str(&format!(
-            "Current Working Directory: {} ({}, {})\n",
-            escape_md(&current.path),
-            alias,
-            current.access,
-        ));
-    } else {
-        buf.push_str(&format!(
-            "Current Working Directory: {} (agent home)\n",
-            escape_md(install_path)
-        ));
-    }
-    buf.push_str(&format!(
-        "Agent Home Directory: {} (installation directory)\n\n",
-        escape_md(install_path)
-    ));
-    buf.push_str("### Available Workspaces\n");
-    buf.push_str("| # | Alias | Path | Access | Active |\n");
-    buf.push_str("|---|-------|------|--------|--------|\n");
-    for (i, ws) in workspaces.iter().enumerate() {
-        let alias = escape_md(ws.alias.as_deref().unwrap_or("-"));
-        let active_marker = if ws.last_active { "*" } else { "" };
-        buf.push_str(&format!(
-            "| {} | {} | {} | {} | {} |\n",
-            i + 1,
-            alias,
-            escape_md(&ws.path),
-            ws.access,
-            active_marker,
-        ));
-    }
-    buf
-}
-
-/// Fallback context when config JSON is missing or unparseable.
-fn format_workspace_context_fallback(install_path: &str) -> String {
-    format!(
-        "## Workspace Environment\n\n\
-         Current Working Directory: {} (agent home)\n\
-         No workspace configuration available. The agent's home directory is the default working directory.\n",
-        escape_md(install_path)
-    )
 }
 
 #[cfg(test)]
@@ -656,5 +548,105 @@ mod tests {
         let ctx = format_workspace_context_for_session(&resolver, "ws-1");
         assert!(ctx.contains("my-project"));
         assert!(ctx.contains("read-write"));
+    }
+
+    /// Contract: `read_prompt_file` is the function that surfaces AGENTS.md
+    /// content into the system prompt. It is called from
+    /// `SessionManager::update_session_workspace_context`, which itself is
+    /// invoked during session creation. The bug that motivated this test was
+    /// that session creation paths other than the initial startup never
+    /// invoked that flow, so the prompt file was never read for new sessions.
+    /// This test pins down the resolver-side behavior so any regression in
+    /// `SessionManager`'s wiring is caught at the resolver level too.
+    #[test]
+    fn test_read_prompt_file_returns_content_when_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_path = dir.path().join("my-project");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+
+        // Write the prompt file that the workspace will reference.
+        let prompt_content = "# Project Rules\n\nFollow these conventions.\n";
+        std::fs::write(workspace_path.join("AGENTS.md"), prompt_content).unwrap();
+
+        // Build a config that points at the workspace AND configures the
+        // prompt file path. Resolver reads both pieces of metadata.
+        let config = format!(
+            r#"{{
+                "version": "1.0.0",
+                "additional_dirs": [
+                    {{
+                        "id": "ws-1",
+                        "path": "{}",
+                        "access": "read-write",
+                        "added_at": "2026-05-01T00:00:00Z",
+                        "prompt_file": "AGENTS.md"
+                    }}
+                ]
+            }}"#,
+            workspace_path.display().to_string().replace('\\', "\\\\")
+        );
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            config,
+        )
+        .unwrap();
+
+        let resolver = WorkspaceResolver::new(dir.path().to_str().unwrap());
+        let content = resolver.read_prompt_file("ws-1");
+        assert_eq!(content.as_deref(), Some(prompt_content));
+    }
+
+    #[test]
+    fn test_read_prompt_file_returns_none_when_not_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"{
+            "version": "1.0.0",
+            "additional_dirs": [
+                {
+                    "id": "ws-1",
+                    "path": "D:\\projects\\my-project",
+                    "access": "read-write",
+                    "added_at": "2026-05-01T00:00:00Z"
+                }
+            ]
+        }"#;
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            config,
+        )
+        .unwrap();
+
+        let resolver = WorkspaceResolver::new(dir.path().to_str().unwrap());
+        assert_eq!(resolver.read_prompt_file("ws-1"), None);
+    }
+
+    #[test]
+    fn test_read_prompt_file_returns_none_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"{
+            "version": "1.0.0",
+            "additional_dirs": [
+                {
+                    "id": "ws-1",
+                    "path": "D:\\nonexistent\\path",
+                    "access": "read-write",
+                    "added_at": "2026-05-01T00:00:00Z",
+                    "prompt_file": "AGENTS.md"
+                }
+            ]
+        }"#;
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            config,
+        )
+        .unwrap();
+
+        let resolver = WorkspaceResolver::new(dir.path().to_str().unwrap());
+        // Path doesn't exist on disk, so read fails and returns None —
+        // never panics on a missing file.
+        assert_eq!(resolver.read_prompt_file("ws-1"), None);
     }
 }

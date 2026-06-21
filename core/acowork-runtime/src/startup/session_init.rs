@@ -204,37 +204,9 @@ pub(crate) async fn phase_b_init_session(
     };
     tracing::info!(initial_session_id = %initial_session_id, "Initial session created");
 
-    // ── Step 9.5: Apply workspace context and runtime overrides ─────
-    {
-        let config_path = work_dir_path
-            .join("config")
-            .join("agent_workspaces.json");
-        if config_path.exists() {
-            if let Ok(config_json) = std::fs::read_to_string(&config_path) {
-                session_manager.update_session_workspace_context(
-                    &initial_session_id,
-                    &ctx.workspace_resolver.read().unwrap(),
-                );
-                let context_text =
-                    crate::tools::workspace_resolver::format_workspace_context_from_json(
-                        &config_json,
-                        &config.work_dir,
-                    );
-                session_manager.set_workspace_context(context_text);
-            }
-        } else {
-            session_manager.update_session_workspace_context(
-                &initial_session_id,
-                &ctx.workspace_resolver.read().unwrap(),
-            );
-            let fallback =
-                crate::tools::workspace_resolver::format_workspace_context_from_json(
-                    r#"{"version":"1.0.0","additional_dirs":[]}"#,
-                    &config.work_dir,
-                );
-            session_manager.set_workspace_context(fallback);
-        }
-    }
+    // Workspace context and prompt file are applied inside
+    // create_session_with_id_and_conversation (single source of truth from
+    // the shared WorkspaceResolver). No follow-up step required here.
 
     if ctx.hello_config.is_some() {
         let agent_cfg = crate::agent_config::load_agent_config(work_dir_path)

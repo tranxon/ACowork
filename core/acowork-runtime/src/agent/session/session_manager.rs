@@ -167,11 +167,6 @@ pub struct SessionManager {
     /// Runtime config overrides (accumulated from Gateway pushes) that
     /// must be re-applied to every newly created session.
     pub runtime_overrides: RuntimeConfigOverrides,
-    /// Cached workspace context (from AgentHello or Gateway push) that
-    /// must be re-applied to every newly created session.
-    /// After the session-workspace refactor, this is kept for backward
-    /// compatibility; new code should use `session_workspaces`.
-    workspace_context: Option<String>,
     /// MCP tool wrappers, built when MCP servers are connected.
     /// Merged into each new session's tools at creation time.
     mcp_tools: Option<Vec<Arc<dyn Tool>>>,
@@ -220,7 +215,6 @@ impl SessionManager {
             sessions: HashMap::new(),
             config,
             runtime_overrides: RuntimeConfigOverrides::default(),
-            workspace_context: None,
             mcp_tools: None,
             mcp_manager: McpManager::new(),
             session_workspaces: HashMap::new(),
@@ -397,22 +391,16 @@ impl SessionManager {
         // and sends SetWorkDir (redundant with direct init, but harmless).
         self.set_session_workspace(&session_id, &initial_workspace);
 
-        // Re-apply the cached workspace context to the new session.
-        // This is separate from `runtime_overrides` because workspace
-        // context is a large string (not a config override) and follows
-        // the same cache-and-replay pattern.
-        if let Some(ref ctx) = self.workspace_context {
-            tracing::info!(
-                session_id = %session_id,
-                ctx_len = ctx.len(),
-                "SessionManager: replaying workspace context to new session"
-            );
-            if let Some(handle) = self.sessions.get(&session_id) {
-                let _ = handle.send(SessionMessage::UpdateWorkspaceContext {
-                    context_text: ctx.clone(),
-                });
-            }
-        }
+        // Apply workspace context + prompt file from the resolver.
+        //
+        // This is the single source of truth for per-session workspace state
+        // injection. `set_resolver()` is a hard precondition for session
+        // creation (see its doc); `update_session_workspace_context` will
+        // panic via `.expect()` if it was not called (programming error).
+        // By injecting at creation time, every session path — initial
+        // session, "New Chat", lazy resume — bootstraps identically with no
+        // caller-side follow-up required.
+        self.update_session_workspace_context(&session_id);
 
         // Provider list / capabilities / max-output limits are now read
         // on demand from the shared `AgentCore.global_provider_list`
@@ -928,21 +916,6 @@ After installation, ask the user to re-enable the MCP server.",
         }
     }
 
-    /// Cache workspace context and broadcast to all active sessions.
-    ///
-    /// This mirrors `apply_runtime_config_override`: the context is
-    /// cached so any session created *after* this call also receives
-    /// it (fixing the bug where a fresh session after deletion would
-    /// lose its workspace context).
-    pub fn set_workspace_context(&mut self, context_text: String) -> Vec<String> {
-        tracing::info!(
-            ctx_len = context_text.len(),
-            "SessionManager: caching workspace context"
-        );
-        self.workspace_context = Some(context_text.clone());
-        self.broadcast(SessionMessage::UpdateWorkspaceContext { context_text })
-    }
-
     /// Route a model switch to a specific session (ADR-012: per-session model).
     ///
     /// Only sends the ModelSwitch message to the targeted session.
@@ -1330,15 +1303,21 @@ After installation, ask the user to re-enable the MCP server.",
 
     /// Format and send workspace context to a specific session only.
     /// Also reads and sends workspace prompt file content (CLAUDE.md / AGENTS.md).
-    pub fn update_session_workspace_context(
-        &mut self,
-        session_id: &str,
-        resolver: &WorkspaceResolver,
-    ) {
+    ///
+    /// The shared `WorkspaceResolver` (set via `set_resolver()`) is the
+    /// single source of truth; this method acquires the read lock internally
+    /// so callers don't need to manage it.
+    pub fn update_session_workspace_context(&self, session_id: &str) {
+        let resolver = self
+            .resolver
+            .as_ref()
+            .expect("set_resolver must be called before any workspace context update");
+        let resolver_guard = resolver.read().unwrap();
         let ws_id = self.session_workspace_id(session_id);
-        let context_text = format_workspace_context_for_session(resolver, ws_id);
-        let prompt_file_content = resolver.read_prompt_file(ws_id);
+        let context_text = format_workspace_context_for_session(&resolver_guard, ws_id);
+        let prompt_file_content = resolver_guard.read_prompt_file(ws_id);
         if let Some(handle) = self.sessions.get(session_id) {
+            let has_prompt_file = prompt_file_content.is_some();
             let _ = handle.send(SessionMessage::UpdateWorkspaceContext { context_text });
             let _ = handle.send(SessionMessage::SetWorkspacePromptFile {
                 content: prompt_file_content,
@@ -1346,7 +1325,7 @@ After installation, ask the user to re-enable the MCP server.",
             tracing::info!(
                 session_id = %session_id,
                 workspace_id = %ws_id,
-                has_prompt_file = resolver.read_prompt_file(ws_id).is_some(),
+                has_prompt_file,
                 "SessionManager: sent per-session workspace context and prompt file"
             );
         } else {

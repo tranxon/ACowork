@@ -1556,15 +1556,17 @@ async fn process_gateway_recv(
                     // switched to foreground, but prompt_file changes need to
                     // take effect immediately for the user's active session.
                     session_manager.reconcile_deleted_workspaces(&resolver_guard);
+                    // Must release the read lock before the loop below —
+                    // update_session_workspace_context re-acquires it internally.
+                    drop(resolver_guard);
 
                     // 5. Push workspace context + prompt_file content to every active
                     // session. This ensures prompt_file changes (e.g. AGENTS.md)
                     // are reflected immediately without requiring a workspace switch.
                     let active_sessions = session_manager.active_sessions();
                     for sid in &active_sessions {
-                        session_manager.update_session_workspace_context(sid, &resolver_guard);
+                        session_manager.update_session_workspace_context(sid);
                     }
-                    drop(resolver_guard);
                     tracing::info!(
                         session_count = active_sessions.len(),
                         "Workspace config applied: file written, resolver reloaded, contexts refreshed"
@@ -1612,9 +1614,11 @@ async fn process_gateway_recv(
                         );
                     }
 
-                    // Format and send per-session workspace context
-                    session_manager.update_session_workspace_context(&session_id, &resolver_guard);
+                    // Format and send per-session workspace context.
+                    // Must release the read lock first — update_session_workspace_context
+                    // re-acquires it internally.
                     drop(resolver_guard);
+                    session_manager.update_session_workspace_context(&session_id);
                     LoopAction::Continue
                 }
 
