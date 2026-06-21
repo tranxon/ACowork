@@ -1,10 +1,8 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem } from "../lib/types";
-import { useSessionStore } from "./sessionStore";
 import { useAgentStore } from "./agentStore";
 import { useUserProfileStore } from "./userProfileStore";
-import { useAgentProfileStore } from "./agentProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { getGatewayUrl } from "../lib/config";
 import i18n from "../i18n";
@@ -12,9 +10,9 @@ import i18n from "../i18n";
 // ── Sender info helpers ────────────────────────────────────────────────
 
 function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; senderRole?: string } {
-  const agentProfile = useAgentProfileStore.getState().getProfile(agentId);
-  const agents = useAgentStore.getState().agents;
-  const agent = agents.find((a) => a.agent_id === agentId);
+  const store = useAgentStore.getState();
+  const agentProfile = store.getProfile(agentId);
+  const agent = store.agents[agentId]?.meta;
   return {
     senderDisplayName: agentProfile?.displayName ?? agent?.display_name ?? agent?.name,
     senderRole: agent?.role,
@@ -713,7 +711,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => ({ wsMap: { ...state.wsMap, [agentId]: ws } }));
 
       // ADR-014: Pull repair — refresh session statuses on WS (re)connect
-      useSessionStore.getState().fetchSessions(agentId);
+      useAgentStore.getState().fetchSessions(agentId);
     };
 
     ws.onmessage = (event) => {
@@ -1436,14 +1434,24 @@ function updateSessionTitleFromMessages(messages: ChatMessage[], sessionId: stri
 
   // Don't overwrite an existing title — historical sessions should keep
   // their original title. Only set title for brand-new sessions.
-  const existingSession = useSessionStore.getState().sessions.find(
-    (s) => s.session_id === sessionId,
-  );
-  if (existingSession?.title && existingSession.title.trim() !== "") return;
+  if (agentId) {
+    const sessions = useAgentStore.getState().agents[agentId]?.sessions ?? [];
+    const existingSession = sessions.find(
+      (s) => s.session_id === sessionId,
+    );
+    if (existingSession?.title && existingSession.title.trim() !== "") return;
+  } else {
+    // agentId unknown — search all agents for the session
+    const allAgents = useAgentStore.getState().agents;
+    for (const storage of Object.values(allAgents)) {
+      const existing = storage.sessions.find((s) => s.session_id === sessionId);
+      if (existing?.title && existing.title.trim() !== "") return;
+    }
+  }
 
   const title = makeSessionTitle(firstUserMsg.content);
 
-  useSessionStore.getState().updateSessionTitle(sessionId, title);
+  useAgentStore.getState().updateSessionTitle(sessionId, title);
 
   const cacheKey = `${sessionId}::${title}`;
   const persistedTitles = useChatStore.getState().persistedTitles;

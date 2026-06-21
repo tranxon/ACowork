@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useToast } from "../common/ToastProvider";
@@ -14,8 +14,6 @@ import { cn } from "../../lib/utils";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useSessionStore } from "../../stores/sessionStore";
-import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import type { CloneResponse } from "../../lib/types";
 import { syncAgentUI } from "../../lib/agent-start";
 
@@ -26,11 +24,11 @@ interface AgentListProps {
 export function AgentList({ width }: AgentListProps) {
   const { t } = useTranslation();
   const isCollapsed = width !== undefined && width <= 80;
-  const { agents, selectedAgentId, loading, fetchAgents, selectAgent, startAgent, stopAgent, uninstallAgent, restartAgentInDebug } =
+  const { selectedAgentId, loading, fetchAgents, selectAgent, startAgent, stopAgent, uninstallAgent, restartAgentInDebug } =
     useAgentStore();
-  const sessionTitles = useSessionStore((s) => s.sessionTitles);
-  const agentProfiles = useAgentProfileStore((s) => s.profiles);
-  const fetchLatestSessionTitle = useSessionStore((s) => s.fetchLatestSessionTitle);
+  const agentsMap = useAgentStore((s) => s.agents);
+  const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
+  const fetchLatestSessionTitle = useAgentStore((s) => s.fetchLatestSessionTitle);
   const { addToast } = useToast();
   const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -111,13 +109,13 @@ export function AgentList({ width }: AgentListProps) {
 
   // Fetch latest session title for each agent
   useEffect(() => {
-    if (agents.length === 0) return;
-    for (const agent of agents) {
-      if (sessionTitles[agent.agent_id] === undefined) {
+    if (agentsList.length === 0) return;
+    for (const agent of agentsList) {
+      if (agentsMap[agent.agent_id]?.sessionTitle === undefined) {
         void fetchLatestSessionTitle(agent.agent_id);
       }
     }
-  }, [agents, sessionTitles, fetchLatestSessionTitle]);
+  }, [agentsList, agentsMap, fetchLatestSessionTitle]);
 
   const handleInstall = async () => {
     try {
@@ -131,9 +129,10 @@ export function AgentList({ width }: AgentListProps) {
         addToast({ type: "success", message: "Agent installed successfully" });
         // Auto-select the newly installed agent
         await fetchAgents();
-        const agents = useAgentStore.getState().agents;
-        if (agents.length > 0) {
-          selectAgent(agents[agents.length - 1].agent_id);
+        const agentsNow = useAgentStore.getState().agents;
+        const ids = Object.keys(agentsNow);
+        if (ids.length > 0) {
+          selectAgent(ids[ids.length - 1]);
         }
       }
     } catch (e) {
@@ -185,7 +184,7 @@ export function AgentList({ width }: AgentListProps) {
   };
 
   const handleStop = async (agentId: string) => {
-    const agent = agents.find((a) => a.agent_id === agentId);
+    const agent = agentsMap[agentId]?.meta;
     setConfirmDialog({
       open: true,
       title: "Stop Agent",
@@ -211,7 +210,7 @@ export function AgentList({ width }: AgentListProps) {
       addToast({ type: "warning", message: "System Agent cannot be uninstalled" });
       return;
     }
-    const agent = agents.find((a) => a.agent_id === agentId);
+    const agent = agentsMap[agentId]?.meta;
     setConfirmDialog({
       open: true,
       title: "Uninstall Agent",
@@ -236,8 +235,8 @@ export function AgentList({ width }: AgentListProps) {
     setContextMenu({ agentId, x: e.clientX, y: e.clientY });
   };
 
-  const contextAgent = agents.find((a) => a.agent_id === contextMenu?.agentId);
-  const filteredAgents = agents.filter((a) =>
+  const contextAgent = contextMenu?.agentId ? agentsMap[contextMenu.agentId]?.meta : undefined;
+  const filteredAgents = agentsList.filter((a) =>
     a.name.toLowerCase().includes(searchQuery.toLowerCase()),
   );
 
@@ -269,14 +268,14 @@ export function AgentList({ width }: AgentListProps) {
       {/* Agent list */}
       <div className="flex-1 overflow-y-auto" role="list" aria-label="Agent list">
 
-        {loading && agents.length === 0 && (
+        {loading && agentsList.length === 0 && (
           <div className="flex items-center justify-center py-8">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
           </div>
         )}
 
         {filteredAgents.map((agent, index) => {
-          const sessionTitle = sessionTitles[agent.agent_id];
+          const sessionTitle = agentsMap[agent.agent_id]?.sessionTitle;
 
           return (
             <div
@@ -294,7 +293,7 @@ export function AgentList({ width }: AgentListProps) {
             >
               {/* Avatar */}
               <Tooltip
-                content={isCollapsed ? (agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name) : ""}
+                content={isCollapsed ? (agentsMap[agent.agent_id]?.profile?.displayName ?? agent.display_name ?? agent.name) : ""}
                 variant="plain"
                 position="right"
                 delayMs={0}
@@ -304,7 +303,7 @@ export function AgentList({ width }: AgentListProps) {
                   displayName={agent.display_name ?? agent.name}
                   avatarUrl={agent.avatar}
                   version={agent.version}
-                  iconId={agentProfiles[agent.agent_id]?.avatarIconId}
+                  iconId={agentsMap[agent.agent_id]?.profile?.avatarIconId}
                   size={40}
                   className={isCollapsed ? "mx-auto" : ""}
                 />
@@ -316,15 +315,48 @@ export function AgentList({ width }: AgentListProps) {
                   {/* Top row: name */}
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0 flex items-center gap-1.5">
-                      <span className={cn("truncate font-medium", selectedAgentId === agent.agent_id ? "text-white" : agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentProfiles[agent.agent_id]?.displayName ?? agent.display_name ?? agent.name}</span>
+                      <span className={cn("truncate font-medium", selectedAgentId === agent.agent_id ? "text-white" : agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agentsMap[agent.agent_id]?.profile?.displayName ?? agent.display_name ?? agent.name}</span>
 
                     </div>
                   </div>
-                  {/* Bottom row: current session title */}
-                  <div className="mt-0.5" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
-                    <span className={cn("block truncate", selectedAgentId === agent.agent_id ? "text-white/70" : "text-zinc-500 dark:text-zinc-400")}>
-                      {sessionTitle === undefined ? "" : (sessionTitle === null ? "No session" : (sessionTitle || "Untitled session"))}
-                    </span>
+                  {/* Bottom row: current session title.
+                      * min-height + animate-pulse skeleton locks the row height so the agent
+                      * name above does not jump when the async session title loads. */}
+                  <div
+                    className="mt-0.5 flex items-center"
+                    style={{
+                      minHeight: "calc(var(--ui-font-size, 0.875rem) * 0.85 * 1.5)",
+                      fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)",
+                    }}
+                  >
+                    {sessionTitle === undefined ? (
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "block h-2.5 w-2/3 animate-pulse rounded",
+                          selectedAgentId === agent.agent_id
+                            ? "bg-white/40"
+                            : "bg-zinc-300/60 dark:bg-zinc-600/60",
+                        )}
+                      />
+                    ) : (
+                      <span
+                        className={cn(
+                          "block truncate",
+                          selectedAgentId === agent.agent_id
+                            ? "text-white/70"
+                            : "text-zinc-500 dark:text-zinc-400",
+                        )}
+                      >
+                        {sessionTitle === null ? (
+                          <span aria-label="agent sleeping" className="inline-flex items-baseline">
+                            <span className="zzz-n">z</span>
+                            <span className="zzz-n">z</span>
+                            <span className="zzz-n">z</span>
+                          </span>
+                        ) : (sessionTitle || "Untitled session")}
+                      </span>
+                    )}
                   </div>
                 </div>
               )}
@@ -334,7 +366,7 @@ export function AgentList({ width }: AgentListProps) {
 
         {filteredAgents.length === 0 && !loading && (
           <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-500">
-            {agents.length === 0 ? "No agents installed" : "No matching agents"}
+            {agentsList.length === 0 ? "No agents installed" : "No matching agents"}
           </div>
         )}
       </div>

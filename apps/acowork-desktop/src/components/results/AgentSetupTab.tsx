@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef } from "react";
 import { useAgentStore } from "../../stores/agentStore";
-import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -13,9 +12,10 @@ import { Tooltip } from "../common/Tooltip";
 export function AgentSetupTab() {
   const { t } = useTranslation();
   const { agents, selectedAgentId } = useAgentStore();
-  const { getProfile, setProfile, resetProfile } = useAgentProfileStore();
+  const { getProfile, setProfile, resetProfile } = useAgentStore();
 
-  const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+  const storage = selectedAgentId ? agents[selectedAgentId] : null;
+  const selectedAgent = storage?.meta ?? null;
   const profile = selectedAgentId ? getProfile(selectedAgentId) : null;
 
   // Fetch agent runtime config from Gateway API on mount

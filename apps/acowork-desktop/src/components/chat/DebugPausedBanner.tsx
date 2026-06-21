@@ -16,7 +16,7 @@ export function DebugPausedBanner() {
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const devMode = useAgentStore((s) => {
     if (!s.selectedAgentId) return false;
-    return s.agents.find((a) => a.agent_id === s.selectedAgentId)?.dev_mode ?? false;
+    return s.agents[s.selectedAgentId]?.meta?.dev_mode ?? false;
   });
   const currentSessionId = useChatStore((s) =>
     selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null,

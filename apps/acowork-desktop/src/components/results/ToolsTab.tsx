@@ -17,9 +17,8 @@ interface SearchProvidersResponse {
 
 export function ToolsTab() {
   const { t } = useTranslation();
-  const { agents, selectedAgentId } = useAgentStore();
-
-  const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+  const { selectedAgentId } = useAgentStore();
+  const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
 
   // MCP server activation — per-agent selectors
   const catalog = useMcpStore((s) => s.catalog);

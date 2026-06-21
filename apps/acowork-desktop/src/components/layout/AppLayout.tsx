@@ -11,7 +11,6 @@ import { GatewayBanner } from "./GatewayBanner";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
-import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useStatusBarStore } from "../../stores/statusBarStore";
 import { cn } from "../../lib/utils";
@@ -106,11 +105,10 @@ export function AppLayout() {
   // Determine if selected agent is in debug mode
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
-  const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+  const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
   const isDebugMode = selectedAgent?.dev_mode && selectedAgent?.running;
-  const agentProfiles = useAgentProfileStore((s) => s.profiles);
   const agentDisplayName = selectedAgent
-    ? (agentProfiles[selectedAgent.agent_id]?.displayName ??
+    ? (agents[selectedAgent.agent_id]?.profile?.displayName ??
       selectedAgent.display_name ??
       selectedAgent.name)
     : null;

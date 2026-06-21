@@ -13,8 +13,7 @@ import { Tooltip } from "../common/Tooltip";
 export function WorkspaceExplorer() {
     const { t } = useTranslation();
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
-    const agents = useAgentStore((s) => s.agents);
-    const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+    const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
     const invalidateTreeCache = useWorkspaceStore((s) => s.invalidateTreeCache);
     const fetchTree = useWorkspaceStore((s) => s.fetchTree);
     const sessionWorkspaceMap = useWorkspaceStore((s) => s.sessionWorkspaceMap);

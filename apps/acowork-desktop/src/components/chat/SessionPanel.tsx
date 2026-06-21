@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState, useRef } from "react";
-import { useSessionStore } from "../../stores/sessionStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
@@ -30,14 +30,13 @@ function formatRelativeTime(dateStr: string, t: (key: string, options?: Record<s
 
 export function SessionPanel({ agentId }: SessionPanelProps) {
   const { t } = useTranslation();
-  const {
-    sessions,
-    isLoading,
-    fetchSessions,
-    switchSession,
-    createSession,
-    deleteSession,
-  } = useSessionStore();
+  const agentStorage = useAgentStore((s) => s.agents[agentId]);
+  const sessions = agentStorage?.sessions ?? [];
+  const isLoading = agentStorage?.isLoading ?? false;
+  const fetchSessions = useAgentStore((s) => s.fetchSessions);
+  const switchSession = useAgentStore((s) => s.switchSession);
+  const createSession = useAgentStore((s) => s.createSession);
+  const deleteSession = useAgentStore((s) => s.deleteSession);
 
   const currentSessionId = useChatStore((s) => s.agentStates[agentId]?.activeSessionId ?? null);
   const [open, setOpen] = useState(false);
@@ -79,7 +78,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
 
   const handleSwitchSession = async (sessionId: string) => {
     await switchSession(sessionId, agentId);
-    useSessionStore.getState().saveSessionForAgent(agentId, sessionId);
+    useAgentStore.getState().saveSessionForAgent(agentId, sessionId);
     setOpen(false);
   };
 

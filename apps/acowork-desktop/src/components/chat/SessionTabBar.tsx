@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { useSessionStore } from "../../stores/sessionStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { isSessionActive } from "../../lib/types";
 import { cn } from "../../lib/utils";
@@ -38,7 +38,15 @@ interface SessionListDropdownProps {
 
 function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
   const { t } = useTranslation();
-  const { sessions, fetchSessions, switchSession, deleteSession, totalCount, currentPage, totalPages, pageSize } = useSessionStore();
+  const agentStorage = useAgentStore((s) => s.agents[agentId]);
+  const sessions = agentStorage?.sessions ?? [];
+  const totalCount = agentStorage?.pagination.totalCount ?? 0;
+  const currentPage = agentStorage?.pagination.currentPage ?? 1;
+  const totalPages = agentStorage?.pagination.totalPages ?? 1;
+  const pageSize = agentStorage?.pagination.pageSize ?? 20;
+  const fetchSessions = useAgentStore((s) => s.fetchSessions);
+  const switchSession = useAgentStore((s) => s.switchSession);
+  const deleteSession = useAgentStore((s) => s.deleteSession);
   const openSessionIds = useChatStore((s) => s.agentStates[agentId]?.openSessionIds ?? EMPTY_ARRAY);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -60,7 +68,7 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
 
   const handleSelect = async (sessionId: string) => {
     await switchSession(sessionId, agentId);
-    useSessionStore.getState().saveSessionForAgent(agentId, sessionId);
+    useAgentStore.getState().saveSessionForAgent(agentId, sessionId);
     // Ensure tab is opened
     useChatStore.getState().openTab(agentId, sessionId);
     onClose();
@@ -234,8 +242,8 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const agent = useChatStore((s) => s.agentStates[agentId]);
   const openSessionIds = agent?.openSessionIds ?? [];
   const activeSessionId = agent?.activeSessionId;
-  const sessions = useSessionStore((s) => s.sessions);
-  const { switchSession, createSession, saveSessionForAgent, closeSession } = useSessionStore();
+  const sessions = useAgentStore((s) => s.agents[agentId]?.sessions ?? []);
+  const { switchSession, createSession, saveSessionForAgent, closeSession } = useAgentStore();
 
   const [listOpen, setListOpen] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);

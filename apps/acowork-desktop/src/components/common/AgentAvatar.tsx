@@ -5,7 +5,7 @@ import {
   resolveAgentAvatarObjectUrl,
   resolveAgentAvatarUrl,
 } from "../../lib/avatar";
-import { useAgentProfileStore } from "../../stores/agentProfileStore";
+import { useAgentStore } from "../../stores/agentStore";
 
 // ── Built-in icon wrapper ────────────────────────────────────────────────
 
@@ -164,7 +164,7 @@ function DeterministicBuiltinAvatar({
   className?: string;
 }) {
   const fallbackIconId = useMemo(() => pickDeterministicBuiltinIconId(seed), [seed]);
-  const profileIconId = useAgentProfileStore((s) => s.profiles[seed]?.avatarIconId);
+  const profileIconId = useAgentStore((s) => s.agents[seed]?.profile?.avatarIconId ?? null);
 
   // If the profile store has an icon for this agent, use it. This avoids a
   // mismatch when the persisted icon differs from the deterministic pick
@@ -175,9 +175,9 @@ function DeterministicBuiltinAvatar({
   // in the background. This is idempotent and runs once per (seed, render-mount).
   useEffect(() => {
     if (!seed) return;
-    const state = useAgentProfileStore.getState();
-    const existing = state.profiles[seed];
-    if (existing && existing.avatarIconId) return;
+    const state = useAgentStore.getState();
+    const existing = state.agents[seed]?.profile;
+    if (existing?.avatarIconId) return;
     if (!fallbackIconId) return;
     state.setProfile(seed, { avatarIconId: fallbackIconId });
   }, [seed, fallbackIconId]);

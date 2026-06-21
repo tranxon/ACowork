@@ -3,10 +3,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
-import { useSessionStore } from "../../stores/sessionStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
-import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { ToolApprovalNeededEvent } from "../../lib/types";
@@ -66,7 +64,8 @@ let lastLoadedSessionId: string | null = null;
 
 export function ChatPanel() {
   const { t } = useTranslation();
-  const { agents, selectedAgentId, startAgent } = useAgentStore();
+  const { selectedAgentId, startAgent } = useAgentStore();
+  const selectedAgent = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.meta : undefined);
 
   // Per-agent + per-session state selectors
   // Two-level mapping: agentStates[agentId].sessionStates[sessionId]
@@ -175,8 +174,7 @@ export function ChatPanel() {
   /** True only during the first useEffect run of this mount. */
   const justMountedRef = useRef(true);
 
-  const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
-  const agentDisplayName = useAgentProfileStore((s) => selectedAgentId ? s.profiles[selectedAgentId]?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
+  const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
 
   // Group consecutive messages for display
   // - Consecutive think + tool_call + tool_result → explore_group (aggregated)
@@ -340,14 +338,14 @@ export function ChatPanel() {
     const leavingAgentId = lastInitAgentId;
     const leavingSessionId = leavingAgentId ? useChatStore.getState().getActiveSessionId(leavingAgentId) : null;
     if (leavingAgentId && leavingSessionId) {
-      useSessionStore.getState().saveSessionForAgent(leavingAgentId, leavingSessionId);
+      useAgentStore.getState().saveSessionForAgent(leavingAgentId, leavingSessionId);
     }
 
     if (!isSameAgentRemount) {
       // Allow reload for new agent/session
       lastLoadedSessionId = null;
       // Reset session list state for the new agent
-      useSessionStore.getState().reset();
+      useAgentStore.getState().reset();
     }
 
     if (selectedAgentId && selectedAgent?.running && selectedAgent?.ready) {
@@ -378,12 +376,12 @@ export function ChatPanel() {
 
             // Retry fetching sessions until Agent is ready (max 10 attempts, 1s interval)
             const maxRetries = 10;
-            let sessions = useSessionStore.getState().sessions;
+            let sessions = useAgentStore.getState().agents[selectedAgentId]?.sessions ?? [];
 
             for (let i = 0; i < maxRetries; i++) {
               if (initAbortedRef.current) return;
-              await useSessionStore.getState().fetchSessions(selectedAgentId);
-              sessions = useSessionStore.getState().sessions;
+              await useAgentStore.getState().fetchSessions(selectedAgentId);
+              sessions = useAgentStore.getState().agents[selectedAgentId]?.sessions ?? [];
               if (sessions.length > 0) break;
               if (i < maxRetries - 1) {
                 await new Promise(resolve => setTimeout(resolve, 1000));
@@ -398,14 +396,14 @@ export function ChatPanel() {
             }
 
             // Restore previously selected session for this agent, fallback to latest
-            const rememberedSessionId = useSessionStore.getState().agentSessionMap[selectedAgentId];
+            const rememberedSessionId = useAgentStore.getState().agents[selectedAgentId]?.rememberedSessionId;
             const targetSession = rememberedSessionId
               ? sessions.find((s) => s.session_id === rememberedSessionId) ?? sessions[0]
               : sessions[0];
             if (targetSession) {
               // switchSession first (clears old messages), then loadSessionMessages
               // so that messages are not cleared after loading.
-              await useSessionStore.getState().switchSession(targetSession.session_id, selectedAgentId);
+              await useAgentStore.getState().switchSession(targetSession.session_id, selectedAgentId);
               await useChatStore
                 .getState()
                 .loadSessionMessages(selectedAgentId, targetSession.session_id);
@@ -416,11 +414,11 @@ export function ChatPanel() {
         } else {
           // Messages already cached — restore session list and selection without reloading
           const restoreSessionSelection = async () => {
-            await useSessionStore.getState().fetchSessions(selectedAgentId);
-            const rememberedId = useSessionStore.getState().agentSessionMap[selectedAgentId];
-            const sessions = useSessionStore.getState().sessions;
+            await useAgentStore.getState().fetchSessions(selectedAgentId);
+            const rememberedId = useAgentStore.getState().agents[selectedAgentId]?.rememberedSessionId;
+            const sessions = useAgentStore.getState().agents[selectedAgentId]?.sessions ?? [];
             if (rememberedId && sessions.some(s => s.session_id === rememberedId)) {
-              useSessionStore.getState().switchSession(rememberedId, selectedAgentId);
+              useAgentStore.getState().switchSession(rememberedId, selectedAgentId);
             }
           };
           void restoreSessionSelection();
@@ -452,9 +450,9 @@ export function ChatPanel() {
     if (isInitialLoadRef.current) return;
 
     // Guard: only proceed if this session belongs to the current agent's session list.
-    const session = useSessionStore
+    const session = useAgentStore
       .getState()
-      .sessions.find((s) => s.session_id === currentSessionId);
+      .agents[selectedAgentId]?.sessions.find((s) => s.session_id === currentSessionId);
     if (!session) return;
 
     // If this session was already loaded (e.g. returning from Settings navigation
@@ -913,7 +911,7 @@ export function ChatPanel() {
   }, [sending]);
 
   // ── Empty state: no agents at all ──
-  if (agents.length === 0) {
+  if (Object.keys(useAgentStore.getState().agents).length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
         <div className="text-center">
@@ -1630,12 +1628,12 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
   // Agent icon from profile settings
-  const agentIconId = useAgentProfileStore((s) => s.profiles[agentId]?.avatarIconId);
+  const agentIconId = useAgentStore((s) => s.agents[agentId]?.profile?.avatarIconId);
   // Live names — subscribe to profile stores so name edits update all messages instantly
   // (instead of relying on the senderDisplayName snapshot captured at message creation time)
   const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
-  const agentProfileName = useAgentProfileStore((s) => s.profiles[agentId]?.displayName);
-  const agentInfo = useAgentStore((s) => s.agents.find((a) => a.agent_id === agentId));
+  const agentProfileName = useAgentStore((s) => s.agents[agentId]?.profile?.displayName);
+  const agentInfo = useAgentStore((s) => s.agents[agentId]?.meta);
   const liveAgentName = agentProfileName ?? agentInfo?.display_name ?? agentInfo?.name ?? message.senderDisplayName;
   const liveUserName = userDisplayName ?? message.senderDisplayName;
 

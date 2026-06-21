@@ -34,7 +34,8 @@ interface ResultsPanelProps {
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
 export function ResultsPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: ResultsPanelProps & { width: number }) {
-  const { agents, selectedAgentId } = useAgentStore();
+  const { selectedAgentId } = useAgentStore();
+  const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
   const activeSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
   const tokenUsage = useChatStore((s) => {
     if (!selectedAgentId) return null;
@@ -143,8 +144,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     current: string;
   } | null>(null);
 
-  // Selected agent info
-  const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+  // Selected agent info (already derived above)
 
   // Count iterations (number of assistant messages)
   const iterations = messages.filter((m) => m.type === "assistant").length;

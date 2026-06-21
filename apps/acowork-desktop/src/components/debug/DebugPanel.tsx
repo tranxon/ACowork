@@ -61,7 +61,8 @@ export function formatBytes(bytes: number): string {
 // ── Component ──────────────────────────────────────────────────────────
 
 export function DebugPanel({ width = 320 }: { width?: number }) {
-  const { agents, selectedAgentId } = useAgentStore();
+  const { selectedAgentId } = useAgentStore();
+  const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
   const {
     connected,
     connecting,
@@ -107,7 +108,7 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
   const prevAgentId = useRef<string | null>(null);
 
   // Determine if the selected agent is in debug mode
-  const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId);
+  // (selectedAgent is already derived above from the Record-based store)
 
   // Auto-connect when a debug-mode agent is selected or becomes active
   useEffect(() => {
@@ -398,6 +399,27 @@ export function SnapshotNode({
 }) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, []);
+
+  // Reset copied state when editing ends
+  useEffect(() => {
+    if (!editingSection) setCopied(false);
+  }, [editingSection]);
 
   return (
     <div className="border-b border-zinc-100 dark:border-zinc-800">
@@ -518,11 +540,20 @@ export function SnapshotNode({
                           </button>
                           <Tooltip content={t("debugPanel.copyContent")} variant="plain">
                             <button
-                              onClick={() => navigator.clipboard.writeText(editingSection.current)}
+                              onClick={() => handleCopy(editingSection.current)}
                               className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-zinc-500 transition-colors hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700"
                             >
-                            <Copy className="h-2.5 w-2.5" />
-                            Copy
+                            {copied ? (
+                              <>
+                                <Check className="h-2.5 w-2.5" />
+                                Copied
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-2.5 w-2.5" />
+                                Copy
+                              </>
+                            )}
                           </button>
                           </Tooltip>
                         </div>

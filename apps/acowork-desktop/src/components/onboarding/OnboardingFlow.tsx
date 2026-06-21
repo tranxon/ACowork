@@ -4,7 +4,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
-import { useAgentProfileStore } from "../../stores/agentProfileStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
@@ -748,11 +747,11 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       // Belt-and-suspenders: explicitly backfill again in case fetchAgents
       // failed or the bundled agent list was empty.
       const installed = useAgentStore.getState().agents;
-      useAgentProfileStore.getState().ensureBuiltinAvatars(
-        installed.map((a) => ({
-          agent_id: a.agent_id,
-          avatar: a.avatar ?? null,
-          builtin_avatar: a.builtin_avatar ?? null,
+      useAgentStore.getState().ensureBuiltinAvatars(
+        Object.values(installed).map((s) => ({
+          agent_id: s.meta.agent_id,
+          avatar: s.meta.avatar ?? null,
+          builtin_avatar: s.meta.builtin_avatar ?? null,
         })),
       );
       setInstalling(null);
