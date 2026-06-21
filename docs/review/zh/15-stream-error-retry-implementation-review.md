@@ -201,7 +201,7 @@ if removed > 0 {
 | `STREAM_READ_TIMEOUT` | 45s | anthropic.rs, openai.rs |
 | `REQUEST_SIZE_WARN` | 200KB | loop_.rs |
 | `REQUEST_SIZE_HARD` | 280KB | loop_.rs |
-| `MAX_ITERATION_RETRIES` | 2 | loop_.rs |
+| `MAX_ITERATION_RETRIES` | 3 | loop_.rs |
 
 建议从 manifest 或配置文件读取，允许不同 Agent/model 使用不同阈值。
 
