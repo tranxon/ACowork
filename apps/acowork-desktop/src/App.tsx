@@ -6,8 +6,13 @@ import { SplashScreen } from "./components/layout/SplashScreen";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { useSystemResume } from "./hooks/useSystemResume";
 
 function App() {
+  // Detect system resume from sleep and reload webview to recover GPU compositor.
+  // Must be mounted before any other UI so it survives the full app lifecycle.
+  useSystemResume();
+
   const [onboardingDone, setOnboardingDone] = useState(() => {
     return localStorage.getItem("acowork_onboarding") === "completed";
   });

@@ -28,7 +28,17 @@ mod state;
 mod tray;
 
 use state::AppState;
-use tauri::{Listener, Manager};
+use std::sync::atomic::{AtomicI64, Ordering};
+use tauri::{Emitter, Listener, Manager};
+
+/// Minimum seconds of inactivity before a focus-regained event is treated as
+/// a potential system-resume (sleep/hibernate wake).  Shorter gaps are normal
+/// window switching and are ignored by the frontend recovery logic.
+const RESUME_GAP_SECS: i64 = 30;
+
+/// Unix-epoch timestamp (seconds) of the last `Focused(true)` event.
+/// Shared across all invocations of `on_window_event`.
+static LAST_FOCUS_TS: AtomicI64 = AtomicI64::new(0);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -100,27 +110,47 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Hide to tray instead of closing
-            // Only intercept close when window is visible and focused
-            // This prevents interference with system tray menu on Windows
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Only hide if window is currently visible
-                // When tray menu is showing, window won't be visible/focused
-                match window.is_visible() {
-                    Ok(true) => {
-                        tracing::debug!("Intercepting close request, hiding to tray");
-                        window.hide().unwrap();
-                        api.prevent_close();
-                    }
-                    Ok(false) => {
-                        tracing::debug!("Window not visible, allowing close to proceed");
-                        // Don't intercept - let it close (for Quit menu)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to check window visibility: {}", e);
-                        // Safe default: allow close
+            match event {
+                // ── System-resume detection (backup for frontend heartbeat) ───
+                // When the window regains focus after a long gap (sleep/hibernate),
+                // emit "system-resume" so the frontend can reload the webview
+                // even if its JS heartbeat was suspended and hasn't ticked yet.
+                tauri::WindowEvent::Focused(true) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let prev = LAST_FOCUS_TS.swap(now, Ordering::Relaxed);
+                    if prev > 0 && (now - prev) > RESUME_GAP_SECS {
+                        tracing::info!(
+                            gap_secs = now - prev,
+                            "Window focused after long gap — emitting system-resume"
+                        );
+                        let _ = window.emit("system-resume", ());
                     }
                 }
+
+                // ── Hide to tray instead of closing ──────────────────────────
+                // Only intercept close when window is visible and focused.
+                // This prevents interference with system tray menu on Windows.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    match window.is_visible() {
+                        Ok(true) => {
+                            tracing::debug!("Intercepting close request, hiding to tray");
+                            window.hide().unwrap();
+                            api.prevent_close();
+                        }
+                        Ok(false) => {
+                            tracing::debug!("Window not visible, allowing close to proceed");
+                            // Don't intercept - let it close (for Quit menu)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to check window visibility: {}", e);
+                            // Safe default: allow close
+                        }
+                    }
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
