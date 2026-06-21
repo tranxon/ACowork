@@ -77,7 +77,7 @@ SIGNED_PKG="${OUTPUT_DIR}/${AGENT_ID}.agent"
 
 echo -e "${GREEN}[1/4]${NC} Creating unsigned package..."
 cd "$AGENT_DIR"
-zip -r "$UNSIGNED_PKG" manifest.toml prompts/ skills/ -x "*.DS_Store" -x "*/__MACOSX/*"
+zip -r "$UNSIGNED_PKG" manifest.toml prompts/ skills/ assets/ -x "*.DS_Store" -x "*/__MACOSX/*"
 echo -e "      Created: ${UNSIGNED_PKG}"
 echo ""
 

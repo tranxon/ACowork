@@ -11,6 +11,7 @@ author = "AgentCowork Team"
 runtime_version = "0.1.0"
 system = false
 dev = false
+avatar = "assets/avatar.jpg"
 
 identity_deps = ["language", "timezone"]
 

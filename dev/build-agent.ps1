@@ -129,7 +129,7 @@ function Build-Agent {
     Push-Location $AgentDir
     try {
         $filesToZip = @("manifest.toml")
-        $dirsToAdd  = @("prompts", "skills")
+        $dirsToAdd  = @("prompts", "skills", "assets")
 
         foreach ($d in $dirsToAdd) {
             if (Test-Path $d) {
