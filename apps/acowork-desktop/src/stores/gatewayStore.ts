@@ -34,7 +34,15 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
     // this action), so `localState` may still be "idle" even though the
     // backend already has a running child process.
     await get().checkLocalStatus();
-    if (get().localState === "starting" || get().localState === "running") return;
+    if (get().localState === "starting") return;
+    if (get().localState === "running") {
+      // Gateway process already exists (e.g. from a previous session or
+      // SplashScreen boot path), but we may not have checked health yet.
+      // Without this call, `status` stays "disconnected" and the UI shows
+      // "Not started" even though the Gateway is actually reachable.
+      await get().checkHealth();
+      return;
+    }
     set({ localState: "starting" });
     try {
       // Dynamically import invoke to avoid issues when not in Tauri context

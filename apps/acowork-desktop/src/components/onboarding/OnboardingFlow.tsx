@@ -203,11 +203,9 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
     }
   }, [status]);
 
-  // Auto-check health when remote mode is selected
+  // Auto-check health when mode changes or on mount (both local and remote)
   useEffect(() => {
-    if (gatewayMode === "remote") {
-      checkHealth();
-    }
+    checkHealth();
   }, [gatewayMode, checkHealth]);
 
   const handleModeChange = (mode: GatewayMode) => {
