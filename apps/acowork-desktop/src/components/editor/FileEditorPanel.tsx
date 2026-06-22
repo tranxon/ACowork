@@ -537,7 +537,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                         startLine: sel.startLineNumber,
                         endLine: sel.endLineNumber,
                     });
-                    // Position the floating button near the end of the selection
+                    // Position the floating button below selection end, clamped to container
                     requestAnimationFrame(() => {
                         const ed = editorRef.current;
                         if (!ed) return;
@@ -546,7 +546,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                             column: sel.endColumn,
                         });
                         if (endPos) {
-                            setAddToChatPos({ top: endPos.top + 18, left: endPos.left + 20 });
+                            // Button is ~120px wide; clamp left so it stays inside the editor
+                            const btnWidth = 120;
+                            const containerWidth = ed.getLayoutInfo().width;
+                            const left = Math.max(8, Math.min(endPos.left + 20, containerWidth - btnWidth));
+                            setAddToChatPos({ top: endPos.top + 18, left });
                         }
                     });
                     return;

@@ -4,6 +4,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { FileTree } from "./FileTree/FileTree";
 import { WorkspaceSelector } from "./WorkspaceSelector";
 import type { TreeEntry } from "../../stores/workspaceStore";
@@ -13,6 +14,7 @@ import { Tooltip } from "../common/Tooltip";
 export function WorkspaceExplorer() {
     const { t } = useTranslation();
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+    const fontSize = useSettingsStore((s) => s.fontSize);
     const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
     const invalidateTreeCache = useWorkspaceStore((s) => s.invalidateTreeCache);
     const fetchTree = useWorkspaceStore((s) => s.fetchTree);
@@ -229,6 +231,7 @@ export function WorkspaceExplorer() {
             {/* File tree (normal mode, no search filtering) */}
             {selectedAgentId && activeSessionId && (
                 <FileTree
+                    key={fontSize}
                     agentId={selectedAgentId}
                     workspaceId={currentWorkspaceId}
                     sessionId={activeSessionId}

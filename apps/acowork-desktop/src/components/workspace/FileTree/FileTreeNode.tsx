@@ -193,7 +193,7 @@ export const FileTreeNode = memo(function FileTreeNode({
     <>
       <div
         className={cn(
-          "flex cursor-pointer items-center gap-1 py-[2px] pr-3 hover:bg-zinc-100 dark:hover:bg-zinc-800",
+          "flex cursor-pointer items-center gap-1 py-[0.2em] pr-3 hover:bg-zinc-100 dark:hover:bg-zinc-800",
           isSelected && "bg-[var(--color-accent)]/10",
         )}
         style={{ paddingLeft: `${depth * 16 + 8}px`, fontSize: "var(--ui-font-size, 0.875rem)" }}
@@ -203,11 +203,11 @@ export const FileTreeNode = memo(function FileTreeNode({
         title={relPath}
       >
         {/* Icon — chevron for dirs, file-type for files; both occupy same 16px slot so names align */}
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <span className="flex shrink-0 items-center justify-center" style={{ height: "1.15em", width: "1.15em" }}>
           {isDir ? (
             <ChevronRight
               className={cn(
-                "h-3 w-3 text-zinc-400 transition-transform duration-150",
+                "h-[0.8em] w-[0.8em] text-zinc-400 transition-transform duration-150",
                 isExpanded && "rotate-90",
               )}
             />

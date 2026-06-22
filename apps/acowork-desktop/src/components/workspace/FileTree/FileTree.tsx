@@ -4,6 +4,7 @@ import { useWorkspaceStore, type TreeEntry } from "../../../stores/workspaceStor
 import { useAgentStore } from "../../../stores/agentStore";
 import { useChatStore } from "../../../stores/chatStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
+import { useSettingsStore } from "../../../stores/settingsStore";
 import { FileTreeNode } from "./FileTreeNode";
 
 const EMPTY_ARRAY: string[] = [];
@@ -112,12 +113,14 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
         setSelectedPath(relPath);
     }, []);
 
-    // Virtual scrolling setup
+    // Virtual scrolling setup — row height scales with global font size
     const scrollRef = useRef<HTMLDivElement | null>(null);
+    const fontSize = useSettingsStore((s) => s.fontSize);
+    const rowHeight = useMemo(() => Math.round(fontSize * 16 * 1.55), [fontSize]);
     const virtualizer = useVirtualizer({
         count: flatNodes.length,
         getScrollElement: () => scrollRef.current,
-        estimateSize: () => 22,
+        estimateSize: () => rowHeight,
         overscan: 20,
     });
 
