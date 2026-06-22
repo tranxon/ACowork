@@ -214,9 +214,6 @@ impl AgentManifest {
 /// LLM provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LlmConfig {
-    /// Sampling temperature (0.0 - 2.0)
-    #[serde(default)]
-    pub temperature: Option<f64>,
     /// Maximum tokens in response
     #[serde(default)]
     pub max_tokens: Option<u32>,
@@ -490,7 +487,6 @@ mod tests {
             runtime_version = "0.1.0"
 
             [llm]
-            temperature = 0.7
             max_tokens = 4096
 
             [memory]
@@ -546,7 +542,6 @@ mod tests {
         let manifest = AgentManifest::from_toml(sample_manifest_toml()).unwrap();
         assert_eq!(manifest.agent_id, "com.example.weather");
         assert_eq!(manifest.version, "1.0.0");
-        assert_eq!(manifest.llm.temperature, Some(0.7));
         assert_eq!(manifest.llm.max_tokens, Some(4096));
         assert!(manifest.memory.enabled);
         assert_eq!(manifest.memory.retention_days, Some(90));

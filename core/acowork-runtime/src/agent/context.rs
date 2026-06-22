@@ -624,7 +624,7 @@ impl ContextBuilder {
         ChatRequest {
             model,
             messages,
-            temperature: manifest.llm.temperature,
+            temperature: None,
             max_tokens,
             tools: self.tool_definitions.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
@@ -676,7 +676,6 @@ mod tests {
             [llm]
             provider = "openai"
             model = "gpt-4"
-            temperature = 0.7
         "#,
         )
         .unwrap()

@@ -653,6 +653,7 @@ impl Provider for AnthropicProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = crate::providers::parse_retry_after_header(response.headers());
             let body = response.text().await.unwrap_or_default();
 
             // Try to parse Anthropic error structure for better classification
@@ -665,9 +666,9 @@ impl Provider for AnthropicProvider {
                 format!("Anthropic API error: {status} — {body}")
             };
 
-            return Err(acowork_core::AcoworkError::Provider(
-                acowork_core::ProviderError::from_status_code(status.as_u16(), message),
-            ));
+            let mut err = acowork_core::ProviderError::from_status_code(status.as_u16(), message);
+            err.retry_after_ms = retry_after;
+            return Err(acowork_core::AcoworkError::Provider(err));
         }
 
         let native_resp: AnthropicResponse = response.json().await.map_err(|e| {
@@ -758,13 +759,14 @@ impl Provider for AnthropicProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = crate::providers::parse_retry_after_header(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(acowork_core::AcoworkError::Provider(
-                acowork_core::ProviderError::from_status_code(
-                    status.as_u16(),
-                    format!("Anthropic API error: {status} — {body}"),
-                ),
-            ));
+            let mut err = acowork_core::ProviderError::from_status_code(
+                status.as_u16(),
+                format!("Anthropic API error: {status} — {body}"),
+            );
+            err.retry_after_ms = retry_after;
+            return Err(acowork_core::AcoworkError::Provider(err));
         }
 
         let (tx, rx) = mpsc::channel(32);

@@ -27,6 +27,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 toml = "0.8"
 
+# Unix-specific: clock_gettime for sleep detection (macOS + Linux)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

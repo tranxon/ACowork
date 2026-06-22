@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
-import { normalizeBuiltinAvatarId, pickRandomBuiltinIconId } from "../lib/avatar";
+import { clearAgentAvatarCache, normalizeBuiltinAvatarId, pickRandomBuiltinIconId } from "../lib/avatar";
 import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus } from "../lib/types";
 import { isSessionActive } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
@@ -22,7 +22,6 @@ export interface AgentProfileSettings {
   providerId?: string;
   maxTokens?: number;
   maxIterations?: number;
-  temperature?: number;
   systemPrompt?: string;
   shellApprovalThreshold?: string;
   approvalTimeoutSecs?: number;
@@ -38,7 +37,6 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   providerId: undefined,
   maxTokens: 0,
   maxIterations: 0,
-  temperature: 0.7,
   systemPrompt: undefined,
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
@@ -85,7 +83,6 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
           (s as { toolsLimit?: number }).toolsLimit! > 0
           ? (s as { toolsLimit?: number }).toolsLimit!
           : 0,
-    temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
     systemPrompt: s.systemPrompt,
     shellApprovalThreshold: s.shellApprovalThreshold,
     approvalTimeoutSecs:
@@ -345,7 +342,37 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   uninstallAgent: async (agentId) => {
     if (agentId === SYSTEM_AGENT_ID) throw new Error("System Agent cannot be uninstalled");
     try {
+      // Capture version before removal — needed to clear the avatar blob cache
+      const version = get().agents[agentId]?.meta.version;
+
       await invoke("uninstall_agent", { agentId });
+
+      // Clear avatar blob URL cache so a re-install fetches fresh bytes
+      clearAgentAvatarCache(agentId, version);
+
+      // Clean up profile from localStorage
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const profiles = JSON.parse(raw) as Record<string, unknown>;
+          if (profiles[agentId]) {
+            delete profiles[agentId];
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+          }
+        }
+      } catch {
+        // localStorage unavailable — non-fatal
+      }
+
+      // Disconnect WebSocket and remove chatStore agent state
+      const chatStore = useChatStore.getState();
+      chatStore.disconnectStream(agentId);
+      useChatStore.setState((state) => {
+        const next = { ...state.agentStates };
+        delete next[agentId];
+        return { agentStates: next };
+      });
+
       set((state) => {
         const next = { ...state.agents };
         delete next[agentId];
@@ -554,30 +581,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   createSession: async (agentId: string) => {
     try {
-      const chatStore = useChatStore.getState();
-      const agent = chatStore.agentStates[agentId];
-      const availableModels = chatStore.availableModels;
-      const initialModel = agent?.preferredModel ?? availableModels[0]?.name ?? null;
-      const initialProvider = agent?.preferredProvider ?? null;
       const lastActiveWs =
         useWorkspaceStore
           .getState()
           .workspaces.find((w) => w.last_active)
           ?.id ?? null;
 
-      // Ensure agent.preferredModel is set on the frontend
-      if (!agent?.preferredModel && initialModel) {
-        useChatStore.setState((s) => ({
-          agentStates: {
-            ...s.agentStates,
-            [agentId]: { ...s.agentStates[agentId], preferredModel: initialModel },
-          },
-        }));
-      }
-
+      // model/provider is managed by Runtime internally via
+      // SessionManager::current_model_and_provider() fallback.
+      // Frontend MUST NOT cache or pass preferredModel/preferredProvider
+      // — that violates the display-only principle.
       const body: Record<string, string> = {};
-      if (initialModel) body.model = initialModel;
-      if (initialProvider) body.provider = initialProvider;
       if (lastActiveWs) body.workspace_id = lastActiveWs;
 
       const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions`, {

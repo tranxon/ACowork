@@ -461,6 +461,7 @@ impl AgentLoop {
                 self.transition_status(SessionStatus::Paused {
                     iteration: Some(iteration),
                     max_iterations: Some(self.core.config.max_iterations),
+                    retry_info: None,
                 });
                 let _ = self.core.try_send_chunk(ChunkEvent::IterationLimitPaused {
                     iteration,
@@ -688,6 +689,7 @@ impl AgentLoop {
                         self.transition_status(SessionStatus::Paused {
                             iteration: None,
                             max_iterations: None,
+                            retry_info: None,
                         });
                         if let Some(ref notify) = rewind_notify {
                             tokio::select! {

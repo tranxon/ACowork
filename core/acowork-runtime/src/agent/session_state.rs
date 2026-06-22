@@ -84,11 +84,31 @@ pub enum SessionStatus {
     Streaming { message_id: Option<String> },
     /// A tool requires user approval before execution
     WaitingApproval { request_id: String },
-    /// Iteration limit reached or debug pause — awaiting user decision
+    /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision
     Paused {
         iteration: Option<u32>,
         max_iterations: Option<u32>,
+        /// 429 retry wait info. `None` for non-retry pauses (iteration limit / debug).
+        /// When present, the frontend shows a countdown timer and skip button.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_info: Option<RetryPauseInfo>,
     },
+}
+
+/// 429 rate-limit retry pause information.
+///
+/// Emitted inside [`SessionStatus::Paused::retry_info`] when the provider
+/// enters a retry wait whose duration exceeds the UX threshold (10 s).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RetryPauseInfo {
+    /// Wait duration in milliseconds
+    pub wait_ms: u64,
+    /// Current retry attempt (1-based)
+    pub attempt: u32,
+    /// Maximum retry attempts
+    pub max_attempts: u32,
+    /// Name of the provider that was rate-limited
+    pub provider: String,
 }
 
 

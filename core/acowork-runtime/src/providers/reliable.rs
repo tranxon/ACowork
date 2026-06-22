@@ -4,7 +4,7 @@
 //! AgentCowork deviation: uses acowork-core Provider trait instead of ZeroClaw's.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acowork_core::providers::error_patterns::is_non_retryable_rate_limit;
@@ -13,7 +13,54 @@ use acowork_core::providers::traits::{
 };
 use async_trait::async_trait;
 use futures_core::Stream;
+use rand::RngExt;
+use tokio::sync::Notify;
 use tokio::time::sleep;
+
+use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
+use crate::agent::session_state::{RetryPauseInfo, SessionStatus};
+
+/// Threshold (ms) above which the retry wait triggers UX (countdown + skip button).
+const UX_WAIT_THRESHOLD_MS: u64 = 10_000;
+
+/// Shared state for 429 retry UX.
+///
+/// Written by [`ReliableProvider`] when entering a retry wait whose duration
+/// exceeds [`UX_WAIT_THRESHOLD_MS`]. Read by external observers (SessionTask,
+/// Gateway) to decide whether to trigger `skip_notify`.
+#[derive(Debug, Clone)]
+pub struct RetryWaitState {
+    /// Wait duration in milliseconds
+    pub wait_ms: u64,
+    /// Current retry attempt (1-based)
+    pub attempt: u32,
+    /// Maximum retry attempts
+    pub max_attempts: u32,
+    /// Name of the provider being retried
+    pub provider_name: String,
+}
+
+/// External handle for controlling a retry wait.
+///
+/// Held by [`AgentCore`] so that [`SessionTask`] can wake up a paused
+/// retry when the user presses "Skip Wait" (via the existing
+/// `continue_execution` API).
+pub struct RetryWaitHandle {
+    /// Current retry wait state, shared with [`ReliableProvider`]
+    pub state: Arc<Mutex<Option<RetryWaitState>>>,
+    /// Notify to wake the retry loop early (user skip)
+    pub skip_notify: Arc<Notify>,
+}
+
+impl RetryWaitHandle {
+    /// Create a new retry-wait handle pair.
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(None)),
+            skip_notify: Arc::new(Notify::new()),
+        }
+    }
+}
 
 /// Retry configuration
 #[derive(Debug, Clone)]
@@ -31,7 +78,7 @@ impl Default for RetryConfig {
         Self {
             max_attempts: 3,
             backoff: BackoffStrategy::Exponential { base_ms: 1000 },
-            max_wait_ms: 30000,
+            max_wait_ms: 10000,
         }
     }
 }
@@ -66,6 +113,14 @@ pub struct ReliableProvider {
     fallbacks: Vec<Arc<dyn Provider>>,
     /// Retry configuration
     retry_config: RetryConfig,
+    /// Retry wait control handle (429 UX). Shared with AgentCore.
+    retry_wait_handle: Option<RetryWaitHandle>,
+    /// Session status for emitting retry-pause state transitions.
+    session_status: Option<Arc<std::sync::RwLock<SessionStatus>>>,
+    /// Chunk sender for emitting SessionStateChanged events.
+    chunk_sender: Option<tokio::sync::mpsc::Sender<SessionChunkEvent>>,
+    /// Session ID for tagging chunk events.
+    session_id: Option<String>,
 }
 
 impl ReliableProvider {
@@ -75,6 +130,10 @@ impl ReliableProvider {
             primary,
             fallbacks: Vec::new(),
             retry_config,
+            retry_wait_handle: None,
+            session_status: None,
+            chunk_sender: None,
+            session_id: None,
         }
     }
 
@@ -82,6 +141,187 @@ impl ReliableProvider {
     pub fn with_fallback(mut self, provider: Arc<dyn Provider>) -> Self {
         self.fallbacks.push(provider);
         self
+    }
+
+    /// Enable 429 retry UX: pause status emission + user-skippable wait.
+    ///
+    /// Callers (e.g. `AgentCore` during session init) must call this to
+    /// wire up the retry-wait handle, session status slot, and chunk
+    /// sender so that long retry waits (> 10 s) surface to the frontend.
+    pub fn with_retry_ux(
+        mut self,
+        handle: RetryWaitHandle,
+        session_status: Arc<std::sync::RwLock<SessionStatus>>,
+        chunk_sender: tokio::sync::mpsc::Sender<SessionChunkEvent>,
+        session_id: String,
+    ) -> Self {
+        self.retry_wait_handle = Some(handle);
+        self.session_status = Some(session_status);
+        self.chunk_sender = Some(chunk_sender);
+        self.session_id = Some(session_id);
+        self
+    }
+
+    /// Emit [`SessionStatus::Paused`] with retry_info so the frontend
+    /// shows a countdown timer and skip button.
+    fn emit_retry_pause(&self, wait_ms: u64, attempt: u32, provider_name: &str) {
+        if let Some(ref status_lock) = self.session_status {
+            if let Ok(mut guard) = status_lock.write() {
+                *guard = SessionStatus::Paused {
+                    iteration: None,
+                    max_iterations: None,
+                    retry_info: Some(RetryPauseInfo {
+                        wait_ms,
+                        attempt,
+                        max_attempts: self.retry_config.max_attempts,
+                        provider: provider_name.to_string(),
+                    }),
+                };
+            }
+        }
+        if let Some(ref tx) = self.chunk_sender
+            && let Some(ref sid) = self.session_id
+        {
+            let status = self
+                .session_status
+                .as_ref()
+                .and_then(|l| l.read().ok())
+                .map(|g| g.clone())
+                .unwrap_or(SessionStatus::Idle);
+            let _ = tx.try_send(SessionChunkEvent {
+                session_id: sid.clone(),
+                event: ChunkEvent::SessionStateChanged {
+                    status,
+                    model: None,
+                    provider: None,
+                    workspace_id: None,
+                    ratio: None,
+                    reasoning_effort: None,
+                    temperature: None,
+                },
+            });
+        }
+    }
+
+    /// Restore [`SessionStatus::Streaming`] after retry wait (timeout or skip).
+    fn emit_streaming_resume(&self) {
+        if let Some(ref status_lock) = self.session_status {
+            if let Ok(mut guard) = status_lock.write() {
+                *guard = SessionStatus::Streaming { message_id: None };
+            }
+        }
+        if let Some(ref tx) = self.chunk_sender
+            && let Some(ref sid) = self.session_id
+        {
+            let status = self
+                .session_status
+                .as_ref()
+                .and_then(|l| l.read().ok())
+                .map(|g| g.clone())
+                .unwrap_or(SessionStatus::Idle);
+            let _ = tx.try_send(SessionChunkEvent {
+                session_id: sid.clone(),
+                event: ChunkEvent::SessionStateChanged {
+                    status,
+                    model: None,
+                    provider: None,
+                    workspace_id: None,
+                    ratio: None,
+                    reasoning_effort: None,
+                    temperature: None,
+                },
+            });
+        }
+    }
+
+    /// Sleep for a retry wait duration, with optional UX support.
+    ///
+    /// When `wait_ms >= UX_WAIT_THRESHOLD_MS` AND UX is wired up
+    /// (`retry_wait_handle` / `session_status` / `chunk_sender` all set),
+    /// this method:
+    /// 1. Emits [`SessionStatus::Paused`] with `retry_info` → frontend countdown
+    /// 2. Uses `tokio::select!` so a `skip_notify` from the outside wakes
+    ///    the loop immediately
+    /// 3. Restores [`SessionStatus::Streaming`] on wake
+    ///
+    /// When UX is not wired up (CLI mode, or short waits), falls back to
+    /// plain `sleep(wait).await`.
+    async fn retry_sleep(&self, wait_ms: u64, attempt: u32) {
+        let use_ux = wait_ms >= UX_WAIT_THRESHOLD_MS
+            && self.retry_wait_handle.is_some()
+            && self.session_status.is_some()
+            && self.chunk_sender.is_some();
+
+        if !use_ux {
+            sleep(Duration::from_millis(wait_ms)).await;
+            return;
+        }
+
+        // Emit paused status with retry info for the frontend
+        let provider_name = self.primary.name().to_string();
+        self.emit_retry_pause(wait_ms, attempt, &provider_name);
+
+        // Update shared RetryWaitState so external observers can read it
+        if let Some(ref handle) = self.retry_wait_handle {
+            if let Ok(mut guard) = handle.state.lock() {
+                *guard = Some(RetryWaitState {
+                    wait_ms,
+                    attempt,
+                    max_attempts: self.retry_config.max_attempts,
+                    provider_name: provider_name.clone(),
+                });
+            }
+        }
+
+        tracing::info!(
+            wait_ms = wait_ms,
+            attempt = attempt,
+            "Retry wait with UX: emitting paused status, waiting with skip support"
+        );
+
+        // Wait with skip support
+        if let Some(ref handle) = self.retry_wait_handle {
+            tokio::select! {
+                _ = sleep(Duration::from_millis(wait_ms)) => {
+                    tracing::debug!("Retry wait completed normally");
+                }
+                _ = handle.skip_notify.notified() => {
+                    tracing::info!("Retry wait skipped by user");
+                }
+            }
+        }
+
+        // Clear shared state
+        if let Some(ref handle) = self.retry_wait_handle {
+            if let Ok(mut guard) = handle.state.lock() {
+                *guard = None;
+            }
+        }
+
+        // Restore streaming status
+        self.emit_streaming_resume();
+    }
+
+    /// Compute effective wait duration for a retry attempt.
+    ///
+    /// Prefers the server-suggested `retry_after_ms` (from HTTP Retry-After header)
+    /// over the backoff strategy. Applies cap via `max_wait_ms` and adds ±25% jitter.
+    fn compute_wait(&self, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
+        // Prefer server-suggested wait time; fall back to backoff strategy
+        let base_ms = if let Some(ms) = retry_after_ms {
+            ms
+        } else {
+            self.retry_config.backoff.wait_duration(attempt).as_millis() as u64
+        };
+
+        // Cap at max_wait_ms
+        let capped_ms = base_ms.min(self.retry_config.max_wait_ms);
+
+        // Apply jitter ±25% (uniform distribution in [0.75, 1.25])
+        let factor: f64 = rand::rng().random_range(0.75..=1.25);
+        let jittered_ms = (capped_ms as f64 * factor) as u64;
+
+        Duration::from_millis(jittered_ms)
     }
 
     /// Check if an error is retryable
@@ -147,15 +387,20 @@ impl Provider for ReliableProvider {
                     }
 
                     if attempt + 1 < self.retry_config.max_attempts {
-                        let wait = self.retry_config.backoff.wait_duration(attempt);
-                        let wait = wait.min(Duration::from_millis(self.retry_config.max_wait_ms));
+                        let retry_after_ms = match &e {
+                            acowork_core::AcoworkError::Provider(pe) => pe.retry_after_ms,
+                            _ => None,
+                        };
+                        let wait = self.compute_wait(attempt, retry_after_ms);
+                        let wait_ms = wait.as_millis() as u64;
                         tracing::warn!(
                             attempt = attempt + 1,
                             max = self.retry_config.max_attempts,
-                            wait_ms = wait.as_millis(),
+                            wait_ms = wait_ms,
+                            has_retry_after = retry_after_ms.is_some(),
                             "Retrying primary provider"
                         );
-                        sleep(wait).await;
+                        self.retry_sleep(wait_ms, attempt + 1).await;
                     } else {
                         tracing::error!(
                             attempts = self.retry_config.max_attempts,
@@ -204,17 +449,22 @@ impl Provider for ReliableProvider {
                         break; // Move to next provider
                     }
                     Err(e) if attempt + 1 < self.retry_config.max_attempts => {
-                        let wait = self.retry_config.backoff.wait_duration(attempt);
-                        let wait = wait.min(Duration::from_millis(self.retry_config.max_wait_ms));
+                        let retry_after_ms = match &e {
+                            acowork_core::AcoworkError::Provider(pe) => pe.retry_after_ms,
+                            _ => None,
+                        };
+                        let wait = self.compute_wait(attempt, retry_after_ms);
+                        let wait_ms = wait.as_millis() as u64;
                         tracing::warn!(
                             provider = %provider.name(),
                             attempt = attempt + 1,
                             max = self.retry_config.max_attempts,
-                            wait_ms = wait.as_millis(),
+                            wait_ms = wait_ms,
+                            has_retry_after = retry_after_ms.is_some(),
                             error = %e,
                             "Retrying stream establishment"
                         );
-                        sleep(wait).await;
+                        self.retry_sleep(wait_ms, attempt + 1).await;
                     }
                     Err(e) => {
                         tracing::error!(

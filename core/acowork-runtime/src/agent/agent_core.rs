@@ -150,6 +150,21 @@ pub struct AgentCore {
     /// Set by SessionTask before run(), updated via SetWorkDir message.
     /// Filesystem tools use this as the base directory for relative path resolution.
     pub(crate) current_work_dir: Option<String>,
+    /// Shared session status for 429 retry UX.
+    ///
+    /// Written by both [`AgentLoop::transition_status`] (normal flow) and
+    /// [`crate::providers::reliable::ReliableProvider`] (retry pause/resume).
+    /// A clone is passed to the ReliableProvider so it can emit
+    /// `SessionStateChanged` events during long retry waits.
+    pub(crate) retry_session_status:
+        Option<Arc<std::sync::RwLock<crate::agent::session_state::SessionStatus>>>,
+    /// Active retry-wait handle for 429 UX.
+    ///
+    /// Set when the ReliableProvider is wired up with UX support.
+    /// [`crate::agent::session::SessionTask`] checks this when handling
+    /// `ContinueExecution` to trigger `skip_notify` and wake the retry loop.
+    pub(crate) retry_wait_handle:
+        Option<crate::providers::reliable::RetryWaitHandle>,
 }
 
 impl AgentCore {
@@ -204,6 +219,8 @@ impl AgentCore {
             consolidation_scheduler: None,
             consolidation_bg_task: None,
             current_work_dir: Some(initial_work_dir),
+            retry_session_status: None,
+            retry_wait_handle: None,
         }
     }
 
@@ -764,6 +781,8 @@ impl AgentCore {
             // work_dir is set separately by SessionTask after clone;
             // default to agent_home to avoid None window before SetWorkDir arrives.
             current_work_dir: Some(self.config.work_dir.clone()),
+            retry_session_status: None, // set separately by SessionTask
+            retry_wait_handle: None,    // set separately by SessionTask
         }
     }
 
@@ -812,13 +831,19 @@ impl AgentCore {
 
     /// Rebuild Provider instance for a given provider_id from global cache.
     /// Returns None if provider not found in cache or no API key available.
+    ///
+    /// The returned provider is wrapped in [`ReliableProvider`] so that
+    /// per-session model switches also benefit from retry logic (backoff,
+    /// retry-after, jitter). When [`retry_session_status`] and
+    /// [`retry_wait_handle`] are set on this `AgentCore`, the provider is
+    /// also wired up with 429-retry UX (countdown timer + skip button).
     pub fn build_provider_for(&self, provider_id: &str) -> Option<Arc<dyn Provider>> {
         let provider_meta = self.get_provider(provider_id)?;
         let api_key = self.get_provider_api_key(provider_id);
         let timeouts = Some(crate::providers::router::ProviderTimeouts::from(
             &self.config,
         ));
-        Some(crate::providers::router::create_provider(
+        let raw = crate::providers::router::create_provider(
             &provider_meta.id,
             &provider_meta.protocol_type,
             api_key.as_deref(),
@@ -828,7 +853,28 @@ impl AgentCore {
                 Some(&provider_meta.base_url)
             },
             timeouts,
-        ))
+        );
+        let retry_config = crate::providers::reliable::RetryConfig::default();
+        let mut reliable = crate::providers::reliable::ReliableProvider::new(raw, retry_config);
+
+        // Wire up 429 retry UX if the session has set up the shared state
+        if let Some(status) = &self.retry_session_status
+            && let Some(handle) = &self.retry_wait_handle
+            && let Some(tx) = &self.on_chunk
+            && let Some(sid) = &self.session_id
+        {
+            reliable = reliable.with_retry_ux(
+                crate::providers::reliable::RetryWaitHandle {
+                    state: handle.state.clone(),
+                    skip_notify: handle.skip_notify.clone(),
+                },
+                status.clone(),
+                tx.clone(),
+                sid.clone(),
+            );
+        }
+
+        Some(Arc::new(reliable))
     }
 
     /// Set debug mode by replacing the observer slot with a DevMode observer.

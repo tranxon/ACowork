@@ -2486,9 +2486,16 @@ async fn handle_list_sessions(
                     crate::agent::session_state::SessionStatus::Paused {
                         iteration,
                         max_iterations,
+                        retry_info,
                     } => acowork_core::protocol::SessionStatusDto::Paused {
                         iteration: *iteration,
                         max_iterations: *max_iterations,
+                        retry_info: retry_info.as_ref().map(|ri| acowork_core::protocol::RetryPauseInfoDto {
+                            wait_ms: ri.wait_ms,
+                            attempt: ri.attempt,
+                            max_attempts: ri.max_attempts,
+                            provider: ri.provider.clone(),
+                        }),
                     },
                 }
             });

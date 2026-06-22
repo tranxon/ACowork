@@ -323,7 +323,7 @@ async fn build_attached_context_blocks(
             .unwrap_or(false);
 
         let file_content = if is_document_format {
-            match extract_document_text(&abs_path).await {
+            match extract_document_text(abs_path).await {
                 Ok(text) => text,
                 Err(e) => {
                     tracing::warn!(
@@ -340,7 +340,7 @@ async fn build_attached_context_blocks(
                 }
             }
         } else {
-            match std::fs::read_to_string(&abs_path) {
+            match std::fs::read_to_string(abs_path) {
                 Ok(content) => content,
                 Err(e) => {
                     tracing::warn!(
@@ -481,13 +481,57 @@ impl SessionTask {
         // initialized from session creation context here, not patched later
         // via message replay.
 
+        // ── 429 retry UX setup ──
+        // Create shared state that bridges ReliableProvider (inside the
+        // LLM call) with SessionTask (handling ContinueExecution from the
+        // user via Gateway). Without this, the ReliableProvider has no way
+        // to emit session status changes or listen for user skip signals.
+        let retry_session_status = Arc::new(std::sync::RwLock::new(
+            crate::agent::session_state::SessionStatus::Streaming { message_id: None },
+        ));
+        let retry_wait_handle = crate::providers::reliable::RetryWaitHandle::new();
+        core_for_session.retry_session_status = Some(retry_session_status);
+        core_for_session.retry_wait_handle = Some(retry_wait_handle);
+
         // ADR-012: Rebuild LLM Provider from SessionState.provider so the
         // session always sends requests to the correct API endpoint.
         // Without this, clone_for_session inherits the global startup provider.
+        //
+        // The rebuilt provider is wrapped in ReliableProvider (retry logic)
+        // AND wired up with 429-retry UX (countdown + skip button) via
+        // `build_provider_for`, which checks `retry_session_status` and
+        // `retry_wait_handle` set above.
         if let Some(ref provider_id) = session.provider
             && let Some(new_provider) = core_for_session.build_provider_for(provider_id) {
                 let model = session.model.clone().unwrap_or_default();
                 core_for_session.update_provider(new_provider, model);
+            } else {
+                // For new sessions (no per-session provider override),
+                // re-wrap the startup provider with ReliableProvider + UX.
+                let raw = core_for_session.provider.clone();
+                let retry_config = crate::providers::reliable::RetryConfig::default();
+                let mut reliable = crate::providers::reliable::ReliableProvider::new(
+                    raw,
+                    retry_config,
+                );
+                // Wire up UX if shared state is available
+                if let Some(status) = &core_for_session.retry_session_status
+                    && let Some(handle) = &core_for_session.retry_wait_handle
+                    && let Some(tx) = &core_for_session.on_chunk
+                    && let Some(sid) = &core_for_session.session_id
+                {
+                    reliable = reliable.with_retry_ux(
+                        crate::providers::reliable::RetryWaitHandle {
+                            state: handle.state.clone(),
+                            skip_notify: handle.skip_notify.clone(),
+                        },
+                        status.clone(),
+                        tx.clone(),
+                        sid.clone(),
+                    );
+                }
+                let model = session.model.clone().unwrap_or_default();
+                core_for_session.update_provider(Arc::new(reliable), model);
             }
 
         // Apply accumulated runtime config overrides from Gateway pushes.
@@ -608,31 +652,31 @@ impl SessionTask {
         // frontend can show input/output token counts without waiting for
         // the first LLM round. Only fires when persisted last_tokens exist
         // and model capabilities are available.
-        if let Some(ref conv) = agent_loop.session.conversation {
-            if let Some((input, output)) = conv.last_tokens() {
-                let model_name = agent_loop
-                    .session
-                    .model
-                    .as_deref()
-                    .unwrap_or("unknown");
-                if let Some(caps) = agent_loop.core.get_model_capabilities(model_name) {
-                    let max_output = agent_loop
-                        .core
-                        .max_output_tokens_limit_for_model(model_name);
-                    let ctx = crate::agent::context::build_context_usage_from_persisted(
-                        &caps,
-                        input,
-                        output,
-                        max_output,
-                    );
-                    if let Some(ref tx) = chunk_tx {
-                        let _ = tx
-                            .send(SessionChunkEvent {
-                                session_id: session_id.clone(),
-                                event: ChunkEvent::ContextUsage(ctx),
-                            })
-                            .await;
-                    }
+        if let Some(ref conv) = agent_loop.session.conversation
+            && let Some((input, output)) = conv.last_tokens()
+        {
+            let model_name = agent_loop
+                .session
+                .model
+                .as_deref()
+                .unwrap_or("unknown");
+            if let Some(caps) = agent_loop.core.get_model_capabilities(model_name) {
+                let max_output = agent_loop
+                    .core
+                    .max_output_tokens_limit_for_model(model_name);
+                let ctx = crate::agent::context::build_context_usage_from_persisted(
+                    &caps,
+                    input,
+                    output,
+                    max_output,
+                );
+                if let Some(ref tx) = chunk_tx {
+                    let _ = tx
+                        .send(SessionChunkEvent {
+                            session_id: session_id.clone(),
+                            event: ChunkEvent::ContextUsage(ctx),
+                        })
+                        .await;
                 }
             }
         }
@@ -1047,6 +1091,15 @@ impl SessionTask {
                         session_id = %session_id,
                         "SessionTask: ContinueExecution received"
                     );
+                    // 429 retry UX: if the ReliableProvider is currently in a
+                    // long retry wait, wake it immediately via skip_notify.
+                    if let Some(ref handle) = agent_loop.core.retry_wait_handle {
+                        handle.skip_notify.notify_one();
+                        tracing::info!(
+                            session_id = %session_id,
+                            "Skip retry wait triggered via ContinueExecution"
+                        );
+                    }
                     let _ = agent_inbound_tx
                         .send(crate::agent::inbound::InboundMessage::ContinueExecution {
                             reason: "user_requested".to_string(),

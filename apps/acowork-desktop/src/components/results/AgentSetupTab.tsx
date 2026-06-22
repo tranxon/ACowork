@@ -49,7 +49,6 @@ export function AgentSetupTab() {
         setProfile(selectedAgentId, {
           maxTokens: data.max_output_tokens,
           maxIterations: data.max_iterations,
-          temperature: data.temperature,
           shellApprovalThreshold: data.shell_approval_threshold,
           approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
           globalMaxTokens: data.global_max_output_tokens,
@@ -108,7 +107,6 @@ export function AgentSetupTab() {
       const body: Record<string, unknown> = {};
       if (profile.maxTokens && profile.maxTokens > 0) body.max_output_tokens = profile.maxTokens;
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
-      if (profile.temperature !== undefined) body.temperature = profile.temperature;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
       if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
       const res = await fetch(
@@ -257,31 +255,6 @@ export function AgentSetupTab() {
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.leaveEmptyDefault")}
         </p>
-      </div>
-
-      {/* Temperature */}
-      <div className="mb-3 space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.temperature", { value: profile.temperature ?? 0.7 })}
-        </label>
-        <input
-          type="range"
-          min={0}
-          max={2}
-          step={0.1}
-          value={profile.temperature ?? 0.7}
-          onChange={(e) =>
-            setProfile(selectedAgentId, {
-              temperature: parseFloat(e.target.value),
-            })
-          }
-          className="w-full"
-          style={{ "--progress": `${((profile.temperature ?? 0.7) / 2) * 100}%` } as React.CSSProperties}
-        />
-        <div className="flex justify-between text-[9px] text-zinc-400 dark:text-zinc-500">
-          <span>{t("agentSetup.deterministic")}</span>
-          <span>{t("agentSetup.creative")}</span>
-        </div>
       </div>
 
       {/* Shell Command Approval Threshold */}

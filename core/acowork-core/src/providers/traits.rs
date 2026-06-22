@@ -44,6 +44,10 @@ pub struct ProviderError {
     pub error_type: ProviderErrorType,
     /// Whether the request may succeed if retried.
     pub retryable: bool,
+    /// Server-suggested wait time in milliseconds (from HTTP Retry-After header).
+    /// When present, the retry loop should prefer this over the backoff strategy.
+    #[serde(default)]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl ProviderError {
@@ -63,6 +67,7 @@ impl ProviderError {
             status_code: Some(status),
             error_type,
             retryable,
+            retry_after_ms: None,
         }
     }
 
@@ -73,6 +78,7 @@ impl ProviderError {
             status_code: None,
             error_type: ProviderErrorType::NetworkError,
             retryable: true,
+            retry_after_ms: None,
         }
     }
 
@@ -83,6 +89,7 @@ impl ProviderError {
             status_code: None,
             error_type: ProviderErrorType::Unknown,
             retryable: false,
+            retry_after_ms: None,
         }
     }
 
@@ -93,6 +100,7 @@ impl ProviderError {
             status_code: Some(401),
             error_type: ProviderErrorType::Unauthorized,
             retryable: false,
+            retry_after_ms: None,
         }
     }
 
@@ -103,6 +111,7 @@ impl ProviderError {
             status_code: Some(429),
             error_type: ProviderErrorType::RateLimited,
             retryable: true,
+            retry_after_ms: None,
         }
     }
 
@@ -113,6 +122,7 @@ impl ProviderError {
             status_code: Some(500),
             error_type: ProviderErrorType::ServerError,
             retryable: true,
+            retry_after_ms: None,
         }
     }
 
@@ -124,6 +134,7 @@ impl ProviderError {
             status_code: Some(402),
             error_type: ProviderErrorType::PaymentRequired,
             retryable: false,
+            retry_after_ms: None,
         }
     }
 
@@ -135,6 +146,7 @@ impl ProviderError {
             status_code: None,
             error_type: ProviderErrorType::ContextOverflow,
             retryable: false,
+            retry_after_ms: None,
         }
     }
 
@@ -146,6 +158,7 @@ impl ProviderError {
             status_code: None,
             error_type: ProviderErrorType::StreamDecodeError,
             retryable: true,
+            retry_after_ms: None,
         }
     }
 
@@ -157,6 +170,7 @@ impl ProviderError {
             status_code: None,
             error_type: ProviderErrorType::StreamTimeout,
             retryable: true,
+            retry_after_ms: None,
         }
     }
 }

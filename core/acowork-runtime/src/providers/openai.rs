@@ -21,6 +21,7 @@ use acowork_core::providers::traits::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageRole, Provider,
     ReasoningEffort, StreamEvent, ToolCall, UsageInfo,
 };
+use acowork_core::tools::schema::sanitize_tool_schema;
 
 /// Default per-chunk read timeout (45s) — used by backwards-compatible constructors.
 const DEFAULT_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -110,7 +111,8 @@ fn openai_reasoning_str(effort: &ReasoningEffort) -> Option<&'static str> {
 struct NativeChatRequest {
     model: String,
     messages: Vec<NativeMessage>,
-    temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,7 +405,7 @@ fn convert_tools(tools: Option<&[serde_json::Value]>) -> Option<Vec<NativeToolSp
                     .unwrap_or("")
                     .to_string();
                 let parameters = match tool.get("parameters") {
-                    Some(p) if p.is_object() => p.clone(),
+                    Some(p) if p.is_object() => sanitize_tool_schema(p),
                     Some(p) => {
                         tracing::warn!(
                             tool_name = %name,
@@ -505,7 +507,7 @@ impl Provider for OpenAIProvider {
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
-            temperature: request.temperature.unwrap_or(0.7),
+            temperature: request.temperature,
             max_tokens: request.max_tokens,
             tools: convert_tools(request.tools.as_deref()),
             stream: None,
@@ -541,7 +543,77 @@ impl Provider for OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = crate::providers::parse_retry_after_header(response.headers());
             let body = response.text().await.unwrap_or_default();
+
+            // Fallback: if the error is 400/422 and reasoning_effort is present,
+            // retry without it. Many OpenAI-compatible providers reject this
+            // non-standard field.
+            if (status.as_u16() == 400 || status.as_u16() == 422)
+                && native_request.reasoning_effort.is_some()
+            {
+                tracing::warn!(
+                    status = %status,
+                    "reasoning_effort not supported in non-streaming chat, retrying without it"
+                );
+                let fallback_request = NativeChatRequest {
+                    model: native_request.model.clone(),
+                    messages: native_request.messages.clone(),
+                    temperature: native_request.temperature,
+                    max_tokens: native_request.max_tokens,
+                    tools: native_request.tools.clone(),
+                    stream: None,
+                    stream_options: None,
+                    reasoning_effort: None,
+                };
+                let fallback_response = {
+                    let mut fb_builder = self.http_client.post(&url);
+                    if let Some(ref api_key) = self.api_key {
+                        fb_builder = fb_builder.bearer_auth(api_key);
+                    }
+                    fb_builder
+                        .json(&fallback_request)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            acowork_core::AcoworkError::Provider(
+                                acowork_core::ProviderError::network(format!(
+                                    "OpenAI request failed: {e}"
+                                )),
+                            )
+                        })?
+                };
+
+                if fallback_response.status().is_success() {
+                    let native_resp: NativeChatResponse = fallback_response
+                        .json()
+                        .await
+                        .map_err(|e| {
+                            acowork_core::AcoworkError::Provider(
+                                acowork_core::ProviderError::unknown(format!(
+                                    "Failed to parse OpenAI response: {e}"
+                                )),
+                            )
+                        })?;
+                    let choice = native_resp.choices.into_iter().next().ok_or_else(|| {
+                        acowork_core::AcoworkError::Provider(
+                            acowork_core::ProviderError::unknown(
+                                "No choices in OpenAI response".to_string(),
+                            ),
+                        )
+                    })?;
+                    return Ok(parse_response(choice.message, native_resp.usage));
+                }
+                // Fallback also failed — fall through to error with the fallback response
+                let f_status = fallback_response.status();
+                let f_body = fallback_response.text().await.unwrap_or_default();
+                let mut err = acowork_core::ProviderError::from_status_code(
+                    f_status.as_u16(),
+                    format!("OpenAI API error: {f_status} — {f_body}"),
+                );
+                err.retry_after_ms = retry_after;
+                return Err(acowork_core::AcoworkError::Provider(err));
+            }
 
             // Detailed diagnostics for 400 Bad Request errors
             if status.as_u16() == 400 {
@@ -568,12 +640,12 @@ impl Provider for OpenAIProvider {
                 }
             }
 
-            return Err(acowork_core::AcoworkError::Provider(
-                acowork_core::ProviderError::from_status_code(
-                    status.as_u16(),
-                    format!("OpenAI API error: {status} — {body}"),
-                ),
-            ));
+            let mut err = acowork_core::ProviderError::from_status_code(
+                status.as_u16(),
+                format!("OpenAI API error: {status} — {body}"),
+            );
+            err.retry_after_ms = retry_after;
+            return Err(acowork_core::AcoworkError::Provider(err));
         }
 
         let native_resp: NativeChatResponse = response.json().await.map_err(|e| {
@@ -603,7 +675,7 @@ impl Provider for OpenAIProvider {
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
-            temperature: request.temperature.unwrap_or(0.7),
+            temperature: request.temperature,
             max_tokens: request.max_tokens,
             tools: convert_tools(request.tools.as_deref()),
             stream: Some(true),
@@ -640,17 +712,26 @@ impl Provider for OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = crate::providers::parse_retry_after_header(response.headers());
             let body = response.text().await.unwrap_or_default();
 
-            // Fallback: if the error is caused by stream_options (some OpenAI-compatible
-            // APIs don't support this field), retry without it.
-            if (status.as_u16() == 422 || status.as_u16() == 400) && body.contains("stream_options")
-            {
+            // Progressive fallback chain for 400/422 errors.
+            // Many OpenAI-compatible providers reject various non-standard
+            // fields. We progressively strip fields and retry.
+            if status.as_u16() == 422 || status.as_u16() == 400 {
+                // Log the full request JSON for diagnosis
+                let request_json = serde_json::to_string(&native_request)
+                    .unwrap_or_else(|_| "<serialization failed>".to_string());
                 tracing::warn!(
                     status = %status,
-                    "stream_options not supported, retrying without it"
+                    error_body = %body,
+                    request_json = %request_json,
+                    "Initial 400/422 — starting progressive fallback"
                 );
-                let fallback_request = NativeChatRequest {
+
+                // Fallback 1: strip stream_options only
+                tracing::warn!("Fallback 1/3: stripping stream_options");
+                let fb1 = NativeChatRequest {
                     model: native_request.model.clone(),
                     messages: native_request.messages.clone(),
                     temperature: native_request.temperature,
@@ -660,24 +741,84 @@ impl Provider for OpenAIProvider {
                     stream_options: None,
                     reasoning_effort: native_request.reasoning_effort.clone(),
                 };
-                let retry_response = self.send_streaming_request(&url, &fallback_request).await?;
-                if !retry_response.status().is_success() {
-                    let s = retry_response.status();
-                    let b = retry_response.text().await.unwrap_or_default();
-                    return Err(acowork_core::AcoworkError::Provider(
-                        acowork_core::ProviderError::from_status_code(
-                            s.as_u16(),
-                            format!("OpenAI API error: {s} - {b}"),
-                        ),
-                    ));
+                let resp1 = self.send_streaming_request(&url, &fb1).await?;
+                if resp1.status().is_success() {
+                    return Ok(Self::sse_to_stream(resp1, self.stream_read_timeout));
                 }
-                return Ok(Self::sse_to_stream(
-                    retry_response,
-                    self.stream_read_timeout,
-                ));
+                let s1 = resp1.status();
+                let b1 = resp1.text().await.unwrap_or_default();
+                tracing::warn!(status = %s1, error_body = %b1, "Fallback 1 failed");
+
+                // Fallback 2: also strip reasoning_effort
+                if native_request.reasoning_effort.is_some() {
+                    tracing::warn!("Fallback 2/3: also stripping reasoning_effort");
+                    let fb2 = NativeChatRequest {
+                        model: native_request.model.clone(),
+                        messages: native_request.messages.clone(),
+                        temperature: native_request.temperature,
+                        max_tokens: native_request.max_tokens,
+                        tools: native_request.tools.clone(),
+                        stream: Some(true),
+                        stream_options: None,
+                        reasoning_effort: None,
+                    };
+                    let resp2 = self.send_streaming_request(&url, &fb2).await?;
+                    if resp2.status().is_success() {
+                        return Ok(Self::sse_to_stream(resp2, self.stream_read_timeout));
+                    }
+                    let s2 = resp2.status();
+                    let b2 = resp2.text().await.unwrap_or_default();
+                    tracing::warn!(status = %s2, error_body = %b2, "Fallback 2 failed");
+                }
+
+                // Fallback 3: also strip tools (last resort — model gets no tools)
+                tracing::warn!("Fallback 3/3: also stripping tools (last resort)");
+                let fb3 = NativeChatRequest {
+                    model: native_request.model.clone(),
+                    messages: native_request.messages.clone(),
+                    temperature: native_request.temperature,
+                    max_tokens: native_request.max_tokens,
+                    tools: None,
+                    stream: Some(true),
+                    stream_options: None,
+                    reasoning_effort: None,
+                };
+                let resp3 = self.send_streaming_request(&url, &fb3).await?;
+                if resp3.status().is_success() {
+                    tracing::warn!(
+                        "Fallback 3 succeeded — the 400 was caused by tool definitions. \
+                         Tools have been stripped for this request."
+                    );
+                    return Ok(Self::sse_to_stream(resp3, self.stream_read_timeout));
+                }
+                let s3 = resp3.status();
+                let b3 = resp3.text().await.unwrap_or_default();
+
+                // All fallbacks failed — log comprehensive diagnostics
+                tracing::error!(
+                    model = %native_request.model,
+                    tools_count = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+                    messages_count = native_request.messages.len(),
+                    has_stream_options = native_request.stream_options.is_some(),
+                    has_reasoning_effort = native_request.reasoning_effort.is_some(),
+                    has_temperature = native_request.temperature.is_some(),
+                    max_tokens = ?native_request.max_tokens,
+                    initial_error = %body,
+                    fb1_error = %b1,
+                    fb3_error = %b3,
+                    request_json = %request_json,
+                    "All streaming fallbacks failed — full diagnostics"
+                );
+
+                let mut err = acowork_core::ProviderError::from_status_code(
+                    s3.as_u16(),
+                    format!("OpenAI API error: {s3} - {b3}"),
+                );
+                err.retry_after_ms = retry_after;
+                return Err(acowork_core::AcoworkError::Provider(err));
             }
 
-            // Detailed diagnostics for 400 Bad Request errors
+            // Detailed diagnostics for other 400 Bad Request errors
             if status.as_u16() == 400 {
                 tracing::error!(
                     tools_count = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
@@ -700,12 +841,12 @@ impl Provider for OpenAIProvider {
                 }
             }
 
-            return Err(acowork_core::AcoworkError::Provider(
-                acowork_core::ProviderError::from_status_code(
-                    status.as_u16(),
-                    format!("OpenAI API error: {status} - {body}"),
-                ),
-            ));
+            let mut err = acowork_core::ProviderError::from_status_code(
+                status.as_u16(),
+                format!("OpenAI API error: {status} - {body}"),
+            );
+            err.retry_after_ms = retry_after;
+            return Err(acowork_core::AcoworkError::Provider(err));
         }
 
         Ok(Self::sse_to_stream(response, self.stream_read_timeout))

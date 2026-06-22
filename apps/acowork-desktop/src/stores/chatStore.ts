@@ -45,6 +45,14 @@ interface SessionChatState {
   hasMoreMessages: boolean;
   messageCursor: string | null;
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
+  /** 429 retry wait info — populated from session_state_changed when the provider is rate-limited */
+  retryWaitInfo: {
+    waitMs: number;
+    attempt: number;
+    maxAttempts: number;
+    provider: string;
+    startedAt: number; // Date.now() for frontend countdown timer
+  } | null;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
   pendingQuestion: AskQuestionEvent | null;
   isLoadingSession: boolean;
@@ -67,8 +75,6 @@ interface SessionChatState {
   ratio: number | null;
   /** Per-session reasoning effort override (frontend display only, source of truth is Runtime) */
   reasoningEffort: string | null;
-  /** Per-session temperature override (source of truth is Runtime) */
-  temperature: number | null;
   /** Context compaction in progress (both manual and auto triggers) */
   isCompacting: boolean;
   /** File tree expanded directory paths (persisted per-session) */
@@ -97,6 +103,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   hasMoreMessages: false,
   messageCursor: null,
   iterationLimitPaused: null,
+  retryWaitInfo: null,
   pendingApproval: {},
   pendingQuestion: null,
   isLoadingSession: false,
@@ -110,7 +117,6 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   provider: null,
   ratio: null,
   reasoningEffort: null,
-  temperature: null,
   isCompacting: false,
   treeExpandedPaths: [],
   attachedContext: [],
@@ -1408,7 +1414,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (typeof data.provider === "string" && data.provider) sessionPatch.provider = data.provider;
       if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio;
       if (typeof data.reasoning_effort === "string" && data.reasoning_effort) sessionPatch.reasoningEffort = data.reasoning_effort;
-      if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature;
       if (Object.keys(sessionPatch).length > 0) {
         set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
       }
@@ -2192,8 +2197,6 @@ function handleMessageEvent(
             if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio as number;
             // Reasoning effort level (thinking level) from Runtime session state.
             if (typeof data.reasoning_effort === "string") sessionPatch.reasoningEffort = data.reasoning_effort as string;
-            // Temperature setting from Runtime session state.
-            if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature as number;
 
             // When status transitions FROM Streaming, clear transient streaming state.
             // IMPORTANT: Before clearing thinkingMessageId, stamp endTime on the thinking
@@ -2222,6 +2225,20 @@ function handleMessageEvent(
               sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestion = null;
               sessionPatch.iterationLimitPaused = null;
+            }
+
+            // 429 retry UX: populate retryWaitInfo when paused with retry_info
+            if (status.status === "paused" && status.detail?.retry_info) {
+              sessionPatch.retryWaitInfo = {
+                waitMs: status.detail.retry_info.wait_ms,
+                attempt: status.detail.retry_info.attempt,
+                maxAttempts: status.detail.retry_info.max_attempts,
+                provider: status.detail.retry_info.provider,
+                startedAt: Date.now(),
+              };
+            } else if (prev.sessionStatus?.status === "paused" && status.status !== "paused") {
+              // Clear retry wait info when leaving paused state
+              sessionPatch.retryWaitInfo = null;
             }
 
             // Update session state (model/provider/status) then agent-level defaults

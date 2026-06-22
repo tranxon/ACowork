@@ -442,7 +442,7 @@ async fn compact_with_llm(
             },
             ChatMessage::user(prompt),
         ],
-        temperature: Some(0.3),
+        temperature: None,
         max_tokens: Some(max_tokens),
         tools: None,
         reasoning_effort: None,

@@ -1125,11 +1125,27 @@ pub enum SessionStatusDto {
     Streaming { message_id: Option<String> },
     /// A tool requires user approval before execution
     WaitingApproval { request_id: String },
-    /// Iteration limit reached or debug pause — awaiting user decision
+    /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision
     Paused {
         iteration: Option<u32>,
         max_iterations: Option<u32>,
+        /// 429 retry wait info. `None` for non-retry pauses.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_info: Option<RetryPauseInfoDto>,
     },
+}
+
+/// 429 rate-limit retry pause information (DTO).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPauseInfoDto {
+    /// Wait duration in milliseconds
+    pub wait_ms: u64,
+    /// Current retry attempt (1-based)
+    pub attempt: u32,
+    /// Maximum retry attempts
+    pub max_attempts: u32,
+    /// Name of the provider that was rate-limited
+    pub provider: String,
 }
 
 /// Conversation entry DTO for IPC responses (S1.14)

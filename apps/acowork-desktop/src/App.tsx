@@ -13,12 +13,24 @@ function App() {
   // Must be mounted before any other UI so it survives the full app lifecycle.
   useSystemResume();
 
+  // On sleep-recovery reload, skip splash screen — gateway is already running
+  // (Rust backend survives reload) and Zustand persisted stores restore from
+  // localStorage, so we can jump straight to AppLayout.
+  const isRecoveryReload = sessionStorage.getItem("acowork_recovery_reload") === "1";
+
   const [onboardingDone, setOnboardingDone] = useState(() => {
     return localStorage.getItem("acowork_onboarding") === "completed";
   });
 
-  const [gatewayReady, setGatewayReady] = useState(false);
-  const [splashShown, setSplashShown] = useState(false);
+  const [gatewayReady, setGatewayReady] = useState(isRecoveryReload);
+  const [splashShown, setSplashShown] = useState(isRecoveryReload);
+
+  // Clear the recovery flag after mount so it doesn't affect future loads.
+  useEffect(() => {
+    if (isRecoveryReload) {
+      sessionStorage.removeItem("acowork_recovery_reload");
+    }
+  }, [isRecoveryReload]);
 
   // Signal Rust to show the native window after the first React render.
   // The window starts hidden (visible: false in tauri.conf.json) to prevent

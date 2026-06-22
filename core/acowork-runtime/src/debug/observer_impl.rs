@@ -135,6 +135,7 @@ impl DebugObserverImpl {
                     transition_status(SessionStatus::Paused {
                         iteration: None,
                         max_iterations: None,
+                        retry_info: None,
                     });
                     // Use tokio::select! with rewind_notify so that
                     // rewinds are applied immediately (notification-driven)
