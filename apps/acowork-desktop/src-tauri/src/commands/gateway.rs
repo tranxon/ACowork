@@ -352,7 +352,8 @@ pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> R
     command
         .current_dir(&resource_dir)
         .env("ACOWORK_GATEWAY_DAEMON", "true")
-        .env("ACOWORK_GATEWAY_LOG_LEVEL", "info")
+        .env("ACOWORK_GATEWAY_LOG_LEVEL", "debug")
+        .env("RUST_LOG", "debug,h2=info,hyper=info,hyper_util=info,tower=info")
         .env(
             "ACOWORK_LSP_CONFIG_DIR",
             resource_dir.to_string_lossy().to_string(),
