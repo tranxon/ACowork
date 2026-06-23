@@ -134,19 +134,56 @@ if (args.length === 0) {
 // inject the right features so the build can fetch ORT automatically.
 if (!ort) {
     const isCargoBuild = args[0] === "cargo" && (args[1] === "build" || args[1] === "check" || args[1] === "test");
-    const targetsEmbed = args.includes("-p") && args[args.indexOf("-p") + 1] === "acowork-embed";
-    const noFeatures = !args.includes("--features");
-    const hasDownload = args.some(a => a.startsWith("--features") && a.includes("download-ort"));
 
-    if (isCargoBuild && targetsEmbed && noFeatures && !hasDownload) {
-        const features = pickEmbedFeatures();
-        args.push("--features", features);
-        console.log(`[ort_env] → injecting --features ${features}`);
-    } else if (isCargoBuild && targetsEmbed && !noFeatures && !hasDownload) {
-        // User already provided --features; just append download-ort to whatever they have
-        const featuresIdx = args.indexOf("--features");
-        args[featuresIdx + 1] = `${args[featuresIdx + 1]},${pickEmbedFeatures()}`;
-        console.log(`[ort_env] → appending download-ort to existing --features`);
+    // Scan all `-p <crate>` pairs to find any acowork-embed target.
+    // Cargo allows multiple -p flags (e.g. -p gateway -p runtime -p embed),
+    // so we must iterate, not just look at args.indexOf("-p") + 1.
+    function targetsEmbedCrate(argv) {
+        for (let i = 0; i < argv.length; i++) {
+            if (argv[i] === "-p" || argv[i] === "--package") {
+                if (argv[i + 1] === "acowork-embed") return true;
+            }
+        }
+        return false;
+    }
+    const targetsEmbed = targetsEmbedCrate(args);
+
+    // Find any existing --features flag and its value(s).
+    // --features can be repeated; we treat any flag whose value mentions download-ort as "already covered".
+    const hasDownload = args.some((a, i) => a === "--features" && (args[i + 1] || "").includes("download-ort"));
+    const hasAnyFeatures = args.some((a, i) => a === "--features");
+
+    if (isCargoBuild && targetsEmbed) {
+        if (!hasDownload) {
+            const features = pickEmbedFeatures();
+            // Find where the cargo command ends (next shell operator: && || ;).
+            // --features must go BEFORE the operator, otherwise it ends up
+            // attached to whatever comes after (e.g. `npm run dev`).
+            const SHELL_OPS = new Set(["&&", "||", ";", "|", ">", ">>", "<"]);
+            let insertAt = args.length;
+            for (let i = 1; i < args.length; i++) {
+                if (SHELL_OPS.has(args[i])) { insertAt = i; break; }
+            }
+
+            // If the user already provided --features in the cargo segment, append to it.
+            let appended = false;
+            for (let i = 1; i < insertAt; i++) {
+                if (args[i] === "--features") {
+                    args[i + 1] = `${args[i + 1]},${features}`;
+                    appended = true;
+                    console.log(`[ort_env] → appending ${features} to existing --features at arg #${i}`);
+                    break;
+                }
+            }
+            if (!appended) {
+                args.splice(insertAt, 0, "--features", features);
+                console.log(`[ort_env] → injecting --features ${features} before ${args[insertAt + 2] || "<end>"}`);
+            }
+        } else {
+            console.log(`[ort_env] → download-ort already present in --features, skipping`);
+        }
+    } else if (isCargoBuild) {
+        console.log(`[ort_env] → command does not target acowork-embed, skipping feature injection`);
     }
 }
 
