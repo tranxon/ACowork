@@ -160,6 +160,31 @@ else
             fi
         done
     fi
+    
+    # Fallback: Auto-detect from Cargo cache if download-ort feature was used
+    if [ -z "$ORT_LIB_LOCATION" ]; then
+        echo -e "${YELLOW}  .ort/ not found, searching Cargo registry cache...${NC}"
+        for cached_ort in ~/.cargo/registry/cache/*/onnxruntime-osx-aarch64-* ~/.cargo/registry/cache/*/onnxruntime-osx-x64-* 2>/dev/null; do
+            [ -d "$cached_ort" ] || continue
+            if [ "$OS" = "macos" ]; then
+                lib_path="$cached_ort/lib/libonnxruntime.dylib"
+            else
+                lib_path="$cached_ort/lib/libonnxruntime.so"
+            fi
+            if [ -f "$lib_path" ]; then
+                echo -e "${GREEN}  Found ONNX Runtime in Cargo cache: $lib_path${NC}"
+                # Create a symlink in .ort/ so build_core.sh can use it
+                WORKSPACE_ROOT_ORT="$WORKSPACE_ROOT/.ort/onnxruntime-osx-aarch64-latest"
+                mkdir -p "$WORKSPACE_ROOT_ORT/lib"
+                cp "$lib_path" "$WORKSPACE_ROOT_ORT/lib/"
+                echo -e "${GREEN}  Copied to $WORKSPACE_ROOT_ORT${NC}"
+                export ORT_LIB_LOCATION="$WORKSPACE_ROOT_ORT/lib"
+                export ORT_DYLIB_PATH="$lib_path"
+                export ORT_PREFER_DYNAMIC_LINK=1
+                break
+            fi
+        done
+    fi
     if [ -z "$ORT_LIB_LOCATION" ]; then
         echo -e "${RED}  ONNX Runtime not found. Run ./dev/setup_ort.sh first.${NC}"
         echo -e "${RED}  Alternative: cargo build --release -p acowork-embed --features download-ort${NC}"
