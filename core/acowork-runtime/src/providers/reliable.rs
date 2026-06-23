@@ -7,9 +7,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acowork_core::providers::error_patterns::is_non_retryable_rate_limit;
+use acowork_core::providers::error_patterns::{is_balance_exhausted, is_retryable};
 use acowork_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, Provider, ProviderError, ProviderErrorType, StreamEvent,
+    ChatMessage, ChatRequest, ChatResponse, Provider, ProviderError, StreamEvent,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -324,48 +324,6 @@ impl ReliableProvider {
         Duration::from_millis(jittered_ms)
     }
 
-    /// Check if an error is retryable
-    fn is_retryable(error: &acowork_core::AcoworkError) -> bool {
-        match error {
-            acowork_core::AcoworkError::Provider(provider_err) => {
-                // Use structured retryable flag; rate-limited, stream-decode,
-                // and stream-timeout errors are retryable.
-                // ContextOverflow is NOT directly retryable (needs trim first).
-                provider_err.retryable
-                    || provider_err.error_type == ProviderErrorType::RateLimited
-                    || provider_err.error_type == ProviderErrorType::StreamDecodeError
-                    || provider_err.error_type == ProviderErrorType::StreamTimeout
-            }
-            acowork_core::AcoworkError::RateLimited(_) => true,
-            acowork_core::AcoworkError::Io(_) => true,
-            _ => false,
-        }
-    }
-
-    /// Check if an error indicates insufficient balance (not retryable).
-    ///
-    /// Combines:
-    /// 1. Generic business/quota exhaustion patterns from error_patterns.rs
-    /// 2. MiniMax-specific business codes (1113, 1311)
-    fn is_balance_exhausted(error: &acowork_core::AcoworkError) -> bool {
-        match error {
-            acowork_core::AcoworkError::Provider(provider_err) => {
-                // 1. Check generic patterns (e.g. "insufficient quota", "out of credits")
-                is_non_retryable_rate_limit(&provider_err.message)
-                // 2. Check MiniMax-specific business codes
-                || Self::is_minimax_balance_code(&provider_err.message)
-            }
-            _ => false,
-        }
-    }
-
-    /// Check for MiniMax-specific balance exhaustion error codes.
-    ///
-    /// These are provider-specific business codes that cannot be matched
-    /// by generic patterns alone.
-    fn is_minimax_balance_code(msg: &str) -> bool {
-        msg.contains("1113") || msg.contains("1311")
-    }
 }
 
 #[async_trait]
@@ -375,18 +333,24 @@ impl Provider for ReliableProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
-        // Try primary provider with retries
-        for attempt in 0..self.retry_config.max_attempts {
-            match self.primary.chat(request.clone()).await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    // Non-retryable errors — fail immediately
-                    if !Self::is_retryable(&e) || Self::is_balance_exhausted(&e) {
-                        tracing::error!(error = %e, "Non-retryable error from primary provider");
+        // Collect all candidate providers: primary + fallbacks
+        let candidates: Vec<&Arc<dyn Provider>> = std::iter::once(&self.primary)
+            .chain(self.fallbacks.iter())
+            .collect();
+
+        for provider in candidates {
+            for attempt in 0..self.retry_config.max_attempts {
+                match provider.chat(request.clone()).await {
+                    Ok(response) => return Ok(response),
+                    Err(e) if !is_retryable(&e) || is_balance_exhausted(&e) => {
+                        tracing::warn!(
+                            provider = %provider.name(),
+                            error = %e,
+                            "Non-retryable error, trying next provider"
+                        );
                         break;
                     }
-
-                    if attempt + 1 < self.retry_config.max_attempts {
+                    Err(e) if attempt + 1 < self.retry_config.max_attempts => {
                         let retry_after_ms = match &e {
                             acowork_core::AcoworkError::Provider(pe) => pe.retry_after_ms,
                             _ => None,
@@ -394,30 +358,25 @@ impl Provider for ReliableProvider {
                         let wait = self.compute_wait(attempt, retry_after_ms);
                         let wait_ms = wait.as_millis() as u64;
                         tracing::warn!(
+                            provider = %provider.name(),
                             attempt = attempt + 1,
                             max = self.retry_config.max_attempts,
                             wait_ms = wait_ms,
                             has_retry_after = retry_after_ms.is_some(),
-                            "Retrying primary provider"
+                            error = %e,
+                            "Retrying provider"
                         );
                         self.retry_sleep(wait_ms, attempt + 1).await;
-                    } else {
-                        tracing::error!(
-                            attempts = self.retry_config.max_attempts,
-                            "Primary provider retries exhausted"
-                        );
                     }
-                }
-            }
-        }
-
-        // Try fallback providers
-        for (i, fallback) in self.fallbacks.iter().enumerate() {
-            tracing::info!(fallback_index = i, name = %fallback.name(), "Trying fallback provider");
-            match fallback.chat(request.clone()).await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    tracing::warn!(fallback_index = i, error = %e, "Fallback provider failed");
+                    Err(e) => {
+                        tracing::error!(
+                            provider = %provider.name(),
+                            attempts = self.retry_config.max_attempts,
+                            error = %e,
+                            "Retries exhausted for provider"
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -440,7 +399,7 @@ impl Provider for ReliableProvider {
             for attempt in 0..self.retry_config.max_attempts {
                 match provider.chat_stream(request.clone()).await {
                     Ok(stream) => return Ok(stream),
-                    Err(e) if !Self::is_retryable(&e) || Self::is_balance_exhausted(&e) => {
+                    Err(e) if !is_retryable(&e) || is_balance_exhausted(&e) => {
                         tracing::warn!(
                             provider = %provider.name(),
                             error = %e,
@@ -512,16 +471,16 @@ mod tests {
     fn test_is_retryable() {
         let err =
             acowork_core::AcoworkError::Provider(ProviderError::network("timeout".to_string()));
-        assert!(ReliableProvider::is_retryable(&err));
+        assert!(is_retryable(&err));
 
         let err = acowork_core::AcoworkError::Provider(ProviderError::from_status_code(
             401,
             "401 unauthorized".to_string(),
         ));
-        assert!(!ReliableProvider::is_retryable(&err));
+        assert!(!is_retryable(&err));
 
         let err = acowork_core::AcoworkError::RateLimited("too many requests".to_string());
-        assert!(ReliableProvider::is_retryable(&err));
+        assert!(is_retryable(&err));
     }
 
     #[test]
@@ -529,12 +488,12 @@ mod tests {
         let err = acowork_core::AcoworkError::Provider(ProviderError::unknown(
             "insufficient_quota".to_string(),
         ));
-        assert!(ReliableProvider::is_balance_exhausted(&err));
+        assert!(is_balance_exhausted(&err));
 
         let err = acowork_core::AcoworkError::Provider(ProviderError::unknown(
             "out of credits".to_string(),
         ));
-        assert!(ReliableProvider::is_balance_exhausted(&err));
+        assert!(is_balance_exhausted(&err));
     }
 
     #[test]
@@ -542,12 +501,12 @@ mod tests {
         let err = acowork_core::AcoworkError::Provider(ProviderError::unknown(
             "Error code 1113: balance exhausted".to_string(),
         ));
-        assert!(ReliableProvider::is_balance_exhausted(&err));
+        assert!(is_balance_exhausted(&err));
 
         let err = acowork_core::AcoworkError::Provider(ProviderError::unknown(
             "Code 1311: insufficient balance".to_string(),
         ));
-        assert!(ReliableProvider::is_balance_exhausted(&err));
+        assert!(is_balance_exhausted(&err));
     }
 
     #[test]
@@ -556,13 +515,13 @@ mod tests {
             500,
             "500 internal error".to_string(),
         ));
-        assert!(!ReliableProvider::is_balance_exhausted(&err));
+        assert!(!is_balance_exhausted(&err));
     }
 
     #[test]
     fn test_is_minimax_balance_code() {
-        assert!(ReliableProvider::is_minimax_balance_code("error code 1113"));
-        assert!(ReliableProvider::is_minimax_balance_code("code 1311"));
-        assert!(!ReliableProvider::is_minimax_balance_code("generic error"));
+        assert!(acowork_core::providers::error_patterns::is_minimax_balance_code("error code 1113"));
+        assert!(acowork_core::providers::error_patterns::is_minimax_balance_code("code 1311"));
+        assert!(!acowork_core::providers::error_patterns::is_minimax_balance_code("generic error"));
     }
 }

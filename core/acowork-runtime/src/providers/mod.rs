@@ -35,3 +35,58 @@ pub fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<
 
     None
 }
+
+/// Convert an HTTP error response into a structured `ProviderError`.
+///
+/// This is the **single entry point** for converting `reqwest::Response`
+/// failures into `ProviderError`. All provider implementations (OpenAI,
+/// Anthropic, Ollama) should use this instead of manually constructing
+/// `ProviderError::from_status_code` + `parse_retry_after_header`.
+///
+/// Automatically fills `error_type`, `retryable`, `retry_after_ms`,
+/// and `user_message`.
+pub async fn from_http_response(response: reqwest::Response) -> acowork_core::ProviderError {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+
+    // Read error body (best-effort; may be empty for some providers)
+    let body = response.text().await.unwrap_or_default();
+    let message = if body.is_empty() {
+        format!("HTTP {} {}", status, reqwest::StatusCode::from_u16(status).ok().and_then(|s| s.canonical_reason()).unwrap_or("Error"))
+    } else {
+        body
+    };
+
+    let mut error = acowork_core::ProviderError::from_status_code(status, message);
+
+    // Parse Retry-After header for 429 / 503 responses
+    if let Some(retry_after_ms) = parse_retry_after_header(&headers) {
+        error.retry_after_ms = Some(retry_after_ms);
+        error.refresh_user_message();
+    }
+
+    error
+}
+
+/// Convert pre-extracted HTTP error parts into a structured `ProviderError`.
+///
+/// Use this when the response body has already been consumed (e.g. for
+/// diagnostics or JSON parsing). For the simple case where you just need
+/// to convert a failed response, use [`from_http_response`] instead.
+///
+/// Automatically fills `error_type`, `retryable`, `retry_after_ms`,
+/// and `user_message`.
+pub fn from_http_parts(
+    status: u16,
+    message: String,
+    headers: &reqwest::header::HeaderMap,
+) -> acowork_core::ProviderError {
+    let mut error = acowork_core::ProviderError::from_status_code(status, message);
+
+    if let Some(retry_after_ms) = parse_retry_after_header(headers) {
+        error.retry_after_ms = Some(retry_after_ms);
+        error.refresh_user_message();
+    }
+
+    error
+}

@@ -305,9 +305,13 @@ async fn relay_chunk_event(
             relay_intent(outbound_tx, "agent_response", &params).await;
         }
 
-        ChunkEvent::Error { message, message_id } => {
+        ChunkEvent::Error { user_message, detail, error_type, message_id } => {
             let params = serde_json::json!({
-                "content": message, "message_id": message_id, "session_id": sid,
+                "content": user_message,
+                "detail": detail,
+                "error_type": error_type,
+                "message_id": message_id,
+                "session_id": sid,
             });
             relay_intent(outbound_tx, "agent_error", &params).await;
         }

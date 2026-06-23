@@ -59,3 +59,72 @@ pub enum RuntimeError {
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
+
+impl RuntimeError {
+    /// Extract user-friendly error info as `(user_message, detail, error_type)`.
+    ///
+    /// - `user_message`: short, readable summary for default frontend display
+    /// - `detail`: raw error string for the expandable "Details" section
+    /// - `error_type`: stringified `ProviderErrorType` for conditional rendering
+    pub fn error_info(&self) -> (String, String, String) {
+        match self {
+            RuntimeError::Provider(pe) => {
+                let user_message = if pe.user_message.is_empty() {
+                    pe.message.clone()
+                } else {
+                    pe.user_message.clone()
+                };
+                (
+                    user_message,
+                    pe.message.clone(),
+                    format!("{:?}", pe.error_type),
+                )
+            }
+            RuntimeError::Core(acowork_core::AcoworkError::Provider(pe)) => {
+                let user_message = if pe.user_message.is_empty() {
+                    pe.message.clone()
+                } else {
+                    pe.user_message.clone()
+                };
+                (
+                    user_message,
+                    pe.message.clone(),
+                    format!("{:?}", pe.error_type),
+                )
+            }
+            RuntimeError::StreamError(se) => {
+                let user_message = acowork_core::ProviderError::compute_user_message(
+                    &se.error_type,
+                    None,
+                );
+                (
+                    user_message,
+                    se.message.clone(),
+                    format!("{:?}", se.error_type),
+                )
+            }
+            RuntimeError::ContextOverflow(msg) => {
+                (
+                    "Context too long. History compressed.".to_string(),
+                    msg.clone(),
+                    "ContextOverflow".to_string(),
+                )
+            }
+            RuntimeError::BudgetExceeded(msg) => {
+                (
+                    "Budget exceeded.".to_string(),
+                    msg.clone(),
+                    "BudgetExceeded".to_string(),
+                )
+            }
+            _ => {
+                let detail = self.to_string();
+                (
+                    "Unexpected error. See details.".to_string(),
+                    detail,
+                    "Unknown".to_string(),
+                )
+            }
+        }
+    }
+}

@@ -2040,13 +2040,17 @@ function handleMessageEvent(
 
     case "error": {
       if (!sid) break;
-      // Gateway透传后Runtime原始字段名是content，旧IPC路径重写为message
-      const errorMsg = (data.message ?? data.content) as string;
-      console.error("[ChatStore] Server error:", errorMsg);
+      // Backend sends user_message as content, plus detail and error_type
+      const errorMsg = (data.content ?? data.message) as string;
+      const errorDetail = (data.detail) as string | undefined;
+      const errorType = (data.error_type) as string | undefined;
+      console.error("[ChatStore] Server error:", errorMsg, errorDetail);
       const errMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
         type: "error",
         content: errorMsg as string,
+        errorDetail: errorDetail || undefined,
+        errorType: errorType || undefined,
         timestamp: Date.now(),
         ...getAgentSenderInfo(agentId),
       };

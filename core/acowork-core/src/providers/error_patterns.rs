@@ -8,6 +8,7 @@
 //! All upstream consumers (ReliableProvider, AgentLoop, etc.) should use
 //! these functions instead of implementing their own string matching.
 
+use crate::error::AcoworkError;
 use crate::providers::traits::{ProviderErrorType, StreamError};
 
 /// Check if an error message indicates a context window / token limit overflow.
@@ -111,6 +112,47 @@ pub fn is_non_retryable_rate_limit(msg: &str) -> bool {
     BUSINESS_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Check if an error indicates insufficient balance / quota exhaustion.
+///
+/// Combines:
+/// 1. Generic business/quota exhaustion patterns (e.g. "insufficient_quota")
+/// 2. MiniMax-specific business codes (1113, 1311)
+///
+/// These are NOT retryable — the user needs to add funds or switch provider.
+pub fn is_balance_exhausted(error: &AcoworkError) -> bool {
+    match error {
+        AcoworkError::Provider(provider_err) => {
+            // 1. Check generic patterns (e.g. "insufficient quota", "out of credits")
+            is_non_retryable_rate_limit(&provider_err.message)
+            // 2. Check MiniMax-specific business codes
+            || is_minimax_balance_code(&provider_err.message)
+        }
+        _ => false,
+    }
+}
+
+/// Check for MiniMax-specific balance exhaustion error codes.
+///
+/// These are provider-specific business codes that cannot be matched
+/// by generic patterns alone.
+pub fn is_minimax_balance_code(msg: &str) -> bool {
+    msg.contains("1113") || msg.contains("1311")
+}
+
+/// Unified retryability check for `AcoworkError`.
+///
+/// This is the single source of truth for "should we retry this error?".
+/// It reads the structured `retryable` flag on `ProviderError` (set at
+/// construction time by `from_status_code` or convenience constructors).
+pub fn is_retryable(error: &AcoworkError) -> bool {
+    match error {
+        AcoworkError::Provider(provider_err) => provider_err.retryable,
+        AcoworkError::RateLimited(_) => true,
+        AcoworkError::Io(_) => true,
+        _ => false,
+    }
+}
+
 /// Classify a raw stream error string into a structured `StreamError`.
 ///
 /// This is the unified entry point for converting unstructured error
@@ -151,6 +193,55 @@ pub fn classify_stream_error(msg: &str) -> StreamError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::AcoworkError;
+    use crate::providers::traits::ProviderError;
+
+    #[test]
+    fn test_is_balance_exhausted_generic() {
+        let err = AcoworkError::Provider(ProviderError::unknown(
+            "insufficient_quota".to_string(),
+        ));
+        assert!(is_balance_exhausted(&err));
+
+        let err = AcoworkError::Provider(ProviderError::unknown(
+            "out of credits".to_string(),
+        ));
+        assert!(is_balance_exhausted(&err));
+    }
+
+    #[test]
+    fn test_is_balance_exhausted_minimax_codes() {
+        let err = AcoworkError::Provider(ProviderError::unknown(
+            "Error code 1113: balance exhausted".to_string(),
+        ));
+        assert!(is_balance_exhausted(&err));
+
+        let err = AcoworkError::Provider(ProviderError::unknown(
+            "Code 1311: insufficient balance".to_string(),
+        ));
+        assert!(is_balance_exhausted(&err));
+    }
+
+    #[test]
+    fn test_is_balance_exhausted_non_matching() {
+        let err = AcoworkError::Provider(ProviderError::from_status_code(
+            500,
+            "500 internal error".to_string(),
+        ));
+        assert!(!is_balance_exhausted(&err));
+    }
+
+    #[test]
+    fn test_is_retryable() {
+        let err = AcoworkError::Provider(ProviderError::network("timeout".to_string()));
+        assert!(is_retryable(&err));
+
+        let err = AcoworkError::Provider(ProviderError::from_status_code(
+            401,
+            "401 unauthorized".to_string(),
+        ));
+        assert!(!is_retryable(&err));
+    }
 
     #[test]
     fn test_context_overflow_detection() {

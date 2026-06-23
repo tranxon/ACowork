@@ -766,10 +766,13 @@ impl SessionTask {
                                             "SessionTask agent loop error (replay)"
                                         );
                                         if let Some(ref tx) = chunk_tx {
+                                            let (user_message, detail, error_type) = e.error_info();
                                             let event = SessionChunkEvent {
                                                 session_id: session_id.clone(),
                                                 event: ChunkEvent::Error {
-                                                    message: format!("Error: {}", e),
+                                                    user_message,
+                                                    detail,
+                                                    error_type,
                                                     message_id: msg_id.clone(),
                                                 },
                                             };
@@ -1069,10 +1072,13 @@ impl SessionTask {
                                 "SessionTask agent loop error"
                             );
                             if let Some(ref tx) = chunk_tx {
+                                let (user_message, detail, error_type) = e.error_info();
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
                                     event: ChunkEvent::Error {
-                                        message: format!("Error: {}", e),
+                                        user_message,
+                                        detail,
+                                        error_type,
                                         message_id,
                                     },
                                 };

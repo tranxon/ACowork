@@ -27,3 +27,5 @@ chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+grafeo-common.workspace = true
+async-trait.workspace = true

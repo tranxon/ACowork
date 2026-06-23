@@ -21,7 +21,7 @@ pub mod triple_extraction;
 pub use ambiguous::AmbiguousConflict;
 pub use conflict_llm::{ConflictClassification, LlmConflictType, classify_conflict};
 pub use generalization::{
-    BehaviorPattern, GeneralizationConfig, GeneralizationResult, PatternCategory,
+    BehaviorPattern, EmbeddingFn, GeneralizationConfig, GeneralizationResult, PatternCategory,
     detect_simple_patterns, discover_patterns_llm,
 };
 pub use instant::{ConflictCandidate, ConflictResolutionDetail, MemoryStoreInput, ProcessResult};

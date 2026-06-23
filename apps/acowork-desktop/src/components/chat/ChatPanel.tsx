@@ -1840,7 +1840,19 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
               <div className="flex items-start gap-2 min-w-0">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                <div className="min-w-0 whitespace-pre-wrap break-words">{message.content}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                  {message.errorDetail && (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-300 dark:text-zinc-500 dark:hover:text-zinc-400 select-none">
+                        Details
+                      </summary>
+                      <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-all">
+                        {message.errorDetail}
+                      </pre>
+                    </details>
+                  )}
+                </div>
               </div>
             </div>
           </div>

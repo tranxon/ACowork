@@ -301,6 +301,10 @@ export interface ChatMessage {
   imageUrls?: string[];
   /** For type=compaction: structured metadata parsed from CompactionEventMeta */
   compactionMeta?: CompactionEventMeta;
+  /** For type=error: raw error detail (shown in expandable "Details" section) */
+  errorDetail?: string;
+  /** For type=error: error type string for conditional rendering */
+  errorType?: string;
 }
 
 /** Compaction event metadata (mirrors backend `CompactionEventMeta`).

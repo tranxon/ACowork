@@ -229,14 +229,7 @@ impl Provider for OllamaProvider {
             })?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let retry_after = crate::providers::parse_retry_after_header(response.headers());
-            let body = response.text().await.unwrap_or_default();
-            let mut err = acowork_core::ProviderError::from_status_code(
-                status.as_u16(),
-                format!("Ollama API error: {status} — {body}"),
-            );
-            err.retry_after_ms = retry_after;
+            let err = crate::providers::from_http_response(response).await;
             return Err(acowork_core::AcoworkError::Provider(err));
         }
 

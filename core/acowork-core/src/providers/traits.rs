@@ -36,8 +36,13 @@ pub enum ProviderErrorType {
 /// Structured error type for LLM provider failures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderError {
-    /// Human-readable error message.
+    /// Raw error message (includes API response body, status code, etc.).
+    /// Shown in the frontend "Details" expandable section.
     pub message: String,
+    /// User-friendly error summary, generated from `error_type`.
+    /// Shown by default in the frontend. Empty string means "use `message`".
+    #[serde(default)]
+    pub user_message: String,
     /// HTTP status code, if the error originated from an HTTP response.
     pub status_code: Option<u16>,
     /// Classified error type.
@@ -51,8 +56,52 @@ pub struct ProviderError {
 }
 
 impl ProviderError {
+    /// Generate a user-friendly error summary from `error_type` and metadata.
+    ///
+    /// This is the single source of truth for user-facing error text.
+    /// The raw API response body is kept separately in `message` for the
+    /// frontend "Details" expandable section.
+    pub fn compute_user_message(error_type: &ProviderErrorType, retry_after_ms: Option<u64>) -> String {
+        match error_type {
+            ProviderErrorType::RateLimited => {
+                if let Some(ms) = retry_after_ms {
+                    format!("Rate limited. Retry in ~{}s.", ms / 1000)
+                } else {
+                    "Rate limited. Please retry shortly.".to_string()
+                }
+            }
+            ProviderErrorType::PaymentRequired => {
+                "Insufficient balance. Please top up or switch provider.".to_string()
+            }
+            ProviderErrorType::Unauthorized => {
+                "Invalid API key. Check provider settings.".to_string()
+            }
+            ProviderErrorType::ServerError => {
+                "Server error. Please retry.".to_string()
+            }
+            ProviderErrorType::NetworkError => {
+                "Network error. Check connection.".to_string()
+            }
+            ProviderErrorType::ContextOverflow => {
+                "Context too long. History compressed.".to_string()
+            }
+            ProviderErrorType::StreamDecodeError => {
+                "Stream error. Retrying.".to_string()
+            }
+            ProviderErrorType::StreamTimeout => {
+                "Response timeout.".to_string()
+            }
+            ProviderErrorType::ClientError => {
+                "Invalid request. Check model/tool config.".to_string()
+            }
+            ProviderErrorType::Unknown => {
+                "Unexpected error. See details.".to_string()
+            }
+        }
+    }
+
     /// Build a `ProviderError` from an HTTP status code and message.
-    /// Automatically infers `error_type` and `retryable`.
+    /// Automatically infers `error_type`, `retryable`, and `user_message`.
     pub fn from_status_code(status: u16, message: String) -> Self {
         let (error_type, retryable) = match status {
             402 => (ProviderErrorType::PaymentRequired, false),
@@ -63,6 +112,7 @@ impl ProviderError {
             _ => (ProviderErrorType::Unknown, false),
         };
         Self {
+            user_message: Self::compute_user_message(&error_type, None),
             message,
             status_code: Some(status),
             error_type,
@@ -74,6 +124,7 @@ impl ProviderError {
     /// Convenience constructor for network-level errors.
     pub fn network(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::NetworkError, None),
             message,
             status_code: None,
             error_type: ProviderErrorType::NetworkError,
@@ -85,6 +136,7 @@ impl ProviderError {
     /// Convenience constructor for unclassified errors.
     pub fn unknown(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::Unknown, None),
             message,
             status_code: None,
             error_type: ProviderErrorType::Unknown,
@@ -96,6 +148,7 @@ impl ProviderError {
     /// Convenience constructor for authentication/authorization errors.
     pub fn unauthorized(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::Unauthorized, None),
             message,
             status_code: Some(401),
             error_type: ProviderErrorType::Unauthorized,
@@ -107,6 +160,7 @@ impl ProviderError {
     /// Convenience constructor for rate-limited errors.
     pub fn rate_limited(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::RateLimited, None),
             message,
             status_code: Some(429),
             error_type: ProviderErrorType::RateLimited,
@@ -118,6 +172,7 @@ impl ProviderError {
     /// Convenience constructor for server-side errors.
     pub fn server_error(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::ServerError, None),
             message,
             status_code: Some(500),
             error_type: ProviderErrorType::ServerError,
@@ -130,6 +185,7 @@ impl ProviderError {
     /// These are NOT retryable — the user needs to add funds or upgrade their plan.
     pub fn payment_required(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::PaymentRequired, None),
             message,
             status_code: Some(402),
             error_type: ProviderErrorType::PaymentRequired,
@@ -142,6 +198,7 @@ impl ProviderError {
     /// Not directly retryable — requires history trimming before retry.
     pub fn context_overflow(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::ContextOverflow, None),
             message,
             status_code: None,
             error_type: ProviderErrorType::ContextOverflow,
@@ -154,6 +211,7 @@ impl ProviderError {
     /// These are retryable — re-issuing the same request may succeed.
     pub fn stream_decode(message: String) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::StreamDecodeError, None),
             message,
             status_code: None,
             error_type: ProviderErrorType::StreamDecodeError,
@@ -166,12 +224,19 @@ impl ProviderError {
     /// These are retryable — the provider may have been temporarily overloaded.
     pub fn stream_timeout(timeout_secs: u64) -> Self {
         Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::StreamTimeout, None),
             message: format!("Stream timeout: no data received for {}s", timeout_secs),
             status_code: None,
             error_type: ProviderErrorType::StreamTimeout,
             retryable: true,
             retry_after_ms: None,
         }
+    }
+
+    /// Refresh `user_message` after `retry_after_ms` is set (e.g. from HTTP headers).
+    /// Call this after mutating `retry_after_ms` to keep the user message in sync.
+    pub fn refresh_user_message(&mut self) {
+        self.user_message = Self::compute_user_message(&self.error_type, self.retry_after_ms);
     }
 }
 

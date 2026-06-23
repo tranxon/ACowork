@@ -543,7 +543,7 @@ impl Provider for OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let retry_after = crate::providers::parse_retry_after_header(response.headers());
+            let headers = response.headers().clone();
             let body = response.text().await.unwrap_or_default();
 
             // Fallback: if the error is 400/422 and reasoning_effort is present,
@@ -607,11 +607,11 @@ impl Provider for OpenAIProvider {
                 // Fallback also failed — fall through to error with the fallback response
                 let f_status = fallback_response.status();
                 let f_body = fallback_response.text().await.unwrap_or_default();
-                let mut err = acowork_core::ProviderError::from_status_code(
+                let err = crate::providers::from_http_parts(
                     f_status.as_u16(),
                     format!("OpenAI API error: {f_status} — {f_body}"),
+                    &headers,
                 );
-                err.retry_after_ms = retry_after;
                 return Err(acowork_core::AcoworkError::Provider(err));
             }
 
@@ -640,11 +640,11 @@ impl Provider for OpenAIProvider {
                 }
             }
 
-            let mut err = acowork_core::ProviderError::from_status_code(
+            let err = crate::providers::from_http_parts(
                 status.as_u16(),
                 format!("OpenAI API error: {status} — {body}"),
+                &headers,
             );
-            err.retry_after_ms = retry_after;
             return Err(acowork_core::AcoworkError::Provider(err));
         }
 
@@ -712,7 +712,7 @@ impl Provider for OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let retry_after = crate::providers::parse_retry_after_header(response.headers());
+            let headers = response.headers().clone();
             let body = response.text().await.unwrap_or_default();
 
             // Progressive fallback chain for 400/422 errors.
@@ -810,11 +810,11 @@ impl Provider for OpenAIProvider {
                     "All streaming fallbacks failed — full diagnostics"
                 );
 
-                let mut err = acowork_core::ProviderError::from_status_code(
+                let err = crate::providers::from_http_parts(
                     s3.as_u16(),
                     format!("OpenAI API error: {s3} - {b3}"),
+                    &headers,
                 );
-                err.retry_after_ms = retry_after;
                 return Err(acowork_core::AcoworkError::Provider(err));
             }
 
@@ -841,11 +841,11 @@ impl Provider for OpenAIProvider {
                 }
             }
 
-            let mut err = acowork_core::ProviderError::from_status_code(
+            let err = crate::providers::from_http_parts(
                 status.as_u16(),
                 format!("OpenAI API error: {status} - {body}"),
+                &headers,
             );
-            err.retry_after_ms = retry_after;
             return Err(acowork_core::AcoworkError::Provider(err));
         }
 

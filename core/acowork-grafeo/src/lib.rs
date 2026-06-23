@@ -38,8 +38,9 @@ pub use conflict::{
 };
 pub use consolidation::{
     BehaviorPattern, ConflictCandidate, ConsolidationRun, ConsolidationScheduler,
-    GeneralizationConfig, GeneralizationResult, MemoryStoreInput, OfflineConsolidationConfig,
-    OfflineConsolidationResult, PatternCategory, SchedulerConfig, TriggerReason,
+    EmbeddingFn, GeneralizationConfig, GeneralizationResult, MemoryStoreInput,
+    OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory, SchedulerConfig,
+    TriggerReason,
 };
 pub use engineering::{
     CapacityConfig, CapacityStatus, ConcurrencyConfig, EmbeddingLevel, HealthCheckResult,

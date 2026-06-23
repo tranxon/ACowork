@@ -643,7 +643,9 @@ impl AgentLoop {
                     current_model
                 );
                 let _ = self.core.try_send_chunk(ChunkEvent::Error {
-                    message: msg,
+                    user_message: msg,
+                    detail: String::new(),
+                    error_type: "ContextOverflow".to_string(),
                     message_id: format!("caps-missing-{}", current_model),
                 });
             }

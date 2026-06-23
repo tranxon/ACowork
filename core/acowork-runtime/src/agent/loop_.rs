@@ -108,7 +108,16 @@ pub enum ChunkEvent {
     /// with preceding content chunks)
     Done { content: String, message_id: String },
     /// Agent error (routed through chunk channel for ordering guarantee)
-    Error { message: String, message_id: String },
+    Error {
+        /// User-friendly error summary (shown by default)
+        user_message: String,
+        /// Raw error detail (shown in expandable "Details" section)
+        detail: String,
+        /// Error type string for frontend conditional rendering
+        error_type: String,
+        /// Message ID for deduplication
+        message_id: String,
+    },
     /// LLM asks the user a question with pre-defined options.
     /// The Desktop App renders an AskQuestionCard with options + "Other" textarea;
     /// the Runtime pauses until Gateway delivers an InboundMessage::QuestionAnswer.

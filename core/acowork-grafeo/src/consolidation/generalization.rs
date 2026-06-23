@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Shared embedding function type used across consolidation pipelines.
-type EmbeddingFn = Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>;
+pub type EmbeddingFn = Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>;
 
 use chrono::{DateTime, Utc};
 use grafeo_common::types::Value;

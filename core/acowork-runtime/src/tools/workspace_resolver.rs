@@ -172,7 +172,6 @@ impl WorkspaceResolver {
     /// Create a resolver directly from a list of workspace directories.
     /// For tests only — bypasses disk I/O so tests can inject arbitrary
     /// workspace configurations without creating `agent_workspaces.json`.
-    #[cfg(test)]
     pub fn new_for_test(allowed_dirs: Vec<WorkspaceDir>) -> Self {
         Self {
             agent_home: "/tmp/agent-home".to_string(),
