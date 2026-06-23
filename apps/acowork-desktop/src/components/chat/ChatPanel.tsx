@@ -318,12 +318,13 @@ export function ChatPanel() {
     try {
       const keys = await invoke<VaultKeyEntry[]>("list_keys");
 
-      // Build (provider, configuredModelIds) pairs, skipping empty entries
+      // Build (provider, configuredModelIds, modelCapabilities) tuples, skipping empty entries
       const entries = keys.map(key => ({
         provider: key.provider,
         modelIds: key.models?.length
           ? key.models
           : key.default_model ? [key.default_model] : [],
+        modelCapabilities: key.model_capabilities,
       })).filter(e => e.modelIds.length > 0);
 
       // Fetch capabilities for all providers in parallel
@@ -344,6 +345,7 @@ export function ChatPanel() {
             tool_call: info?.tool_call ?? undefined,
             reasoning: info?.reasoning ?? undefined,
             input_modalities: info?.input_modalities ?? undefined,
+            default_reasoning_effort: entry.modelCapabilities?.[modelId]?.default_reasoning_effort ?? undefined,
           });
         }
       });

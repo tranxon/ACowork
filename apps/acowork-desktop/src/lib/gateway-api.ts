@@ -3,6 +3,7 @@
 import type {
   ProviderModelsResponse,
   ProviderListEntry,
+  ModelInfo,
   BackendUserProfile,
   UserProfileListResponse,
   CreateUserRequest,
@@ -33,6 +34,25 @@ export async function fetchProviderModels(
   if (!resp.ok)
     throw new Error(`Failed to fetch models for ${providerId}: ${resp.status}`);
   return resp.json();
+}
+
+/** Discover models from a custom provider's base URL (OpenAI-compatible /v1/models) */
+export async function discoverModels(
+  baseUrl: string,
+  apiKey?: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<ModelInfo[]> {
+  const resp = await fetch(`${gatewayUrl}/api/models/discover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey || undefined }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: resp.statusText }));
+    throw new Error((err as { error?: string }).error ?? `Discover failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  return data.models ?? [];
 }
 
 // ── User Profile API ────────────────────────────────────────────────────

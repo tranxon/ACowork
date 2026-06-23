@@ -283,7 +283,22 @@
         "localProviderNoKey": "Local provider — no API key needed",
         "compactModelHint": "Compact model for summarization",
         "defaultReasoningEffort": "Default reasoning effort (applies to all reasoning models)",
-        "useModelDefault": "Use model default"
+        "useModelDefault": "Use model default",
+        "custom": "Custom",
+        "customProvider": "Custom Provider",
+        "customProviders": "Custom Providers",
+        "addCustomProvider": "Add Custom Provider",
+        "customProviderName": "Provider Name",
+        "customProviderId": "Provider ID",
+        "customBaseUrl": "Base URL",
+        "customProviderNameRequired": "Provider name is required",
+        "customProviderIdRequired": "Provider ID is required",
+        "customBaseUrlRequired": "Base URL is required",
+        "discoveringModels": "Discovering models...",
+        "discoverFailed": "Failed to discover models",
+        "providerIdExists": "Provider ID already exists",
+        "customProviderNoKey": "Custom provider — uses base URL",
+        "optional": "optional"
     },
     "harnessSearch": {
         "searchProviderManagement": "Search Provider Management",

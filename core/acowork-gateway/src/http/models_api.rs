@@ -1,12 +1,13 @@
-//! Models API — provider model lists (offline-only)
+//! Models API — provider model lists and model discovery
 //!
 //! Endpoints:
-//!   GET /api/models              — list all providers with models
-//!   GET /api/models/{provider}   — get models for a specific provider
+//!   GET  /api/models              — list all providers with models
+//!   POST /api/models/discover     — discover models from a custom base URL
+//!   GET  /api/models/{provider}   — get models for a specific provider
 //!
 //! Data source: offline_providers.json loaded at startup into a static cache.
 
-use axum::{Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::{get, post}};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -29,7 +30,7 @@ const LOCAL_PROVIDERS: &[(&str, &str, &str)] = &[
 
 /// Check whether a provider ID refers to a local (self-hosted) provider.
 ///
-/// Used by vault_api.rs to skip API key validation for local providers,
+/// Used by provider_api.rs to skip API key validation for local providers,
 /// and by the frontend to determine UI treatment (no key input, local badge).
 pub fn is_local_provider(id: &str) -> bool {
     LOCAL_PROVIDERS.iter().any(|(pid, _, _)| *pid == id)
@@ -117,7 +118,127 @@ pub struct ProviderModels {
 pub fn models_routes() -> Router<AppState> {
     Router::new()
         .route("/api/models", get(list_all_providers))
+        .route("/api/models/discover", post(discover_models))
         .route("/api/models/{provider}", get(get_provider_models))
+}
+
+// ── Model discovery ─────────────────────────────────────────────────
+
+/// Request body for `POST /api/models/discover`.
+///
+/// Queries an OpenAI-compatible `{base_url}/models` endpoint to discover
+/// available models. Used by the frontend when adding a custom provider.
+#[derive(Deserialize)]
+struct DiscoverModelsRequest {
+    /// Base URL of the OpenAI-compatible API (e.g. "https://my-proxy.com/v1")
+    base_url: String,
+    /// Optional API key for authentication
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+/// `POST /api/models/discover` — discover models from an OpenAI-compatible API.
+///
+/// Queries `{base_url}/models` with a 5-second timeout.
+/// If `api_key` is provided, sends `Authorization: Bearer {api_key}` header.
+/// Returns the discovered model list (enriched from offline data when available).
+async fn discover_models(
+    Json(body): Json<DiscoverModelsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if body.base_url.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "base_url must not be empty"})),
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to build HTTP client: {}", e)})),
+            )
+        })?;
+
+    let url = format!("{}/models", body.base_url.trim_end_matches('/'));
+    let mut req = client.get(&url);
+    if let Some(ref key) = body.api_key {
+        if !key.is_empty() {
+            req = req.bearer_auth(key);
+        }
+    }
+
+    let resp = req.send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("Failed to reach {}: {}", url, e)})),
+        )
+    })?;
+
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("Upstream returned HTTP {}", resp.status())})),
+        ));
+    }
+
+    let body_val: serde_json::Value = resp.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("Failed to parse response: {}", e)})),
+        )
+    })?;
+
+    let data = body_val
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Response missing 'data' array"})),
+            )
+        })?;
+
+    let mut models: Vec<ModelInfo> = data
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?;
+            Some(ModelInfo {
+                id: id.to_string(),
+                name: id.to_string(),
+                family: None,
+                reasoning: None,
+                tool_call: None,
+                attachment: None,
+                temperature: None,
+                release_date: None,
+                context_window: None,
+                max_tokens: None,
+                max_input_tokens: None,
+                knowledge: None,
+                input_cost: None,
+                output_cost: None,
+                input_modalities: None,
+                output_modalities: None,
+            })
+        })
+        .collect();
+
+    // Enrich discovered models with offline capabilities when available.
+    for model in &mut models {
+        enrich_model_from_offline(model);
+    }
+
+    // Sort: reasoning models first, then alphabetically by id
+    models.sort_by(|a, b| {
+        let a_reasoning = a.reasoning.unwrap_or(false);
+        let b_reasoning = b.reasoning.unwrap_or(false);
+        b_reasoning.cmp(&a_reasoning).then(a.id.cmp(&b.id))
+    });
+
+    Ok(Json(serde_json::json!({"models": models})))
 }
 
 // ── Offline data ──────────────────────────────────────────────────────

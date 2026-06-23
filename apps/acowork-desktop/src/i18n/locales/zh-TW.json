@@ -281,7 +281,22 @@
         "localProviderNoKey": "Local provider — no API key needed",
         "compactModelHint": "Compact model for summarization",
         "defaultReasoningEffort": "預設思考深度（對該服務商所有推理模型生效）",
-        "useModelDefault": "使用模型預設"
+        "useModelDefault": "使用模型預設",
+        "custom": "自訂",
+        "customProvider": "自訂服務商",
+        "customProviders": "自訂服務商",
+        "addCustomProvider": "新增自訂服務商",
+        "customProviderName": "服務商名稱",
+        "customProviderId": "服務商 ID",
+        "customBaseUrl": "介面位址",
+        "customProviderNameRequired": "請輸入服務商名稱",
+        "customProviderIdRequired": "請輸入服務商 ID",
+        "customBaseUrlRequired": "請輸入介面位址",
+        "discoveringModels": "正在發現模型...",
+        "discoverFailed": "模型發現失敗",
+        "providerIdExists": "服務商 ID 已存在",
+        "customProviderNoKey": "自訂服務商 — 使用介面位址",
+        "optional": "可選"
     },
     "harnessSearch": {
         "searchProviderManagement": "搜尋服務提供者管理",

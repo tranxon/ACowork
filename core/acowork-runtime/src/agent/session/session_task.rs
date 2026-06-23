@@ -1152,19 +1152,28 @@ impl SessionTask {
                     // Reset reasoning_effort to new model's default (clear user override).
                     // Three-level priority chain:
                     // 1. provider capabilities default_reasoning_effort
-                    // 2. None (provider does not support thinking control)
+                    // 2. Auto (if supports_reasoning is true)
+                    // 3. None (provider does not support thinking control)
                     // No persisted session value applies on model switch — the model changed.
-                    let provider_default = agent_loop
-                        .core
-                        .get_model_capabilities(&model)
-                        .and_then(|c| c.default_reasoning_effort);
+                    let caps = agent_loop.core.get_model_capabilities(&model);
+                    let provider_default = caps
+                        .as_ref()
+                        .and_then(|c| c.default_reasoning_effort.clone());
                     let default_effort = provider_default
                         .as_deref()
-                        .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose);
-                    agent_loop.session.set_reasoning_effort(default_effort);
+                        .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
+                        .or_else(|| {
+                            if caps.as_ref().and_then(|c| c.supports_reasoning).unwrap_or(false) {
+                                Some(acowork_core::providers::traits::ReasoningEffort::Auto)
+                            } else {
+                                None
+                            }
+                        });
+                    agent_loop.session.set_reasoning_effort(default_effort.clone());
                     // Persist new effort to ConversationSession so resume is consistent.
                     if let Some(conv) = agent_loop.session.conversation() {
-                        conv.update_reasoning_effort(provider_default);
+                        let effort_str = default_effort.as_ref().map(|e| e.to_string());
+                        conv.update_reasoning_effort(effort_str);
                     }
                 }
                 Some(SessionMessage::ReasoningEffort { effort }) => {

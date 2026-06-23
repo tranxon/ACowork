@@ -283,7 +283,22 @@
         "localProviderNoKey": "本地服务商 — 无需 API 密钥",
         "compactModelHint": "用于摘要的精简模型",
         "defaultReasoningEffort": "默认思考深度（对该服务商所有推理模型生效）",
-        "useModelDefault": "使用模型默认"
+        "useModelDefault": "使用模型默认",
+        "custom": "自定义",
+        "customProvider": "自定义服务商",
+        "customProviders": "自定义服务商",
+        "addCustomProvider": "添加自定义服务商",
+        "customProviderName": "服务商名称",
+        "customProviderId": "服务商 ID",
+        "customBaseUrl": "接口地址",
+        "customProviderNameRequired": "请输入服务商名称",
+        "customProviderIdRequired": "请输入服务商 ID",
+        "customBaseUrlRequired": "请输入接口地址",
+        "discoveringModels": "正在发现模型...",
+        "discoverFailed": "模型发现失败",
+        "providerIdExists": "服务商 ID 已存在",
+        "customProviderNoKey": "自定义服务商 — 使用接口地址",
+        "optional": "可选"
     },
     "harnessSearch": {
         "searchProviderManagement": "搜索服务商管理",

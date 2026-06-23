@@ -5,9 +5,9 @@ import { cn } from "../../lib/utils";
 import { inputBase, selectBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { needsApiKey, keyPlaceholder, isLocalProvider } from "../../lib/providers";
-import { fetchProviderModels } from "../../lib/gateway-api";
+import { fetchProviderModels, discoverModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, Search, Globe, BookOpen, FileText, PenTool, Star, ChevronsDown } from "lucide-react";
+import { Monitor, Search, Globe, BookOpen, FileText, PenTool, Star, ChevronsDown, Plus } from "lucide-react";
 import { useMcpStore } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { SearchTab } from "./SearchTab";
@@ -95,6 +95,19 @@ function ProvidersTab() {
   const [editSupportsToolCalling, setEditSupportsToolCalling] = useState(true);
   const [editCompactModel, setEditCompactModel] = useState("");
   const [editDefaultReasoningEffort, setEditDefaultReasoningEffort] = useState("auto");
+
+  // Custom provider dialog state
+  const [showCustomDialog, setShowCustomDialog] = useState(false);
+  const [customProviderName, setCustomProviderName] = useState("");
+  const [customProviderId, setCustomProviderId] = useState("");
+  const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [customApiKey, setCustomApiKey] = useState("");
+  const [customModels, setCustomModels] = useState<string[]>([]);
+  const [customAvailableModels, setCustomAvailableModels] = useState<ModelInfo[]>([]);
+  const [customModelsLoading, setCustomModelsLoading] = useState(false);
+  const [customDiscoverError, setCustomDiscoverError] = useState<string | null>(null);
+  const [customModelSearchTerm, setCustomModelSearchTerm] = useState("");
+  const [customTesting, setCustomTesting] = useState(false);
   // Gateway config for default provider indication
   const [config, setConfig] = useState<GatewayConfig | null>(null);
 
@@ -107,18 +120,21 @@ function ProvidersTab() {
   // Search term for filtering available providers (both local and remote)
   const [providerSearchTerm, setProviderSearchTerm] = useState("");
 
-  // Split providers into local / remote for UI grouping
-  const { localProviders, remoteProviders } = useMemo(() => {
+  // Split providers into local / custom / remote for UI grouping
+  const { localProviders, remoteProviders, customProviders } = useMemo(() => {
     const local: ProviderListEntry[] = [];
     const remote: ProviderListEntry[] = [];
+    const custom: ProviderListEntry[] = [];
     for (const p of dynamicProviders) {
-      if (p.local || isLocalProvider(p.id)) {
+      if (p.custom) {
+        custom.push(p);
+      } else if (p.local || isLocalProvider(p.id)) {
         local.push(p);
       } else {
         remote.push(p);
       }
     }
-    return { localProviders: local, remoteProviders: remote };
+    return { localProviders: local, remoteProviders: remote, customProviders: custom };
   }, [dynamicProviders]);
 
   // Filter remote providers by search term (match name or id)
@@ -453,6 +469,85 @@ function ProvidersTab() {
     }
   };
 
+  // Custom provider: auto-slug from name
+  const slugifyProviderId = (name: string): string => {
+    return "custom-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  };
+
+  // Custom provider: discover models from base URL
+  const handleDiscoverCustomModels = async () => {
+    const url = customBaseUrl.trim();
+    if (!url) return;
+    setCustomModelsLoading(true);
+    setCustomDiscoverError(null);
+    setCustomAvailableModels([]);
+    try {
+      const models = await discoverModels(url, customApiKey.trim() || undefined);
+      setCustomAvailableModels(models);
+    } catch (e: any) {
+      setCustomDiscoverError(e?.message || String(e));
+    } finally {
+      setCustomModelsLoading(false);
+    }
+  };
+
+  // Custom provider: save
+  const handleAddCustom = async () => {
+    const name = customProviderName.trim();
+    const id = customProviderId.trim();
+    const url = customBaseUrl.trim();
+    if (!name) { alert(t("harness.customProviderNameRequired")); return; }
+    if (!id) { alert(t("harness.customProviderIdRequired")); return; }
+    if (!url) { alert(t("harness.customBaseUrlRequired")); return; }
+    // Check ID uniqueness
+    if (dynamicProviders.some(p => p.id === id) || keys.some(k => k.provider === id)) {
+      alert(t("harness.providerIdExists"));
+      return;
+    }
+    setCustomTesting(true);
+    try {
+      // Build per-model capabilities map
+      const modelCapabilities: ModelCapabilitiesMap = {};
+      if (customModels.length > 0) {
+        for (const modelId of customModels) {
+          const mi = customAvailableModels.find(m => m.id === modelId);
+          modelCapabilities[modelId] = {
+            context_window: mi?.context_window ?? 128000,
+            max_output_tokens: mi?.max_tokens ?? 4096,
+            supports_tool_calling: mi?.tool_call ?? true,
+            supports_reasoning: mi?.reasoning ?? undefined,
+            modalities: mi?.input_modalities?.length ? { input: mi.input_modalities } : undefined,
+          };
+        }
+      }
+      await invoke("add_key", {
+        provider: id,
+        key: customApiKey.trim() || "",
+        baseUrl: url,
+        models: customModels.length > 0 ? customModels : undefined,
+        modelCapabilities,
+        custom: true,
+      });
+      setShowCustomDialog(false);
+      setCustomProviderName("");
+      setCustomProviderId("");
+      setCustomBaseUrl("");
+      setCustomApiKey("");
+      setCustomModels([]);
+      setCustomAvailableModels([]);
+      setCustomDiscoverError(null);
+      setCustomModelSearchTerm("");
+      await fetchKeys();
+      await fetchConfig();
+      await loadProviders();
+      window.dispatchEvent(new CustomEvent('models-added'));
+    } catch (e) {
+      alert(`${t("harness.failedAddKey")}: ${e}`);
+    } finally {
+      setCustomTesting(false);
+    }
+  };
+
   return (
     <div className="max-w-2xl space-y-4">
       <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
@@ -471,6 +566,7 @@ function ProvidersTab() {
                 const provider = dynamicProviders.find((p) => p.id === keyEntry.provider);
                 const providerName = provider?.name || keyEntry.provider;
                 const isLocal = keyEntry.local || isLocalProvider(keyEntry.provider);
+                const isCustom = keyEntry.custom || provider?.custom;
 
                 return (
                   <div key={keyEntry.provider} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
@@ -491,7 +587,13 @@ function ProvidersTab() {
                           </button>
                         </Tooltip>
                         <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harness.active")}</span>
-                        {isLocal ? (
+                        {isCustom ? (
+                          <Tooltip content={t("harness.customProviderNoKey")} variant="plain">
+                            <span className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                              🔧 {t("harness.custom")}
+                            </span>
+                          </Tooltip>
+                        ) : isLocal ? (
                           <Tooltip content={t("harness.localProviderNoKey")} variant="plain">
                             <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
                               🏠 {t("harness.local")}
@@ -591,6 +693,67 @@ function ProvidersTab() {
                   </div>
                 </div>
               )}
+
+              {/* ── Custom Providers (configured) ── */}
+              {customProviders.length > 0 && (
+                <div>
+                  <h4 className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🔧 {t("harness.customProviders")}</h4>
+                  <div className="space-y-1">
+                    {customProviders.map((item) => {
+                      const providerId = item.id;
+                      const providerName = item.name || providerId;
+                      const keyEntry = keys.find((k) => k.provider === providerId);
+                      // Only show unconfigured custom providers (configured ones appear in the top section)
+                      if (keyEntry) return null;
+                      return (
+                        <div key={providerId} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+                          <div className="flex items-center justify-between">
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-medium">{providerName}</span>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setNewProvider(providerId);
+                                setNewBaseUrl(item.api ?? "");
+                                setNewKey("");
+                                fetchModels(providerId).then((models) => setAvailableModels(models));
+                                setNewContextWindow("");
+                                setNewMaxOutputTokens("");
+                                setNewSupportsToolCalling(true);
+                                setShowAddDialog(true);
+                              }}
+                              className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                            >
+                              {t("harness.connect")}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ── Add Custom Provider ── */}
+              <div>
+                <button
+                  onClick={() => {
+                    setCustomProviderName("");
+                    setCustomProviderId("");
+                    setCustomBaseUrl("");
+                    setCustomApiKey("");
+                    setCustomModels([]);
+                    setCustomAvailableModels([]);
+                    setCustomDiscoverError(null);
+                    setCustomModelSearchTerm("");
+                    setShowCustomDialog(true);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-600 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
+                >
+                  <Plus className="h-4 w-4" />
+                  {t("harness.addCustomProvider")}
+                </button>
+              </div>
 
               {/* ── Remote Providers (expandable) ── */}
               {remoteProviders.length > 0 && (
@@ -1339,6 +1502,173 @@ function ProvidersTab() {
                 className="w-20 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-center text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 {t("harness.save")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Provider dialog */}
+      {showCustomDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
+            <h3 className="mb-3 text-sm font-semibold">
+              {t("harness.addCustomProvider")}
+            </h3>
+
+            <div className="space-y-2">
+              {/* Provider Name */}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">{t("harness.customProviderName")}</label>
+                <StyledInput
+                  type="text"
+                  value={customProviderName}
+                  onChange={(e) => {
+                    setCustomProviderName(e.target.value);
+                    setCustomProviderId(slugifyProviderId(e.target.value));
+                  }}
+                  placeholder="e.g. My GPT Proxy"
+                />
+              </div>
+
+              {/* Provider ID */}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">{t("harness.customProviderId")}</label>
+                <StyledInput
+                  type="text"
+                  value={customProviderId}
+                  onChange={(e) => setCustomProviderId(e.target.value)}
+                  placeholder="e.g. custom-my-gpt-proxy"
+                  fontMono
+                />
+              </div>
+
+              {/* Base URL */}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">{t("harness.customBaseUrl")}</label>
+                <StyledInput
+                  type="text"
+                  value={customBaseUrl}
+                  onChange={(e) => setCustomBaseUrl(e.target.value)}
+                  onBlur={() => { if (customBaseUrl.trim()) handleDiscoverCustomModels(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter" && customBaseUrl.trim()) { e.preventDefault(); handleDiscoverCustomModels(); } }}
+                  placeholder="https://api.example.com/v1"
+                  fontMono
+                />
+              </div>
+
+              {/* API Key (optional) */}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">{t("harness.apiKey")} <span className="text-zinc-400">({t("harness.optional")})</span></label>
+                <StyledInput
+                  type="password"
+                  value={customApiKey}
+                  onChange={(e) => setCustomApiKey(e.target.value)}
+                  placeholder="sk-..."
+                />
+              </div>
+
+              {/* Model discovery status */}
+              {customModelsLoading && (
+                <div className="rounded-md bg-zinc-50 px-3 py-2 text-xs text-zinc-500 dark:bg-zinc-900">
+                  {t("harness.discoveringModels")}
+                </div>
+              )}
+              {customDiscoverError && (
+                <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-400">
+                  {t("harness.discoverFailed")}: {customDiscoverError}
+                </div>
+              )}
+
+              {/* Model selection */}
+              {customAvailableModels.length > 0 && (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-500">
+                    {t("harness.defaultModel")} {customModels.length > 0 && <span className="text-accent-green">({customModels.length} {t("harness.selected")})</span>}
+                  </label>
+                  {customModels.length > 0 && (
+                    <div className="mb-1 flex flex-wrap gap-1">
+                      {customModels.map((m) => (
+                        <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
+                          {m}
+                          <button onClick={() => setCustomModels(customModels.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <StyledInput
+                    type="text"
+                    value={customModelSearchTerm}
+                    onChange={(e) => setCustomModelSearchTerm(e.target.value)}
+                    placeholder={t("harness.searchModels")}
+                  />
+                  <div className="mt-1 max-h-40 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
+                    {customAvailableModels
+                      .filter((m) => {
+                        if (!customModelSearchTerm) return true;
+                        const term = customModelSearchTerm.toLowerCase();
+                        return m.id.toLowerCase().includes(term) || m.name.toLowerCase().includes(term);
+                      })
+                      .map((m) => (
+                        <label
+                          key={m.id}
+                          className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={customModels.includes(m.id)}
+                            onChange={() => toggleModel(m.id, customModels, setCustomModels)}
+                            className="accent-[var(--color-accent)]"
+                          />
+                          <div className="flex flex-1 flex-col gap-0.5">
+                            <span className="truncate">{m.name || m.id}</span>
+                            <div className="flex gap-2 text-xs text-zinc-400">
+                              {m.context_window && (
+                                <span>{(m.context_window / 1000).toFixed(0)}K {t("harness.context")}</span>
+                              )}
+                              {m.max_tokens && (
+                                <span>{(m.max_tokens / 1000).toFixed(1)}K {t("harness.maxOutput")}</span>
+                              )}
+                              {m.reasoning && <span>🧠 {t("harness.reasoning")}</span>}
+                              {m.tool_call && <span>🔧 {t("harness.tools")}</span>}
+                            </div>
+                          </div>
+                        </label>
+                      ))}
+                  </div>
+                  <div className="mt-2 flex gap-1">
+                    <StyledInput
+                      type="text"
+                      placeholder={t("harness.customModelPlaceholder")}
+                      className="flex-1"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          const val = (e.target as HTMLInputElement).value.trim();
+                          if (val && !customModels.includes(val)) {
+                            setCustomModels([...customModels, val]);
+                            (e.target as HTMLInputElement).value = "";
+                          }
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                onClick={() => { setShowCustomDialog(false); setCustomDiscoverError(null); }}
+                className="w-20 rounded-md px-3 py-1.5 text-xs font-medium text-center text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                onClick={handleAddCustom}
+                disabled={!customProviderName.trim() || !customProviderId.trim() || !customBaseUrl.trim() || customTesting}
+                className="w-20 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-center text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+              >
+                {customTesting ? t("harness.saving") : t("harness.save")}
               </button>
             </div>
           </div>

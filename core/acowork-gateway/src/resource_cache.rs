@@ -403,15 +403,25 @@ pub fn save_embedding_models(data_dir: &Path, list: &EmbeddingModelsFile) -> Res
 /// Capabilities are sourced from offline_providers.json (models.dev).
 /// Protocol type and default base_url are also looked up from offline data.
 /// User-provided `base_url` overrides the default when present.
+/// When `custom` is true, the provider is user-defined: protocol defaults to
+/// OpenAI-compatible and offline data lookup is skipped.
 pub(crate) fn build_provider_list_item(
     name: &str,
     base_url_override: Option<&str>,
     model_ids: &[String],
     compact_model: Option<&str>,
     max_output_tokens: u64,
+    custom: bool,
 ) -> ProviderListItem {
-    let (protocol_type, api_base_url) =
-        crate::http::models_api::lookup_protocol_info(name, None);
+    use acowork_core::protocol::ProtocolType;
+
+    let (protocol_type, api_base_url) = if custom {
+        // Custom providers always use OpenAI-compatible protocol;
+        // base_url must be provided by the user.
+        (ProtocolType::OpenAI, None)
+    } else {
+        crate::http::models_api::lookup_protocol_info(name, None)
+    };
     let base_url = base_url_override
         .filter(|u| !u.is_empty())
         .map(|u| u.to_string())
@@ -421,7 +431,27 @@ pub(crate) fn build_provider_list_item(
     let models: Vec<ProviderModelEntry> = model_ids
         .iter()
         .map(|model_id| {
-            let capabilities =
+            let capabilities = if custom {
+                // Custom providers have no offline data — use sensible defaults.
+                // User-provided capabilities overrides are merged later via
+                // merge_user_capabilities in add_provider / update_provider.
+                acowork_core::protocol::ModelCapabilitiesInfo {
+                    context_window: 128_000,
+                    max_output_tokens: 16_384,
+                    max_input_tokens: None,
+                    supports_tool_calling: true,
+                    supports_reasoning: None,
+                    supports_attachment: None,
+                    supports_temperature: None,
+                    cost: None,
+                    modalities: None,
+                    name: None,
+                    family: None,
+                    knowledge_cutoff: None,
+                    default_reasoning_effort: None,
+                    thinking_mode: None,
+                }
+            } else {
                 crate::http::models_api::lookup_model_capabilities(name, model_id)
                     .unwrap_or(acowork_core::protocol::ModelCapabilitiesInfo {
                         context_window: 128_000,
@@ -438,7 +468,8 @@ pub(crate) fn build_provider_list_item(
                         knowledge_cutoff: None,
                         default_reasoning_effort: None,
                         thinking_mode: None,
-                    });
+                    })
+            };
             ProviderModelEntry {
                 id: model_id.clone(),
                 capabilities,
@@ -453,6 +484,7 @@ pub(crate) fn build_provider_list_item(
         protocol_type,
         models,
         compact_model: compact_model.map(|s| s.to_string()),
+        custom,
     }
 }
 
@@ -756,6 +788,7 @@ mod tests {
                 base_url: "https://api.openai.com/v1".to_string(),
                 protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
                 compact_model: None,
+                custom: false,
                 models: vec![ProviderModelEntry {
                     id: "gpt-4o".to_string(),
                     capabilities: acowork_core::protocol::ModelCapabilitiesInfo {

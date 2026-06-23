@@ -416,17 +416,17 @@ impl GatewayClient {
 
     // ── Vault ──────────────────────────────────────────────────────────
 
-    /// `GET /api/vault/keys`
+    /// `GET /api/providers`
     pub async fn list_keys(&self) -> Result<Vec<VaultKeyEntry>> {
         let resp = self
             .client
-            .get(format!("{}/api/vault/keys", self.base_url))
+            .get(format!("{}/api/providers", self.base_url))
             .send()
             .await?;
         parse_gateway_response(resp).await
     }
 
-    /// `POST /api/vault/keys` (with optional base_url, default_model, models, and model_capabilities)
+    /// `POST /api/providers` (with optional base_url, default_model, models, model_capabilities, and custom flag)
     pub async fn add_key(
         &self,
         provider: &str,
@@ -436,8 +436,12 @@ impl GatewayClient {
         models: Option<&[String]>,
         model_capabilities: &HashMap<String, ModelCapabilities>,
         compact_model: Option<&str>,
+        custom: bool,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::json!({ "provider": provider, "key": key });
+        if custom {
+            body["custom"] = serde_json::Value::Bool(true);
+        }
         if let Some(url) = base_url {
             body["base_url"] = serde_json::Value::String(url.to_string());
         }
@@ -469,24 +473,24 @@ impl GatewayClient {
         }
         let resp = self
             .client
-            .post(format!("{}/api/vault/keys", self.base_url))
+            .post(format!("{}/api/providers", self.base_url))
             .json(&body)
             .send()
             .await?;
         parse_gateway_response(resp).await
     }
 
-    /// `DELETE /api/vault/keys/:provider`
+    /// `DELETE /api/providers/:provider`
     pub async fn remove_key(&self, provider: &str) -> Result<GenericMessageResponse> {
         let resp = self
             .client
-            .delete(format!("{}/api/vault/keys/{}", self.base_url, provider))
+            .delete(format!("{}/api/providers/{}", self.base_url, provider))
             .send()
             .await?;
         parse_gateway_response(resp).await
     }
 
-    /// `PUT /api/vault/keys/:provider` (supports partial updates — key is optional)
+    /// `PUT /api/providers/:provider` (supports partial updates — key is optional)
     ///
     /// If `key` is None, the existing API key is preserved on the Gateway side.
     /// This prevents the masked key_preview from overwriting the real key.
@@ -551,7 +555,7 @@ impl GatewayClient {
         }
         let resp = self
             .client
-            .put(format!("{}/api/vault/keys/{}", self.base_url, provider))
+            .put(format!("{}/api/providers/{}", self.base_url, provider))
             .json(&body)
             .send()
             .await?;
@@ -754,6 +758,9 @@ pub struct VaultKeyEntry {
     /// Whether this is a local (self-hosted) provider (no API key required)
     #[serde(default)]
     pub local: bool,
+    /// Whether this is a user-defined custom provider (not listed in models.dev)
+    #[serde(default)]
+    pub custom: bool,
 }
 
 /// Model capabilities info

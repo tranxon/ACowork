@@ -181,6 +181,10 @@ pub struct ProviderListItem {
     /// None = fall back to the session's current model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_model: Option<String>,
+    /// Whether this is a user-defined custom provider (not listed in models.dev).
+    /// Custom providers always use OpenAI-compatible protocol.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom: bool,
 }
 
 /// Individual model entry within a provider's model list.

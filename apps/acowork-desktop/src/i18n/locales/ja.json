@@ -283,7 +283,22 @@
         "localProviderNoKey": "Local provider — no API key needed",
         "compactModelHint": "Compact model for summarization",
         "defaultReasoningEffort": "デフォルトの推論深度（このプロバイダの全推論モデルに適用）",
-        "useModelDefault": "モデルのデフォルトを使用"
+        "useModelDefault": "モデルのデフォルトを使用",
+        "custom": "カスタム",
+        "customProvider": "カスタムプロバイダ",
+        "customProviders": "カスタムプロバイダ",
+        "addCustomProvider": "カスタムプロバイダを追加",
+        "customProviderName": "プロバイダ名",
+        "customProviderId": "プロバイダ ID",
+        "customBaseUrl": "ベース URL",
+        "customProviderNameRequired": "プロバイダ名を入力してください",
+        "customProviderIdRequired": "プロバイダ ID を入力してください",
+        "customBaseUrlRequired": "ベース URL を入力してください",
+        "discoveringModels": "モデルを検出中...",
+        "discoverFailed": "モデルの検出に失敗しました",
+        "providerIdExists": "プロバイダ ID は既に存在します",
+        "customProviderNoKey": "カスタムプロバイダ — ベース URL を使用",
+        "optional": "任意"
     },
     "harnessSearch": {
         "searchProviderManagement": "検索プロバイダー管理",

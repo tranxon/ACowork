@@ -281,7 +281,22 @@
         "localProviderNoKey": "Local provider — no API key needed",
         "compactModelHint": "Compact model for summarization",
         "defaultReasoningEffort": "기본 추론 깊이 (이 공급자의 모든 추론 모델에 적용)",
-        "useModelDefault": "모델 기본값 사용"
+        "useModelDefault": "모델 기본값 사용",
+        "custom": "사용자 정의",
+        "customProvider": "사용자 정의 공급자",
+        "customProviders": "사용자 정의 공급자",
+        "addCustomProvider": "사용자 정의 공급자 추가",
+        "customProviderName": "공급자 이름",
+        "customProviderId": "공급자 ID",
+        "customBaseUrl": "베이스 URL",
+        "customProviderNameRequired": "공급자 이름을 입력하세요",
+        "customProviderIdRequired": "공급자 ID를 입력하세요",
+        "customBaseUrlRequired": "베이스 URL을 입력하세요",
+        "discoveringModels": "모델 검색 중...",
+        "discoverFailed": "모델 검색 실패",
+        "providerIdExists": "공급자 ID가 이미 존재합니다",
+        "customProviderNoKey": "사용자 정의 공급자 — 베이스 URL 사용",
+        "optional": "선택사항"
     },
     "harnessSearch": {
         "searchProviderManagement": "검색 제공자 관리",

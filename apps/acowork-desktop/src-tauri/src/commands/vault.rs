@@ -15,7 +15,7 @@ pub async fn list_keys(state: State<'_, AppState>) -> Result<Vec<VaultKeyEntry>,
     client.list_keys().await.map_err(|e| e.to_string())
 }
 
-/// Add a new API key (with optional base_url, models list, and per-model capabilities)
+/// Add a new API key (with optional base_url, models list, per-model capabilities, and custom flag)
 #[tauri::command]
 pub async fn add_key(
     state: State<'_, AppState>,
@@ -26,6 +26,7 @@ pub async fn add_key(
     models: Option<Vec<String>>,
     model_capabilities: Option<HashMap<String, ModelCapabilities>>,
     compact_model: Option<String>,
+    custom: Option<bool>,
 ) -> Result<GenericMessageResponse, String> {
     let client = state.gateway.read().await;
     let caps = model_capabilities.unwrap_or_default();
@@ -38,6 +39,7 @@ pub async fn add_key(
             models.as_deref(),
             &caps,
             compact_model.as_deref(),
+            custom.unwrap_or(false),
         )
         .await
         .map_err(|e| e.to_string())

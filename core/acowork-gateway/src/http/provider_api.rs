@@ -1,12 +1,12 @@
-//! Vault HTTP API handlers
+//! Provider configuration HTTP API handlers
 //!
-//! API key management (stored in encrypted Vault) combined with
-//! provider configuration management (stored in provider_list.json).
+//! Full provider lifecycle management: API key (encrypted Vault) +
+//! configuration (provider_list.json: base_url, models, capabilities, compact_model).
 //!
-//! - GET    /api/vault/keys         — list keys (masked) + config
-//! - POST   /api/vault/keys         — add a key + config
-//! - DELETE /api/vault/keys/:provider — delete a key + config
-//! - PUT    /api/vault/keys/:provider — update a key + config
+//! - GET    /api/providers          — list providers (masked keys) + config
+//! - POST   /api/providers          — add a provider (key + config)
+//! - DELETE /api/providers/:provider — remove a provider
+//! - PUT    /api/providers/:provider — update a provider (key and/or config)
 
 use axum::{
     Json, Router,
@@ -19,15 +19,17 @@ use serde::{Deserialize, Serialize};
 use crate::http::models_api;
 use crate::http::routes::{ApiError, AppState};
 use crate::resource_cache;
+use acowork_core::protocol::ModelCapabilitiesInfo;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Build the vault router
-pub fn vault_routes() -> Router<AppState> {
+/// Build the provider configuration router
+pub fn provider_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/vault/keys", get(list_keys).post(add_key))
+        .route("/api/providers", get(list_providers).post(add_provider))
         .route(
-            "/api/vault/keys/{provider}",
-            delete(remove_key).put(update_key),
+            "/api/providers/{provider}",
+            delete(remove_provider).put(update_provider),
         )
         .route(
             "/api/search/keys",
@@ -46,7 +48,7 @@ pub fn vault_routes() -> Router<AppState> {
 /// Config fields (base_url, models, compact_model) are read from
 /// provider_list.json, NOT from Vault.
 #[derive(Serialize)]
-pub struct VaultKeyEntryResponse {
+pub struct ProviderEntryResponse {
     pub provider: String,
     pub key_preview: String,
     /// Configured base URL (if any)
@@ -64,18 +66,24 @@ pub struct VaultKeyEntryResponse {
     /// Whether this is a local (self-hosted) provider (no API key required)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local: bool,
+    /// Whether this is a user-defined custom provider (not listed in models.dev)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom: bool,
+    /// Per-model capabilities map (model ID → capabilities), including user-configured overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_capabilities: Option<HashMap<String, ModelCapabilitiesInfo>>,
 }
 
 /// Default max output tokens when gateway config doesn't specify a limit.
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
-/// Add key request.
+/// Add provider request.
 ///
 /// `key` → stored in encrypted Vault.
 /// `base_url`, `models`, `compact_model` → stored in provider_list.json.
-/// Model capabilities are always sourced from offline_providers.json (models.dev).
+/// `model_capabilities` → user-configured overrides merged into offline data.
 #[derive(Deserialize)]
-pub struct AddKeyRequest {
+pub struct AddProviderRequest {
     pub provider: String,
     pub key: String,
     /// Optional base URL override (e.g. "https://api.deepseek.com/v1")
@@ -91,11 +99,20 @@ pub struct AddKeyRequest {
     /// Compact model for LLM summarization (ADR-010). None = use current model.
     #[serde(default)]
     pub compact_model: Option<String>,
+    /// Whether this is a custom (user-defined) provider not listed in models.dev.
+    /// Custom providers always use OpenAI-compatible protocol.
+    #[serde(default)]
+    pub custom: Option<bool>,
+    /// Per-model capabilities overrides (model ID → capabilities).
+    /// User-configured fields (e.g. `default_reasoning_effort`) are merged
+    /// into the offline models.dev data so the Runtime sees user preferences.
+    #[serde(default)]
+    pub model_capabilities: Option<HashMap<String, ModelCapabilitiesInfo>>,
 }
 
-/// Update key request (supports partial updates — key and config are optional).
+/// Update provider request (supports partial updates — key and config are optional).
 #[derive(Deserialize)]
-pub struct UpdateKeyRequest {
+pub struct UpdateProviderRequest {
     /// API key. If None or empty, the existing key is preserved.
     #[serde(default)]
     pub key: Option<String>,
@@ -111,6 +128,11 @@ pub struct UpdateKeyRequest {
     /// Compact model for LLM summarization (ADR-010).
     #[serde(default)]
     pub compact_model: Option<String>,
+    /// Per-model capabilities overrides (model ID → capabilities).
+    /// User-configured fields (e.g. `default_reasoning_effort`) are merged
+    /// into the offline models.dev data so the Runtime sees user preferences.
+    #[serde(default)]
+    pub model_capabilities: Option<HashMap<String, ModelCapabilitiesInfo>>,
 }
 
 /// Generic message response
@@ -144,13 +166,13 @@ pub struct UpdateSearchKeyRequest {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-/// `GET /api/vault/keys` — list stored keys (masked) with provider config.
+/// `GET /api/providers` — list stored providers (masked keys) with config.
 ///
 /// Key previews come from Vault. Config (base_url, models, compact_model)
 /// comes from provider_list.json (resource_cache).
-pub async fn list_keys(
+pub async fn list_providers(
     State(state): State<AppState>,
-) -> Result<Json<Vec<VaultKeyEntryResponse>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<ProviderEntryResponse>>, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
 
     // Build key_preview lookup from Vault (only for key masking, not authority).
@@ -167,7 +189,7 @@ pub async fn list_keys(
         .unwrap_or_default();
 
     // Iterate resource_cache as source of truth for which providers exist.
-    let response: Vec<VaultKeyEntryResponse> = gw
+    let response: Vec<ProviderEntryResponse> = gw
         .resource_cache
         .provider_list
         .providers
@@ -179,7 +201,7 @@ pub async fn list_keys(
             } else {
                 key_previews.get(&cfg.id).cloned().unwrap_or_default()
             };
-            VaultKeyEntryResponse {
+            ProviderEntryResponse {
                 provider: cfg.id.clone(),
                 key_preview,
                 base_url: if cfg.base_url.is_empty() {
@@ -191,6 +213,15 @@ pub async fn list_keys(
                 models: cfg.models.iter().map(|m| m.id.clone()).collect(),
                 compact_model: cfg.compact_model.clone(),
                 local: is_local,
+                custom: cfg.custom,
+                model_capabilities: {
+                    let caps: HashMap<String, ModelCapabilitiesInfo> = cfg
+                        .models
+                        .iter()
+                        .map(|m| (m.id.clone(), m.capabilities.clone()))
+                        .collect();
+                    if caps.is_empty() { None } else { Some(caps) }
+                },
             }
         })
         .collect();
@@ -198,14 +229,14 @@ pub async fn list_keys(
     Ok(Json(response))
 }
 
-/// `POST /api/vault/keys` — add a key and provider config.
+/// `POST /api/providers` — add a provider (key + config).
 ///
 /// API key → stored in encrypted Vault.
-/// Config (base_url, models, compact_model) → built from request + offline
-/// capabilities, stored in provider_list.json via resource_cache.
-pub async fn add_key(
+/// Config (base_url, models, compact_model, model_capabilities) → built from
+/// request + offline capabilities, stored in provider_list.json via resource_cache.
+pub async fn add_provider(
     State(state): State<AppState>,
-    Json(body): Json<AddKeyRequest>,
+    Json(body): Json<AddProviderRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
     // Validate base_url format if provided
     if let Some(ref url) = body.base_url
@@ -221,7 +252,8 @@ pub async fn add_key(
         return Err(ApiError::bad_request("provider must not be empty"));
     }
     let is_local = models_api::is_local_provider(&body.provider);
-    if !is_local && body.key.is_empty() {
+    let is_custom = body.custom.unwrap_or(false);
+    if !is_local && !is_custom && body.key.is_empty() {
         return Err(ApiError::bad_request("key must not be empty"));
     }
 
@@ -230,6 +262,8 @@ pub async fn add_key(
     // 1. Store API key in encrypted Vault.
     let effective_key = if is_local {
         "local".to_string()
+    } else if is_custom && body.key.is_empty() {
+        "custom".to_string()
     } else {
         body.key.clone()
     };
@@ -252,13 +286,19 @@ pub async fn add_key(
         .as_ref()
         .map(|c| c.max_output_tokens_limit)
         .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
-    let item = resource_cache::build_provider_list_item(
+    let mut item = resource_cache::build_provider_list_item(
         &body.provider,
         body.base_url.as_deref(),
         &resolved_models,
         body.compact_model.as_deref(),
         max_output_tokens,
+        is_custom,
     );
+
+    // 3b. Merge user-provided model_capabilities overrides (e.g. default_reasoning_effort).
+    if let Some(ref user_caps) = body.model_capabilities {
+        merge_user_capabilities(&mut item, user_caps);
+    }
 
     // 4. Add to in-memory provider list (replace if already exists).
     resource_cache::remove_provider_from_memory(&mut gw, &body.provider);
@@ -285,8 +325,8 @@ pub async fn add_key(
     ))
 }
 
-/// `DELETE /api/vault/keys/:provider` — delete a key and provider config.
-pub async fn remove_key(
+/// `DELETE /api/providers/:provider` — remove a provider (key + config).
+pub async fn remove_provider(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
@@ -315,15 +355,15 @@ pub async fn remove_key(
     }))
 }
 
-/// `PUT /api/vault/keys/:provider` — update a key and/or provider config.
+/// `PUT /api/providers/:provider` — update a provider (key and/or config).
 ///
 /// If `key` is None/empty, the existing Vault key is preserved.
 /// If `models` is empty and `default_model` is None, existing models are
 /// preserved from provider_list.json.
-pub async fn update_key(
+pub async fn update_provider(
     State(state): State<AppState>,
     Path(provider): Path<String>,
-    Json(body): Json<UpdateKeyRequest>,
+    Json(body): Json<UpdateProviderRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     if let Some(ref url) = body.base_url
         && !url.is_empty()
@@ -352,7 +392,7 @@ pub async fn update_key(
     };
     // Only re-store if the key actually changed; otherwise skip to avoid
     // unnecessary Vault re-serialization.
-    if body.key.as_ref().map_or(false, |k| !k.is_empty()) {
+    if body.key.as_ref().is_some_and(|k| !k.is_empty()) {
         gw.vault
             .store_key(&provider, &api_key)
             .map_err(|e| ApiError::internal(&format!("Failed to update key: {}", e)))?;
@@ -410,13 +450,28 @@ pub async fn update_key(
         .as_ref()
         .map(|c| c.max_output_tokens_limit)
         .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
-    let item = resource_cache::build_provider_list_item(
+    // Preserve the existing custom flag from the stored provider entry.
+    let is_custom = gw
+        .resource_cache
+        .provider_list
+        .providers
+        .iter()
+        .find(|p| p.id == provider)
+        .map(|p| p.custom)
+        .unwrap_or(false);
+    let mut item = resource_cache::build_provider_list_item(
         &provider,
         resolved_base_url.as_deref(),
         &resolved_models,
         resolved_compact_model.as_deref(),
         max_output_tokens,
+        is_custom,
     );
+
+    // 5b. Merge user-provided model_capabilities overrides (e.g. default_reasoning_effort).
+    if let Some(ref user_caps) = body.model_capabilities {
+        merge_user_capabilities(&mut item, user_caps);
+    }
 
     // 6. Replace in in-memory list.
     resource_cache::remove_provider_from_memory(&mut gw, &provider);
@@ -566,6 +621,37 @@ pub async fn update_search_key(
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+/// Merge user-provided model capabilities overrides into a ProviderListItem.
+///
+/// For each model ID present in `user_caps`:
+/// - If the model already exists in `item.models`, user-set fields override
+///   the offline data (only non-None user fields are applied).
+/// - If the model is not in `item.models`, the override is silently ignored
+///   (only configured models can have overrides).
+fn merge_user_capabilities(
+    item: &mut acowork_core::protocol::ProviderListItem,
+    user_caps: &HashMap<String, ModelCapabilitiesInfo>,
+) {
+    for model_entry in &mut item.models {
+        if let Some(user_cap) = user_caps.get(&model_entry.id) {
+            // Only override fields that the user explicitly set (non-None).
+            if user_cap.default_reasoning_effort.is_some() {
+                model_entry.capabilities.default_reasoning_effort =
+                    user_cap.default_reasoning_effort.clone();
+            }
+            if user_cap.thinking_mode.is_some() {
+                model_entry.capabilities.thinking_mode = user_cap.thinking_mode.clone();
+            }
+            if user_cap.supports_reasoning.is_some() {
+                model_entry.capabilities.supports_reasoning = user_cap.supports_reasoning;
+            }
+            if user_cap.supports_temperature.is_some() {
+                model_entry.capabilities.supports_temperature = user_cap.supports_temperature;
+            }
+        }
+    }
+}
+
 /// Get data_dir from GatewayState config.
 fn get_data_dir_from_gw(gw: &crate::gateway::state::GatewayState) -> PathBuf {
     gw.config
@@ -579,9 +665,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_add_key_request_deserialization() {
+    fn test_add_provider_request_deserialization() {
         let json = r#"{"provider": "openai", "key": "sk-12345"}"#;
-        let req: AddKeyRequest = serde_json::from_str(json).unwrap();
+        let req: AddProviderRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.provider, "openai");
         assert_eq!(req.key, "sk-12345");
         assert!(req.base_url.is_none());
@@ -589,9 +675,9 @@ mod tests {
     }
 
     #[test]
-    fn test_add_key_request_with_full_config() {
+    fn test_add_provider_request_with_full_config() {
         let json = r#"{"provider": "deepseek", "key": "sk-abc", "base_url": "https://api.deepseek.com/v1", "default_model": "deepseek-chat"}"#;
-        let req: AddKeyRequest = serde_json::from_str(json).unwrap();
+        let req: AddProviderRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.provider, "deepseek");
         assert_eq!(req.key, "sk-abc");
         assert_eq!(
@@ -602,18 +688,18 @@ mod tests {
     }
 
     #[test]
-    fn test_update_key_request_deserialization() {
+    fn test_update_provider_request_deserialization() {
         let json = r#"{"key": "sk-new-key"}"#;
-        let req: UpdateKeyRequest = serde_json::from_str(json).unwrap();
+        let req: UpdateProviderRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.key, Some("sk-new-key".to_string()));
         assert!(req.base_url.is_none());
         assert!(req.default_model.is_none());
     }
 
     #[test]
-    fn test_update_key_request_with_full_config() {
+    fn test_update_provider_request_with_full_config() {
         let json = r#"{"key": "sk-new", "base_url": "https://api.custom.com/v1", "default_model": "custom-model"}"#;
-        let req: UpdateKeyRequest = serde_json::from_str(json).unwrap();
+        let req: UpdateProviderRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.key, Some("sk-new".to_string()));
         assert_eq!(req.base_url, Some("https://api.custom.com/v1".to_string()));
         assert_eq!(req.default_model, Some("custom-model".to_string()));

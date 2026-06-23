@@ -156,6 +156,8 @@ export interface VaultKeyEntry {
   compact_model?: string;
   /** Whether this is a local (self-hosted) provider (no API key required) */
   local?: boolean;
+  /** Whether this is a user-defined custom provider (not listed in models.dev) */
+  custom?: boolean;
 }
 
 /** Gateway config response */
@@ -411,6 +413,8 @@ export interface ProviderListEntry {
   api?: string;
   /** Whether this is a local (self-hosted) provider (no API key required) */
   local?: boolean;
+  /** Whether this is a user-defined custom provider (not listed in models.dev) */
+  custom?: boolean;
 }
 
 // ── Memory types ──────────────────────────────────────────────────────
@@ -593,19 +597,19 @@ export type SessionStatus =
   | { status: "streaming"; detail?: { message_id: string | null } }
   | { status: "waiting_approval"; detail: { request_id: string } }
   | {
-      status: "paused";
-      detail?: {
-        iteration: number | null;
-        max_iterations: number | null;
-        /** 429 retry wait info — present when the provider is rate-limited */
-        retry_info?: {
-          wait_ms: number;
-          attempt: number;
-          max_attempts: number;
-          provider: string;
-        };
+    status: "paused";
+    detail?: {
+      iteration: number | null;
+      max_iterations: number | null;
+      /** 429 retry wait info — present when the provider is rate-limited */
+      retry_info?: {
+        wait_ms: number;
+        attempt: number;
+        max_attempts: number;
+        provider: string;
       };
     };
+  };
 
 /** Helper: check if a SessionStatus means the session is actively processing (includes paused) */
 export function isSessionActive(s: SessionStatus | undefined | null): boolean {

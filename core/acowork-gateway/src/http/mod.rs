@@ -22,5 +22,5 @@ pub mod routes;
 pub mod server;
 pub mod skills_api;
 pub mod users_api;
-pub mod vault_api;
+pub mod provider_api;
 pub mod workspaces;

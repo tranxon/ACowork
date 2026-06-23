@@ -512,18 +512,28 @@ impl SessionManager {
                 session_state.set_reasoning_effort(effort);
             } else {
                 // No persisted value: initialize from provider capabilities default.
-                // None here means provider does not support thinking control.
-                let provider_default = self
-                    .core
-                    .get_model_capabilities(m)
-                    .and_then(|c| c.default_reasoning_effort);
+                // If default_reasoning_effort is None but supports_reasoning is true,
+                // fall back to Auto so the user sees the reasoning effort control.
+                let caps = self.core.get_model_capabilities(m);
+                let provider_default = caps
+                    .as_ref()
+                    .and_then(|c| c.default_reasoning_effort.clone());
                 let effort = provider_default
                     .as_deref()
-                    .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose);
+                    .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
+                    .or_else(|| {
+                        // Model supports reasoning but has no explicit default → Auto
+                        if caps.as_ref().and_then(|c| c.supports_reasoning).unwrap_or(false) {
+                            Some(acowork_core::providers::traits::ReasoningEffort::Auto)
+                        } else {
+                            None
+                        }
+                    });
                 session_state.set_reasoning_effort(effort.clone());
                 // Write back to ConversationSession so future resumes have a value.
                 if let Some(conv) = session_state.conversation() {
-                    conv.update_reasoning_effort(provider_default);
+                    let effort_str = effort.as_ref().map(|e| e.to_string());
+                    conv.update_reasoning_effort(effort_str);
                 }
             }
         }

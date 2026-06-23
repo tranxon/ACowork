@@ -1,6 +1,6 @@
 //! Unified global resource pusher.
 //!
-//! Replaces the ad-hoc `hot_push_llm_config` (vault_api.rs) and
+//! Replaces the ad-hoc `hot_push_llm_config` (provider_api.rs) and
 //! `hot_push_mcp_config` (mcp_catalog_api.rs) functions with a single
 //! struct. All HTTP handlers call `push_llm_config()` or
 //! `push_mcp_catalog()` after mutating global state.
@@ -50,7 +50,7 @@ impl GlobalResourcePusher {
     /// what `AgentHelloResult` delivers on handshake — so the Runtime can
     /// rebuild its provider registry atomically without any per-provider
     /// fan-out. The cache is the source of truth: HTTP handlers that mutate
-    /// the Vault must rebuild it (see `vault_api.rs`) before calling this.
+    /// the Vault must rebuild it (see `provider_api.rs`) before calling this.
     #[tracing::instrument(skip(self), name = "push_llm_config")]
     pub async fn push_llm_config(&self) {
         let grpc_session_mgr = match &self.grpc_session_mgr {
