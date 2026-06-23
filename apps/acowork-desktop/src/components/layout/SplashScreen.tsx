@@ -277,10 +277,10 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 {/* Title */}
                 <div className="flex flex-col items-center gap-4">
                     <h1 className="text-[56px] font-bold tracking-tight">
-                        <span style={{ color: "#4285F4" }}>A</span>
-                        <span style={{ color: "#4285F4" }}>·</span>
-                        <span style={{ color: "#EA4335" }}>Co</span>
-                        <span style={{ color: "#34A853" }}>work</span>
+                        <span style={{ color: "#EA4335" }}>A</span>
+                        <span style={{ color: "#34A853" }}>·</span>
+                        <span style={{ color: "#4285F4" }}>Co</span>
+                        <span style={{ color: "#FBBC05" }}>work</span>
                     </h1>
                     <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">
                         Collaborate with your AI colleagues
