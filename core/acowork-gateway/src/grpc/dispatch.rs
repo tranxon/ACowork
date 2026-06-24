@@ -137,7 +137,8 @@ pub async fn dispatch_grpc_request(
                 },
             };
             let agent_id = req.agent_id;
-            handle_context_usage_report(&agent_id, &context, conn_id, session_mgr, bridge_tx).await
+            let session_id = req.session_id;
+            handle_context_usage_report(&agent_id, &session_id, &context, conn_id, session_mgr, bridge_tx).await
         }
 
         Some(proto::client_message::Payload::AgentHello(req)) => {

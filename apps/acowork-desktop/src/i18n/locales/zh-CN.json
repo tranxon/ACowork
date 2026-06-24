@@ -443,7 +443,14 @@
         "copy": "复制",
         "previewBadge": "预览",
         "previewLoading": "正在加载预览...",
-        "previewDoubleClickHint": "双击切换到编辑器"
+        "previewDoubleClickHint": "双击切换到编辑器",
+        "loadingUrl": "正在加载页面...",
+        "urlLoadError": "此页面无法加载",
+        "openInBrowser": "在浏览器中打开",
+        "navBack": "后退",
+        "navForward": "前进",
+        "navRefresh": "刷新",
+        "iframeBlockedHint": "此网站不支持在应用内预览"
     },
     "sessionPanel": {
         "loadingSessions": "加载会话中...",

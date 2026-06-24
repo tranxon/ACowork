@@ -115,7 +115,7 @@ message CapabilityQueryRequest  { string agent_id = 1; }
 message CronRegisterRequest     { string agent_id = 1; string schedule = 2; string action = 3; string params_json = 4; }
 message CronUnregisterRequest   { string cron_id = 1; }
 message CronListRequest         {}
-message ContextUsageReportRequest { string agent_id = 1; ContextUsageInfo context = 2; }
+message ContextUsageReportRequest { string agent_id = 1; ContextUsageInfo context = 2; string session_id = 3; }
 message AgentHelloRequest       {
   string agent_id = 1;
   string version = 2;

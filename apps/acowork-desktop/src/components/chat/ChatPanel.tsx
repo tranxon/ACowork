@@ -3,7 +3,9 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -91,6 +93,33 @@ const markdownComponents = {
       return <CodeBlock language={language} code={code} />;
     }
     return <pre>{children}</pre>;
+  },
+  /** Intercept link clicks: open in a preview tab instead of navigating the webview (which crashes). */
+  a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+    const handleClick = (e: React.MouseEvent) => {
+      if (!href) return;
+      // Always prevent default to avoid Tauri webview navigation crash
+      e.preventDefault();
+      const agentId = useAgentStore.getState().selectedAgentId;
+      if (!agentId) return;
+
+      if (/^https?:\/\//i.test(href)) {
+        // Case 1: http/https URLs — open in URL preview tab
+        useFileEditorStore.getState().openUrl(agentId, href);
+      } else {
+        // Case 2: Local file paths — open in file preview tab
+        const sessionId = useChatStore.getState().getActiveSessionId(agentId);
+        if (!sessionId) return;
+        const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(sessionId);
+        const relPath = href.replace(/^\//, "");
+        useFileEditorStore.getState().openPreview(agentId, workspaceId, relPath);
+      }
+    };
+    return (
+      <a href={href} onClick={handleClick} {...rest}>
+        {children}
+      </a>
+    );
   },
 };
 import { AskQuestionCard } from "./AskQuestionCard";

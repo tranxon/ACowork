@@ -2,6 +2,24 @@ import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
 
+/**
+ * Check if a string looks like a valid HTTP/HTTPS URL.
+ * Returns the normalized URL (lowercased scheme) or null if not a valid http(s) URL.
+ */
+function normalizeUrl(candidate: string): string | null {
+    if (!candidate) return null;
+    const trimmed = candidate.trim();
+    try {
+        const url = new URL(trimmed);
+        if (url.protocol === "http:" || url.protocol === "https:") {
+            return url.href;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 /** Extension → Monaco language ID mapping */
 const EXT_LANGUAGE_MAP: Record<string, string> = {
     rs: "rust",
@@ -53,7 +71,7 @@ const EXT_LANGUAGE_MAP: Record<string, string> = {
 
 /** A file opened in the editor */
 export interface OpenFile {
-    /** Unique ID: `${agentId}:${workspaceId}:${relPath}` */
+    /** Unique ID: `${agentId}:${workspaceId}:${relPath}` for files, `${agentId}:url:${url}` for URLs */
     id: string;
     agentId: string;
     workspaceId: string;
@@ -73,6 +91,12 @@ export interface OpenFile {
     cursorLine?: number;
     /** "edit" = Monaco editor; "preview" = read-only Markdown render. */
     mode: "edit" | "preview";
+    /** "file" = workspace file; "url" = external URL loaded in an iframe */
+    kind: "file" | "url";
+    /** The URL to load (only for kind === "url") */
+    url?: string;
+    /** MIME type from Gateway response (e.g. "image/png", "text/html") */
+    mimeType?: string;
 }
 
 interface FileEditorState {
@@ -88,6 +112,8 @@ interface FileEditorState {
     openPreview: (agentId: string, workspaceId: string, relPath: string) => Promise<void>;
     /** Open a file with pre-loaded content (skips Gateway fetch). Used by LSP cross-file navigation. */
     openFileWithContent: (agentId: string, workspaceId: string, relPath: string, content: string, language: string) => void;
+    /** Open a URL in a new tab (rendered in an iframe). Does nothing if the URL is invalid. */
+    openUrl: (agentId: string, url: string) => void;
     /** Close a file tab. Returns false if dirty (caller should confirm first). */
     closeFile: (fileId: string, force?: boolean) => boolean;
     /** Close all tabs except the one with `keepFileId`.
@@ -161,6 +187,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             dirty: false,
             mode: "edit",
             ...(line !== undefined ? { cursorLine: line } : {}),
+            kind: "file",
         };
 
         set((state) => ({
@@ -191,7 +218,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId
-                        ? { ...f, content: data.content, originalContent: data.content, loading: false }
+                        ? { ...f, content: data.content, originalContent: data.content, loading: false, mimeType: data.mimeType }
                         : f,
                 ),
             }));
@@ -235,6 +262,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             language: "markdown",
             dirty: false,
             mode: "preview",
+            kind: "file",
         };
 
         set((state) => ({
@@ -264,7 +292,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId
-                        ? { ...f, content: data.content, originalContent: data.content, loading: false }
+                        ? { ...f, content: data.content, originalContent: data.content, loading: false, mimeType: data.mimeType }
                         : f,
                 ),
             }));
@@ -301,6 +329,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             language,
             dirty: false,
             mode: "edit",
+            kind: "file",
         };
 
         set((state) => ({
@@ -410,5 +439,45 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         if (!force && state.openFiles.some((f) => f.dirty)) return false;
         set({ openFiles: [], activeFileId: null });
         return true;
+    },
+
+    openUrl: (agentId: string, url: string) => {
+        const normalized = normalizeUrl(url);
+        if (!normalized) {
+            console.warn("[FileEditorStore] openUrl — skipping invalid URL:", url);
+            return;
+        }
+
+        // Use the URL itself as a unique file ID (scoped to agent)
+        const fileId = `${agentId}:url:${normalized}`;
+        const existing = get().openFiles.find((f) => f.id === fileId);
+        if (existing) {
+            // Already open — just activate it
+            set({ activeFileId: fileId });
+            return;
+        }
+
+        const fileName = new URL(normalized).hostname; // e.g. "example.com"
+        const newFile: OpenFile = {
+            id: fileId,
+            agentId,
+            workspaceId: "",
+            relPath: normalized,
+            fileName,
+            content: "",
+            originalContent: "",
+            loading: false,
+            saving: false,
+            language: "plaintext",
+            dirty: false,
+            mode: "preview",
+            kind: "url",
+            url: normalized,
+        };
+
+        set((state) => ({
+            openFiles: [...state.openFiles, newFile],
+            activeFileId: fileId,
+        }));
     },
 }));

@@ -756,11 +756,13 @@ impl GatewayGrpcClient {
     pub async fn report_context_usage(
         &self,
         agent_id: &str,
+        session_id: &str,
         context: acowork_core::protocol::ContextUsageInfo,
     ) -> Result<(), AcoworkError> {
         let request = GatewayRequest::ContextUsageReport {
             agent_id: agent_id.to_string(),
             context,
+            session_id: session_id.to_string(),
         };
 
         let resp = self.send_gateway_request(request).await?;

@@ -567,6 +567,7 @@ pub enum GatewayRequest {
     ContextUsageReport {
         agent_id: String,
         context: ContextUsageInfo,
+        session_id: String,
     },
     /// Agent registration — first message sent after IPC connection
     /// Runtime sends this to identify itself to the Gateway

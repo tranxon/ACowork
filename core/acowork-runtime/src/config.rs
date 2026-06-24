@@ -110,7 +110,7 @@ fn default_debug_port() -> u16 {
 }
 
 fn default_max_iterations() -> u32 {
-    50
+    200
 }
 
 fn default_iteration_timeout_ms() -> u64 {

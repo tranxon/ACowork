@@ -180,7 +180,7 @@
         "defaultModelLimit": "（預設模型限制）",
         "leaveEmptyDefault": "留空使用執行階段預設值",
         "maxIterations": "最大迭代次數（每次執行）",
-        "defaultIterations": "50（預設）",
+        "defaultIterations": "200（預設）",
         "shellCommandApproval": "Shell 命令審批",
         "approvalMedium": "中（預設）— 例如 curl、wget、python、node",
         "approvalLow": "低 — 例如 ls、cat、echo、pwd、grep（最謹慎）",
@@ -438,7 +438,14 @@
         "copy": "複製",
         "previewBadge": "預覽",
         "previewLoading": "正在載入預覽...",
-        "previewDoubleClickHint": "雙擊切換到編輯器"
+        "previewDoubleClickHint": "雙擊切換到編輯器",
+        "loadingUrl": "正在載入頁面...",
+        "urlLoadError": "此頁面無法載入",
+        "openInBrowser": "在瀏覽器中開啟",
+        "navBack": "後退",
+        "navForward": "前進",
+        "navRefresh": "重新整理",
+        "iframeBlockedHint": "此網站不支援在應用程式內預覽"
     },
     "sessionPanel": {
         "loadingSessions": "載入工作階段中...",

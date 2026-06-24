@@ -3,6 +3,8 @@ import { ChevronRight, ChevronDown, Atom } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeBlock } from "./CodeBlock";
+import { useAgentStore } from "../../stores/agentStore";
+import { useFileEditorStore } from "../../stores/fileEditorStore";
 
 /** ReactMarkdown component overrides — code blocks with title bar */
 const thinkMarkdownComponents = {
@@ -19,6 +21,23 @@ const thinkMarkdownComponents = {
       return <CodeBlock language={language} code={code} />;
     }
     return <pre>{children}</pre>;
+  },
+  /** Intercept link clicks: open URLs in a file block tab instead of navigating the webview. */
+  a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+    const handleClick = (e: React.MouseEvent) => {
+      if (!href) return;
+      if (!/^https?:\/\//i.test(href)) return;
+      e.preventDefault();
+      const agentId = useAgentStore.getState().selectedAgentId;
+      if (agentId) {
+        useFileEditorStore.getState().openUrl(agentId, href);
+      }
+    };
+    return (
+      <a href={href} onClick={handleClick} {...rest}>
+        {children}
+      </a>
+    );
   },
 };
 

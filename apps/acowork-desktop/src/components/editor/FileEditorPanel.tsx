@@ -16,6 +16,7 @@ import { TabItem } from "../common/tab";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
+import { UrlPreviewView } from "./UrlPreviewView";
 import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
@@ -1304,6 +1305,23 @@ export function FileEditorPanel({ width }: { width: number }) {
                     <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
                         {t("fileEditor.emptyState")}
                     </div>
+                ) : activeFile.kind === "url" ? (
+                    <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} />
+                ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
+                    <div className="flex h-full w-full items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+                        <img
+                            src={"data:" + activeFile.mimeType + ";base64," + activeFile.content}
+                            alt={activeFile.fileName}
+                            className="max-h-full max-w-full object-contain"
+                        />
+                    </div>
+                ) : activeFile.mode === "preview" && activeFile.mimeType === "text/html" ? (
+                    <iframe
+                        srcDoc={activeFile.content}
+                        className="h-full w-full border-0 bg-white"
+                        sandbox="allow-scripts allow-same-origin allow-forms"
+                        title={activeFile.fileName}
+                    />
                 ) : activeFile.mode === "preview" ? (
                     <MarkdownPreviewView file={activeFile} />
                 ) : (

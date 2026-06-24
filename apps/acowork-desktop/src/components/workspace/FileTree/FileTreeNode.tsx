@@ -65,8 +65,8 @@ export const FileTreeNode = memo(function FileTreeNode({
   const fileIcon = isDir ? null : getFileIcon(entry.name);
   const { t } = useTranslation();
   const openPreview = useFileEditorStore((s) => s.openPreview);
-  // Preview is currently limited to Markdown files only.
-  const isPreviewable = !isDir && entry.name.toLowerCase().endsWith(".md");
+  // Preview is available for Markdown (.md), HTML (.html/.htm), and image files.
+  const isPreviewable = !isDir && /\.(md|html?)$/i.test(entry.name);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);

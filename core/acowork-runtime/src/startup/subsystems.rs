@@ -221,6 +221,7 @@ async fn relay_chunk_event(
                         acowork_core::proto::ContextUsageReportRequest {
                             agent_id: agent_id.to_string(),
                             context: Some((&ctx_info).into()),
+                            session_id: sid.to_string(),
                         },
                     ),
                 ),

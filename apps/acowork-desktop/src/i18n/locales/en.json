@@ -183,7 +183,7 @@
         "defaultModelLimit": "(default model limit)",
         "leaveEmptyDefault": "Leave empty to use runtime default",
         "maxIterations": "Max Iterations (per run)",
-        "defaultIterations": "50 (default)",
+        "defaultIterations": "200 (default)",
         "shellCommandApproval": "Shell Command Approval",
         "approvalMedium": "Medium (default) — e.g. curl, wget, python, node",
         "approvalLow": "Low — e.g. ls, cat, echo, pwd, grep (most cautious)",
@@ -444,7 +444,14 @@
         "copy": "Copy",
         "previewBadge": "Preview",
         "previewLoading": "Loading preview...",
-        "previewDoubleClickHint": "Double-click to open in editor"
+        "previewDoubleClickHint": "Double-click to open in editor",
+        "loadingUrl": "Loading page...",
+        "urlLoadError": "This page could not be loaded",
+        "openInBrowser": "Open in browser",
+        "navBack": "Back",
+        "navForward": "Forward",
+        "navRefresh": "Refresh",
+        "iframeBlockedHint": "This site does not support in-app preview"
     },
     "sessionPanel": {
         "loadingSessions": "Loading sessions...",

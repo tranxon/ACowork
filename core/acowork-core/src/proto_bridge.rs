@@ -302,11 +302,12 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
             protocol::GatewayRequest::CronList {} => Some(
                 proto::client_message::Payload::CronList(proto::CronListRequest {}),
             ),
-            protocol::GatewayRequest::ContextUsageReport { agent_id, context } => {
+            protocol::GatewayRequest::ContextUsageReport { agent_id, context, session_id } => {
                 Some(proto::client_message::Payload::ContextUsageReport(
                     proto::ContextUsageReportRequest {
                         agent_id: agent_id.clone(),
                         context: Some(context.into()),
+                        session_id: session_id.clone(),
                     },
                 ))
             }

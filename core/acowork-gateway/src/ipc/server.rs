@@ -524,6 +524,7 @@ pub async fn handle_cron_list(
 /// Handle ContextUsageReport — forward context usage to Desktop App via WebSocket bridge
 pub async fn handle_context_usage_report(
     agent_id: &str,
+    session_id: &str,
     context: &acowork_core::protocol::ContextUsageInfo,
     _conn_id: &str,
     _session_mgr: &SharedSessionMgr,
@@ -531,6 +532,7 @@ pub async fn handle_context_usage_report(
 ) -> GatewayResponse {
     tracing::info!(
         agent = %agent_id,
+        session = %session_id,
         context_window = context.context_window,
         total_tokens = context.total_tokens,
         has_bridge = bridge_tx.is_some(),
@@ -538,11 +540,17 @@ pub async fn handle_context_usage_report(
     );
     // Broadcast context_usage event to all WebSocket bridge subscribers
     if let Some(tx) = bridge_tx {
+        // Inject session_id into the payload so the frontend can route
+        // the event to the correct session (not just the active one).
+        let mut payload = serde_json::to_value(context).unwrap_or_default();
+        if let serde_json::Value::Object(ref mut map) = payload {
+            map.insert("session_id".to_string(), serde_json::Value::String(session_id.to_string()));
+        }
         let event = crate::http::routes::BridgeEvent {
             agent_id: agent_id.to_string(),
             message_id: String::new(),
             event_type: crate::http::routes::BridgeEventType::ContextUsage,
-            payload: serde_json::to_value(context).unwrap_or_default(),
+            payload,
         };
         match tx.send(event) {
             Ok(count) => {

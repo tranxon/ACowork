@@ -6,6 +6,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { CodeBlock } from "../chat/CodeBlock";
+import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { cn } from "../../lib/utils";
@@ -25,6 +26,23 @@ const markdownComponents = {
             return <CodeBlock language={language} code={code} />;
         }
         return <pre>{children}</pre>;
+    },
+    /** Intercept link clicks: open URLs in a file block tab instead of navigating the webview. */
+    a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+        const handleClick = (e: React.MouseEvent) => {
+            if (!href) return;
+            if (!/^https?:\/\//i.test(href)) return;
+            e.preventDefault();
+            const agentId = useAgentStore.getState().selectedAgentId;
+            if (agentId) {
+                useFileEditorStore.getState().openUrl(agentId, href);
+            }
+        };
+        return (
+            <a href={href} onClick={handleClick} {...rest}>
+                {children}
+            </a>
+        );
     },
 };
 

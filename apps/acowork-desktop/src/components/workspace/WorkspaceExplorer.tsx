@@ -26,6 +26,7 @@ export function WorkspaceExplorer() {
     const copyItem = useWorkspaceStore((s) => s.copyItem);
     const setCopiedEntry = useWorkspaceStore((s) => s.setCopiedEntry);
     const openFile = useFileEditorStore((s) => s.openFile);
+    const openPreview = useFileEditorStore((s) => s.openPreview);
 
     // Get the current workspace ID for the active session
     const activeSessionId = useChatStore((s) =>
@@ -113,8 +114,13 @@ export function WorkspaceExplorer() {
 
     const handleFileDoubleClick = useCallback((_entry: TreeEntry, relPath: string) => {
         if (!selectedAgentId) return;
-        void openFile(selectedAgentId, currentWorkspaceId, relPath);
-    }, [selectedAgentId, currentWorkspaceId, openFile]);
+        // Images open in preview; everything else opens in editor (source code)
+        if (/\.(jpg|jpeg|png|gif|webp|svg)$/i.test(relPath)) {
+            void openPreview(selectedAgentId, currentWorkspaceId, relPath);
+        } else {
+            void openFile(selectedAgentId, currentWorkspaceId, relPath);
+        }
+    }, [selectedAgentId, currentWorkspaceId, openFile, openPreview]);
 
     /** Called from FileTree context menu to create item at a specific path */
     const handleContextNewItem = useCallback((type: "file" | "dir", parentPath: string) => {
