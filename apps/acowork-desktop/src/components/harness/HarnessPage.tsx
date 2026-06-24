@@ -335,11 +335,17 @@ function ProvidersTab() {
     const models = await fetchModels(provider);
     setEditAvailableModels(models);
     setEditModelsLoading(false);
-    // Initialize per-model caps from fetched model data (for local/custom, this includes stored caps)
+    // Initialize per-model caps: prefer stored caps from vault (preserves
+    // default_reasoning_effort, supports_reasoning, etc.), fall back to
+    // live model data or sensible defaults.
+    const storedCaps = keyEntry?.model_capabilities ?? {};
     const caps: Record<string, ModelCapabilitiesInfo> = {};
     for (const modelId of configuredModels) {
       const mi = models.find(m => m.id === modelId);
-      caps[modelId] = makeDefaultCaps(mi);
+      const stored = storedCaps[modelId];
+      caps[modelId] = stored
+        ? { ...makeDefaultCaps(mi), ...stored }
+        : makeDefaultCaps(mi);
     }
     setEditModelCaps(caps);
   };
@@ -427,7 +433,13 @@ function ProvidersTab() {
     } else {
       setEditModels([...editModels, model]);
       const mi = editAvailableModels.find(m => m.id === model);
-      setEditModelCaps({ ...editModelCaps, [model]: makeDefaultCaps(mi) });
+      // Preserve stored caps when re-selecting a previously configured model
+      const keyEntry = keys.find(k => k.provider === showEditDialog);
+      const stored = keyEntry?.model_capabilities?.[model];
+      setEditModelCaps({
+        ...editModelCaps,
+        [model]: stored ? { ...makeDefaultCaps(mi), ...stored } : makeDefaultCaps(mi),
+      });
     }
   };
 
