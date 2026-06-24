@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Wrench, FolderPlus, Check, Loader2, AlertCircle, X } from "lucide-react";
+import { Sparkles, FolderPlus, Check, Loader2, AlertCircle, X } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { useSkillStore } from "../../stores/skillStore";
@@ -116,7 +116,7 @@ export function SkillsPanel() {
   return (
     <>
       <ToolbarDropdownTrigger
-        icon={<Wrench size={14} />}
+        icon={<Sparkles size={14} />}
         label={skillsLabel}
         collapseClass="tb-sk-text"
         tipClass="tb-sk-tip"
@@ -155,7 +155,7 @@ export function SkillsPanel() {
                           "hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
                         )}
                       >
-                        <Wrench className={cn("h-3.5 w-3.5 shrink-0")} style={isActive ? { color: "var(--color-accent)" } : { color: "" }} />
+                        <Sparkles className={cn("h-3.5 w-3.5 shrink-0")} style={isActive ? { color: "var(--color-accent)" } : { color: "" }} />
                         <div className="min-w-0 flex-1">
                           <div className={cn("truncate text-xs", isActive ? "font-medium" : "text-zinc-800 dark:text-zinc-200")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
                             {skill.name}
