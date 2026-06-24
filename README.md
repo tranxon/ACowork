@@ -1,7 +1,7 @@
-<h1 align="center">AgentCowork.AI — Collaborate with your agent Colleagues</h1>
+<h1 align="center">Acowork.AI — Collaborate with your AI Colleagues</h1>
 
 <p align="center">
-  <img src="./assets/logo.svg" alt="AgentCowork.AI Logo" width="160" height="160" />
+  <span style="font-size:64px;font-weight:bold;letter-spacing:-0.03em;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;"><span style="color:#FBBC05">A</span><span style="color:#34A853">co</span><span style="color:#4285F4">work</span></span>
 </p>
 
 <p align="center">
@@ -43,17 +43,17 @@
 
 ---
 
-AgentCowork.AI is a **decentralized, high-security, scalable AI Agent runtime platform** modeled after Android. Instead of just building tools, AgentCowork lets you create **AI colleagues** — autonomous digital beings with their own memory, workspace, and personality, each specialized in different domains, collaborating with you and each other.
+Acowork.AI is a **decentralized, high-security, scalable AI Agent runtime platform** modeled after Android. Instead of just building tools, Acowork lets you create **AI colleagues** — autonomous digital beings with their own memory, workspace, and personality, each specialized in different domains, collaborating with you and each other.
 
 Every Agent is an independent **"digital being"**: its own runtime process, private memory, workspace, and configuration — fully independent personalized cognition. Like having a team of AI specialists working alongside you — a QA analyst, a project manager, a senior engineer — each with their own expertise and memory, communicating and coordinating through the platform's Intent mechanism.
 
-AgentCowork **serves two types of users**: developers build agents declaratively by tuning three dimensions — **prompt, tools, and memory** — while end-users install agents from a repository. An agent's true intelligence comes from the interplay of its system prompt, available tools, and the experience accumulated in its private memory over time. The signing toolchain + DevMode + publishing wizard form a complete developer toolkit — making **"tune prompt, tools, and memory = build an AI colleague"** a reality.
+Acowork **serves two types of users**: developers build agents declaratively by tuning three dimensions — **prompt, tools, and memory** — while end-users install agents from a repository. An agent's true intelligence comes from the interplay of its system prompt, available tools, and the experience accumulated in its private memory over time. The signing toolchain + DevMode + publishing wizard form a complete developer toolkit — making **"tune prompt, tools, and memory = build an AI colleague"** a reality.
 
 Agents can be freely shared between users — Personal/Sensitive data is automatically stripped during packaging, taking only the agent's capabilities away, leaving user's private memories behind.
 
 ### 🏪 Agent as APP — Like Android for AI
 
-AgentCowork treats every Agent like an **app on your phone**. Each `.agent` package is a complete, self-contained application — just like an APK. The universal Agent Runtime is the "operating system," and the Gateway manages installations, lifecycle, and permissions — just like an app store. This means anyone can build, distribute, and run AI agents with the same ease as smartphone apps.
+Acowork treats every Agent like an **app on your phone**. Each `.agent` package is a complete, self-contained application — just like an APK. The universal Agent Runtime is the "operating system," and the Gateway manages installations, lifecycle, and permissions — just like an app store. This means anyone can build, distribute, and run AI agents with the same ease as smartphone apps.
 
 ---
 
@@ -61,7 +61,7 @@ AgentCowork treats every Agent like an **app on your phone**. Each `.agent` pack
 
 ### Android Analogy
 
-| Android         | AgentCowork         | Role                                                               |
+| Android         | Acowork         | Role                                                               |
 | --------------- | ------------------- | ------------------------------------------------------------------ |
 | ART             | Agent Runtime       | Universal execution engine (single binary)                         |
 | APK             | `.agent` package    | Declarative bundle (config + prompts + skills, no executable code) |
@@ -74,14 +74,14 @@ AgentCowork treats every Agent like an **app on your phone**. Each `.agent` pack
 ### System Architecture
 
 <p align="center">
-  <img src="./assets/architecture.svg" alt="AgentCowork.AI System Architecture" width="100%" />
+  <img src="./assets/architecture.svg" alt="Acowork.AI System Architecture" width="100%" />
 </p>
 
 ---
 
-## 🔥 Why AgentCowork?
+## 🔥 Why Acowork?
 
-| Dimension           | LangChain / CrewAI                         | OpenCode / OpenClaw                                | AgentCowork.AI                                                             |
+| Dimension           | LangChain / CrewAI                         | OpenCode / OpenClaw                                | Acowork.AI                                                             |
 | ------------------- | ------------------------------------------ | -------------------------------------------------- | -------------------------------------------------------------------------- |
 | **Architecture**    | Library/Framework: your code calls its API | Coding Agent (TUI/CLI): single-agent, task-focused | **Agent Platform**: declarative `.agent` package, universal Runtime binary |
 | **Agent Model**     | Code-defined agents (Python/TS)            | Built-in agents (build/plan), skill-based          | **Declarative agents**: config + prompt + SKILL.md, zero coding            |
@@ -280,7 +280,7 @@ Developers build agents by **tuning declarative configurations** — crafting sy
 
 ### Core Crate Architecture
 
-AgentCowork adopts a **7-crate Rust workspace** architecture:
+Acowork adopts a **7-crate Rust workspace** architecture:
 
 | Crate                                          | Responsibility                                                    | Status        |
 | ---------------------------------------------- | ----------------------------------------------------------------- | ------------- |
@@ -337,7 +337,7 @@ AgentCowork adopts a **7-crate Rust workspace** architecture:
 
 ## 🧪 References & Acknowledgments
 
-AgentCowork.AI's design is deeply inspired by the following open-source projects:
+Acowork.AI's design is deeply inspired by the following open-source projects:
 
 | Project                                                 | Domain           | Inspiration                                                             |
 | ------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------- |
@@ -348,7 +348,7 @@ AgentCowork.AI's design is deeply inspired by the following open-source projects
 | [LightMem](https://github.com/zjunlp/LightMem)          | Memory Framework | Lightweight memory compression, structured memory management            |
 | [OpenCode](https://github.com/anomalyco/opencode)       | Coding Agent     | Multi-agent collaboration, provider-agnostic design                     |
 
-> ZeroClaw is a reference implementation (`ref-repo/zeroclaw/`), not the Source of Truth for AgentCowork.AI design. Code reuse follows MIT / Apache-2.0 license requirements.
+> ZeroClaw is a reference implementation (`ref-repo/zeroclaw/`), not the Source of Truth for Acowork.AI design. Code reuse follows MIT / Apache-2.0 license requirements.
 
 ---
 
@@ -369,6 +369,6 @@ Apache-2.0 — see [LICENSE](./LICENSE) for details.
 ---
 
 <p align="center">
-  <b>AgentCowork.AI — Collaborate with your AI Colleagues</b><br>
+  <b>Acowork.AI — Collaborate with your AI Colleagues</b><br>
   <i>Build and collaborate with AI agents like team members.</i>
 </p>

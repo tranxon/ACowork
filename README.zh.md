@@ -1,7 +1,7 @@
-<h1 align="center">AgentCowork.AI — 和你的 agent 同事一起工作</h1>
+<h1 align="center">Acowork.AI — 和你的 agent 同事一起工作</h1>
 
 <p align="center">
-  <img src="./assets/logo.svg" alt="AgentCowork.AI Logo" width="160" height="160" />
+  <span style="font-size:64px;font-weight:bold;letter-spacing:-0.03em;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;"><span style="color:#FBBC05">A</span><span style="color:#34A853">co</span><span style="color:#4285F4">work</span></span>
 </p>
 
 <p align="center">
@@ -43,18 +43,18 @@
 
 ---
 
-AgentCowork.AI 是一个**去中心化、高安全、可扩展的 AI Agent 运行时平台**。它不仅是一套开发框架，更是让你能够创造 **AI 同事**的平台——每个 Agent 都是拥有独立记忆、工作区和个性的自主数字存在，各自擅长不同领域，与你和其他 Agent 协作共进。
+Acowork.AI 是一个**去中心化、高安全、可扩展的 AI Agent 运行时平台**。它不仅是一套开发框架，更是让你能够创造 **AI 同事**的平台——每个 Agent 都是拥有独立记忆、工作区和个性的自主数字存在，各自擅长不同领域，与你和其他 Agent 协作共进。
 
 每个 Agent 都是独立的**"数字伙伴"**：拥有自己的运行时进程、私有记忆、工作区和配置，完全独立的个性化认知。就像身边有一支 AI 专家团队——有质量分析师、项目经理、高级工程师，各有所长、各司其职，通过平台的 Intent 机制沟通协调。
 
-AgentCowork **同时服务于两类用户**：开发者通过三个维度的调优来构建 Agent——**Prompt、Tools 和 Memory**，普通用户从仓库安装使用。Agent 真正的智能来自系统提示词、可用工具和私有记忆中沉淀的经验三者之间的协同。签名工具链 + DevMode + 发布向导构成完整的开发者工具链，让**"调优 Prompt、Tools、Memory = 构建 AI 同事"**成为可能。
+Acowork **同时服务于两类用户**：开发者通过三个维度的调优来构建 Agent——**Prompt、Tools 和 Memory**，普通用户从仓库安装使用。Agent 真正的智能来自系统提示词、可用工具和私有记忆中沉淀的经验三者之间的协同。签名工具链 + DevMode + 发布向导构成完整的开发者工具链，让**"调优 Prompt、Tools、Memory = 构建 AI 同事"**成为可能。
 
 Agent 可在用户间自由分享——Personal/Sensitive 数据自动剥离，只带走 Agent 能力和记忆，不带走用户记忆。
 
 
 ### 🏪 Agent as APP — 像 Android 一样管理 AI
 
-AgentCowork 将每个 Agent 视为手机上的**应用**。`.agent` 包就是完整自包含的应用——如同 APK。通用 Agent Runtime 是"操作系统"，Gateway 管理安装、生命周期、权限——如同应用商店。任何人都能以智能手机应用般的便捷度构建、分发和运行 AI Agent。
+Acowork 将每个 Agent 视为手机上的**应用**。`.agent` 包就是完整自包含的应用——如同 APK。通用 Agent Runtime 是"操作系统"，Gateway 管理安装、生命周期、权限——如同应用商店。任何人都能以智能手机应用般的便捷度构建、分发和运行 AI Agent。
 
 ---
 
@@ -62,7 +62,7 @@ AgentCowork 将每个 Agent 视为手机上的**应用**。`.agent` 包就是完
 
 ### Android 类比
 
-| Android         | AgentCowork         | 作用                                                  |
+| Android         | Acowork         | 作用                                                  |
 | --------------- | ------------------- | ----------------------------------------------------- |
 | ART             | Agent Runtime       | 通用执行引擎（平台唯一二进制）                        |
 | APK             | `.agent` 包         | 声明式打包（config + prompts + skills，无可执行代码） |
@@ -75,14 +75,14 @@ AgentCowork 将每个 Agent 视为手机上的**应用**。`.agent` 包就是完
 ### 系统架构
 
 <p align="center">
-  <img src="./assets/architecture.svg" alt="AgentCowork.AI 系统架构" width="100%" />
+  <img src="./assets/architecture.svg" alt="Acowork.AI 系统架构" width="100%" />
 </p>
 
 ---
 
 ## 🔥 为什么选择 AgentCowork？
 
-| 维度              | LangChain / CrewAI                    | OpenCode / OpenClaw                        | AgentCowork.AI                                          |
+| 维度              | LangChain / CrewAI                    | OpenCode / OpenClaw                        | Acowork.AI                                          |
 | ----------------- | ------------------------------------- | ------------------------------------------ | ------------------------------------------------------- |
 | **架构模式**      | Library/Framework：你的代码调它的 API | Coding Agent（TUI/CLI）：单Agent、任务聚焦 | **Agent 平台**：声明式 `.agent` 包，通用 Runtime 二进制 |
 | **Agent 模型**    | 代码定义 Agent（Python/TS）           | 内置 Agent（build/plan）、Skill 化         | **声明式 Agent**：config + prompt + SKILL.md，零代码    |
@@ -281,7 +281,7 @@ Desktop App（Tauri v2）提供：
 
 ### 核心 Crate 架构
 
-AgentCowork 采用 **7-crate Rust workspace** 架构：
+Acowork 采用 **7-crate Rust workspace** 架构：
 
 | Crate                                          | 职责                                           | 状态     |
 | ---------------------------------------------- | ---------------------------------------------- | -------- |
@@ -338,7 +338,7 @@ AgentCowork 采用 **7-crate Rust workspace** 架构：
 
 ## 🧪 参考与致谢
 
-AgentCowork.AI 的设计深受以下开源项目启发：
+Acowork.AI 的设计深受以下开源项目启发：
 
 | 项目                                                    | 领域          | 借鉴点                                     |
 | ------------------------------------------------------- | ------------- | ------------------------------------------ |
@@ -349,7 +349,7 @@ AgentCowork.AI 的设计深受以下开源项目启发：
 | [LightMem](https://github.com/zjunlp/LightMem)          | 记忆框架      | 轻量级记忆压缩、结构化记忆管理             |
 | [OpenCode](https://github.com/anomalyco/opencode)       | Coding Agent  | 多 Agent 协作模式、Provider 无关设计       |
 
-> ZeroClaw 为参考实现（`ref-repo/zeroclaw/`），非 AgentCowork.AI 设计的 Source of Truth。代码复用遵循 MIT / Apache-2.0 许可证要求。
+> ZeroClaw 为参考实现（`ref-repo/zeroclaw/`），非 Acowork.AI 设计的 Source of Truth。代码复用遵循 MIT / Apache-2.0 许可证要求。
 
 ---
 
@@ -370,6 +370,6 @@ Apache-2.0 — 详见 [LICENSE](./LICENSE) 文件。
 ---
 
 <p align="center">
-  <b>AgentCowork.AI — 与你的 AI 同事协作</b><br>
+  <b>Acowork.AI — 与你的 AI 同事协作</b><br>
   <i>像组建团队一样构建和协作 AI 伙伴。</i>
 </p>
