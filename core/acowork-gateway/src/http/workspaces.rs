@@ -17,6 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path as StdPath;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::http::routes::{ApiError, AppState};
@@ -724,6 +725,14 @@ fn detect_mime(ext: &str) -> Option<&'static str> {
         "env" | "ini" | "cfg" | "conf" => Some("text/plain"),
         "txt" | "log" | "csv" => Some("text/plain"),
         "gitignore" | "editorconfig" => Some("text/plain"),
+        // Image types
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        "bmp" => Some("image/bmp"),
+        "ico" => Some("image/x-icon"),
         _ => None,
     }
 }
@@ -871,15 +880,143 @@ pub async fn read_file(
     let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mime_type = detect_mime(ext).unwrap_or("text/plain").to_string();
 
-    // Read content
-    let content = std::fs::read_to_string(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?;
+    // Read content: binary files (images, etc.) are base64-encoded;
+    // text files are read as UTF-8 strings.
+    let content = if mime_type.starts_with("image/") {
+        let bytes = std::fs::read(&abs_path)
+            .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    } else {
+        std::fs::read_to_string(&abs_path)
+            .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?
+    };
 
     Ok(Json(FileResponse {
         content,
         size: metadata.len(),
         mime_type,
     }))
+}
+
+/// `GET /api/agents/{agent_id}/workspaces/file-raw` — read a file's raw bytes
+///
+/// Returns the file content directly (not wrapped in JSON) with the correct
+/// Content-Type header. This is used for iframe src URLs (HTML preview, etc.)
+/// where a proper HTTP origin is required for scripts to load without CORS issues.
+pub async fn read_raw_file(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<FileQuery>,
+) -> Result<(StatusCode, [(String, String); 1], axum::body::Body), (StatusCode, Json<ApiError>)> {
+    let file_rel_path = query.path.as_deref().unwrap_or("");
+    if file_rel_path.is_empty() {
+        return Err(ApiError::bad_request("Missing required 'path' parameter"));
+    }
+
+    let workspace_root =
+        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+
+    let (_canonical_root, abs_path, _rel_path) =
+        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
+
+    if !abs_path.is_file() {
+        return Err(ApiError::bad_request("Path is not a file"));
+    }
+
+    let metadata = std::fs::metadata(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Cannot read metadata: {}", e)))?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiError {
+                error: format!(
+                    "File too large ({} bytes, max {} bytes)",
+                    metadata.len(),
+                    MAX_FILE_SIZE
+                ),
+                code: 413,
+            }),
+        ));
+    }
+
+    let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mime_type = detect_mime(ext).unwrap_or("text/plain").to_string();
+
+    let bytes = std::fs::read(&abs_path)
+        .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?;
+
+    Ok((
+        StatusCode::OK,
+        [("Content-Type".to_string(), mime_type)],
+        axum::body::Body::from(bytes),
+    ))
+}
+
+/// `GET /ws-files/{agent_id}/{*path}` — serve a workspace file as a static asset
+///
+/// This endpoint serves files from the agent's workspace root so that HTML
+/// documents can reference sub-resources (scripts, styles, images) via
+/// root-relative URLs like `/src/main.tsx`.
+///
+/// The `{*path}` parameter captures the remainder of the URL after `/ws-files/{agent_id}/`,
+/// which is used as the relative path within the workspace root.
+pub async fn serve_ws_file(
+    State(state): State<AppState>,
+    Path((agent_id, file_rel_path)): Path<(String, String)>,
+) -> Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)> {
+    if file_rel_path.is_empty() || file_rel_path == "/" {
+        return Err(ApiError::bad_request("Missing file path"));
+    }
+
+    // Trim leading slash
+    let file_rel_path = file_rel_path.trim_start_matches('/');
+
+    // Use agent home as workspace root (same as __agent_home__)
+    let workspace_root = resolve_workspace_root(&state, &agent_id, None).await?;
+    let workspace_root = PathBuf::from(workspace_root);
+
+    let abs_path = workspace_root.join(file_rel_path);
+
+    // Security: verify the resolved path is within the workspace root
+    let canonical = abs_path.canonicalize().map_err(|_| {
+        ApiError::not_found(&format!("File not found: {}", file_rel_path))
+    })?;
+    if !canonical.starts_with(&workspace_root) {
+        return Err(ApiError::bad_request("Path escapes workspace root"));
+    }
+
+    if !canonical.is_file() {
+        return Err(ApiError::not_found(&format!("File not found: {}", file_rel_path)));
+    }
+
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|e| ApiError::internal(&format!("Cannot read metadata: {}", e)))?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiError {
+                error: format!(
+                    "File too large ({} bytes, max {} bytes)",
+                    metadata.len(),
+                    MAX_FILE_SIZE
+                ),
+                code: 413,
+            }),
+        ));
+    }
+
+    let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mime_type = detect_mime(ext).unwrap_or("application/octet-stream").to_string();
+
+    let bytes = std::fs::read(&canonical)
+        .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?;
+
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", mime_type), ("Access-Control-Allow-Origin", "*".to_string())],
+        axum::body::Body::from(bytes),
+    ))
 }
 
 /// `PUT /api/agents/{agent_id}/workspaces/file` — write content to a file
@@ -1431,12 +1568,15 @@ pub fn workspace_routes() -> Router<AppState> {
             put(set_prompt_file),
         )
         .route("/api/agents/{agent_id}/workspaces/tree", get(list_tree))
-        .route(
-            "/api/agents/{agent_id}/workspaces/file",
+        .route("/api/agents/{agent_id}/workspaces/file",
             get(read_file)
                 .put(write_file)
                 .post(create_file)
                 .delete(delete_file),
+        )
+        .route(
+            "/api/agents/{agent_id}/workspaces/file-raw",
+            get(read_raw_file),
         )
         .route(
             "/api/agents/{agent_id}/workspaces/dir",
@@ -1446,5 +1586,9 @@ pub fn workspace_routes() -> Router<AppState> {
         .route(
             "/api/agents/{agent_id}/workspaces/search",
             get(search_files),
+        )
+        .route(
+            "/ws-files/{agent_id}/{*path}",
+            get(serve_ws_file),
         )
 }

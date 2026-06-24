@@ -25,6 +25,7 @@ acowork-memory.workspace = true
 secrecy.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 serde.workspace = true
 serde_json.workspace = true

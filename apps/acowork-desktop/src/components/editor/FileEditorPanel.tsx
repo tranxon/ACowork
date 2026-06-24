@@ -17,6 +17,7 @@ import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./
 import { LspDocumentTracker } from "./LspDocumentTracker";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
+import { HtmlPreviewView } from "./HtmlPreviewView";
 import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
@@ -1316,12 +1317,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                         />
                     </div>
                 ) : activeFile.mode === "preview" && activeFile.mimeType === "text/html" ? (
-                    <iframe
-                        srcDoc={activeFile.content}
-                        className="h-full w-full border-0 bg-white"
-                        sandbox="allow-scripts allow-same-origin allow-forms"
-                        title={activeFile.fileName}
-                    />
+                    <HtmlPreviewView content={activeFile.content} gatewayUrl={getGatewayUrl()} agentId={activeFile.agentId} fileName={activeFile.fileName} />
                 ) : activeFile.mode === "preview" ? (
                     <MarkdownPreviewView file={activeFile} />
                 ) : (

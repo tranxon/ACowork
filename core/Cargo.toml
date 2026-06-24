@@ -84,6 +84,9 @@ tiktoken-rs = "0.6"
 # ZIP
 zip = { version = "8.1", default-features = true, features = ["deflate-flate2"] }
 
+# Encoding
+base64 = "0.22"
+
 # Document parsing
 pdf-extract = "0.10"
 calamine = "0.26"
