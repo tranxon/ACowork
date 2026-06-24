@@ -74,6 +74,7 @@
         "compressContext": "compact context"
     },
     "agentList": {
+        "doubleClickToStart": "Double-click to start",
         "searchPlaceholder": "Search agents...",
         "stopConfirm": "Stop {{agent}}? Current conversation state will be preserved.",
         "uninstallConfirm": "Uninstall {{agent}}? This action cannot be undone."

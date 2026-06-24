@@ -37,8 +37,9 @@ export function AgentList({ width }: AgentListProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
 
-  // Track agents currently waiting for the Runtime to become ready
-  const [, setStartingAgentIds] = useState<Set<string>>(new Set());
+  // Track agents currently waiting for the Runtime to become ready.
+  // Reading this Set is the dedup gate for `handleStart` — see guard there.
+  const [startingAgentIds, setStartingAgentIds] = useState<Set<string>>(new Set());
 
   /// Poll fetchAgents until the agent's `ready` flag becomes true, then connect WebSocket.
   /// Called after startAgent() succeeds. Max wait 15 seconds (30 × 500ms).
@@ -143,13 +144,14 @@ export function AgentList({ width }: AgentListProps) {
   };
 
   const handleStart = async (agentId: string) => {
+    // Dedup gate: prevent rapid double-fires (e.g. user double-clicks the list
+    // item, or double-clicks and then triggers Start from the context menu).
+    // The set is held until `waitForAgentReady` finishes, see below.
+    if (startingAgentIds.has(agentId)) return;
     try {
-      console.log(`[AgentList] handleStart calling startAgent for ${agentId}`);
       await startAgent(agentId);
-      console.log(`[AgentList] handleStart startAgent done, launching waitForAgentReady for ${agentId}`);
       // Poll until ready, then connect WebSocket
       waitForAgentReady(agentId, false);
-      console.log(`[AgentList] handleStart waitForAgentReady launched (fire-and-forget) for ${agentId}`);
     } catch (e) {
       addToast({ type: "error", message: `Failed to start agent: ${String(e)}` });
     }
@@ -258,8 +260,8 @@ export function AgentList({ width }: AgentListProps) {
             placeholder={isCollapsed ? "" : t("agentList.searchPlaceholder")}
             aria-label={t("agentList.searchPlaceholder")}
             className={cn(
-              "rounded-md bg-[#D8D9DC] pl-7 dark:bg-[#3D3D3F]",
-              isCollapsed ? "h-7 min-w-0 pr-0" : "py-1.5 pr-2",
+              "rounded-md bg-[#D8D9DC] pl-7 dark:bg-[#3D3D3F] py-1.5",
+              isCollapsed ? "min-w-0 pr-0" : "pr-2",
             )}
           />
         </div>
@@ -288,6 +290,14 @@ export function AgentList({ width }: AgentListProps) {
                 index < filteredAgents.length - 1 && (isCollapsed ? "after:absolute after:bottom-0 after:left-1 after:right-1 after:border-b after:border-[#C8C8C8]/40 dark:after:border-zinc-600/40" : "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-[#C8C8C8]/40 dark:after:border-zinc-600/40")
               )}
               onClick={() => selectAgent(agent.agent_id)}
+              onDoubleClick={() => {
+                // Convenience: double-click a stopped agent to start it.
+                // Running/starting agents ignore this — use context menu for Stop.
+                if (!agent.running && !startingAgentIds.has(agent.agent_id)) {
+                  void handleStart(agent.agent_id);
+                }
+              }}
+              title={agent.running ? undefined : t("agentList.doubleClickToStart")}
               onContextMenu={(e) => handleContextMenu(e, agent.agent_id)}
               role="listitem"
             >
