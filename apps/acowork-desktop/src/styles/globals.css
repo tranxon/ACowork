@@ -17,13 +17,20 @@
      so consumers just write `bg-chat-bubble` / `bg-chat-title` /
      `bg-chat-body` / `border-chat-border` / `bg-chat-badge` /
      `bg-chat-user` / `text-chat-user-text` with no `dark:` prefix needed. */
-   --color-chat-bubble: hsl(240 5.9% 90.6% / 0.4); /* = zinc-200/50 — message surface */
-   --color-chat-title:  hsl(240 4.8% 86.1% / 0.5);   /* = zinc-300 — block title */
-   --color-chat-body:   hsl(0 0% 98% / 0.8);            /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
-   --color-chat-border: hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
-   --color-chat-badge:  hsl(240 5.9% 90.6%);       /* = zinc-200, #e4e4e7 — sender-role label pill */
-   --color-chat-user:   color-mix(in srgb, var(--color-accent) 50%, transparent); /* = accent 50% — user message bubble */
-   --color-chat-user-text: hsl(240 10% 3.9%);          /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
+  --color-chat-bubble: hsl(240 5.9% 90.6% / 0.4);
+  /* = zinc-200/50 — message surface */
+  --color-chat-title: hsl(240 4.8% 86.1% / 0.5);
+  /* = zinc-300 — block title */
+  --color-chat-body: hsl(0 0% 98% / 0.8);
+  /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
+  --color-chat-border: hsl(240 5.9% 90.6%);
+  /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
+  --color-chat-badge: hsl(240 5.9% 90.6%);
+  /* = zinc-200, #e4e4e7 — sender-role label pill */
+  --color-chat-user: color-mix(in srgb, var(--color-accent) 50%, transparent);
+  /* = accent 50% — user message bubble */
+  --color-chat-user-text: hsl(240 10% 3.9%);
+  /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
 
   /* Border radius — 3-tier unified scale
      sm (4px): buttons, inputs, labels, badges
@@ -153,13 +160,20 @@
   /* ~zinc-400 for dark mode */
 
   /* Chat palette (dark) — auto-flips the @theme light values (6 tokens) */
-  --color-chat-bubble: hsl(240 3.8% 15.7% / 0.6);  /* = zinc-800, #27272a — message surface */
-  --color-chat-title:  hsl(240 5.2% 26.1% / 0.6);  /* = zinc-700, #3f3f46 — block title (lighter than body) */
-  --color-chat-body:   hsl(240 5.9% 10% / 0.6);    /* = zinc-900, #18181b — block body (darker, closer to panel) */
-  --color-chat-border: hsl(240 5.2% 26.1%);  /* = zinc-700, #3f3f46 — container border */
-  --color-chat-badge:  hsl(240 5.2% 26.1%);  /* = zinc-700, #3f3f46 — sender-role label pill */
-  --color-chat-user:   color-mix(in srgb, var(--color-accent) 90%, transparent); /* = accent 50% — user message bubble */
-  --color-chat-user-text: hsl(240 10% 3.9%);          /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
+  --color-chat-bubble: hsl(240 3.8% 15.7% / 0.6);
+  /* = zinc-800, #27272a — message surface */
+  --color-chat-title: hsl(240 5.2% 26.1% / 0.6);
+  /* = zinc-700, #3f3f46 — block title (lighter than body) */
+  --color-chat-body: hsl(240 5.9% 10% / 0.6);
+  /* = zinc-900, #18181b — block body (darker, closer to panel) */
+  --color-chat-border: hsl(240 5.2% 26.1%);
+  /* = zinc-700, #3f3f46 — container border */
+  --color-chat-badge: hsl(240 5.2% 26.1%);
+  /* = zinc-700, #3f3f46 — sender-role label pill */
+  --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
+  /* = accent 50% — user message bubble */
+  --color-chat-user-text: hsl(240 10% 3.9%);
+  /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
 
   /* Shimmer gradient stops (dark) */
   --shimmer-from: hsl(240 5% 40%);
@@ -327,100 +341,127 @@ body {
   color: hsl(120 3% 46%);
   font-style: italic;
 }
+
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-subst {
   color: hsl(271 73% 40%);
   font-weight: 500;
 }
+
 .hljs-number,
 .hljs-literal,
 .hljs-template-variable,
 .hljs-tag .hljs-attr {
   color: hsl(10 75% 38%);
 }
+
 .hljs-string,
 .hljs-doctag {
   color: hsl(155 55% 28%);
 }
+
 .hljs-title,
 .hljs-section,
 .hljs-selector-id {
   color: hsl(220 70% 40%);
 }
+
 .hljs-title.class_,
 .hljs-title.function_ {
   color: hsl(220 70% 40%);
 }
+
 .hljs-type {
   color: hsl(40 80% 35%);
 }
+
 .hljs-attr,
 .hljs-built_in,
 .hljs-meta .hljs-keyword {
   color: hsl(200 70% 32%);
 }
+
 .hljs-meta {
   color: hsl(260 50% 42%);
 }
+
 .hljs-meta .hljs-string {
   color: hsl(155 55% 28%);
 }
+
 .hljs-tag,
 .hljs-name {
   color: hsl(100 40% 32%);
 }
+
 .hljs-addition {
   color: hsl(130 50% 28%);
   background: hsl(130 50% 92%);
 }
+
 .hljs-deletion {
   color: hsl(0 60% 40%);
   background: hsl(0 60% 94%);
 }
+
 .hljs-emphasis {
   font-style: italic;
 }
+
 .hljs-strong {
   font-weight: 700;
 }
+
 .hljs-link {
   color: hsl(240 50% 45%);
   text-decoration: underline;
 }
+
 .hljs-formula {
   color: hsl(30 80% 40%);
 }
+
 .hljs-operator {
   color: hsl(240 5% 35%);
 }
+
 .hljs-params {
   color: hsl(240 5% 30%);
 }
+
 .hljs-property {
   color: hsl(220 50% 35%);
 }
+
 .hljs-punctuation {
   color: hsl(240 4% 45%);
 }
+
 .hljs-regexp {
   color: hsl(0 60% 40%);
 }
+
 .hljs-selector-class {
   color: hsl(40 80% 35%);
 }
+
 .hljs-selector-pseudo {
   color: hsl(200 70% 32%);
 }
+
 .hljs-symbol {
   color: hsl(155 55% 28%);
 }
+
 .hljs-template-tag {
   color: hsl(200 70% 32%);
 }
+
 .hljs-template-variable {
   color: hsl(10 75% 38%);
 }
+
 .hljs-variable.language_ {
   color: hsl(271 73% 40%);
 }
@@ -431,100 +472,127 @@ body {
   color: hsl(120 3% 48%);
   font-style: italic;
 }
+
 .dark .hljs-keyword,
 .dark .hljs-selector-tag,
 .dark .hljs-subst {
   color: hsl(271 70% 72%);
   font-weight: 500;
 }
+
 .dark .hljs-number,
 .dark .hljs-literal,
 .dark .hljs-template-variable,
 .dark .hljs-tag .hljs-attr {
   color: hsl(10 72% 58%);
 }
+
 .dark .hljs-string,
 .dark .hljs-doctag {
   color: hsl(155 50% 52%);
 }
+
 .dark .hljs-title,
 .dark .hljs-section,
 .dark .hljs-selector-id {
   color: hsl(220 68% 64%);
 }
+
 .dark .hljs-title.class_,
 .dark .hljs-title.function_ {
   color: hsl(220 68% 64%);
 }
+
 .dark .hljs-type {
   color: hsl(40 70% 55%);
 }
+
 .dark .hljs-attr,
 .dark .hljs-built_in,
 .dark .hljs-meta .hljs-keyword {
   color: hsl(200 60% 56%);
 }
+
 .dark .hljs-meta {
   color: hsl(260 45% 62%);
 }
+
 .dark .hljs-meta .hljs-string {
   color: hsl(155 50% 52%);
 }
+
 .dark .hljs-tag,
 .dark .hljs-name {
   color: hsl(100 35% 52%);
 }
+
 .dark .hljs-addition {
   color: hsl(130 40% 48%);
   background: hsl(130 40% 12%);
 }
+
 .dark .hljs-deletion {
   color: hsl(0 60% 56%);
   background: hsl(0 50% 16%);
 }
+
 .dark .hljs-emphasis {
   font-style: italic;
 }
+
 .dark .hljs-strong {
   font-weight: 700;
 }
+
 .dark .hljs-link {
   color: hsl(240 50% 68%);
   text-decoration: underline;
 }
+
 .dark .hljs-formula {
   color: hsl(30 70% 58%);
 }
+
 .dark .hljs-operator {
   color: hsl(240 5% 62%);
 }
+
 .dark .hljs-params {
   color: hsl(240 5% 72%);
 }
+
 .dark .hljs-property {
   color: hsl(220 45% 62%);
 }
+
 .dark .hljs-punctuation {
   color: hsl(240 4% 52%);
 }
+
 .dark .hljs-regexp {
   color: hsl(0 60% 56%);
 }
+
 .dark .hljs-selector-class {
   color: hsl(40 70% 55%);
 }
+
 .dark .hljs-selector-pseudo {
   color: hsl(200 60% 56%);
 }
+
 .dark .hljs-symbol {
   color: hsl(155 50% 52%);
 }
+
 .dark .hljs-template-tag {
   color: hsl(200 60% 56%);
 }
+
 .dark .hljs-template-variable {
   color: hsl(10 72% 58%);
 }
+
 .dark .hljs-variable.language_ {
   color: hsl(271 70% 72%);
 }
@@ -1088,4 +1156,16 @@ input[type="radio"]:checked {
   .tb-sk-tip {
     display: none !important;
   }
+}
+
+/* ── Monaco find-widget: suppress hover tooltips ──────────────────────
+   Monaco 0.55+ uses a custom HoverService that renders floating tooltips
+   via .workbench-hover-container elements. In a Tauri window the
+   CompositeMouseTracker fails to detect mouseenter on the tooltip (Tauri
+   webview quirk), causing a dispose→re-show loop (visible flicker).
+   Hiding the container with display:none breaks the visual loop.
+   Code-editor hover tooltips (type info, errors) are also suppressed —
+   acceptable trade-off since the find-widget flicker makes them unusable. */
+.workbench-hover-container {
+  display: none !important;
 }

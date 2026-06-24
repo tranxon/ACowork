@@ -1361,7 +1361,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
             {/* Status bar — only for editable files */}
             {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
-                <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-100 px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-800 dark:text-zinc-400">
+                <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-[#FAFAFA] px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
                     <span className="uppercase truncate min-w-0">{activeFile.language || "plain text"}</span>
                     {lspEnabled && lspLanguage && (
                         <div className="shrink-0">
