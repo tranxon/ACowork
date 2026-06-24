@@ -634,7 +634,18 @@ fn merge_user_capabilities(
 ) {
     for model_entry in &mut item.models {
         if let Some(user_cap) = user_caps.get(&model_entry.id) {
-            // Only override fields that the user explicitly set (non-None).
+            // Core limits — always override (frontend always sends these)
+            model_entry.capabilities.context_window = user_cap.context_window;
+            model_entry.capabilities.max_output_tokens = user_cap.max_output_tokens;
+            model_entry.capabilities.supports_tool_calling = user_cap.supports_tool_calling;
+
+            // Optional fields — override only when the user explicitly set them
+            if user_cap.modalities.is_some() {
+                model_entry.capabilities.modalities = user_cap.modalities.clone();
+            }
+            if user_cap.supports_attachment.is_some() {
+                model_entry.capabilities.supports_attachment = user_cap.supports_attachment;
+            }
             if user_cap.default_reasoning_effort.is_some() {
                 model_entry.capabilities.default_reasoning_effort =
                     user_cap.default_reasoning_effort.clone();

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesMap, ProviderListEntry, McpServerConfigDef, McpTransportDef, McpPresetDef } from "../../lib/types";
+import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpTransportDef, McpPresetDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { inputBase, selectBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
@@ -71,11 +71,9 @@ function ProvidersTab() {
   const [modelSearchTerm, setModelSearchTerm] = useState("");
   const [modelCapabilityFilter, setModelCapabilityFilter] = useState<string[]>([]);
 
-  // Add dialog — model capabilities state
-  const [newContextWindow, setNewContextWindow] = useState("");
-  const [newMaxOutputTokens, setNewMaxOutputTokens] = useState("");
-  const [newSupportsToolCalling, setNewSupportsToolCalling] = useState(true);
-  const [newDefaultReasoningEffort, setNewDefaultReasoningEffort] = useState("auto");
+  // Add dialog — per-model capabilities state
+  const [newModelCaps, setNewModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
+  const [newExpandedModels, setNewExpandedModels] = useState<Set<string>>(new Set());
   const [newCompactModel, setNewCompactModel] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -89,12 +87,10 @@ function ProvidersTab() {
   const [editModelSearchTerm, setEditModelSearchTerm] = useState("");
   const [editModelCapabilityFilter, setEditModelCapabilityFilter] = useState<string[]>([]);
 
-  // Edit dialog — model capabilities state
-  const [editContextWindow, setEditContextWindow] = useState("");
-  const [editMaxOutputTokens, setEditMaxOutputTokens] = useState("");
-  const [editSupportsToolCalling, setEditSupportsToolCalling] = useState(true);
+  // Edit dialog — per-model capabilities state
+  const [editModelCaps, setEditModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
+  const [editExpandedModels, setEditExpandedModels] = useState<Set<string>>(new Set());
   const [editCompactModel, setEditCompactModel] = useState("");
-  const [editDefaultReasoningEffort, setEditDefaultReasoningEffort] = useState("auto");
 
   // Custom provider dialog state
   const [showCustomDialog, setShowCustomDialog] = useState(false);
@@ -108,6 +104,8 @@ function ProvidersTab() {
   const [customDiscoverError, setCustomDiscoverError] = useState<string | null>(null);
   const [customModelSearchTerm, setCustomModelSearchTerm] = useState("");
   const [customTesting, setCustomTesting] = useState(false);
+  const [customModelCaps, setCustomModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
+  const [customExpandedModels, setCustomExpandedModels] = useState<Set<string>>(new Set());
   // Gateway config for default provider indication
   const [config, setConfig] = useState<GatewayConfig | null>(null);
 
@@ -216,37 +214,19 @@ function ProvidersTab() {
     if (newProviderIsLocal) {
       setTesting(true);
       try {
-        // Build per-model capabilities map
-        const modelCapabilities: ModelCapabilitiesMap = {};
-        if (newModels.length > 0) {
-          for (const modelId of newModels) {
-            const mi = availableModels.find(m => m.id === modelId);
-            modelCapabilities[modelId] = {
-              context_window: mi?.context_window ?? 128000,
-              max_output_tokens: mi?.max_tokens ?? 4096,
-              supports_tool_calling: mi?.tool_call ?? newSupportsToolCalling,
-              supports_reasoning: mi?.reasoning ?? undefined,
-              default_reasoning_effort: mi?.reasoning ? (newDefaultReasoningEffort || undefined) : undefined,
-              modalities: mi?.input_modalities?.length ? { input: mi.input_modalities } : undefined,
-            };
-          }
-        }
         await invoke("add_key", {
           provider: newProvider,
           key: "",  // local providers don't need a key; Gateway will fill placeholder
           baseUrl: newBaseUrl || undefined,
           defaultModel: undefined,
           models: newModels.length > 0 ? newModels : undefined,
-          modelCapabilities,
+          modelCapabilities: newModels.length > 0 ? newModelCaps : undefined,
           compactModel: newCompactModel || undefined,
         });
         setShowAddDialog(false);
         setNewKey("");
         setNewModels([]);
-        setNewContextWindow("");
-        setNewMaxOutputTokens("");
-        setNewSupportsToolCalling(true);
-        setNewDefaultReasoningEffort("auto");
+        setNewModelCaps({});
         setTestResult(null);
         await fetchKeys();
         await fetchConfig();
@@ -286,40 +266,7 @@ function ProvidersTab() {
     setTesting(false);
 
     // Test passed, proceed with saving
-    // Get effective values (prefer models.dev data if available)
-    const primaryModel = newModels.length > 0 ? newModels[0] : "";
-    const modelInfo = availableModels.find(m => m.id === primaryModel);
-    const hasModelsDevData = !!(modelInfo && (modelInfo.context_window || modelInfo.max_tokens));
-    const effectiveContextWindow = hasModelsDevData
-      ? (modelInfo?.context_window?.toString() ?? newContextWindow)
-      : newContextWindow;
-    const effectiveMaxOutputTokens = hasModelsDevData
-      ? (modelInfo?.max_tokens?.toString() ?? newMaxOutputTokens)
-      : newMaxOutputTokens;
-    const effectiveSupportsToolCalling = hasModelsDevData
-      ? (modelInfo?.tool_call ?? newSupportsToolCalling)
-      : newSupportsToolCalling;
-
-    // Rust requires context_window to be present (u64, not Option)
-    // Default to 128000 if not specified (safe default for most models)
-    const ctxWindow = effectiveContextWindow ? parseInt(effectiveContextWindow) : 128000;
-
-    // Build per-model capabilities map
-    const modelCapabilities: ModelCapabilitiesMap = {};
-    if (newModels.length > 0) {
-      const maxOutTokens = effectiveMaxOutputTokens ? parseInt(effectiveMaxOutputTokens) : 4096;
-      for (const modelId of newModels) {
-        const mi = availableModels.find(m => m.id === modelId);
-        modelCapabilities[modelId] = {
-          context_window: mi?.context_window ?? ctxWindow,
-          max_output_tokens: mi?.max_tokens ?? maxOutTokens,
-          supports_tool_calling: mi?.tool_call ?? effectiveSupportsToolCalling,
-          supports_reasoning: mi?.reasoning ?? undefined,
-          default_reasoning_effort: mi?.reasoning ? (newDefaultReasoningEffort || undefined) : undefined,
-          modalities: mi?.input_modalities?.length ? { input: mi.input_modalities } : undefined,
-        };
-      }
-    }
+    // For remote providers, don't send model_capabilities — offline data is authoritative
     try {
       await invoke("add_key", {
         provider: newProvider,
@@ -327,16 +274,12 @@ function ProvidersTab() {
         baseUrl: newBaseUrl || undefined,
         defaultModel: undefined,
         models: newModels.length > 0 ? newModels : undefined,
-        modelCapabilities,
         compactModel: newCompactModel || undefined,
       });
       setShowAddDialog(false);
       setNewKey("");
       setNewModels([]);
-      setNewContextWindow("");
-      setNewMaxOutputTokens("");
-      setNewSupportsToolCalling(true);
-      setNewDefaultReasoningEffort("auto");
+      setNewModelCaps({});
       setTestResult(null);
       await fetchKeys();
       await fetchConfig();
@@ -384,28 +327,26 @@ function ProvidersTab() {
     setEditModelSearchTerm("");
     setEditModelCapabilityFilter([]);
     setEditCompactModel(keyEntry?.compact_model ?? "");
+    setEditModelCaps({});
+    setEditExpandedModels(new Set());
     setShowEditDialog(provider);
     // Fetch models from Gateway API (includes input_modalities, context_window, etc.)
     setEditModelsLoading(true);
     const models = await fetchModels(provider);
     setEditAvailableModels(models);
     setEditModelsLoading(false);
-    // Read capabilities from API models (not vault — vault only stores keys now)
-    const firstModelId = configuredModels[0];
-    const firstInfo = firstModelId ? models.find(m => m.id === firstModelId) : undefined;
-    setEditContextWindow(firstInfo?.context_window && firstInfo.context_window > 0 ? firstInfo.context_window.toString() : "128000");
-    setEditMaxOutputTokens(firstInfo?.max_tokens && firstInfo.max_tokens > 0 ? firstInfo.max_tokens.toString() : "4096");
-    setEditSupportsToolCalling(firstInfo?.tool_call ?? true);
-    setEditDefaultReasoningEffort("auto");
+    // Initialize per-model caps from fetched model data (for local/custom, this includes stored caps)
+    const caps: Record<string, ModelCapabilitiesInfo> = {};
+    for (const modelId of configuredModels) {
+      const mi = models.find(m => m.id === modelId);
+      caps[modelId] = makeDefaultCaps(mi);
+    }
+    setEditModelCaps(caps);
   };
 
   const handleEditSave = async () => {
     if (!showEditDialog) return;
-    console.log("[handleEditSave] provider:", showEditDialog, "models:", editModels, "key:", editKey ? "(present)" : "(empty)");
     try {
-      // NOTE: editKey is initialized from key_preview (masked), NOT the real API key.
-      // Do NOT send the key field unless the user explicitly entered a new key.
-      // The Gateway update_key API preserves the existing key when key is omitted.
       const updatePayload: Record<string, unknown> = {
         provider: showEditDialog,
         baseUrl: editBaseUrl || undefined,
@@ -417,29 +358,11 @@ function ProvidersTab() {
       if (editKey && editKey !== keyEntry?.key_preview) {
         updatePayload.key = editKey;
       }
-      // Build per-model capabilities map
-      const shouldBuildCaps = editContextWindow || editMaxOutputTokens || editDefaultReasoningEffort;
-      if (shouldBuildCaps) {
-        const cw = Number(editContextWindow);
-        const mot = Number(editMaxOutputTokens);
-        if ((editContextWindow && (!Number.isFinite(cw) || cw <= 0)) ||
-          (editMaxOutputTokens && (!Number.isFinite(mot) || mot <= 0))) {
-          alert(t("harness.contextWindowMaxOutputPositive"));
-          return;
-        }
-        const caps: ModelCapabilitiesMap = {};
-        for (const modelId of editModels) {
-          const modelInfo = editAvailableModels.find(m => m.id === modelId);
-          caps[modelId] = {
-            context_window: cw || 128000,
-            max_output_tokens: mot || 4096,
-            supports_tool_calling: editSupportsToolCalling,
-            supports_reasoning: modelInfo?.reasoning ?? undefined,
-            default_reasoning_effort: editDefaultReasoningEffort || undefined,
-            modalities: modelInfo?.input_modalities?.length ? { input: modelInfo.input_modalities } : undefined,
-          };
-        }
-        updatePayload.modelCapabilities = caps;
+      // For local/custom providers, send per-model capabilities
+      const isLocal = isLocalProvider(showEditDialog);
+      const isCustom = keyEntry?.custom ?? false;
+      if ((isLocal || isCustom) && editModels.length > 0 && Object.keys(editModelCaps).length > 0) {
+        updatePayload.modelCapabilities = editModelCaps;
       }
       // Include compact_model if set
       if (editCompactModel) {
@@ -447,26 +370,101 @@ function ProvidersTab() {
       } else {
         updatePayload.compactModel = null;  // Explicitly clear if empty
       }
-      console.log("[handleEditSave] payload:", JSON.stringify(updatePayload));
       await invoke("update_key", updatePayload);
-      console.log("[handleEditSave] success");
       setShowEditDialog(null);
       await fetchKeys();
       await fetchConfig();
       window.dispatchEvent(new CustomEvent('models-added'));
     } catch (e) {
-      console.error("[handleEditSave] error:", e);
       alert(`${t("harness.failedUpdateKey")}: ${e}`);
     }
   };
 
-  // Toggle a model in the selection list
-  const toggleModel = (model: string, currentList: string[], setList: (v: string[]) => void) => {
-    if (currentList.includes(model)) {
-      setList(currentList.filter((m) => m !== model));
-    } else {
-      setList([...currentList, model]);
+  // Helper: create default capabilities for a model
+  const makeDefaultCaps = (mi: ModelInfo | undefined): ModelCapabilitiesInfo => {
+    if (mi && (mi.context_window || mi.max_tokens)) {
+      return {
+        context_window: mi.context_window ?? 128000,
+        max_output_tokens: mi.max_tokens ?? 16384,
+        supports_tool_calling: mi.tool_call ?? true,
+        supports_reasoning: mi.reasoning ?? false,
+        modalities: {
+          input: mi.input_modalities ?? ["text"],
+          output: mi.output_modalities ?? ["text"],
+        },
+      };
     }
+    return {
+      context_window: 128000,
+      max_output_tokens: 16384,
+      supports_tool_calling: true,
+      supports_reasoning: false,
+      modalities: { input: ["text"], output: ["text"] },
+    };
+  };
+
+  // Toggle model in add dialog (with caps management)
+  const toggleNewModel = (model: string) => {
+    if (newModels.includes(model)) {
+      setNewModels(newModels.filter(m => m !== model));
+      const next = { ...newModelCaps };
+      delete next[model];
+      setNewModelCaps(next);
+    } else {
+      setNewModels([...newModels, model]);
+      const mi = availableModels.find(m => m.id === model);
+      setNewModelCaps({ ...newModelCaps, [model]: makeDefaultCaps(mi) });
+    }
+  };
+
+  // Toggle model in edit dialog (with caps management)
+  const toggleEditModel = (model: string) => {
+    if (editModels.includes(model)) {
+      setEditModels(editModels.filter(m => m !== model));
+      const next = { ...editModelCaps };
+      delete next[model];
+      setEditModelCaps(next);
+    } else {
+      setEditModels([...editModels, model]);
+      const mi = editAvailableModels.find(m => m.id === model);
+      setEditModelCaps({ ...editModelCaps, [model]: makeDefaultCaps(mi) });
+    }
+  };
+
+  // Toggle model in custom dialog (with caps management)
+  const toggleCustomModel = (model: string) => {
+    if (customModels.includes(model)) {
+      setCustomModels(customModels.filter(m => m !== model));
+      const next = { ...customModelCaps };
+      delete next[model];
+      setCustomModelCaps(next);
+    } else {
+      setCustomModels([...customModels, model]);
+      const mi = customAvailableModels.find(m => m.id === model);
+      setCustomModelCaps({ ...customModelCaps, [model]: makeDefaultCaps(mi) });
+    }
+  };
+
+  // Update a single field in a model's capabilities (add dialog)
+  const updateNewModelCap = (modelId: string, field: keyof ModelCapabilitiesInfo, value: unknown) => {
+    setNewModelCaps(prev => ({
+      ...prev,
+      [modelId]: { ...prev[modelId], [field]: value },
+    }));
+  };
+  // Update a single field in a model's capabilities (edit dialog)
+  const updateEditModelCap = (modelId: string, field: keyof ModelCapabilitiesInfo, value: unknown) => {
+    setEditModelCaps(prev => ({
+      ...prev,
+      [modelId]: { ...prev[modelId], [field]: value },
+    }));
+  };
+  // Update a single field in a model's capabilities (custom dialog)
+  const updateCustomModelCap = (modelId: string, field: keyof ModelCapabilitiesInfo, value: unknown) => {
+    setCustomModelCaps(prev => ({
+      ...prev,
+      [modelId]: { ...prev[modelId], [field]: value },
+    }));
   };
 
   // Custom provider: auto-slug from name
@@ -506,26 +504,12 @@ function ProvidersTab() {
     }
     setCustomTesting(true);
     try {
-      // Build per-model capabilities map
-      const modelCapabilities: ModelCapabilitiesMap = {};
-      if (customModels.length > 0) {
-        for (const modelId of customModels) {
-          const mi = customAvailableModels.find(m => m.id === modelId);
-          modelCapabilities[modelId] = {
-            context_window: mi?.context_window ?? 128000,
-            max_output_tokens: mi?.max_tokens ?? 4096,
-            supports_tool_calling: mi?.tool_call ?? true,
-            supports_reasoning: mi?.reasoning ?? undefined,
-            modalities: mi?.input_modalities?.length ? { input: mi.input_modalities } : undefined,
-          };
-        }
-      }
       await invoke("add_key", {
         provider: id,
         key: customApiKey.trim() || "",
         baseUrl: url,
         models: customModels.length > 0 ? customModels : undefined,
-        modelCapabilities,
+        modelCapabilities: customModels.length > 0 ? customModelCaps : undefined,
         custom: true,
       });
       setShowCustomDialog(false);
@@ -537,6 +521,7 @@ function ProvidersTab() {
       setCustomAvailableModels([]);
       setCustomDiscoverError(null);
       setCustomModelSearchTerm("");
+      setCustomModelCaps({});
       await fetchKeys();
       await fetchConfig();
       await loadProviders();
@@ -655,7 +640,63 @@ function ProvidersTab() {
             <div className="py-3 text-center text-xs text-zinc-400">{t("harness.noProvidersAvailable")}</div>
           ) : (
             <div className="space-y-3">
-              {/* ── Local Providers (always visible) ── */}
+              {/* ── Custom Providers (always at top: configured + add button) ── */}
+              <div>
+                <h4 className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🔧 {t("harness.customProviders")}</h4>
+                <div className="space-y-1">
+                  {customProviders.map((item) => {
+                    const providerId = item.id;
+                    const providerName = item.name || providerId;
+                    const keyEntry = keys.find((k) => k.provider === providerId);
+                    // Only show unconfigured custom providers (configured ones appear in the top section)
+                    if (keyEntry) return null;
+                    return (
+                      <div key={providerId} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+                        <div className="flex items-center justify-between">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-medium">{providerName}</span>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setNewProvider(providerId);
+                              setNewBaseUrl(item.api ?? "");
+                              setNewKey("");
+                              fetchModels(providerId).then((models) => setAvailableModels(models));
+                              setNewModelCaps({});
+                              setNewExpandedModels(new Set());
+                              setShowAddDialog(true);
+                            }}
+                            className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                          >
+                            {t("harness.connect")}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Add Custom Provider button — always visible, lives inside the Custom group */}
+                  <button
+                    onClick={() => {
+                      setCustomProviderName("");
+                      setCustomProviderId("");
+                      setCustomBaseUrl("");
+                      setCustomApiKey("");
+                      setCustomModels([]);
+                      setCustomAvailableModels([]);
+                      setCustomDiscoverError(null);
+                      setCustomModelSearchTerm("");
+                      setShowCustomDialog(true);
+                    }}
+                    className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-600 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
+                  >
+                    <Plus className="h-4 w-4" />
+                    {t("harness.addCustomProvider")}
+                  </button>
+                </div>
+              </div>
+
+              {/* ── Local Providers ── */}
               {localProviders.length > 0 && (
                 <div>
                   <h4 className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🏠 {t("harness.localProviders")}</h4>
@@ -677,9 +718,8 @@ function ProvidersTab() {
                                 setNewBaseUrl(item.api ?? "");
                                 setNewKey("");
                                 fetchModels(providerId).then((models) => setAvailableModels(models));
-                                setNewContextWindow("");
-                                setNewMaxOutputTokens("");
-                                setNewSupportsToolCalling(true);
+                                setNewModelCaps({});
+                                setNewExpandedModels(new Set());
                                 setShowAddDialog(true);
                               }}
                               className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
@@ -693,67 +733,6 @@ function ProvidersTab() {
                   </div>
                 </div>
               )}
-
-              {/* ── Custom Providers (configured) ── */}
-              {customProviders.length > 0 && (
-                <div>
-                  <h4 className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🔧 {t("harness.customProviders")}</h4>
-                  <div className="space-y-1">
-                    {customProviders.map((item) => {
-                      const providerId = item.id;
-                      const providerName = item.name || providerId;
-                      const keyEntry = keys.find((k) => k.provider === providerId);
-                      // Only show unconfigured custom providers (configured ones appear in the top section)
-                      if (keyEntry) return null;
-                      return (
-                        <div key={providerId} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
-                          <div className="flex items-center justify-between">
-                            <div className="min-w-0 flex-1">
-                              <span className="text-xs font-medium">{providerName}</span>
-                            </div>
-                            <button
-                              onClick={() => {
-                                setNewProvider(providerId);
-                                setNewBaseUrl(item.api ?? "");
-                                setNewKey("");
-                                fetchModels(providerId).then((models) => setAvailableModels(models));
-                                setNewContextWindow("");
-                                setNewMaxOutputTokens("");
-                                setNewSupportsToolCalling(true);
-                                setShowAddDialog(true);
-                              }}
-                              className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
-                            >
-                              {t("harness.connect")}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* ── Add Custom Provider ── */}
-              <div>
-                <button
-                  onClick={() => {
-                    setCustomProviderName("");
-                    setCustomProviderId("");
-                    setCustomBaseUrl("");
-                    setCustomApiKey("");
-                    setCustomModels([]);
-                    setCustomAvailableModels([]);
-                    setCustomDiscoverError(null);
-                    setCustomModelSearchTerm("");
-                    setShowCustomDialog(true);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-600 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
-                >
-                  <Plus className="h-4 w-4" />
-                  {t("harness.addCustomProvider")}
-                </button>
-              </div>
 
               {/* ── Remote Providers (expandable) ── */}
               {remoteProviders.length > 0 && (
@@ -808,9 +787,8 @@ function ProvidersTab() {
                                       const dynamicProvider = dynamicProviders.find((p) => p.id === providerId);
                                       setNewBaseUrl(dynamicProvider?.api ?? "");
                                       fetchModels(providerId).then((models) => setAvailableModels(models));
-                                      setNewContextWindow("");
-                                      setNewMaxOutputTokens("");
-                                      setNewSupportsToolCalling(true);
+                                      setNewModelCaps({});
+                                      setNewExpandedModels(new Set());
                                       setShowAddDialog(true);
                                     }}
                                     className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
@@ -952,7 +930,7 @@ function ProvidersTab() {
                     {newModels.map((m) => (
                       <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
                         {m}
-                        <button onClick={() => setNewModels(newModels.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
+                        <button onClick={() => toggleNewModel(m)} className="text-accent-green/60 hover:text-accent-green">×</button>
                       </span>
                     ))}
                   </div>
@@ -994,7 +972,7 @@ function ProvidersTab() {
                           <input
                             type="checkbox"
                             checked={newModels.includes(m.id)}
-                            onChange={() => toggleModel(m.id, newModels, setNewModels)}
+                            onChange={() => toggleNewModel(m.id)}
                             className="accent-[var(--color-accent)]"
                           />
                           <div className="flex flex-1 flex-col gap-0.5">
@@ -1029,6 +1007,7 @@ function ProvidersTab() {
                         const val = (e.target as HTMLInputElement).value.trim();
                         if (val && !newModels.includes(val)) {
                           setNewModels([...newModels, val]);
+                          setNewModelCaps(prev => ({ ...prev, [val]: makeDefaultCaps(undefined) }));
                           (e.target as HTMLInputElement).value = "";
                         }
                       }
@@ -1037,99 +1016,146 @@ function ProvidersTab() {
                 </div>
               </div>
 
-              {/* Model Capabilities */}
-              {newModels.length > 0 && (() => {
-                // Find the first selected model in availableModels to check if it has capabilities
-                const primaryModel = newModels[0];
-                const modelInfo = availableModels.find(m => m.id === primaryModel);
-                const hasModelsDevData = !!(modelInfo && (modelInfo.context_window || modelInfo.max_tokens));
-                // Auto-fill from models.dev data when available
-                const autoContextWindow = modelInfo?.context_window?.toString() ?? "";
-                const autoMaxOutputTokens = modelInfo?.max_tokens?.toString() ?? "";
-                const autoSupportsToolCalling = modelInfo?.tool_call ?? true;
-                // Use auto-filled values if available, otherwise use user input state
-                const displayContextWindow = hasModelsDevData ? autoContextWindow : newContextWindow;
-                const displayMaxOutputTokens = hasModelsDevData ? autoMaxOutputTokens : newMaxOutputTokens;
-                const displaySupportsToolCalling = hasModelsDevData ? autoSupportsToolCalling : newSupportsToolCalling;
-                return (
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-500">
-                      {t("harness.modelCapabilities")}
-                      {hasModelsDevData && <span className="ml-1 text-xs text-zinc-400">({t("harness.fromModelsDev")})</span>}
-                      {!hasModelsDevData && <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>}
-                    </label>
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.contextWindow")}</label>
-                        <StyledInput
-                          type="number"
-                          value={displayContextWindow}
-                          onChange={(e) => setNewContextWindow(e.target.value)}
-                          readOnly={hasModelsDevData}
-                          placeholder="e.g. 128000"
-                          className={cn(
-                            hasModelsDevData
-                              ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
-                              : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
-                          )}
-                        />
-                      </div>
-                      <div className="flex-1">
-                        <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.maxOutputTokens")}</label>
-                        <StyledInput
-                          type="number"
-                          value={displayMaxOutputTokens}
-                          onChange={(e) => setNewMaxOutputTokens(e.target.value)}
-                          readOnly={hasModelsDevData}
-                          placeholder="e.g. 4096"
-                          className={cn(
-                            hasModelsDevData
-                              ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
-                              : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
-                          )}
-                        />
-                      </div>
-                    </div>
-                    <div className="mt-1.5 flex items-center gap-2">
-                      <label className="flex items-center gap-1.5 text-xs text-zinc-500">
-                        <input
-                          type="checkbox"
-                          checked={displaySupportsToolCalling}
-                          onChange={(e) => setNewSupportsToolCalling(e.target.checked)}
-                          disabled={hasModelsDevData}
-                          className="accent-[var(--color-accent)]"
-                        />
-                        {t("harness.supportsToolCalling")}
-                      </label>
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Default reasoning effort (applies to reasoning models in this provider) */}
-              {newModels.length > 0 && newModels.some((m) => availableModels.find((mi) => mi.id === m)?.reasoning === true) && (
+              {/* Per-model capabilities (local providers only — remote uses offline data) */}
+              {newProviderIsLocal && newModels.length > 0 && (
                 <div>
                   <label className="mb-1 block text-xs text-zinc-500">
-                    {t("harness.defaultReasoningEffort")}
+                    {t("harness.modelCapabilities")}
+                    <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>
                   </label>
-                  <select
-                    value={newDefaultReasoningEffort}
-                    onChange={(e) => setNewDefaultReasoningEffort(e.target.value)}
-                    className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                    style={{
-                      backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                      backgroundPosition: 'right 0.5rem center',
-                      backgroundRepeat: 'no-repeat',
-                      backgroundSize: '1.5em 1.5em',
-                      paddingRight: '2rem',
-                    }}
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="off">Off</option>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                  </select>
+                  <div className="space-y-1">
+                    {newModels.map(modelId => {
+                      const caps = newModelCaps[modelId];
+                      if (!caps) return null;
+                      const expanded = newExpandedModels.has(modelId);
+                      return (
+                        <div key={modelId} className="rounded border border-zinc-200 dark:border-zinc-700">
+                          <button
+                            type="button"
+                            onClick={() => setNewExpandedModels(prev => {
+                              const next = new Set(prev);
+                              if (next.has(modelId)) next.delete(modelId);
+                              else next.add(modelId);
+                              return next;
+                            })}
+                            className="flex w-full items-center gap-1 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-300"
+                          >
+                            <span className="text-zinc-400">{expanded ? "\u25BC" : "\u25B6"}</span>
+                            <span className="flex-1 truncate text-left">{modelId}</span>
+                            <span className="text-zinc-400">{caps.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
+                          </button>
+                          {expanded && (
+                            <div className="border-t border-zinc-200 px-2 py-2 dark:border-zinc-700">
+                              <div className="flex gap-2">
+                                <div className="flex-1">
+                                  <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.contextWindow")}</label>
+                                  <StyledInput
+                                    type="number"
+                                    value={caps.context_window?.toString() ?? ""}
+                                    onChange={(e) => updateNewModelCap(modelId, "context_window", parseInt(e.target.value) || 0)}
+                                    placeholder="e.g. 128000"
+                                    className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                                  />
+                                </div>
+                                <div className="flex-1">
+                                  <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.maxOutputTokens")}</label>
+                                  <StyledInput
+                                    type="number"
+                                    value={caps.max_output_tokens?.toString() ?? ""}
+                                    onChange={(e) => updateNewModelCap(modelId, "max_output_tokens", parseInt(e.target.value) || 0)}
+                                    placeholder="e.g. 4096"
+                                    className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                                  />
+                                </div>
+                              </div>
+                              <div className="mt-1.5 flex flex-wrap items-center gap-3">
+                                <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                                  <input
+                                    type="checkbox"
+                                    checked={caps.supports_tool_calling ?? false}
+                                    onChange={(e) => updateNewModelCap(modelId, "supports_tool_calling", e.target.checked)}
+                                    className="accent-[var(--color-accent)]"
+                                  />
+                                  {t("harness.supportsToolCalling")}
+                                </label>
+                                <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                                  <input
+                                    type="checkbox"
+                                    checked={caps.supports_reasoning ?? false}
+                                    onChange={(e) => updateNewModelCap(modelId, "supports_reasoning", e.target.checked)}
+                                    className="accent-[var(--color-accent)]"
+                                  />
+                                  {t("harness.reasoning")}
+                                </label>
+                              </div>
+                              <div className="mt-1.5 flex gap-4">
+                                <div>
+                                  <label className="mb-0.5 block text-xs text-zinc-400">Input</label>
+                                  <div className="flex gap-2">
+                                    {["text", "image", "audio", "video"].map(mod => (
+                                      <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                                        <input
+                                          type="checkbox"
+                                          checked={caps.modalities?.input?.includes(mod) ?? false}
+                                          onChange={(e) => {
+                                            const current = caps.modalities?.input ?? [];
+                                            const nextMod = e.target.checked
+                                              ? [...current, mod]
+                                              : current.filter(m => m !== mod);
+                                            updateNewModelCap(modelId, "modalities", { ...caps.modalities, input: nextMod });
+                                          }}
+                                          className="accent-[var(--color-accent)]"
+                                        />
+                                        {mod}
+                                      </label>
+                                    ))}
+                                  </div>
+                                </div>
+                                <div>
+                                  <label className="mb-0.5 block text-xs text-zinc-400">Output</label>
+                                  <div className="flex gap-2">
+                                    {["text", "image"].map(mod => (
+                                      <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                                        <input
+                                          type="checkbox"
+                                          checked={caps.modalities?.output?.includes(mod) ?? false}
+                                          onChange={(e) => {
+                                            const current = caps.modalities?.output ?? [];
+                                            const nextMod = e.target.checked
+                                              ? [...current, mod]
+                                              : current.filter(m => m !== mod);
+                                            updateNewModelCap(modelId, "modalities", { ...caps.modalities, output: nextMod });
+                                          }}
+                                          className="accent-[var(--color-accent)]"
+                                        />
+                                        {mod}
+                                      </label>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              {caps.supports_reasoning && (
+                                <div className="mt-1.5">
+                                  <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.defaultReasoningEffort")}</label>
+                                  <select
+                                    value={caps.default_reasoning_effort ?? "auto"}
+                                    onChange={(e) => updateNewModelCap(modelId, "default_reasoning_effort", e.target.value)}
+                                    className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                                  >
+                                    <option value="auto">Auto</option>
+                                    <option value="off">Off</option>
+                                    <option value="low">Low</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">High</option>
+                                  </select>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
@@ -1296,7 +1322,7 @@ function ProvidersTab() {
                     {editModels.map((m) => (
                       <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
                         {m}
-                        <button onClick={() => setEditModels(editModels.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
+                        <button onClick={() => toggleEditModel(m)} className="text-accent-green/60 hover:text-accent-green">×</button>
                       </span>
                     ))}
                   </div>
@@ -1337,7 +1363,7 @@ function ProvidersTab() {
                           <input
                             type="checkbox"
                             checked={editModels.includes(m.id)}
-                            onChange={() => toggleModel(m.id, editModels, setEditModels)}
+                            onChange={() => toggleEditModel(m.id)}
                             className="accent-[var(--color-accent)]"
                           />
                           <div className="flex flex-1 flex-col gap-0.5">
@@ -1368,6 +1394,7 @@ function ProvidersTab() {
                         const val = (e.target as HTMLInputElement).value.trim();
                         if (val && !editModels.includes(val)) {
                           setEditModels([...editModels, val]);
+                          setEditModelCaps(prev => ({ ...prev, [val]: makeDefaultCaps(undefined) }));
                           (e.target as HTMLInputElement).value = "";
                         }
                       }
@@ -1376,98 +1403,154 @@ function ProvidersTab() {
                 </div>
               </div>
 
-              {/* Model Capabilities */}
-              {editModels.length > 0 && (() => {
-                const primaryModel = editModels[0];
-                const modelInfo = editAvailableModels.find(m => m.id === primaryModel);
-                const hasModelsDevData = !!(modelInfo && (modelInfo.context_window || modelInfo.max_tokens));
-                const autoContextWindow = modelInfo?.context_window?.toString() ?? "";
-                const autoMaxOutputTokens = modelInfo?.max_tokens?.toString() ?? "";
-                const autoSupportsToolCalling = modelInfo?.tool_call ?? true;
-                const displayContextWindow = hasModelsDevData ? autoContextWindow : editContextWindow;
-                const displayMaxOutputTokens = hasModelsDevData ? autoMaxOutputTokens : editMaxOutputTokens;
-                const displaySupportsToolCalling = hasModelsDevData ? autoSupportsToolCalling : editSupportsToolCalling;
+              {/* Per-model capabilities (local/custom providers only — remote uses offline data) */}
+              {(() => {
+                const editKeyEntry = keys.find(k => k.provider === showEditDialog);
+                const editIsLocal = showEditDialog ? isLocalProvider(showEditDialog) : false;
+                const editIsCustom = editKeyEntry?.custom ?? false;
+                if (!(editIsLocal || editIsCustom) || editModels.length === 0) return null;
                 return (
                   <div>
                     <label className="mb-1 block text-xs text-zinc-500">
                       {t("harness.modelCapabilities")}
-                      {hasModelsDevData && <span className="ml-1 text-xs text-zinc-400">({t("harness.fromModelsDev")})</span>}
-                      {!hasModelsDevData && <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>}
+                      <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>
                     </label>
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.contextWindow")}</label>
-                        <StyledInput
-                          type="number"
-                          value={displayContextWindow}
-                          onChange={(e) => setEditContextWindow(e.target.value)}
-                          readOnly={hasModelsDevData}
-                          placeholder="e.g. 128000"
-                          className={cn(
-                            hasModelsDevData
-                              ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
-                              : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
-                          )}
-                        />
-                      </div>
-                      <div className="flex-1">
-                        <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.maxOutputTokens")}</label>
-                        <StyledInput
-                          type="number"
-                          value={displayMaxOutputTokens}
-                          onChange={(e) => setEditMaxOutputTokens(e.target.value)}
-                          readOnly={hasModelsDevData}
-                          placeholder="e.g. 4096"
-                          className={cn(
-                            hasModelsDevData
-                              ? "bg-zinc-50 text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500"
-                              : "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200",
-                          )}
-                        />
-                      </div>
-                    </div>
-                    <div className="mt-1.5 flex items-center gap-2">
-                      <label className="flex items-center gap-1.5 text-xs text-zinc-500">
-                        <input
-                          type="checkbox"
-                          checked={displaySupportsToolCalling}
-                          onChange={(e) => setEditSupportsToolCalling(e.target.checked)}
-                          disabled={hasModelsDevData}
-                          className="accent-[var(--color-accent)]"
-                        />
-                        {t("harness.supportsToolCalling")}
-                      </label>
+                    <div className="space-y-1">
+                      {editModels.map(modelId => {
+                        const caps = editModelCaps[modelId];
+                        if (!caps) return null;
+                        const expanded = editExpandedModels.has(modelId);
+                        return (
+                          <div key={modelId} className="rounded border border-zinc-200 dark:border-zinc-700">
+                            <button
+                              type="button"
+                              onClick={() => setEditExpandedModels(prev => {
+                                const next = new Set(prev);
+                                if (next.has(modelId)) next.delete(modelId);
+                                else next.add(modelId);
+                                return next;
+                              })}
+                              className="flex w-full items-center gap-1 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-300"
+                            >
+                              <span className="text-zinc-400">{expanded ? "\u25BC" : "\u25B6"}</span>
+                              <span className="flex-1 truncate text-left">{modelId}</span>
+                              <span className="text-zinc-400">{caps.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
+                            </button>
+                            {expanded && (
+                              <div className="border-t border-zinc-200 px-2 py-2 dark:border-zinc-700">
+                                <div className="flex gap-2">
+                                  <div className="flex-1">
+                                    <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.contextWindow")}</label>
+                                    <StyledInput
+                                      type="number"
+                                      value={caps.context_window?.toString() ?? ""}
+                                      onChange={(e) => updateEditModelCap(modelId, "context_window", parseInt(e.target.value) || 0)}
+                                      placeholder="e.g. 128000"
+                                      className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                                    />
+                                  </div>
+                                  <div className="flex-1">
+                                    <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.maxOutputTokens")}</label>
+                                    <StyledInput
+                                      type="number"
+                                      value={caps.max_output_tokens?.toString() ?? ""}
+                                      onChange={(e) => updateEditModelCap(modelId, "max_output_tokens", parseInt(e.target.value) || 0)}
+                                      placeholder="e.g. 4096"
+                                      className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                                    />
+                                  </div>
+                                </div>
+                                <div className="mt-1.5 flex flex-wrap items-center gap-3">
+                                  <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                                    <input
+                                      type="checkbox"
+                                      checked={caps.supports_tool_calling ?? false}
+                                      onChange={(e) => updateEditModelCap(modelId, "supports_tool_calling", e.target.checked)}
+                                      className="accent-[var(--color-accent)]"
+                                    />
+                                    {t("harness.supportsToolCalling")}
+                                  </label>
+                                  <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                                    <input
+                                      type="checkbox"
+                                      checked={caps.supports_reasoning ?? false}
+                                      onChange={(e) => updateEditModelCap(modelId, "supports_reasoning", e.target.checked)}
+                                      className="accent-[var(--color-accent)]"
+                                    />
+                                    {t("harness.reasoning")}
+                                  </label>
+                                </div>
+                                <div className="mt-1.5 flex gap-4">
+                                  <div>
+                                    <label className="mb-0.5 block text-xs text-zinc-400">Input</label>
+                                    <div className="flex gap-2">
+                                      {["text", "image", "audio", "video"].map(mod => (
+                                        <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                                          <input
+                                            type="checkbox"
+                                            checked={caps.modalities?.input?.includes(mod) ?? false}
+                                            onChange={(e) => {
+                                              const current = caps.modalities?.input ?? [];
+                                              const nextMod = e.target.checked
+                                                ? [...current, mod]
+                                                : current.filter(m => m !== mod);
+                                              updateEditModelCap(modelId, "modalities", { ...caps.modalities, input: nextMod });
+                                            }}
+                                            className="accent-[var(--color-accent)]"
+                                          />
+                                          {mod}
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <label className="mb-0.5 block text-xs text-zinc-400">Output</label>
+                                    <div className="flex gap-2">
+                                      {["text", "image"].map(mod => (
+                                        <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                                          <input
+                                            type="checkbox"
+                                            checked={caps.modalities?.output?.includes(mod) ?? false}
+                                            onChange={(e) => {
+                                              const current = caps.modalities?.output ?? [];
+                                              const nextMod = e.target.checked
+                                                ? [...current, mod]
+                                                : current.filter(m => m !== mod);
+                                              updateEditModelCap(modelId, "modalities", { ...caps.modalities, output: nextMod });
+                                            }}
+                                            className="accent-[var(--color-accent)]"
+                                          />
+                                          {mod}
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                                {caps.supports_reasoning && (
+                                  <div className="mt-1.5">
+                                    <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.defaultReasoningEffort")}</label>
+                                    <select
+                                      value={caps.default_reasoning_effort ?? "auto"}
+                                      onChange={(e) => updateEditModelCap(modelId, "default_reasoning_effort", e.target.value)}
+                                      className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                                    >
+                                      <option value="auto">Auto</option>
+                                      <option value="off">Off</option>
+                                      <option value="low">Low</option>
+                                      <option value="medium">Medium</option>
+                                      <option value="high">High</option>
+                                    </select>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
               })()}
-
-              {/* Default reasoning effort (applies to all reasoning models in this provider) */}
-              {editModels.length > 0 && editModels.some((m) => editAvailableModels.find((mi) => mi.id === m)?.reasoning === true) && (
-                <div>
-                  <label className="mb-1 block text-xs text-zinc-500">
-                    {t("harness.defaultReasoningEffort")}
-                  </label>
-                  <select
-                    value={editDefaultReasoningEffort}
-                    onChange={(e) => setEditDefaultReasoningEffort(e.target.value)}
-                    className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                    style={{
-                      backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                      backgroundPosition: 'right 0.5rem center',
-                      backgroundRepeat: 'no-repeat',
-                      backgroundSize: '1.5em 1.5em',
-                      paddingRight: '2rem',
-                    }}
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="off">Off</option>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                  </select>
-                </div>
-              )}
 
               {/* Compact model for LLM summarization */}
               {editModels.length > 0 && (
@@ -1591,7 +1674,7 @@ function ProvidersTab() {
                       {customModels.map((m) => (
                         <span key={m} className="inline-flex items-center gap-1 rounded bg-accent-green/10 px-2 py-0.5 text-xs text-accent-green">
                           {m}
-                          <button onClick={() => setCustomModels(customModels.filter((x) => x !== m))} className="text-accent-green/60 hover:text-accent-green">×</button>
+                          <button onClick={() => toggleCustomModel(m)} className="text-accent-green/60 hover:text-accent-green">×</button>
                         </span>
                       ))}
                     </div>
@@ -1617,7 +1700,7 @@ function ProvidersTab() {
                           <input
                             type="checkbox"
                             checked={customModels.includes(m.id)}
-                            onChange={() => toggleModel(m.id, customModels, setCustomModels)}
+                            onChange={() => toggleCustomModel(m.id)}
                             className="accent-[var(--color-accent)]"
                           />
                           <div className="flex flex-1 flex-col gap-0.5">
@@ -1646,11 +1729,155 @@ function ProvidersTab() {
                           const val = (e.target as HTMLInputElement).value.trim();
                           if (val && !customModels.includes(val)) {
                             setCustomModels([...customModels, val]);
+                            setCustomModelCaps(prev => ({ ...prev, [val]: makeDefaultCaps(undefined) }));
                             (e.target as HTMLInputElement).value = "";
                           }
                         }
                       }}
                     />
+                  </div>
+                </div>
+              )}
+
+              {/* Per-model capabilities (custom providers) */}
+              {customModels.length > 0 && (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-500">
+                    {t("harness.modelCapabilities")}
+                    <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>
+                  </label>
+                  <div className="space-y-1">
+                    {customModels.map(modelId => {
+                      const caps = customModelCaps[modelId];
+                      if (!caps) return null;
+                      const expanded = customExpandedModels.has(modelId);
+                      return (
+                        <div key={modelId} className="rounded border border-zinc-200 dark:border-zinc-700">
+                          <button
+                            type="button"
+                            onClick={() => setCustomExpandedModels(prev => {
+                              const next = new Set(prev);
+                              if (next.has(modelId)) next.delete(modelId);
+                              else next.add(modelId);
+                              return next;
+                            })}
+                            className="flex w-full items-center gap-1 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-300"
+                          >
+                            <span className="text-zinc-400">{expanded ? "\u25BC" : "\u25B6"}</span>
+                            <span className="flex-1 truncate text-left">{modelId}</span>
+                            <span className="text-zinc-400">{caps.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
+                          </button>
+                          {expanded && (
+                            <div className="border-t border-zinc-200 px-2 py-2 dark:border-zinc-700">
+                              <div className="flex gap-2">
+                                <div className="flex-1">
+                                  <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.contextWindow")}</label>
+                                  <StyledInput
+                                    type="number"
+                                    value={caps.context_window?.toString() ?? ""}
+                                    onChange={(e) => updateCustomModelCap(modelId, "context_window", parseInt(e.target.value) || 0)}
+                                    placeholder="e.g. 128000"
+                                    className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                                  />
+                                </div>
+                                <div className="flex-1">
+                                  <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.maxOutputTokens")}</label>
+                                  <StyledInput
+                                    type="number"
+                                    value={caps.max_output_tokens?.toString() ?? ""}
+                                    onChange={(e) => updateCustomModelCap(modelId, "max_output_tokens", parseInt(e.target.value) || 0)}
+                                    placeholder="e.g. 16384"
+                                    className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                                  />
+                                </div>
+                              </div>
+                              <div className="mt-1.5 flex flex-wrap items-center gap-3">
+                                <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                                  <input
+                                    type="checkbox"
+                                    checked={caps.supports_tool_calling ?? false}
+                                    onChange={(e) => updateCustomModelCap(modelId, "supports_tool_calling", e.target.checked)}
+                                    className="accent-[var(--color-accent)]"
+                                  />
+                                  {t("harness.supportsToolCalling")}
+                                </label>
+                                <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                                  <input
+                                    type="checkbox"
+                                    checked={caps.supports_reasoning ?? false}
+                                    onChange={(e) => updateCustomModelCap(modelId, "supports_reasoning", e.target.checked)}
+                                    className="accent-[var(--color-accent)]"
+                                  />
+                                  {t("harness.reasoning")}
+                                </label>
+                              </div>
+                              <div className="mt-1.5 flex gap-4">
+                                <div>
+                                  <label className="mb-0.5 block text-xs text-zinc-400">Input</label>
+                                  <div className="flex gap-2">
+                                    {["text", "image", "audio", "video"].map(mod => (
+                                      <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                                        <input
+                                          type="checkbox"
+                                          checked={caps.modalities?.input?.includes(mod) ?? false}
+                                          onChange={(e) => {
+                                            const current = caps.modalities?.input ?? [];
+                                            const nextMod = e.target.checked
+                                              ? [...current, mod]
+                                              : current.filter(m => m !== mod);
+                                            updateCustomModelCap(modelId, "modalities", { ...caps.modalities, input: nextMod });
+                                          }}
+                                          className="accent-[var(--color-accent)]"
+                                        />
+                                        {mod}
+                                      </label>
+                                    ))}
+                                  </div>
+                                </div>
+                                <div>
+                                  <label className="mb-0.5 block text-xs text-zinc-400">Output</label>
+                                  <div className="flex gap-2">
+                                    {["text", "image"].map(mod => (
+                                      <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                                        <input
+                                          type="checkbox"
+                                          checked={caps.modalities?.output?.includes(mod) ?? false}
+                                          onChange={(e) => {
+                                            const current = caps.modalities?.output ?? [];
+                                            const nextMod = e.target.checked
+                                              ? [...current, mod]
+                                              : current.filter(m => m !== mod);
+                                            updateCustomModelCap(modelId, "modalities", { ...caps.modalities, output: nextMod });
+                                          }}
+                                          className="accent-[var(--color-accent)]"
+                                        />
+                                        {mod}
+                                      </label>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              {caps.supports_reasoning && (
+                                <div className="mt-1.5">
+                                  <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.defaultReasoningEffort")}</label>
+                                  <select
+                                    value={caps.default_reasoning_effort ?? "auto"}
+                                    onChange={(e) => updateCustomModelCap(modelId, "default_reasoning_effort", e.target.value)}
+                                    className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                                  >
+                                    <option value="auto">Auto</option>
+                                    <option value="off">Off</option>
+                                    <option value="low">Low</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">High</option>
+                                  </select>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}

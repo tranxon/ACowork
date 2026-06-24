@@ -433,8 +433,11 @@ pub(crate) fn build_provider_list_item(
         .map(|model_id| {
             let capabilities = if custom {
                 // Custom providers have no offline data — use sensible defaults.
-                // User-provided capabilities overrides are merged later via
-                // merge_user_capabilities in add_provider / update_provider.
+                // The /v1/models endpoint of OpenAI-compatible APIs does not
+                // return modality info, so we default to text-only (the common
+                // case for LLMs). User-provided capabilities overrides are
+                // merged later via merge_user_capabilities in add_provider /
+                // update_provider.
                 acowork_core::protocol::ModelCapabilitiesInfo {
                     context_window: 128_000,
                     max_output_tokens: 16_384,
@@ -444,7 +447,10 @@ pub(crate) fn build_provider_list_item(
                     supports_attachment: None,
                     supports_temperature: None,
                     cost: None,
-                    modalities: None,
+                    modalities: Some(acowork_core::protocol::ModelModalities {
+                        input: vec!["text".to_string()],
+                        output: vec!["text".to_string()],
+                    }),
                     name: None,
                     family: None,
                     knowledge_cutoff: None,

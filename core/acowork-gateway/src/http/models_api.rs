@@ -7,7 +7,7 @@
 //!
 //! Data source: offline_providers.json loaded at startup into a static cache.
 
-use axum::{Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::{get, post}};
+use axum::{Json, Router, extract::{Path, State}, http::StatusCode, response::IntoResponse, routing::{get, post}};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -137,69 +137,49 @@ struct DiscoverModelsRequest {
     api_key: Option<String>,
 }
 
-/// `POST /api/models/discover` — discover models from an OpenAI-compatible API.
+/// Discover models from an OpenAI-compatible API.
+///
+/// Core logic shared by `POST /api/models/discover` and
+/// `GET /api/models/{provider}` (for custom providers).
 ///
 /// Queries `{base_url}/models` with a 5-second timeout.
 /// If `api_key` is provided, sends `Authorization: Bearer {api_key}` header.
 /// Returns the discovered model list (enriched from offline data when available).
-async fn discover_models(
-    Json(body): Json<DiscoverModelsRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    if body.base_url.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "base_url must not be empty"})),
-        ));
-    }
-
+async fn discover_models_from_url(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<ModelInfo>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to build HTTP client: {}", e)})),
-            )
-        })?;
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-    let url = format!("{}/models", body.base_url.trim_end_matches('/'));
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = client.get(&url);
-    if let Some(ref key) = body.api_key {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
-        }
+    if let Some(key) = api_key
+        && !key.is_empty()
+    {
+        req = req.bearer_auth(key);
     }
 
-    let resp = req.send().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("Failed to reach {}: {}", url, e)})),
-        )
-    })?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach {}: {}", url, e))?;
 
     if !resp.status().is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("Upstream returned HTTP {}", resp.status())})),
-        ));
+        return Err(format!("Upstream returned HTTP {}", resp.status()));
     }
 
-    let body_val: serde_json::Value = resp.json().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("Failed to parse response: {}", e)})),
-        )
-    })?;
+    let body_val: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
 
     let data = body_val
         .get("data")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": "Response missing 'data' array"})),
-            )
-        })?;
+        .ok_or_else(|| "Response missing 'data' array".to_string())?;
 
     let mut models: Vec<ModelInfo> = data
         .iter()
@@ -237,6 +217,33 @@ async fn discover_models(
         let b_reasoning = b.reasoning.unwrap_or(false);
         b_reasoning.cmp(&a_reasoning).then(a.id.cmp(&b.id))
     });
+
+    Ok(models)
+}
+
+/// `POST /api/models/discover` — discover models from an OpenAI-compatible API.
+///
+/// Queries `{base_url}/models` with a 5-second timeout.
+/// If `api_key` is provided, sends `Authorization: Bearer {api_key}` header.
+/// Returns the discovered model list (enriched from offline data when available).
+async fn discover_models(
+    Json(body): Json<DiscoverModelsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if body.base_url.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "base_url must not be empty"})),
+        ));
+    }
+
+    let models = discover_models_from_url(&body.base_url, body.api_key.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": e})),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({"models": models})))
 }
@@ -481,8 +488,12 @@ fn resolve_provider(
 
 /// GET /api/models — list all providers with model counts
 ///
-/// Returns offline provider data from the static in-memory cache.
-async fn list_all_providers() -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+/// Returns offline provider data from the static in-memory cache, plus
+/// custom providers from resource_cache (user-defined OpenAI-compatible
+/// endpoints) so the frontend can display them in the providers list.
+async fn list_all_providers(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let data = offline_providers().clone();
 
     let providers = match data.as_object() {
@@ -545,6 +556,32 @@ async fn list_all_providers() -> Result<impl IntoResponse, (StatusCode, Json<ser
         }
     }
 
+    // Append custom providers from resource_cache (user-defined OpenAI-compatible
+    // endpoints). These are NOT in offline_providers.json, so without this they
+    // would be invisible in the provider list on the frontend.
+    {
+        let gw = state.gateway_state.read().await;
+        for cfg in &gw.resource_cache.provider_list.providers {
+            if cfg.custom {
+                // Skip if already present (shouldn't happen, but defensive)
+                if result
+                    .iter()
+                    .any(|e| e.get("id").and_then(|v| v.as_str()) == Some(&cfg.id))
+                {
+                    continue;
+                }
+                result.push(serde_json::json!({
+                    "id": cfg.id,
+                    "name": cfg.id,
+                    "model_count": cfg.models.len(),
+                    "local": false,
+                    "custom": true,
+                    "api": cfg.base_url,
+                }));
+            }
+        }
+    }
+
     // Sort by id
     result.sort_by(|a, b| {
         a.get("id")
@@ -560,15 +597,23 @@ async fn list_all_providers() -> Result<impl IntoResponse, (StatusCode, Json<ser
 ///
 /// Resolution order:
 ///   0. (local providers only) Query the running local server directly
-///   1. Built-in offline data (instant, always available)
-///   2. Empty result
+///   1. (custom providers only) Discover models live from the stored base_url
+///      using the decrypted API key from Vault
+///   2. Built-in offline data (instant, always available)
+///   3. Empty result
 ///
 /// For local providers (ollama, lmstudio), their models depend on what the
 /// user has actually loaded in their local server. We query the server first
 /// (with a short timeout), then return empty if unreachable.
 ///
+/// For custom providers (user-defined OpenAI-compatible endpoints), models are
+/// discovered live by querying `{base_url}/models` with the stored API key.
+/// If discovery fails (network error, auth error), we fall back to the models
+/// stored in provider_list.json so the edit dialog can still show configured models.
+///
 /// For remote providers, returns offline data only.
 async fn get_provider_models(
+    State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     // 0. For local providers, try querying the running server first
@@ -603,7 +648,133 @@ async fn get_provider_models(
         }));
     }
 
-    // 1. Try offline data (instant, no network)
+    // 1. For custom providers, discover models live from the stored base_url.
+    //
+    // Custom providers are NOT in offline_providers.json, so the offline
+    // lookup below would return empty. Instead, we use the base_url and
+    // API key stored in the Gateway (provider_list.json + Vault) to query
+    // the provider's OpenAI-compatible /v1/models endpoint.
+    {
+        let gw = state.gateway_state.read().await;
+        let custom_cfg = gw
+            .resource_cache
+            .provider_list
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id && p.custom);
+
+        if let Some(cfg) = custom_cfg {
+            let base_url = cfg.base_url.clone();
+            let provider_name = cfg.id.clone();
+
+            // Capture stored capabilities from provider_list.json before
+            // dropping the lock. These are the user-saved capabilities that
+            // must be merged into the live-discovered models (the /v1/models
+            // endpoint does not return capability info).
+            //
+            // We clone the capabilities (not hold references) so the read
+            // lock can be safely dropped before the outbound HTTP call.
+            let stored_caps: std::collections::HashMap<String, acowork_core::protocol::ModelCapabilitiesInfo> =
+                cfg.models.iter().map(|m| (m.id.clone(), m.capabilities.clone())).collect();
+            let stored_model_ids: Vec<String> =
+                cfg.models.iter().map(|m| m.id.clone()).collect();
+
+            // Retrieve the decrypted API key from Vault.
+            let api_key = gw.vault.get_key(&provider_id).ok();
+
+            // Drop the read lock before making the outbound HTTP request
+            // to avoid holding it during the 5-second discovery timeout.
+            drop(gw);
+
+            tracing::info!(
+                provider = %provider_id,
+                base_url = %base_url,
+                has_key = api_key.is_some(),
+                "Custom provider: discovering models live"
+            );
+
+            match discover_models_from_url(&base_url, api_key.as_deref()).await {
+                Ok(mut models) => {
+                    // Merge stored capabilities from provider_list.json into
+                    // the live-discovered models. The /v1/models endpoint
+                    // returns only model IDs — context_window, max_tokens,
+                    // modalities, etc. come from the user's saved config.
+                    for model in &mut models {
+                        if let Some(caps) = stored_caps.get(&model.id) {
+                            if model.context_window.is_none() {
+                                model.context_window = Some(caps.context_window);
+                            }
+                            if model.max_tokens.is_none() {
+                                model.max_tokens = Some(caps.max_output_tokens);
+                            }
+                            if model.tool_call.is_none() {
+                                model.tool_call = Some(caps.supports_tool_calling);
+                            }
+                            if model.reasoning.is_none() {
+                                model.reasoning = caps.supports_reasoning;
+                            }
+                            if model.attachment.is_none() {
+                                model.attachment = caps.supports_attachment;
+                            }
+                            if model.input_modalities.is_none() {
+                                model.input_modalities = caps.modalities.as_ref().map(|m| m.input.clone());
+                            }
+                            if model.output_modalities.is_none() {
+                                model.output_modalities = caps.modalities.as_ref().map(|m| m.output.clone());
+                            }
+                        }
+                    }
+                    return Ok(Json(ProviderModels {
+                        id: provider_id,
+                        name: provider_name,
+                        models,
+                    }));
+                }
+                Err(e) => {
+                    // Discovery failed (server down, auth error, etc.).
+                    // Fall back to the stored model list so the edit dialog
+                    // can still show previously configured models with their
+                    // saved capabilities.
+                    tracing::warn!(
+                        provider = %provider_id,
+                        error = %e,
+                        "Custom provider model discovery failed, falling back to stored models"
+                    );
+                    let fallback_models: Vec<ModelInfo> = stored_model_ids
+                        .iter()
+                        .map(|id| {
+                            let caps = stored_caps.get(id);
+                            ModelInfo {
+                                id: id.clone(),
+                                name: id.clone(),
+                                family: None,
+                                reasoning: caps.and_then(|c| c.supports_reasoning),
+                                tool_call: caps.map(|c| c.supports_tool_calling),
+                                attachment: caps.and_then(|c| c.supports_attachment),
+                                temperature: None,
+                                release_date: None,
+                                context_window: caps.map(|c| c.context_window),
+                                max_tokens: caps.map(|c| c.max_output_tokens),
+                                max_input_tokens: caps.and_then(|c| c.max_input_tokens),
+                                knowledge: None,
+                                input_cost: None,
+                                output_cost: None,
+                                input_modalities: caps.and_then(|c| c.modalities.as_ref()).map(|m| m.input.clone()),
+                                output_modalities: caps.and_then(|c| c.modalities.as_ref()).map(|m| m.output.clone()),
+                            }
+                        })
+                        .collect();
+                    return Ok(Json(ProviderModels {
+                        id: provider_id,
+                        name: provider_name,
+                        models: fallback_models,
+                    }));
+                }
+            }
+        }
+    }
+
+    // 2. Try offline data (instant, no network)
     if let Some((name, models)) = resolve_provider(offline_providers(), &provider_id) {
         return Ok(Json(ProviderModels {
             id: provider_id,
@@ -612,7 +783,7 @@ async fn get_provider_models(
         }));
     }
 
-    // 2. Provider not found — return empty model list
+    // 3. Provider not found — return empty model list
     Ok(Json(ProviderModels {
         id: provider_id.clone(),
         name: provider_id,
