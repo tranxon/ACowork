@@ -47,7 +47,7 @@ export function TitleBar() {
       {/* Left: App title */}
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-          A·Cowork
+          Acowork
         </span>
       </div>
 

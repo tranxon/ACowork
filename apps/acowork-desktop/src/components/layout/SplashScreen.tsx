@@ -231,58 +231,17 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     return (
         <div className="relative flex h-screen w-screen flex-col items-center justify-center overflow-hidden bg-zinc-50 dark:bg-zinc-900">
             <div
-                className={`relative z-10 flex flex-col items-center gap-8 transition-all duration-700 ${fadeIn ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0"
+                className={`relative z-10 flex flex-col items-center gap-10 transition-all duration-700 ${fadeIn ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0"
                     }`}
             >
-                {/* Logo mark */}
-                <div className="relative">
-                    {/* Outer ring animation */}
-                    <div className="absolute inset-0 animate-[spin_8s_linear_infinite] opacity-25">
-                        <svg className="h-20 w-20" viewBox="0 0 100 100" fill="none">
-                            <circle
-                                cx="50"
-                                cy="50"
-                                r="48"
-                                stroke="url(#ringGrad)"
-                                strokeWidth="1.5"
-                                strokeDasharray="80 220"
-                                strokeLinecap="round"
-                            />
-                            <defs>
-                                <linearGradient id="ringGrad" x1="0" y1="0" x2="100" y2="100">
-                                    <stop offset="0%" stopColor="#10b981" />
-                                    <stop offset="100%" stopColor="#06b6d4" />
-                                </linearGradient>
-                            </defs>
-                        </svg>
-                    </div>
-                    {/* Inner icon */}
-                    <div className="relative flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-cyan-400">
-                        <svg
-                            className="h-9 w-9 text-white"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        >
-                            <circle cx="12" cy="12" r="10" />
-                            <path d="M8 8h5a3 3 0 0 1 0 6H8V8Z" />
-                            <path d="M8 14h4l3 3" />
-                        </svg>
-                    </div>
-                </div>
-
-                {/* Title */}
-                <div className="flex flex-col items-center gap-4">
-                    <h1 className="text-[56px] font-bold tracking-tight">
-                        <span style={{ color: "#EA4335" }}>A</span>
-                        <span style={{ color: "#34A853" }}>·</span>
-                        <span style={{ color: "#4285F4" }}>Co</span>
-                        <span style={{ color: "#FBBC05" }}>work</span>
+                {/* Title — Acowork brand text (no icon) */}
+                <div className="flex flex-col items-center gap-5">
+                    <h1 className="text-[88px] font-bold leading-none tracking-[-0.03em]">
+                        <span style={{ color: "#FBBC05" }}>A</span>
+                        <span style={{ color: "#34A853" }}>co</span>
+                        <span style={{ color: "#4285F4" }}>work</span>
                     </h1>
-                    <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">
+                    <p className="text-sm font-medium uppercase tracking-[0.25em] text-zinc-400 dark:text-zinc-500">
                         Collaborate with your AI colleagues
                     </p>
                 </div>
