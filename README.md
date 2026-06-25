@@ -1,7 +1,7 @@
 <h1 align="center">Acowork.AI — Collaborate with your AI Colleagues</h1>
 
 <p align="center">
-  <span style="font-size:64px;font-weight:bold;letter-spacing:-0.03em;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;"><span style="color:#FBBC05">A</span><span style="color:#34A853">co</span><span style="color:#4285F4">work</span></span>
+  <img src="assets/brand-mark.svg" alt="Acowork" width="360">
 </p>
 
 <p align="center">

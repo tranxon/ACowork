@@ -5,6 +5,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { getGatewayUrl } from "../../lib/config";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import pkg from "../../../package.json";
+import brandMark from "../../../../../assets/brand-mark.svg";
 
 const POLL_INTERVAL = 500;
 const MIN_SPLASH_MS = 1500;
@@ -234,18 +235,10 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 className={`relative z-10 flex flex-col items-center gap-10 transition-all duration-700 ${fadeIn ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0"
                     }`}
             >
-                {/* Title — Acowork brand text (no icon) */}
+                {/* Title — Acowork brand mark (shared SVG with README) */}
                 <div className="flex flex-col items-center gap-5">
-                    <h1 className="text-[88px] font-bold leading-none tracking-[-0.03em]">
-                        {/* Layered A: three solid A glyphs stacked, each shifted right by 3% of the A's own width. The invisible A establishes the wrapper width so the percentage offsets are relative to the glyph. */}
-                        <span className="relative inline-block">
-                            <span className="invisible" aria-hidden="true">A</span>
-                            <span className="absolute left-[6%] top-0" style={{ color: "#4285F4" }} aria-hidden="true">A</span>
-                            <span className="absolute left-[3%] top-0" style={{ color: "#34A853" }} aria-hidden="true">A</span>
-                            <span className="absolute left-0 top-0" style={{ color: "#FBBC05" }} aria-hidden="true">A</span>
-                        </span>
-                        <span style={{ color: "#34A853" }}>co</span>
-                        <span style={{ color: "#4285F4" }}>work</span>
+                    <h1 className="leading-none">
+                        <img src={brandMark} alt="Acowork" width="360" />
                     </h1>
                     <p className="text-sm font-medium uppercase tracking-[0.25em] text-zinc-400 dark:text-zinc-500">
                         Collaborate with your AI colleagues

@@ -12,6 +12,7 @@ import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 import type { GatewayMode, ModelInfo } from "../../lib/types";
 import { RadioGroup } from "../common/RadioGroup";
 import { StyledInput } from "../common/StyledInput";
+import brandMark from "../../../../../assets/brand-mark.svg";
 
 const TOTAL_STEPS = 5;
 
@@ -161,7 +162,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
   return (
     <div className="text-center">
       <div className="text-4xl">🎉🎉🎉</div>
-      <h1 className="mt-4 text-2xl font-bold">Welcome to <span style={{ color: "#FBBC05" }}>A</span><span style={{ color: "#34A853" }}>co</span><span style={{ color: "#4285F4" }}>work</span></h1>
+      <h1 className="mt-4 text-2xl font-bold flex items-center justify-center gap-2"><span>Welcome to</span><img src={brandMark} alt="Acowork" className="h-10" /></h1>
       <p className="mt-2 text-sm text-zinc-500">Let's quickly set up your Agent environment</p>
       <div className="mt-8 space-y-3">
         <button
