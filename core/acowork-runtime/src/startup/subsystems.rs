@@ -41,20 +41,128 @@ pub(crate) async fn phase_c_spawn_subsystems(
     // ── Spawn chunk relay task first ─────────────────────────────────
     // This must run before AgentReady is sent so the chunk channel is
     // already being drained when the Gateway loop starts.
+    //
+    // Two channels are consumed:
+    //   - chunk_rx: data events (Delta, ReasoningDelta, ToolCall, ...)
+    //   - control_chunk_rx: control events (Stopped, SessionStateChanged,
+    //     Done, Error, ...) — consumed with priority via biased select!
+    // This separation ensures control events are never blocked by
+    // data-event backpressure.
     let agent_id_for_relay = ctx.agent_id.clone();
-    let chunk_relay = if let Some(chunk_rx) = ctx.chunk_rx.take() {
+    let chunk_relay = if ctx.chunk_rx.is_some() {
+        let chunk_rx = ctx.chunk_rx.take().unwrap();
+        let control_chunk_rx = ctx.control_chunk_rx.take();
         let outbound_tx = ctx
             .grpc_client
             .as_ref()
             .expect("grpc_client must be Some in Gateway mode")
             .outbound_sender();
-        let mut chunk_rx = chunk_rx;
         Some(tokio::spawn(async move {
             tracing::info!("Chunk relay started (shared gRPC connection)");
-            while let Some(session_event) = chunk_rx.recv().await {
-                let sid = &session_event.session_id;
-                let agent_id = &agent_id_for_relay;
-                relay_chunk_event(&outbound_tx, agent_id, sid, session_event.event).await;
+            let mut chunk_rx = chunk_rx;
+            if let Some(mut control_rx) = control_chunk_rx {
+                loop {
+                    // Priority: drain control channel first (non-blocking)
+                    while let Ok(session_event) = control_rx.try_recv() {
+                        relay_chunk_event(
+                            &outbound_tx,
+                            &agent_id_for_relay,
+                            &session_event.session_id,
+                            session_event.event,
+                        )
+                        .await;
+                    }
+                    // Block-wait on both; biased gives control channel priority
+                    tokio::select! {
+                        biased;
+                        session_event = control_rx.recv() => {
+                            match session_event {
+                                Some(ev) => {
+                                    // Drain pending data events before sending
+                                    // the control event. This preserves FIFO
+                                    // ordering: all Deltas produced before the
+                                    // Stopped/Done/Error are relayed first, then
+                                    // the control event follows.
+                                    //
+                                    // try_recv is non-blocking — drains only
+                                    // already-queued events without waiting.
+                                    // This is safe because urgent_stop has
+                                    // already halted the AgentLoop, so no new
+                                    // Deltas will be produced during drain.
+                                    while let Ok(data_event) = chunk_rx.try_recv() {
+                                        relay_chunk_event(
+                                            &outbound_tx,
+                                            &agent_id_for_relay,
+                                            &data_event.session_id,
+                                            data_event.event,
+                                        )
+                                        .await;
+                                    }
+                                    // Now send the control event itself
+                                    relay_chunk_event(
+                                        &outbound_tx,
+                                        &agent_id_for_relay,
+                                        &ev.session_id,
+                                        ev.event,
+                                    )
+                                    .await;
+                                }
+                                None => {
+                                    // Control channel closed;
+                                    // drain data channel then exit
+                                    while let Some(ev) = chunk_rx.recv().await {
+                                        relay_chunk_event(
+                                            &outbound_tx,
+                                            &agent_id_for_relay,
+                                            &ev.session_id,
+                                            ev.event,
+                                        )
+                                        .await;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        session_event = chunk_rx.recv() => {
+                            match session_event {
+                                Some(ev) => {
+                                    relay_chunk_event(
+                                        &outbound_tx,
+                                        &agent_id_for_relay,
+                                        &ev.session_id,
+                                        ev.event,
+                                    )
+                                    .await;
+                                }
+                                None => {
+                                    // Data channel closed;
+                                    // drain control channel then exit
+                                    while let Some(ev) = control_rx.recv().await {
+                                        relay_chunk_event(
+                                            &outbound_tx,
+                                            &agent_id_for_relay,
+                                            &ev.session_id,
+                                            ev.event,
+                                        )
+                                        .await;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No control channel (shouldn't happen in Gateway mode)
+                while let Some(session_event) = chunk_rx.recv().await {
+                    relay_chunk_event(
+                        &outbound_tx,
+                        &agent_id_for_relay,
+                        &session_event.session_id,
+                        session_event.event,
+                    )
+                    .await;
+                }
             }
             tracing::debug!("Chunk relay task ended");
         }))
@@ -195,7 +303,7 @@ async fn relay_chunk_event(
     event: crate::agent::loop_::ChunkEvent,
 ) {
     use crate::agent::loop_::ChunkEvent;
-    use crate::cli::{relay_intent, relay_stream_chunk};
+    use crate::cli::{relay_intent, relay_stream_chunk, try_relay_stream_chunk};
 
     match event {
         ChunkEvent::ReasoningStarted => {
@@ -205,12 +313,15 @@ async fn relay_chunk_event(
 
         ChunkEvent::Delta(delta) => {
             let params = serde_json::json!({ "content": delta, "session_id": sid });
-            relay_stream_chunk(outbound_tx, "agent_chunk", &params).await;
+            // Non-blocking: dropping a single delta is acceptable,
+            // but blocking would stall control events in the relay loop.
+            try_relay_stream_chunk(outbound_tx, "agent_chunk", &params);
         }
 
         ChunkEvent::ReasoningDelta(delta) => {
             let params = serde_json::json!({ "reasoning_content": delta, "session_id": sid });
-            relay_stream_chunk(outbound_tx, "agent_chunk", &params).await;
+            // Non-blocking: same rationale as Delta above.
+            try_relay_stream_chunk(outbound_tx, "agent_chunk", &params);
         }
 
         ChunkEvent::ContextUsage(ctx_info) => {

@@ -169,7 +169,8 @@ export function ChatPanel() {
   // Derive sending from current session: pendingSend (optimistic) OR sessionStatus (backend truth).
   // This is per-session — no cross-session state leakage.
   const sending = sessionState
-    ? (sessionState.pendingSend
+    ? !sessionState.isStopping &&
+    (sessionState.pendingSend
       || sessionState.sessionStatus?.status === "streaming"
       || sessionState.sessionStatus?.status === "waiting_approval"
       || sessionState.sessionStatus?.status === "paused")

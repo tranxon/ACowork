@@ -2639,6 +2639,38 @@ pub(crate) async fn relay_stream_chunk(
     }
 }
 
+/// Non-blocking variant of [`relay_stream_chunk`] for high-frequency data
+/// events (Delta, ReasoningDelta).
+///
+/// Uses `try_send` instead of `send().await`: if the outbound channel is
+/// full, the event is silently dropped instead of blocking the relay task.
+/// This is acceptable for data events — dropping a single delta only causes
+/// a minor display glitch, whereas blocking would stall control events
+/// (Stopped, SessionStateChanged) that share the relay loop.
+pub(crate) fn try_relay_stream_chunk(
+    outbound_tx: &tokio::sync::mpsc::Sender<acowork_core::proto::ClientMessage>,
+    action: &str,
+    params: &serde_json::Value,
+) {
+    let msg = acowork_core::proto::ClientMessage {
+        request_id: 0,
+
+        payload: Some(acowork_core::proto::client_message::Payload::StreamChunk(
+            acowork_core::proto::StreamChunk {
+                target: "http-ws".to_string(),
+                action: action.to_string(),
+                params_json: params.to_string(),
+            },
+        )),
+    };
+    if outbound_tx.try_send(msg).is_err() {
+        tracing::trace!(
+            "{} relay try_send dropped (outbound full) — acceptable for data events",
+            action
+        );
+    }
+}
+
 /// Relay an IntentSend message to Gateway (used by chunk relay task).
 ///
 /// IntentSend is the full-round-trip path for discrete events

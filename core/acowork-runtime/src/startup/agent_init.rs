@@ -269,11 +269,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             })?;
     embedding_providers.push((Box::new(remote_fallback), 5000));
 
-    let fallback_emb = Arc::new(FallbackEmbeddingProvider::with_providers(
+    let fallback_emb = FallbackEmbeddingProvider::with_providers(
         embedding_providers,
         EmbeddingConfig::default(),
-    ));
-    let emb_provider: Arc<dyn EmbeddingProvider> = fallback_emb;
+    );
+    // Lock the dimension to the first provider's dimension.
+    // This prevents dimension mismatch when fallback providers have
+    // different dimensions. The locked dimension must match the Grafeo
+    // HNSW index dimension.
+    let emb_dim = fallback_emb.dimension();
+    let fallback_emb = fallback_emb.with_locked_dimension(emb_dim);
+    let emb_provider: Arc<dyn EmbeddingProvider> = Arc::new(fallback_emb);
     tracing::info!(
         dim = emb_provider.dimension(),
         name = emb_provider.name(),
@@ -378,9 +384,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         exceeded_action: "warn".to_string(),
     };
 
-    // ── Step 8: Create chunk channel ────────────────────────────────
+    // ── Step 8: Create chunk channels ───────────────────────────────
+    // Data channel: high-capacity for streaming deltas (droppable under load)
+    // Control channel: smaller, for control events that MUST reach frontend
     let (chunk_tx, chunk_rx) = if grpc_client.is_some() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::SessionChunkEvent>(256);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let (control_chunk_tx, control_chunk_rx) = if grpc_client.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::SessionChunkEvent>(64);
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -416,6 +430,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         identity_context,
         chunk_tx,
         chunk_rx,
+        control_chunk_tx,
+        control_chunk_rx,
         budget,
         resource_cache,
         agent_id,

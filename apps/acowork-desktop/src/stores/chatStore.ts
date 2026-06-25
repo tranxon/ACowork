@@ -63,6 +63,10 @@ interface SessionChatState {
   /** Frontend optimistic flag: true between user clicking Send and backend pushing
    *  session_state_changed. Cleared when sessionStatus arrives or on done/error/stopped. */
   pendingSend: boolean;
+  /** Frontend optimistic flag: true between user clicking Stop and backend
+   *  pushing stopped/session_state_changed. When true, `sending` is false —
+   *  the UI immediately exits the "working" state without waiting for backend. */
+  isStopping: boolean;
   /** Last accessed timestamp — used for LRU eviction */
   lastAccessed: number;
   /** Per-session todo list (from todo_write tool) */
@@ -113,6 +117,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   isReasoning: false,
   sessionStatus: null,
   pendingSend: false,
+  isStopping: false,
   lastAccessed: 0,
   todos: [],
   model: null,
@@ -1019,6 +1024,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         agentId,
         ...(sessionId ? { session_id: sessionId } : {}),
       }));
+    }
+    // Optimistic: immediately mark as stopping so the UI exits "working" state
+    // without waiting for the backend Stopped/SessionStateChanged event.
+    const activeSessionId = getAgentState(get(), agentId).activeSessionId;
+    if (activeSessionId) {
+      set((state) =>
+        updateSessionState(state, agentId, activeSessionId, {
+          isStopping: true,
+        }),
+      );
     }
   },
 
@@ -1998,6 +2013,7 @@ function handleMessageEvent(
             isReasoning: false,
             isCompacting: false,
             pendingSend: false,
+            isStopping: false,
           }),
         };
       });
@@ -2068,6 +2084,7 @@ function handleMessageEvent(
           isReasoning: false,
           isCompacting: false,
           pendingSend: false,
+          isStopping: false,
         }),
       }));
       break;
@@ -2096,6 +2113,7 @@ function handleMessageEvent(
             isReasoning: false,
             isCompacting: false,
             pendingSend: false,
+            isStopping: false,
           }),
         };
       });

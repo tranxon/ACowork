@@ -82,6 +82,15 @@ pub struct AgentCore {
     /// When set, each StreamEvent::Content delta is forwarded here
     /// so the caller can relay chunks to Gateway via StreamChunk.
     pub(crate) on_chunk: Option<mpsc::Sender<crate::agent::loop_::SessionChunkEvent>>,
+    /// Dedicated control-event channel for high-priority events that MUST
+    /// reach the frontend (Stopped, SessionStateChanged, Done, Error,
+    /// ToolApprovalNeeded, AskQuestion, IterationLimitPaused).
+    ///
+    /// This channel is consumed with priority over `on_chunk` by the chunk
+    /// relay task, ensuring control events are never blocked by data-event
+    /// backpressure (e.g. a burst of ReasoningDelta chunks filling the
+    /// data channel). None in standalone mode.
+    pub(crate) control_chunk: Option<mpsc::Sender<crate::agent::loop_::SessionChunkEvent>>,
     /// Grafeo memory store (shared across all sessions of this agent).
     /// Opened at agent startup from `{work_dir}/memory/private.grafeo`.
     /// None if initialization failed (memory features degraded gracefully).
@@ -203,6 +212,7 @@ impl AgentCore {
             system_prompt_override: None,
             session_id: None,
             on_chunk,
+            control_chunk: None,
             memory_store: None,
             memory_session: None,
             debug_observer: observer,
@@ -328,7 +338,18 @@ impl AgentCore {
     /// Convenience method used by AgentLoop emit sites. Returns true if sent,
     /// false if channel full/closed or session_id missing.
     pub fn try_send_chunk(&self, event: ChunkEvent) -> bool {
+        // Auto-route: control events go to the dedicated control channel
+        // (never blocked by data backpressure); data events use the regular
+        // on_chunk channel. Falls back to on_chunk when control_chunk is None
+        // (standalone mode).
+        let is_control = event.is_control();
         if let Some(wrapped) = self.make_chunk_event(event) {
+            if is_control
+                && let Some(tx) = self.control_chunk.as_ref()
+            {
+                return tx.try_send(wrapped).is_ok();
+            }
+            // Fallback: standalone mode has no control channel, or data event
             self.on_chunk
                 .as_ref()
                 .map(|tx| tx.try_send(wrapped).is_ok())
@@ -738,6 +759,7 @@ impl AgentCore {
     pub(crate) fn clone_for_session(
         &self,
         on_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
+        control_chunk: Option<mpsc::Sender<SessionChunkEvent>>,
         session_id: String,
     ) -> Self {
         Self {
@@ -755,6 +777,7 @@ impl AgentCore {
             system_prompt_override: self.system_prompt_override.clone(),
             session_id: Some(session_id),
             on_chunk,
+            control_chunk,
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),
             // Debug observer is NOT cloned — each session gets a fresh

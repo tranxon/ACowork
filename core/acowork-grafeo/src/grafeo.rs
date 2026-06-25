@@ -1,6 +1,7 @@
 //! GrafeoStore — GrafeoDB-backed memory storage engine.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use grafeo_common::types::Value;
@@ -57,6 +58,10 @@ pub struct GrafeoStore {
     pub(crate) db: GrafeoDB,
     /// HNSW index configuration used for this store.
     pub(crate) hnsw_config: HnswConfig,
+    /// Current embedding dimension, tracked atomically so that
+    /// [`migrate_embedding_dimension`](Self::migrate_embedding_dimension)
+    /// can update it through `&self` (the store is behind `Arc`).
+    pub(crate) embedding_dim: AtomicUsize,
 }
 
 // Static assertion: GrafeoStore must be Sync for safe concurrent access.
@@ -98,8 +103,11 @@ impl GrafeoStore {
         let store = Self {
             db,
             hnsw_config: config,
+            embedding_dim: AtomicUsize::new(0),
         };
         store.init_schema()?;
+        // Sync embedding_dim with the configured dimension after schema init.
+        store.embedding_dim.store(store.hnsw_config.dim, Ordering::Relaxed);
         Ok(store)
     }
 
@@ -116,8 +124,10 @@ impl GrafeoStore {
         let store = Self {
             db,
             hnsw_config: config,
+            embedding_dim: AtomicUsize::new(0),
         };
         store.init_schema()?;
+        store.embedding_dim.store(store.hnsw_config.dim, Ordering::Relaxed);
         Ok(store)
     }
 
@@ -130,7 +140,12 @@ impl GrafeoStore {
 
     /// Initialize schema: create HNSW vector indexes and BM25 text indexes.
     ///
-    /// Vector indexes are created for all four memory labels.
+    /// Vector indexes are created for all four memory labels **only if they
+    /// do not already exist**. When the database is restored from persistence,
+    /// indexes are restored with their original dimensions and should not be
+    /// recreated. This prevents dimension-mismatch errors when the embedding
+    /// provider dimension has changed since the last session.
+    ///
     /// Text indexes are created on the "content" property for all labels,
     /// plus any label-specific text fields defined in
     /// [`EPISODIC_TEXT_FIELDS`] and [`KNOWLEDGE_TEXT_FIELDS`].
@@ -138,13 +153,18 @@ impl GrafeoStore {
         let cfg = &self.hnsw_config;
 
         // HNSW vector indexes on the "embedding" property.
+        // Try to create each index. If creation fails (e.g., the index was
+        // already restored from persistence with a different dimension, or
+        // existing vectors have a mismatched dimension), log a warning and
+        // continue. The store remains usable for text search and graph
+        // operations; vector search will fail until migration is performed.
         for label in [
             labels::EPISODIC,
             labels::KNOWLEDGE,
             labels::PROCEDURAL,
             labels::AUTOBIOGRAPHICAL,
         ] {
-            self.db.create_vector_index(
+            if let Err(e) = self.db.create_vector_index(
                 label,
                 "embedding",
                 Some(cfg.dim),
@@ -152,28 +172,35 @@ impl GrafeoStore {
                 Some(cfg.m),
                 Some(cfg.ef_construction),
                 None,
-            )?;
+            ) {
+                tracing::warn!(
+                    label,
+                    dim = cfg.dim,
+                    error = %e,
+                    "Failed to create vector index (may already exist or dimension mismatch). \
+                     Vector search will be unavailable until migration."
+                );
+            }
         }
 
         // BM25 text indexes for Episodic fields.
         for field in EPISODIC_TEXT_FIELDS {
-            self.db.create_text_index(labels::EPISODIC, field)?;
+            let _ = self.db.create_text_index(labels::EPISODIC, field);
         }
 
         // BM25 text indexes for Knowledge fields.
         for field in KNOWLEDGE_TEXT_FIELDS {
-            self.db.create_text_index(labels::KNOWLEDGE, field)?;
+            let _ = self.db.create_text_index(labels::KNOWLEDGE, field);
         }
 
         // BM25 text indexes for Procedural content (computed from name/trigger/action).
-        self.db.create_text_index(labels::PROCEDURAL, "content")?;
+        let _ = self.db.create_text_index(labels::PROCEDURAL, "content");
 
         // BM25 text indexes for Autobiographical content (computed from key/value).
-        self.db
-            .create_text_index(labels::AUTOBIOGRAPHICAL, "content")?;
+        let _ = self.db.create_text_index(labels::AUTOBIOGRAPHICAL, "content");
 
         // Also add content text index for Knowledge (computed from subject/predicate/object).
-        self.db.create_text_index(labels::KNOWLEDGE, "content")?;
+        let _ = self.db.create_text_index(labels::KNOWLEDGE, "content");
 
         Ok(())
     }
@@ -188,9 +215,105 @@ impl GrafeoStore {
         &self.db
     }
 
-    /// Return the current embedding dimension (from HNSW config).
+    /// Return the current embedding dimension.
     pub fn embedding_dim(&self) -> usize {
-        self.hnsw_config.dim
+        let dim = self.embedding_dim.load(Ordering::Relaxed);
+        if dim > 0 {
+            dim
+        } else {
+            self.hnsw_config.dim
+        }
+    }
+
+    /// Validate that an embedding vector has the expected dimension.
+    ///
+    /// Returns `Err` if the embedding length does not match the HNSW index
+    /// dimension. Use this before any write operation that stores an embedding.
+    pub fn validate_embedding(&self, embedding: &[f32]) -> Result<()> {
+        crate::index_config::validate_embedding_dim(embedding, self.hnsw_config.dim)
+    }
+
+    /// Migrate all embeddings and vector indexes to a new dimension.
+    ///
+    /// This is the core migration primitive used when the user switches to an
+    /// embedding model with a different dimension (e.g., 384d → 768d).
+    ///
+    /// # Steps
+    ///
+    /// 1. Re-embed all nodes using `embed_fn` (the new provider).
+    /// 2. Drop all existing HNSW vector indexes (old dimension).
+    /// 3. Create new HNSW vector indexes with `new_dim`.
+    /// 4. Update `hnsw_config.dim` to `new_dim`.
+    ///
+    /// # Arguments
+    ///
+    /// * `embed_fn` — Synchronous closure that takes a text string and returns
+    ///   an embedding vector of length `new_dim`. Callers are responsible for
+    ///   bridging async providers (e.g., via `tokio::runtime::Handle::block_on`).
+    /// * `new_dim` — The dimension of the new embedding model.
+    ///
+    /// # Returns
+    ///
+    /// A [`RebuildStats`] with counts of nodes scanned, rebuilt, skipped, and
+    /// errors.
+    pub fn migrate_embedding_dimension(
+        &self,
+        embed_fn: impl Fn(&str) -> Option<Vec<f32>>,
+        new_dim: usize,
+    ) -> Result<RebuildStats> {
+        tracing::info!(
+            old_dim = self.hnsw_config.dim,
+            new_dim,
+            "Starting embedding dimension migration"
+        );
+
+        // Step 1: Re-embed all nodes with the new provider.
+        let stats = self.rebuild_embeddings(&embed_fn, new_dim)?;
+
+        // Step 2: Drop all old HNSW vector indexes.
+        for label in [
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+        ] {
+            let dropped = self.db.drop_vector_index(label, "embedding");
+            if dropped {
+                tracing::debug!(label, "Dropped old vector index");
+            }
+        }
+
+        // Step 3: Create new HNSW vector indexes with the new dimension.
+        // Update the atomic dimension tracker; hnsw_config.dim is not mutated
+        // (it was only used during initial init_schema and is not the source
+        // of truth after migration).
+        self.embedding_dim.store(new_dim, Ordering::Relaxed);
+        for label in [
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+        ] {
+            self.db.create_vector_index(
+                label,
+                "embedding",
+                Some(new_dim),
+                Some(VECTOR_METRIC),
+                Some(self.hnsw_config.m),
+                Some(self.hnsw_config.ef_construction),
+                None,
+            )?;
+        }
+
+        tracing::info!(
+            new_dim,
+            rebuilt = stats.rebuilt,
+            skipped = stats.skipped_no_embedding + stats.skipped_no_content,
+            errors = stats.errors,
+            "Embedding dimension migration complete"
+        );
+
+        Ok(stats)
     }
 
     /// Rebuild all embeddings using a new embedding function.

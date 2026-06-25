@@ -289,7 +289,6 @@ pub async fn send_message(
                 .await
                 .touch_interaction(&agent_id, chrono::Utc::now());
         } else {
-            tracing::warn!("Agent {} is running but has no IPC session", agent_id);
             return Err(ApiError::service_unavailable(&format!(
                 "Agent {} is not yet connected",
                 agent_id

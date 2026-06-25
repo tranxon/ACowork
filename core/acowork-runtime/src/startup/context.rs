@@ -60,6 +60,11 @@ pub(crate) struct AgentBootContext {
     pub identity_context: Option<String>,
     pub chunk_tx: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>>,
     pub chunk_rx: Option<tokio::sync::mpsc::Receiver<crate::agent::loop_::SessionChunkEvent>>,
+    /// Dedicated control-event channel (Stopped, SessionStateChanged, Done,
+    /// Error, etc.). Separated from data channel to prevent backpressure
+    /// from blocking control events.
+    pub control_chunk_tx: Option<tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>>,
+    pub control_chunk_rx: Option<tokio::sync::mpsc::Receiver<crate::agent::loop_::SessionChunkEvent>>,
 
     // Budget
     pub budget: acowork_core::Budget,
@@ -95,6 +100,7 @@ pub(crate) fn build_session_manager_config(
         per_session_budget: ctx.budget.clone(),
         history_max_tokens: config.history_max_tokens,
         chunk_tx: ctx.chunk_tx.clone(),
+        control_chunk_tx: ctx.control_chunk_tx.clone(),
         tool_definitions: ctx.tool_definitions.clone(),
         full_tool_specs: ctx.full_tool_specs.clone(),
         identity_context: ctx.identity_context.clone(),

@@ -366,10 +366,25 @@ impl GatewayConfig {
                 .map(|c| c.iteration_timeout_ms)
                 .unwrap_or_else(default_iteration_timeout_ms),
             dev_mode: file_config.as_ref().map(|c| c.dev_mode).unwrap_or(true),
-            http: file_config
-                .as_ref()
-                .map(|c| c.http.clone())
-                .unwrap_or_default(),
+            http: {
+                let mut http = file_config
+                    .as_ref()
+                    .map(|c| c.http.clone())
+                    .unwrap_or_default();
+                // Allow ACOWORK_GATEWAY_HTTP_PORT env var to override the
+                // configured port (used by E2E tests and manual testing).
+                if let Ok(port_str) = std::env::var("ACOWORK_GATEWAY_HTTP_PORT") {
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        http.port = port;
+                        // Ensure port_max is at least port+10 to allow
+                        // auto-increment on conflict.
+                        if http.port_max < port + 10 {
+                            http.port_max = port + 10;
+                        }
+                    }
+                }
+                http
+            },
             default_provider: file_config
                 .as_ref()
                 .and_then(|c| c.default_provider.clone()),

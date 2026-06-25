@@ -242,6 +242,10 @@ pub(crate) struct SessionTask {
     system_prompt: String,
     /// Optional streaming chunk sender for forwarding responses to Gateway
     chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
+    /// Dedicated control-event sender for Done/Error/Stopped events.
+    /// Separated from `chunk_tx` to guarantee control events are never
+    /// blocked by data-event backpressure.
+    control_chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
     /// Unique session identifier (used for logging and chunk tagging)
     session_id: String,
     /// Complete tool definitions (with input_schema) for ContextBuilder
@@ -378,6 +382,7 @@ impl SessionTask {
         inbound_rx: mpsc::Receiver<SessionMessage>,
         system_prompt: String,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
+        control_chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         session_id: String,
         tool_definitions: Vec<serde_json::Value>,
         identity_context: Option<String>,
@@ -395,7 +400,8 @@ impl SessionTask {
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         // Build the AgentLoop eagerly so its inbound sender can be exposed.
         // Heavy fields (provider, tools) are Arc-cloned (refcount only).
-        let mut core_for_session = core.clone_for_session(chunk_tx.clone(), session_id.clone());
+        let mut core_for_session =
+            core.clone_for_session(chunk_tx.clone(), control_chunk_tx.clone(), session_id.clone());
         // Set MCP tools and rebuild the merged dispatch list
         core_for_session.mcp_tools = mcp_tools;
         core_for_session.rebuild_all_tools();
@@ -503,6 +509,7 @@ impl SessionTask {
             inbound_rx,
             system_prompt,
             chunk_tx,
+            control_chunk_tx,
             session_id,
             tool_definitions,
             identity_context,
@@ -547,6 +554,7 @@ impl SessionTask {
             agent_inbound_tx,
             session_id,
             chunk_tx,
+            control_chunk_tx,
             mut inbound_rx,
             system_prompt,
             tool_definitions,
@@ -680,7 +688,7 @@ impl SessionTask {
                                             response_len = response.len(),
                                             "SessionTask processed chat message (replay)"
                                         );
-                                        if let Some(ref tx) = chunk_tx {
+                                        if let Some(ref tx) = control_chunk_tx {
                                             let event = SessionChunkEvent {
                                                 session_id: session_id.clone(),
                                                 event: ChunkEvent::Done {
@@ -702,7 +710,7 @@ impl SessionTask {
                                             error = %e,
                                             "SessionTask agent loop error (replay)"
                                         );
-                                        if let Some(ref tx) = chunk_tx {
+                                        if let Some(ref tx) = control_chunk_tx {
                                             let (user_message, detail, error_type) = e.error_info();
                                             let event = SessionChunkEvent {
                                                 session_id: session_id.clone(),
@@ -985,7 +993,7 @@ impl SessionTask {
                                 response_len = response.len(),
                                 "SessionTask processed chat message"
                             );
-                            if let Some(ref tx) = chunk_tx {
+                            if let Some(ref tx) = control_chunk_tx {
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
                                     event: ChunkEvent::Done {
@@ -1007,7 +1015,7 @@ impl SessionTask {
                                 error = %e,
                                 "SessionTask agent loop error"
                             );
-                            if let Some(ref tx) = chunk_tx {
+                            if let Some(ref tx) = control_chunk_tx {
                                 let (user_message, detail, error_type) = e.error_info();
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
@@ -1267,22 +1275,94 @@ impl SessionTask {
                         dimension = embed_dimension,
                         "SessionTask: updating embedding provider"
                     );
-                    // Build a new ONNX provider pointing at the updated embed service.
-                    // Same pattern as ModelSwitch for LLM provider rebuild:
-                    // create a new provider instance and replace in AgentCore.
+
+                    // Check if dimension migration is needed.
+                    // When the Grafeo store already has data with a different
+                    // dimension, we must re-embed all nodes and rebuild the
+                    // HNSW indexes before switching to the new provider.
+                    let needs_migration = agent_loop
+                        .core
+                        .memory_store
+                        .as_ref()
+                        .map(|store| store.embedding_dim() != embed_dimension)
+                        .unwrap_or(false);
+
+                    if needs_migration
+                        && let Some(ref store) = agent_loop.core.memory_store
+                    {
+                            let store = store.clone();
+                            let old_dim = store.embedding_dim();
+                            tracing::info!(
+                                old_dim,
+                                new_dim = embed_dimension,
+                                "Embedding dimension changed, starting migration"
+                            );
+
+                            // Build a temporary provider for the migration
+                            // re-embedding. We use the new ONNX provider directly
+                            // (not the fallback chain) to ensure consistent
+                            // embeddings during migration.
+                            let migration_provider =
+                                crate::embedding::remote::RemoteEmbeddingProvider::with_config(
+                                    &embed_endpoint,
+                                    None,
+                                    &embed_model_id,
+                                    embed_dimension,
+                                );
+                            let migration_provider =
+                                std::sync::Arc::new(migration_provider)
+                                    as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
+
+                            // Bridge async embed into a sync closure for
+                            // GrafeoStore::migrate_embedding_dimension.
+                            let handle = tokio::runtime::Handle::current();
+                            let provider_for_fn = migration_provider.clone();
+                            let embed_fn = move |text: &str| -> Option<Vec<f32>> {
+                                let text_owned = text.to_string();
+                                match handle.block_on(provider_for_fn.embed(&text_owned)) {
+                                    Ok(vec) => Some(vec),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Re-embedding failed during migration, skipping node"
+                                        );
+                                        None
+                                    }
+                                }
+                            };
+
+                            match store.migrate_embedding_dimension(embed_fn, embed_dimension) {
+                                Ok(stats) => {
+                                    tracing::info!(
+                                        rebuilt = stats.rebuilt,
+                                        skipped = stats.skipped_no_embedding + stats.skipped_no_content,
+                                        errors = stats.errors,
+                                        "Embedding migration complete"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "Embedding migration failed, vector search may be broken"
+                                    );
+                                }
+                            }
+                    }
+
+                    // Build the new ONNX provider.
                     let new_onnx_provider =
                         crate::embedding::remote::RemoteEmbeddingProvider::with_config(
                             &embed_endpoint,
-                            None, // No API key needed for local embed service
+                            None,
                             &embed_model_id,
                             embed_dimension,
                         );
                     // Wrap as FallbackEmbeddingProvider with ONNX as primary,
                     // keeping the existing provider chain as fallback (if available).
+                    // Lock the dimension so that fallback providers with a
+                    // different dimension are automatically filtered out.
                     let new_emb: Arc<dyn crate::embedding::EmbeddingProvider> =
                         if let Some(ref old_provider) = agent_loop.core.embedding_provider {
-                            // Insert ONNX as primary, old provider chain as fallback.
-                            // ArcDelegateEmbeddingProvider wraps Arc<dyn> → Box<dyn>.
                             Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
                                 vec![
                                 (Box::new(new_onnx_provider), 500),
@@ -1296,13 +1376,14 @@ impl SessionTask {
                                 ),
                             ],
                                 crate::embedding::EmbeddingConfig::default(),
-                            ))
+                            )
+                            .with_locked_dimension(embed_dimension))
                         } else {
-                            // No previous provider — ONNX becomes the sole provider
                             Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
                                 vec![(Box::new(new_onnx_provider), 500)],
                                 crate::embedding::EmbeddingConfig::default(),
-                            ))
+                            )
+                            .with_locked_dimension(embed_dimension))
                         };
                     agent_loop.core.update_embedding_provider(new_emb);
                 }

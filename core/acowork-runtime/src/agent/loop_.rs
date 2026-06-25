@@ -160,6 +160,29 @@ pub enum ChunkEvent {
     },
 }
 
+impl ChunkEvent {
+    /// Returns `true` for control events that MUST reach the frontend
+    /// (Stopped, SessionStateChanged, Done, Error, ToolApprovalNeeded,
+    /// AskQuestion, IterationLimitPaused).
+    ///
+    /// Control events are routed to a dedicated high-priority channel
+    /// that is never blocked by data-event backpressure. Data events
+    /// (Delta, ReasoningDelta, ToolCall, etc.) use the regular channel
+    /// and may be dropped under load without functional impact.
+    pub(crate) fn is_control(&self) -> bool {
+        matches!(
+            self,
+            ChunkEvent::Stopped { .. }
+                | ChunkEvent::SessionStateChanged { .. }
+                | ChunkEvent::Done { .. }
+                | ChunkEvent::Error { .. }
+                | ChunkEvent::ToolApprovalNeeded { .. }
+                | ChunkEvent::AskQuestion { .. }
+                | ChunkEvent::IterationLimitPaused { .. }
+        )
+    }
+}
+
 /// Result of executing a single iteration of the agent loop.
 ///
 /// This is the shared building block used by both:
@@ -2449,6 +2472,188 @@ mod tests {
             result, "Echo: hello world",
             "Valid tool call should execute normally, got: {}",
             result
+        );
+    }
+
+    // ── Control-flow / data-flow separation tests ──────────────────────
+
+    #[test]
+    fn test_chunk_event_is_control_classification() {
+        // Control events — must return true
+        assert!(ChunkEvent::Stopped { content: String::new() }.is_control());
+        assert!(ChunkEvent::Done {
+            content: String::new(),
+            message_id: String::new(),
+        }
+        .is_control());
+        assert!(ChunkEvent::Error {
+            user_message: String::new(),
+            detail: String::new(),
+            error_type: String::new(),
+            message_id: String::new(),
+        }
+        .is_control());
+        assert!(ChunkEvent::SessionStateChanged {
+            status: SessionStatus::Idle,
+            model: None,
+            provider: None,
+            workspace_id: None,
+            ratio: None,
+            reasoning_effort: None,
+            temperature: None,
+        }
+        .is_control());
+        assert!(ChunkEvent::ToolApprovalNeeded {
+            request_id: String::new(),
+            tool_name: String::new(),
+            action: String::new(),
+            risk_level: String::new(),
+            reason: String::new(),
+            tool_call_id: String::new(),
+            approval_timeout_secs: 0,
+        }
+        .is_control());
+        assert!(ChunkEvent::AskQuestion {
+            request_id: String::new(),
+            question: String::new(),
+            options: Vec::new(),
+            title: None,
+            timeout_seconds: None,
+        }
+        .is_control());
+        assert!(ChunkEvent::IterationLimitPaused {
+            iteration: 0,
+            max_iterations: 0,
+        }
+        .is_control());
+
+        // Data events — must return false
+        assert!(!ChunkEvent::Delta(String::new()).is_control());
+        assert!(!ChunkEvent::ReasoningDelta(String::new()).is_control());
+        assert!(!ChunkEvent::ReasoningStarted.is_control());
+        assert!(!ChunkEvent::CompactingStarted.is_control());
+        assert!(!ChunkEvent::CompactingEnded.is_control());
+        assert!(!ChunkEvent::ToolCall {
+            name: String::new(),
+            args: String::new(),
+            id: String::new(),
+        }
+        .is_control());
+        assert!(!ChunkEvent::ToolResult {
+            name: String::new(),
+            result: String::new(),
+            tool_call_id: String::new(),
+        }
+        .is_control());
+        assert!(!ChunkEvent::TodoListUpdated { todos: Vec::new() }.is_control());
+    }
+
+    #[test]
+    fn test_try_send_chunk_auto_routing() {
+        let config = RuntimeConfig::default();
+        let manifest = test_manifest();
+        let provider = Arc::new(MockProvider::single_text("ok"));
+        let tools: Vec<Arc<dyn Tool>> = vec![];
+
+        let (data_tx, mut data_rx) = mpsc::channel::<SessionChunkEvent>(16);
+        let (control_tx, mut control_rx) = mpsc::channel::<SessionChunkEvent>(16);
+
+        let mut core = AgentCore::new(config, manifest, provider, tools, Some(data_tx));
+        core.control_chunk = Some(control_tx);
+        core.session_id = Some("test-session".to_string());
+
+        // 1. Data event (Delta) → should route to on_chunk (data channel)
+        assert!(
+            core.try_send_chunk(ChunkEvent::Delta("hello".to_string())),
+            "Delta should be sent successfully"
+        );
+        let data_event = data_rx.try_recv().expect("Delta should arrive on data channel");
+        assert!(
+            matches!(data_event.event, ChunkEvent::Delta(ref s) if s == "hello"),
+            "Data event should be Delta"
+        );
+        assert!(
+            control_rx.try_recv().is_err(),
+            "Control channel should be empty after Delta"
+        );
+
+        // 2. Control event (Stopped) → should route to control_chunk
+        assert!(
+            core.try_send_chunk(ChunkEvent::Stopped {
+                content: "stopped".to_string(),
+            }),
+            "Stopped should be sent successfully"
+        );
+        let control_event = control_rx
+            .try_recv()
+            .expect("Stopped should arrive on control channel");
+        assert!(
+            matches!(control_event.event, ChunkEvent::Stopped { .. }),
+            "Control event should be Stopped"
+        );
+        assert!(
+            data_rx.try_recv().is_err(),
+            "Data channel should be empty after Stopped"
+        );
+
+        // 3. Control event (Done) → should also route to control_chunk
+        assert!(
+            core.try_send_chunk(ChunkEvent::Done {
+                content: "done".to_string(),
+                message_id: "msg-1".to_string(),
+            }),
+            "Done should be sent successfully"
+        );
+        let done_event = control_rx
+            .try_recv()
+            .expect("Done should arrive on control channel");
+        assert!(
+            matches!(done_event.event, ChunkEvent::Done { .. }),
+            "Control event should be Done"
+        );
+
+        // 4. Data event after control events → still routes to data channel
+        assert!(
+            core.try_send_chunk(ChunkEvent::ReasoningDelta("thinking".to_string())),
+            "ReasoningDelta should be sent successfully"
+        );
+        let reasoning_event = data_rx
+            .try_recv()
+            .expect("ReasoningDelta should arrive on data channel");
+        assert!(
+            matches!(reasoning_event.event, ChunkEvent::ReasoningDelta(ref s) if s == "thinking"),
+            "Data event should be ReasoningDelta"
+        );
+    }
+
+    #[test]
+    fn test_try_send_chunk_fallback_without_control_channel() {
+        // In standalone mode, control_chunk is None.
+        // Control events should fall back to on_chunk (data channel).
+        let config = RuntimeConfig::default();
+        let manifest = test_manifest();
+        let provider = Arc::new(MockProvider::single_text("ok"));
+        let tools: Vec<Arc<dyn Tool>> = vec![];
+
+        let (data_tx, mut data_rx) = mpsc::channel::<SessionChunkEvent>(16);
+
+        let mut core = AgentCore::new(config, manifest, provider, tools, Some(data_tx));
+        // control_chunk is None by default in standalone mode
+        core.session_id = Some("test-session".to_string());
+
+        // Stopped should fall back to on_chunk when control_chunk is None
+        assert!(
+            core.try_send_chunk(ChunkEvent::Stopped {
+                content: "stopped".to_string(),
+            }),
+            "Stopped should fall back to data channel in standalone mode"
+        );
+        let event = data_rx
+            .try_recv()
+            .expect("Stopped should arrive on data channel (fallback)");
+        assert!(
+            matches!(event.event, ChunkEvent::Stopped { .. }),
+            "Fallback event should be Stopped"
         );
     }
 }

@@ -52,6 +52,12 @@ pub struct RetryWaitHandle {
     pub skip_notify: Arc<Notify>,
 }
 
+impl Default for RetryWaitHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RetryWaitHandle {
     /// Create a new retry-wait handle pair.
     pub fn new() -> Self {
@@ -165,19 +171,19 @@ impl ReliableProvider {
     /// Emit [`SessionStatus::Paused`] with retry_info so the frontend
     /// shows a countdown timer and skip button.
     fn emit_retry_pause(&self, wait_ms: u64, attempt: u32, provider_name: &str) {
-        if let Some(ref status_lock) = self.session_status {
-            if let Ok(mut guard) = status_lock.write() {
-                *guard = SessionStatus::Paused {
-                    iteration: None,
-                    max_iterations: None,
-                    retry_info: Some(RetryPauseInfo {
-                        wait_ms,
-                        attempt,
-                        max_attempts: self.retry_config.max_attempts,
-                        provider: provider_name.to_string(),
-                    }),
-                };
-            }
+        if let Some(ref status_lock) = self.session_status
+            && let Ok(mut guard) = status_lock.write()
+        {
+            *guard = SessionStatus::Paused {
+                iteration: None,
+                max_iterations: None,
+                retry_info: Some(RetryPauseInfo {
+                    wait_ms,
+                    attempt,
+                    max_attempts: self.retry_config.max_attempts,
+                    provider: provider_name.to_string(),
+                }),
+            };
         }
         if let Some(ref tx) = self.chunk_sender
             && let Some(ref sid) = self.session_id
@@ -205,10 +211,10 @@ impl ReliableProvider {
 
     /// Restore [`SessionStatus::Streaming`] after retry wait (timeout or skip).
     fn emit_streaming_resume(&self) {
-        if let Some(ref status_lock) = self.session_status {
-            if let Ok(mut guard) = status_lock.write() {
-                *guard = SessionStatus::Streaming { message_id: None };
-            }
+        if let Some(ref status_lock) = self.session_status
+            && let Ok(mut guard) = status_lock.write()
+        {
+            *guard = SessionStatus::Streaming { message_id: None };
         }
         if let Some(ref tx) = self.chunk_sender
             && let Some(ref sid) = self.session_id
@@ -262,15 +268,15 @@ impl ReliableProvider {
         self.emit_retry_pause(wait_ms, attempt, &provider_name);
 
         // Update shared RetryWaitState so external observers can read it
-        if let Some(ref handle) = self.retry_wait_handle {
-            if let Ok(mut guard) = handle.state.lock() {
-                *guard = Some(RetryWaitState {
-                    wait_ms,
-                    attempt,
-                    max_attempts: self.retry_config.max_attempts,
-                    provider_name: provider_name.clone(),
-                });
-            }
+        if let Some(ref handle) = self.retry_wait_handle
+            && let Ok(mut guard) = handle.state.lock()
+        {
+            *guard = Some(RetryWaitState {
+                wait_ms,
+                attempt,
+                max_attempts: self.retry_config.max_attempts,
+                provider_name: provider_name.clone(),
+            });
         }
 
         tracing::info!(
@@ -292,10 +298,10 @@ impl ReliableProvider {
         }
 
         // Clear shared state
-        if let Some(ref handle) = self.retry_wait_handle {
-            if let Ok(mut guard) = handle.state.lock() {
-                *guard = None;
-            }
+        if let Some(ref handle) = self.retry_wait_handle
+            && let Ok(mut guard) = handle.state.lock()
+        {
+            *guard = None;
         }
 
         // Restore streaming status

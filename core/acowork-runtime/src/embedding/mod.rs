@@ -153,6 +153,10 @@ pub struct FallbackEmbeddingProvider {
     providers: Vec<ProviderEntry>,
     /// Configuration
     config: EmbeddingConfig,
+    /// Locked embedding dimension. When set, only providers whose `dimension()`
+    /// matches this value are used. This prevents dimension mismatch when the
+    /// Grafeo HNSW index has been created with a specific dimension.
+    locked_dim: Option<usize>,
 }
 
 impl FallbackEmbeddingProvider {
@@ -172,7 +176,7 @@ impl FallbackEmbeddingProvider {
         }
         providers.push(ProviderEntry::new(fallback, 5000)); // Remote: 5s timeout
 
-        Self { providers, config }
+        Self { providers, config, locked_dim: None }
     }
 
     /// Create with a full providers chain.
@@ -200,12 +204,39 @@ impl FallbackEmbeddingProvider {
             .into_iter()
             .map(|(provider, timeout_ms)| ProviderEntry::new(provider, timeout_ms))
             .collect();
-        Self { providers, config }
+        Self { providers, config, locked_dim: None }
     }
 
     /// Create with only a remote fallback (no local provider).
     pub fn remote_only(fallback: Box<dyn EmbeddingProvider>) -> Self {
         Self::new(None, fallback, EmbeddingConfig::default())
+    }
+
+    /// Lock the provider chain to a specific embedding dimension.
+    ///
+    /// When set, `embed()` and `embed_batch()` will skip any provider whose
+    /// `dimension()` does not match `dim`. This is critical when a Grafeo
+    /// HNSW index has been created with a fixed dimension: using a provider
+    /// with a different dimension would corrupt the index.
+    ///
+    /// Returns `self` for chaining.
+    pub fn with_locked_dimension(mut self, dim: usize) -> Self {
+        self.locked_dim = Some(dim);
+        self
+    }
+
+    /// Update the locked dimension at runtime (e.g., after migration).
+    pub fn set_locked_dimension(&mut self, dim: usize) {
+        self.locked_dim = Some(dim);
+    }
+
+    /// Returns `true` if the provider's dimension matches the locked dimension
+    /// (or if no dimension is locked).
+    fn dimension_matches(&self, entry: &ProviderEntry) -> bool {
+        match self.locked_dim {
+            Some(dim) => entry.provider.dimension() == dim,
+            None => true,
+        }
     }
 }
 
@@ -232,6 +263,16 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
         for entry in &self.providers {
             // Skip degraded providers
             if entry.is_degraded(self.config.failure_threshold) {
+                continue;
+            }
+            // Skip providers with mismatched dimension
+            if !self.dimension_matches(entry) {
+                tracing::debug!(
+                    provider = entry.provider.name(),
+                    provider_dim = entry.provider.dimension(),
+                    locked_dim = self.locked_dim,
+                    "Skipping provider: dimension mismatch"
+                );
                 continue;
             }
 
@@ -285,6 +326,10 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
             for entry in &self.providers {
                 // Skip degraded providers
                 if entry.is_degraded(self.config.failure_threshold) {
+                    continue;
+                }
+                // Skip providers with mismatched dimension
+                if !self.dimension_matches(entry) {
                     continue;
                 }
 
@@ -342,6 +387,10 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
     }
 
     fn dimension(&self) -> usize {
+        // When a dimension is locked, return it directly.
+        if let Some(dim) = self.locked_dim {
+            return dim;
+        }
         // Return the dimension of the first non-degraded provider.
         // (Grafeo index was initialised with this value.)
         // When all providers are degraded, return the last provider's dimension.
