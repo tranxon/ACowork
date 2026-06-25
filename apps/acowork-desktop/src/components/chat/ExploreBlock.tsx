@@ -301,6 +301,16 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
       const method = (params.method as string) || "GET";
       const url = (params.url as string) || "";
       summary = url ? `${method} ${url}` : "";
+    } else if (toolName === "todo_write") {
+      // N items (M done) — avoid dumping the raw todo array via String()
+      const todos = params.todos;
+      if (Array.isArray(todos)) {
+        const total = todos.length;
+        const completed = todos.filter(
+          (t) => t && typeof t === "object" && (t as { status?: unknown }).status === "completed",
+        ).length;
+        summary = `${total} ${total === 1 ? "item" : "items"}${completed > 0 ? ` (${completed} done)` : ""}`;
+      }
     } else if (params.path) {
       summary = params.path as string;
     } else if (params.pattern) {
@@ -310,9 +320,24 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
     } else if (params.url) {
       summary = params.url as string;
     } else {
+      // Generic fallback: show first key + a safe, type-aware value preview.
+      // Avoid String(value) on objects/arrays — it collapses to "[object Object]".
       const entries = Object.entries(params);
       if (entries.length > 0) {
-        summary = `${entries[0][0]}: ${String(entries[0][1]).slice(0, 60)}`;
+        const [key, value] = entries[0];
+        let valuePreview: string;
+        if (typeof value === "string") {
+          valuePreview = value;
+        } else if (typeof value === "number" || typeof value === "boolean") {
+          valuePreview = String(value);
+        } else if (Array.isArray(value)) {
+          valuePreview = `[${value.length}]`;
+        } else if (value && typeof value === "object") {
+          valuePreview = "{…}";
+        } else {
+          valuePreview = String(value);
+        }
+        summary = `${key}: ${valuePreview.slice(0, 60)}`;
       }
     }
   } catch {
