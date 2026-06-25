@@ -37,6 +37,25 @@ export interface TreeResponse {
   entries: TreeEntry[];
 }
 
+/** Single filename-search result — matches Gateway FindResponse.matches */
+export interface FileFindMatch {
+  name: string;
+  /** Forward-slash relative path within the workspace */
+  relPath: string;
+  /** "file" | "directory" — currently the endpoint only returns "file" */
+  type: string;
+  /** Heuristic score (higher = better match). */
+  score: number;
+}
+
+/** Filename-search API response — matches Gateway FindResponse */
+export interface FileFindResponse {
+  root: string;
+  scanned: number;
+  truncated: boolean;
+  matches: FileFindMatch[];
+}
+
 /** Cache key: `${agentId}:${workspaceId}:${relPath}` → TreeEntry[] */
 type TreeCacheKey = string;
 
@@ -74,6 +93,16 @@ interface WorkspaceState {
 
   // Fetch directory tree for a given agent + workspace + relative path
   fetchTree: (agentId: string, workspaceId: string, relPath?: string) => Promise<TreeEntry[] | null>;
+
+  // Server-side filename search. The Gateway walks the workspace
+  // (gitignore-aware) and returns ranked matches in one request.
+  findFiles: (
+    agentId: string,
+    workspaceId: string,
+    query: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ) => Promise<FileFindResponse | null>;
 
   // Get cached tree entries
   getCachedTree: (agentId: string, workspaceId: string, relPath: string) => TreeEntry[] | undefined;
@@ -279,6 +308,45 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   getCachedTree: (agentId: string, workspaceId: string, relPath: string) => {
     return get().treeCache[`${agentId}:${workspaceId}:${relPath}`];
+  },
+
+  findFiles: async (
+    agentId: string,
+    workspaceId: string,
+    query: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ) => {
+    const trimmed = query.trim();
+    if (!trimmed) return null;
+    try {
+      const baseUrl = getGatewayUrl();
+      const params = new URLSearchParams({ q: trimmed });
+      if (workspaceId && workspaceId !== "__agent_home__") {
+        params.set("workspace_id", workspaceId);
+      }
+      if (limit && limit > 0) {
+        params.set("limit", String(limit));
+      }
+      const resp = await fetch(
+        `${baseUrl}/api/agents/${agentId}/workspaces/find?${params.toString()}`,
+        { signal },
+      );
+      if (!resp.ok) {
+        // 404 = agent not running. Treat as no results so the UI stays
+        // quiet instead of logging a misleading error.
+        if (resp.status === 404) return null;
+        console.error("[WorkspaceStore] findFiles failed:", resp.status, resp.statusText);
+        return null;
+      }
+      return (await resp.json()) as FileFindResponse;
+    } catch (e) {
+      // AbortError is expected when the caller cancels an in-flight
+      // request (e.g. user kept typing); don't log it as an error.
+      if (e instanceof DOMException && e.name === "AbortError") return null;
+      console.error("[WorkspaceStore] findFiles error:", e);
+      return null;
+    }
   },
 
   invalidateTreeCache: (agentId: string) => {

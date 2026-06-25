@@ -1546,6 +1546,300 @@ fn is_binary_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+// ─── Filename Search API ───────────────────────────────────────────────
+
+/// Maximum number of entries to walk before bailing out of filename search.
+///
+/// Filename search should be O(files) per request. We hard-cap the walk
+/// at a generous limit so a malicious or unusually large workspace cannot
+/// keep the blocking thread busy forever. The first `MAX_FILENAME_SCAN`
+/// eligible entries are scored and the top `limit` are returned.
+const MAX_FILENAME_SCAN: usize = 50_000;
+
+/// Default and upper bound for the `limit` query parameter.
+const DEFAULT_FILENAME_LIMIT: usize = 50;
+const MAX_FILENAME_LIMIT: usize = 200;
+
+/// Query parameters for filename search.
+#[derive(Debug, Deserialize, Default)]
+pub struct FindQuery {
+    /// Search query — matched against file/dir name and relative path.
+    /// Case-insensitive, space/segment-aware.
+    pub q: Option<String>,
+    /// Workspace ID. "__agent_home__" or empty = agent home directory.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Maximum number of results to return (default 50, max 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// A single filename search match.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindMatch {
+    /// Just the file/dir name (last path segment).
+    pub name: String,
+    /// Relative path within the workspace, using forward slashes.
+    pub rel_path: String,
+    /// "file" or "directory".
+    #[serde(rename = "type")]
+    pub entry_type: String,
+    /// Heuristic score (higher = better match). Used by the client to
+    /// sort and tie-break; not intended to be stable across versions.
+    pub score: u32,
+}
+
+/// Response for filename search.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindResponse {
+    /// Absolute path of the workspace root (normalized, no Windows `\\?\` prefix).
+    pub root: String,
+    /// Number of entries scanned (capped at `MAX_FILENAME_SCAN`).
+    pub scanned: usize,
+    /// True when the walk was truncated by `MAX_FILENAME_SCAN` before
+    /// the entire workspace was scanned. The client should treat the
+    /// results as a partial view.
+    pub truncated: bool,
+    /// Top results, sorted by score descending, then by path length.
+    pub matches: Vec<FindMatch>,
+}
+
+/// `GET /api/agents/{agent_id}/workspaces/find` — search for files/dirs by name
+///
+/// Walks the workspace with the `ignore` crate (respects `.gitignore`,
+/// skips hidden/system directories) and ranks entries whose name or path
+/// contains every whitespace-/slash-separated segment of the query.
+///
+/// Matching is purely filename-based — the file content is not read, so
+/// the request is fast even on large workspaces. Heavy I/O is offloaded
+/// to `tokio::task::spawn_blocking` to keep the async runtime responsive.
+///
+/// Scoring (higher is better):
+/// - 1000 — exact name match (case-insensitive)
+/// - 800  — name starts with the full query
+/// - 600  — every query segment matches a word boundary in the name
+/// - 400  — every query segment is a substring of the name
+/// - 200  — every query segment is a substring of the relative path
+///
+/// Tie-break: shorter path, then alphabetical.
+pub async fn find_files(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<FindQuery>,
+) -> Result<Json<FindResponse>, (StatusCode, Json<ApiError>)> {
+    let pattern = query.q.as_deref().unwrap_or("").trim();
+    if pattern.is_empty() {
+        return Err(ApiError::bad_request("Missing required 'q' parameter"));
+    }
+    // Own the pattern so it can be moved into the blocking closure.
+    let pattern = pattern.to_string();
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_FILENAME_LIMIT)
+        .clamp(1, MAX_FILENAME_LIMIT);
+
+    let workspace_root =
+        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+
+    // Offload the synchronous walk + scoring to a blocking thread.
+    let result = tokio::task::spawn_blocking(move || {
+        run_filename_search(&workspace_root, &pattern, limit)
+    })
+    .await
+    .map_err(|_| ApiError::internal("Filename search task panicked"))?;
+
+    Ok(Json(result))
+}
+
+/// Synchronous filename search — runs on a blocking thread pool.
+///
+/// Walks the workspace with `ignore::WalkBuilder` (same defaults as
+/// content search), scores each entry against the query, then keeps the
+/// top `limit` results in a min-heap-like vec.
+fn run_filename_search(workspace_root: &str, pattern: &str, limit: usize) -> FindResponse {
+    // Normalize the query into segments. Whitespace and path separators
+    // split a query into required-AND segments (matches VS Code-style
+    // filename search). Empty segments are dropped.
+    let q_lower = pattern.to_lowercase();
+    let q_segments: Vec<&str> = q_lower
+        .split(|c: char| c.is_whitespace() || c == '/' || c == '\\')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Strip the Windows extended-length path prefix (\\?\) for the
+    // returned `root` field, mirroring `list_tree`.
+    let canonical_root = std::path::Path::new(workspace_root)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(workspace_root));
+    let canonical_str = canonical_root.to_string_lossy();
+    let stripped = canonical_str
+        .strip_prefix(r"\\?\")
+        .unwrap_or(canonical_str.as_ref());
+    let root_str = stripped.replace('\\', "/");
+
+    let walker = ignore::WalkBuilder::new(workspace_root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build();
+
+    let mut scored: Vec<FindMatch> = Vec::new();
+    let mut scanned: usize = 0;
+    let mut truncated = false;
+
+    'outer: for entry in walker {
+        // Skip directory entries themselves — we only return files.
+        // (We do follow into directories because the walker handles
+        // recursion; we just don't include the directories in results.)
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let ft = match entry.file_type() {
+            Some(ft) => ft,
+            None => continue,
+        };
+
+        if !ft.is_file() {
+            continue;
+        }
+
+        scanned += 1;
+        if scanned > MAX_FILENAME_SCAN {
+            truncated = true;
+            break 'outer;
+        }
+
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Compute the relative path (always forward-slash, no Windows prefix).
+        let rel_path = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let Some(score) = score_match(name, &rel_path, &q_lower, &q_segments) else {
+            continue;
+        };
+
+        scored.push(FindMatch {
+            name: name.to_string(),
+            rel_path,
+            entry_type: "file".to_string(),
+            score,
+        });
+    }
+
+    // Sort: highest score first, then shorter path, then alphabetical.
+    scored.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then(a.rel_path.len().cmp(&b.rel_path.len()))
+            .then(a.rel_path.cmp(&b.rel_path))
+    });
+
+    let total = scored.len();
+    let matches: Vec<FindMatch> = scored.into_iter().take(limit).collect();
+
+    FindResponse {
+        root: root_str,
+        scanned,
+        truncated: truncated || total > matches.len(),
+        matches,
+    }
+}
+
+/// Compute a match score for one file. Returns `None` when the file
+/// does not match the query at all (so the caller can `continue`).
+///
+/// The scoring is intentionally simple — fast enough to run inside the
+/// blocking walk without buffering or heap allocation per file. All
+/// comparisons are case-insensitive (pre-lowered by the caller).
+fn score_match(name: &str, rel_path: &str, q_lower: &str, q_segments: &[&str]) -> Option<u32> {
+    if q_segments.is_empty() {
+        return None;
+    }
+
+    let name_lower = name.to_lowercase();
+
+    // Exact name match wins immediately.
+    if name_lower == *q_lower {
+        return Some(1000);
+    }
+
+    // Name starts with the full query (e.g. "Splash" matches "SplashScreen.tsx").
+    if name_lower.starts_with(q_lower) {
+        return Some(800);
+    }
+
+    // Every segment matches a word boundary in the name.
+    // Word boundaries: start of string, or after a separator [._ -/].
+    if q_segments.iter().all(|seg| match_word_boundary(name, seg)) {
+        return Some(600);
+    }
+
+    // Every segment is a substring of the name.
+    if q_segments.iter().all(|seg| name_lower.contains(seg)) {
+        return Some(400);
+    }
+
+    // Every segment is a substring of the relative path.
+    let path_lower = rel_path.to_lowercase();
+    if q_segments.iter().all(|seg| path_lower.contains(seg)) {
+        return Some(200);
+    }
+
+    None
+}
+
+/// Returns true when `seg` (already lowercased) appears in `name` aligned
+/// to a word boundary.
+///
+/// A word boundary is:
+/// 1. The start of `name`, or
+/// 2. A character class `[._ -/]` immediately preceding the match, or
+/// 3. A camelCase transition in the *original* name — a lowercase
+///    letter followed by an uppercase letter (e.g. the 'S' in
+///    "SplashScreen" follows lowercase 'h' and is uppercase).
+///
+/// This matches the "camelCase / snake_case / kebab-case" intuition
+/// for filename search. We deliberately accept the small extra cost
+/// of allocating a lowered copy once per call to keep the logic
+/// robust against mixed-case queries.
+fn match_word_boundary(name: &str, seg: &str) -> bool {
+    if seg.is_empty() {
+        return true;
+    }
+    let name_bytes = name.as_bytes();
+    let name_lower = name.to_lowercase();
+    let mut start = 0usize;
+    while let Some(pos) = name_lower[start..].find(seg) {
+        let abs = start + pos;
+        let at_word_start =
+            abs == 0 || matches!(name_bytes[abs - 1], b'.' | b'_' | b' ' | b'-' | b'/');
+        // camelCase boundary — the original char at `abs` is uppercase
+        // and the one before it is lowercase.
+        let camel_boundary = abs > 0
+            && name_bytes[abs - 1].is_ascii_lowercase()
+            && name_bytes[abs].is_ascii_uppercase();
+        if at_word_start || camel_boundary {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────
 
 use axum::Router;
@@ -1571,6 +1865,7 @@ pub fn workspace_routes() -> Router<AppState> {
             put(set_prompt_file),
         )
         .route("/api/agents/{agent_id}/workspaces/tree", get(list_tree))
+        .route("/api/agents/{agent_id}/workspaces/find", get(find_files))
         .route("/api/agents/{agent_id}/workspaces/file",
             get(read_file)
                 .put(write_file)
@@ -1598,4 +1893,100 @@ pub fn workspace_routes() -> Router<AppState> {
             "/ws-files/{agent_id}/{*path}",
             get(serve_ws_file),
         )
+}
+
+#[cfg(test)]
+mod filename_search_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        // Files at various depths to test scoring + walking.
+        fs::create_dir_all(root.join("src/components/layout")).unwrap();
+        fs::write(root.join("src/components/layout/SplashScreen.tsx"), "").unwrap();
+        fs::write(root.join("src/components/layout/StatusBar.tsx"), "").unwrap();
+        fs::write(root.join("README.md"), "").unwrap();
+        fs::create_dir_all(root.join("node_modules/react")).unwrap();
+        // .gitignore'd via node_modules convention? We use explicit ignores.
+        fs::write(root.join("node_modules/react/index.js"), "").unwrap();
+
+        // Add a .gitignore that ignores node_modules so we can verify
+        // the walker honors ignore rules.
+        fs::write(root.join(".gitignore"), "node_modules\n").unwrap();
+
+        dir
+    }
+
+    #[test]
+    fn score_exact_name_match() {
+        let s = score_match("SplashScreen.tsx", "src/SplashScreen.tsx", "splashscreen.tsx", &["splashscreen.tsx"]).unwrap();
+        assert_eq!(s, 1000);
+    }
+
+    #[test]
+    fn score_prefix_name_match() {
+        let s = score_match("SplashScreen.tsx", "src/SplashScreen.tsx", "splash", &["splash"]).unwrap();
+        assert_eq!(s, 800);
+    }
+
+    #[test]
+    fn score_word_boundary_substring() {
+        // camelCase boundary
+        let s = score_match("SplashScreen.tsx", "src/SplashScreen.tsx", "screen", &["screen"]).unwrap();
+        assert_eq!(s, 600);
+        // snake_case boundary
+        let s2 = score_match("user_profile.ts", "src/user_profile.ts", "profile", &["profile"]).unwrap();
+        assert_eq!(s2, 600);
+    }
+
+    #[test]
+    fn score_substring_only() {
+        // "creen" is in the name but not at any word boundary.
+        let s = score_match("SplashScreen.tsx", "src/SplashScreen.tsx", "creen", &["creen"]).unwrap();
+        assert_eq!(s, 400);
+    }
+
+    #[test]
+    fn score_path_only() {
+        // "layout" is a path segment, not in the filename.
+        let s = score_match("SplashScreen.tsx", "src/components/layout/SplashScreen.tsx", "layout/splash", &["layout", "splash"]).unwrap();
+        assert_eq!(s, 200);
+    }
+
+    #[test]
+    fn score_no_match() {
+        let s = score_match("SplashScreen.tsx", "src/SplashScreen.tsx", "zzzzz", &["zzzzz"]);
+        assert!(s.is_none());
+    }
+
+    #[test]
+    fn end_to_end_walks_and_ranks() {
+        let dir = make_tree();
+        let root = dir.path().to_string_lossy();
+        let resp = run_filename_search(&root, "SplashScreen", 50);
+        assert!(!resp.matches.is_empty(), "expected at least one match");
+        // Highest-scored match should be the exact prefix "SplashScreen.tsx"
+        assert!(resp.matches[0].rel_path.ends_with("SplashScreen.tsx"));
+        // node_modules must be excluded by .gitignore
+        assert!(
+            !resp
+                .matches
+                .iter()
+                .any(|m| m.rel_path.contains("node_modules")),
+            "node_modules should be ignored"
+        );
+    }
+
+    #[test]
+    fn end_to_end_segment_query() {
+        let dir = make_tree();
+        let root = dir.path().to_string_lossy();
+        // Two segments: "layout" + "Splash" — only the deep file has both.
+        let resp = run_filename_search(&root, "layout Splash", 50);
+        assert!(!resp.matches.is_empty());
+        assert!(resp.matches[0].rel_path.ends_with("SplashScreen.tsx"));
+    }
 }

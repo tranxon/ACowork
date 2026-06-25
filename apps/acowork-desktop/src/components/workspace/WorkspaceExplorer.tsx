@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore, type TreeEntry } from "../../stores/workspaceStore";
@@ -33,7 +33,6 @@ export function WorkspaceExplorer() {
     const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
     const invalidateTreeCache = useWorkspaceStore((s) => s.invalidateTreeCache);
     const fetchTree = useWorkspaceStore((s) => s.fetchTree);
-    const treeCache = useWorkspaceStore((s) => s.treeCache);
     const sessionWorkspaceMap = useWorkspaceStore((s) => s.sessionWorkspaceMap);
     const createFile = useWorkspaceStore((s) => s.createFile);
     const createDir = useWorkspaceStore((s) => s.createDir);
@@ -67,78 +66,65 @@ export function WorkspaceExplorer() {
     const [searchQuery, setSearchQuery] = useState("");
     const [searchFocused, setSearchFocused] = useState(false);
     const [focusedIdx, setFocusedIdx] = useState(0);
+    const [searchLoading, setSearchLoading] = useState(false);
+    const [searchResults, setSearchResults] = useState<
+        Array<{ name: string; relPath: string; dir: string; score: number }>
+    >([]);
     const searchInputRef = useRef<HTMLInputElement>(null);
 
-    const ck = `${selectedAgentId}:${currentWorkspaceId}`;
-
-    // Auto-fetch unfetched directories when searching so the match scope grows
+    // Server-side filename search — one request per debounced query.
+    // Previous in-flight requests are cancelled via AbortController so
+    // the latest keystroke always wins, even on a slow network.
     useEffect(() => {
-        if (!searchQuery || !selectedAgentId) return;
-        const doFetch = () => {
-            const toFetch: string[] = [];
-            for (const [key, entries] of Object.entries(treeCache)) {
-                if (!key.startsWith(`${ck}:`)) continue;
-                for (const entry of entries) {
-                    if (entry.type !== "directory") continue;
-                    const dirPath = key.slice(ck.length + 1);
-                    const childPath = dirPath ? `${dirPath}/${entry.name}` : entry.name;
-                    if (!treeCache[`${ck}:${childPath}`]) {
-                        toFetch.push(childPath);
-                    }
-                }
-            }
-            for (const p of toFetch.slice(0, 20)) {
-                fetchTree(selectedAgentId, currentWorkspaceId, p);
-            }
-        };
-        doFetch();
-        const timer = setInterval(doFetch, 300);
-        return () => clearInterval(timer);
-    }, [searchQuery, ck, treeCache, selectedAgentId, currentWorkspaceId, fetchTree]);
-
-    // Collect matching files from cached tree entries
-    const matchingFiles = useMemo(() => {
-        if (!searchQuery) return [];
-        const q = searchQuery.toLowerCase();
-        const qParts = q.split(/[\s\/\\]+/).filter(Boolean);
-        if (qParts.length === 0) return [];
-        const results: { name: string; relPath: string; dir: string; score: number }[] = [];
-        const seen = new Set<string>();
-
-        for (const [key, entries] of Object.entries(treeCache)) {
-            if (!key.startsWith(`${ck}:`)) continue;
-            const dirPath = key.slice(ck.length + 1);
-
-            for (const entry of entries) {
-                if (entry.type !== "file") continue;
-                const fullPath = dirPath ? `${dirPath}/${entry.name}` : entry.name;
-                if (seen.has(fullPath)) continue;
-                seen.add(fullPath);
-
-                const nameLower = entry.name.toLowerCase();
-                const pathLower = fullPath.toLowerCase();
-
-                let score = 0;
-                if (qParts.every((p) => nameLower.includes(p))) {
-                    score = nameLower === q ? 3 : nameLower.startsWith(q) ? 2 : 1;
-                } else if (qParts.every((p) => pathLower.includes(p))) {
-                    score = 0.5;
-                } else {
-                    continue;
-                }
-
-                results.push({ name: entry.name, relPath: fullPath, dir: dirPath, score });
-            }
+        if (!searchQuery.trim() || !selectedAgentId) {
+            setSearchResults([]);
+            setSearchLoading(false);
+            return;
         }
+        const controller = new AbortController();
+        setSearchLoading(true);
+        const timer = setTimeout(() => {
+            void useWorkspaceStore
+                .getState()
+                .findFiles(
+                    selectedAgentId,
+                    currentWorkspaceId,
+                    searchQuery,
+                    50,
+                    controller.signal,
+                )
+                .then((resp) => {
+                    if (controller.signal.aborted) return;
+                    if (!resp) {
+                        setSearchResults([]);
+                        setSearchLoading(false);
+                        return;
+                    }
+                    const rows = resp.matches.map((m) => {
+                        const slash = m.relPath.lastIndexOf("/");
+                        return {
+                            name: m.name,
+                            relPath: m.relPath,
+                            dir: slash >= 0 ? m.relPath.slice(0, slash) : "",
+                            score: m.score,
+                        };
+                    });
+                    setSearchResults(rows);
+                    setSearchLoading(false);
+                });
+        }, 150);
+        return () => {
+            clearTimeout(timer);
+            controller.abort();
+        };
+    }, [searchQuery, selectedAgentId, currentWorkspaceId]);
 
-        results.sort((a, b) => b.score - a.score || a.relPath.length - b.relPath.length);
-        return results;
-    }, [searchQuery, treeCache, ck]);
+    const matchingFiles = searchQuery ? searchResults : [];
 
     // Clamp focused index when the result list changes
     useEffect(() => {
-        setFocusedIdx(0);
-    }, [searchQuery]);
+        setFocusedIdx((i) => (i >= matchingFiles.length ? 0 : i));
+    }, [searchQuery, matchingFiles.length]);
 
     const handleSearchSelect = useCallback((relPath: string) => {
         if (!selectedAgentId) return;
@@ -395,7 +381,9 @@ export function WorkspaceExplorer() {
                     <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
                         {/* Header with count */}
                         <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-                            {matchingFiles.length > 0 ? (
+                            {searchLoading ? (
+                                <span>Searching…</span>
+                            ) : matchingFiles.length > 0 ? (
                                 <span>{matchingFiles.length} matching file{matchingFiles.length === 1 ? "" : "s"}</span>
                             ) : (
                                 <span>No matching files</span>
@@ -406,7 +394,7 @@ export function WorkspaceExplorer() {
                         <div className="max-h-80 overflow-y-auto py-1">
                             {matchingFiles.length === 0 ? (
                                 <div className="px-3 py-4 text-center text-xs text-zinc-400 dark:text-zinc-500">
-                                    No matching files
+                                    {searchLoading ? "Searching workspace…" : "No matching files"}
                                 </div>
                             ) : (
                                 matchingFiles.map((f, idx) => {

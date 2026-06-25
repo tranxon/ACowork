@@ -20,7 +20,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
+/* ─── Types ────────────────────────────────────────────────────────────────── */
 
 interface FileItem {
     label: string;
@@ -129,49 +129,22 @@ function HighlightedLabel({
     );
 }
 
-/* ─── Collect files from treeCache (same logic as WorkspaceExplorer) ── */
-
-function collectFromCache(
-    treeCache: Record<string, Array<{ name: string; type: string }>>,
-    cacheKeyPrefix: string,
-): FileItem[] {
-    const results: FileItem[] = [];
-    const seen = new Set<string>();
-
-    for (const [key, entries] of Object.entries(treeCache)) {
-        if (!key.startsWith(cacheKeyPrefix)) continue;
-        const dirPath = key.slice(cacheKeyPrefix.length + 1);
-
-        for (const entry of entries) {
-            if (entry.type !== "file") continue;
-            const relPath = dirPath ? `${dirPath}/${entry.name}` : entry.name;
-            if (seen.has(relPath)) continue;
-            seen.add(relPath);
-            results.push({ label: entry.name, description: relPath, relPath });
-        }
-    }
-
-    results.sort((a, b) => a.description.length - b.description.length);
-    return results;
-}
-
 /* ─── Main Component ────────────────────────────────────────────────── */
 
 export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePaletteProps) {
     const [query, setQuery] = useState("");
     const [focusedIdx, setFocusedIdx] = useState(0);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(false);
     const [inputFocused, setInputFocused] = useState(false);
 
     const inputRef = useRef<HTMLInputElement>(null);
     const listRef = useRef<HTMLDivElement>(null);
     const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-    // Read from workspaceStore cache (same data source as WorkspaceExplorer)
-    const treeCache = useWorkspaceStore((s) => s.treeCache);
-    const fetchTree = useWorkspaceStore((s) => s.fetchTree);
-
-    const ck = `${agentId}:${workspaceId}`;
+    // We only call the server-side filename search. No treeCache
+    // dependency: the lazy directory walk was removed because it
+    // could not scale to deep trees within the keystroke deadline.
+    const findFiles = useWorkspaceStore((s) => s.findFiles);
 
     const theme = useSettingsStore((s) => s.theme);
     const isDark = useMemo(() => {
@@ -181,69 +154,71 @@ export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePalet
     }, [theme]);
     const colors = isDark ? darkTheme : lightTheme;
 
-    /* ── Collect all files from cache ──────────────────────────────── */
-    const allFiles = useMemo(() => {
-        return collectFromCache(treeCache, ck);
-    }, [treeCache, ck]);
+    /* ── Server-side filename search (debounced + cancellable) ──── */
+    const [rawResults, setRawResults] = useState<
+        Array<{ name: string; relPath: string }>
+    >([]);
 
-    /* ── Refresh root on mount (auto-syncs with filesystem) ────────── */
     useEffect(() => {
-        // Always fetch root on open to keep fresh — treeLoadingPaths
-        // deduplicates in-flight requests so this is cheap if cached.
-        if (agentId) {
-            fetchTree(agentId, workspaceId, "").then(() => setLoading(false));
-        } else {
+        if (!query.trim() || !agentId) {
+            setRawResults([]);
             setLoading(false);
+            return;
         }
-    }, [ck, agentId, workspaceId, fetchTree]);
-
-    /* ── Auto-fetch unfetched directories when searching ───────────── */
-    useEffect(() => {
-        if (!query || !agentId) return;
-        const doFetch = () => {
-            const toFetch: string[] = [];
-            for (const [key, entries] of Object.entries(treeCache)) {
-                if (!key.startsWith(`${ck}:`)) continue;
-                for (const entry of entries) {
-                    if (entry.type !== "directory") continue;
-                    const dirPath = key.slice(ck.length + 1);
-                    const childPath = dirPath ? `${dirPath}/${entry.name}` : entry.name;
-                    if (!treeCache[`${ck}:${childPath}`]) {
-                        toFetch.push(childPath);
-                    }
+        const controller = new AbortController();
+        setLoading(true);
+        const timer = setTimeout(() => {
+            void findFiles(agentId, workspaceId, query, 50, controller.signal).then((resp) => {
+                if (controller.signal.aborted) return;
+                if (!resp) {
+                    setRawResults([]);
+                    setLoading(false);
+                    return;
                 }
-            }
-            for (const p of toFetch.slice(0, 10)) {
-                fetchTree(agentId, workspaceId, p);
-            }
+                setRawResults(
+                    resp.matches.map((m) => ({ name: m.name, relPath: m.relPath })),
+                );
+                setLoading(false);
+            });
+        }, 150);
+        return () => {
+            clearTimeout(timer);
+            controller.abort();
         };
-        doFetch();
-        const timer = setInterval(doFetch, 300);
-        return () => clearInterval(timer);
-    }, [query, ck, treeCache, agentId, workspaceId, fetchTree]);
+    }, [query, agentId, workspaceId, findFiles]);
 
-    /* ── Filtered & scored items ───────────────────────────────────── */
+    /* ── Compute highlighted indices (matches against the live query) ── */
     const filtered = useMemo(() => {
-        if (!query.trim()) return allFiles.slice(0, 50);
-        const scored: Array<FileItem & { score: number; nameIndices: number[]; pathIndices: number[] }> = [];
-        for (const f of allFiles) {
-            const nameMatch = fuzzyMatch(f.label, query);
-            const pathMatch = fuzzyMatch(f.description, query);
-            const best = nameMatch && pathMatch
-                ? (nameMatch.score >= pathMatch.score ? nameMatch : pathMatch)
-                : (nameMatch || pathMatch);
-            if (best) {
-                scored.push({
-                    ...f,
-                    score: best.score + (nameMatch ? 10 : 0),
-                    nameIndices: nameMatch?.indices ?? [],
-                    pathIndices: pathMatch?.indices ?? [],
-                });
-            }
+        if (!query.trim()) return [];
+        const rows: Array<
+            FileItem & { score: number; nameIndices: number[]; pathIndices: number[] }
+        > = [];
+        for (const r of rawResults) {
+            const slash = r.relPath.lastIndexOf("/");
+            const dir = slash >= 0 ? r.relPath.slice(0, slash) : "";
+            const label = r.name;
+            const description = dir ? `${dir}/${label}` : label;
+            const nameMatch = fuzzyMatch(label, query);
+            const pathMatch = fuzzyMatch(description, query);
+            const best =
+                nameMatch && pathMatch
+                    ? nameMatch.score >= pathMatch.score
+                        ? nameMatch
+                        : pathMatch
+                    : nameMatch || pathMatch;
+            if (!best) continue;
+            rows.push({
+                label,
+                description,
+                relPath: r.relPath,
+                score: best.score + (nameMatch ? 10 : 0),
+                nameIndices: nameMatch?.indices ?? [],
+                pathIndices: pathMatch?.indices ?? [],
+            });
         }
-        scored.sort((a, b) => b.score - a.score);
-        return scored.slice(0, 50);
-    }, [allFiles, query]);
+        rows.sort((a, b) => b.score - a.score);
+        return rows.slice(0, 50);
+    }, [rawResults, query]);
 
     /* ── Auto-focus input ──────────────────────────────────────────── */
     useEffect(() => {
@@ -387,11 +362,11 @@ export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePalet
                 >
                     {loading ? (
                         <div style={{ padding: "8px 12px", color: colors.description, fontSize: 12 }}>
-                            Scanning workspace...
+                            Searching workspace...
                         </div>
                     ) : filtered.length === 0 ? (
                         <div style={{ padding: "8px 12px", color: colors.description, fontSize: 12 }}>
-                            {query ? "No files match" : "No files found"}
+                            {query ? "No matching files" : "Type to search files"}
                         </div>
                     ) : (
                         filtered.map((item, idx) => {
