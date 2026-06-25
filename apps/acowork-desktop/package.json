@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "core:build": "node ../../dev/ort_env.js cargo build --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed",
     "check:i18n": "node scripts/check-i18n.mjs",
     "check:html-preview": "tsx scripts/check-html-preview.mts",
     "build": "npm run check:i18n && npm run check:html-preview && tsc && vite build",
     "preview": "vite preview",
+    "pretauri": "npm run core:build",
     "tauri": "tauri"
   },
   "dependencies": {
