@@ -234,6 +234,17 @@ pub fn run() {
                 let _ = main_window.set_effects(effects);
             }
 
+            // ── Disable native decorations on non-macOS ─────────────────
+            // On Windows/Linux, titleBarStyle:"Overlay" is ignored but
+            // decorations:true from tauri.conf.json still renders a native
+            // OS title bar with wrong colors.  We disable it here so the
+            // frontend's custom TitleBar component is the only one visible.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let main_window = app.get_webview_window("main").expect("no main window");
+                let _ = main_window.set_decorations(false);
+            }
+
             // Spawn async task for automatic sleep detection.
             // Polls biased/unbiased monotonic clocks every 2 s via the
             // existing tokio runtime — no dedicated thread needed.  On
