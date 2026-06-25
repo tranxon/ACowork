@@ -4,13 +4,14 @@
   "version": "0.1.0",
   "identifier": "com.acowork.desktop",
   "build": {
-    "beforeDevCommand": "node ../../dev/ort_env.js cargo build --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "node ../../dev/ort_env.js cargo build --release --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed && npm run build",
+    "beforeBuildCommand": "npm run core:build && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "security": {
       "capabilities": [
         "main-capability"
@@ -29,10 +30,13 @@
         "height": 800,
         "minWidth": 1024,
         "minHeight": 600,
-        "decorations": false,
+        "decorations": true,
         "transparent": true,
         "center": true,
-        "visible": false
+        "visible": true,
+        "shadow": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ]
   },

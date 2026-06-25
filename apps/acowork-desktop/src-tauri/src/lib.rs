@@ -28,7 +28,7 @@ mod state;
 mod tray;
 
 use state::AppState;
-use tauri::{Listener, Manager};
+use tauri::Manager;
 
 // ── System-sleep detection (Windows / macOS / Linux) ────────────────────────
 //
@@ -159,7 +159,7 @@ mod power {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -210,13 +210,29 @@ pub fn run() {
         .setup(|app| {
             tray::setup(app)?;
 
-            // Show main window when frontend signals splash screen is rendered.
-            // Window starts hidden (visible: false in tauri.conf.json) to prevent
-            // white/transparent flash before React mounts the splash screen.
-            let main_window = app.get_webview_window("main").expect("no main window");
-            app.listen("splash-ready", move |_| {
-                let _ = main_window.show();
-            });
+            // ── macOS vibrancy ────────────────────────────────────────────
+            // Apply NSVisualEffectView vibrancy for frosted glass look.
+            // Native rounded corners are provided by decorations:true.
+            // titleBarStyle:"Overlay" makes the title bar transparent so
+            // the vibrancy shows through uniformly across the title bar,
+            // navigation bar, and status bar.
+            //
+            // `UnderWindowBackground` (macOS 10.14+) provides frosted-glass
+            // translucency that shows desktop content behind the window.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::utils::config::WindowEffectsConfig;
+                use tauri::window::EffectState;
+
+                let main_window = app.get_webview_window("main").expect("no main window");
+                let effects = WindowEffectsConfig {
+                    effects: vec![tauri::window::Effect::UnderWindowBackground],
+                    state: Some(EffectState::Active),
+                    radius: None,
+                    color: None,
+                };
+                let _ = main_window.set_effects(effects);
+            }
 
             // Spawn async task for automatic sleep detection.
             // Polls biased/unbiased monotonic clocks every 2 s via the
@@ -288,7 +304,7 @@ pub fn run() {
                 }
 
                 // ── Hide to tray instead of closing ──────────────────────────
-                // Only intercept close when window is visible and focused.
+                // Only intercept close when window is visible.
                 // This prevents interference with system tray menu on Windows.
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     match window.is_visible() {
@@ -310,6 +326,28 @@ pub fn run() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        // Handle dock icon click on macOS.
+        //
+        // When the window is hidden to tray, clicking the dock icon fires
+        // RunEvent::Reopen.  We show the window and focus it.
+        #[cfg(target_os = "macos")]
+        {
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }
+
+        // On non-macOS platforms there are no special run events to handle.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (app_handle, event);
+        }
+    });
 }

@@ -284,6 +284,7 @@ export function AppLayout() {
 
   // Sidebar resize handlers
   const handleMouseMove = useCallback((e: MouseEvent) => {
+    e.preventDefault();
     if (!isResizing.current) return;
     const delta = e.clientX - startX.current;
     const rawWidth = startWidth.current + delta;
@@ -314,12 +315,15 @@ export function AppLayout() {
   const handleMouseUp = useCallback(() => {
     if (!isResizing.current) return;
     isResizing.current = false;
+    document.body.style.userSelect = '';
     document.removeEventListener("mousemove", handleMouseMove);
     document.removeEventListener("mouseup", handleMouseUp);
     localStorage.setItem(SIDEBAR_WIDTH_KEY, String(currentWidthRef.current));
   }, [handleMouseMove]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    document.body.style.userSelect = 'none';
     isResizing.current = true;
     startX.current = e.clientX;
     startWidth.current = sidebarWidth;
@@ -330,6 +334,7 @@ export function AppLayout() {
 
   // Right panel resize handlers
   const handleMouseMoveRight = useCallback((e: MouseEvent) => {
+    e.preventDefault();
     if (!isResizingRight.current) return;
     const delta = e.clientX - startXRight.current;
     const newWidth = Math.min(Math.max(startWidthRight.current - delta, MIN_RIGHT_WIDTH), MAX_RIGHT_WIDTH);
@@ -340,12 +345,15 @@ export function AppLayout() {
   const handleMouseUpRight = useCallback(() => {
     if (!isResizingRight.current) return;
     isResizingRight.current = false;
+    document.body.style.userSelect = '';
     document.removeEventListener("mousemove", handleMouseMoveRight);
     document.removeEventListener("mouseup", handleMouseUpRight);
     localStorage.setItem(RIGHT_WIDTH_KEY, String(currentWidthRefRight.current));
   }, [handleMouseMoveRight]);
 
   const handleMouseDownRight = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    document.body.style.userSelect = 'none';
     isResizingRight.current = true;
     startXRight.current = e.clientX;
     startWidthRight.current = rightWidth;
@@ -358,6 +366,7 @@ export function AppLayout() {
   const maxFileWidthRef = useRef(MAX_FILE_WIDTH);
 
   const handleMouseMoveFile = useCallback((e: MouseEvent) => {
+    e.preventDefault();
     if (!isResizingFile.current) return;
     const delta = e.clientX - startXFile.current;
     const newWidth = Math.min(Math.max(startWidthFile.current - delta, MIN_FILE_WIDTH), maxFileWidthRef.current);
@@ -368,12 +377,15 @@ export function AppLayout() {
   const handleMouseUpFile = useCallback(() => {
     if (!isResizingFile.current) return;
     isResizingFile.current = false;
+    document.body.style.userSelect = '';
     document.removeEventListener("mousemove", handleMouseMoveFile);
     document.removeEventListener("mouseup", handleMouseUpFile);
     localStorage.setItem(FILE_WIDTH_KEY, String(currentWidthRefFile.current));
   }, [handleMouseMoveFile]);
 
   const handleMouseDownFile = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    document.body.style.userSelect = 'none';
     isResizingFile.current = true;
     startXFile.current = e.clientX;
     startWidthFile.current = fileWidth;
