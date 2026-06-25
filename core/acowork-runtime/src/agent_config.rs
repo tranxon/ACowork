@@ -88,8 +88,43 @@ pub struct AgentConfig {
     /// Shell command approval threshold ("low" | "medium" | "high" | "never").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_approval_threshold: Option<String>,
+
+    /// Custom avatar path (relative to install dir, e.g. "assets/avatar-02.jpg").
+    /// When set, takes priority over `builtin_avatar`. Managed via gRPC
+    /// (RuntimeConfigUpdate) from the Gateway — the Runtime persists it
+    /// to agent_config.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+
+    /// Builtin avatar icon ID (e.g. "icon-05"). Mutually exclusive with `avatar`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_avatar: Option<String>,
 }
 
+/// Resolve the effective avatar from agent config and manifest fallback.
+///
+/// Priority:
+/// 1. config.avatar          — user's runtime choice (custom image)
+/// 2. config.builtin_avatar  — user's runtime choice (builtin icon)
+/// 3. manifest.avatar         — install-time default (custom image)
+/// 4. manifest.builtin_avatar — install-time default (builtin icon)
+/// 5. fallback (both None)   — caller renders deterministic random icon
+///
+/// Returns `(avatar, builtin_avatar, source)` where source is
+/// `"config"`, `"manifest"`, or `"fallback"`.
+pub fn resolve_effective_avatar(
+    config: &AgentConfig,
+    manifest_avatar: &Option<String>,
+    manifest_builtin_avatar: &Option<String>,
+) -> (Option<String>, Option<String>, &'static str) {
+    if config.avatar.is_some() || config.builtin_avatar.is_some() {
+        return (config.avatar.clone(), config.builtin_avatar.clone(), "config");
+    }
+    if manifest_avatar.is_some() || manifest_builtin_avatar.is_some() {
+        return (manifest_avatar.clone(), manifest_builtin_avatar.clone(), "manifest");
+    }
+    (None, None, "fallback")
+}
 
 /// Filename for per-agent config in the workspace config directory.
 const AGENT_CONFIG_FILE: &str = "agent_config.json";

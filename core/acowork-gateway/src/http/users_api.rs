@@ -7,8 +7,10 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    body::Body,
+    extract::{Multipart, Path, Query, State},
+    http::{header, StatusCode},
+    response::Response,
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,10 @@ pub fn users_routes() -> Router<AppState> {
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{user_id}", put(update_user))
         .route("/api/users/{user_id}/activate", post(activate_user))
+        // User avatar endpoints
+        .route("/api/user/avatar-config", get(get_user_avatar_config).put(update_user_avatar_config))
+        .route("/api/user/avatar-assets", get(list_user_avatar_assets))
+        .route("/api/user/avatar-file", get(get_user_avatar_file).post(upload_user_avatar_file).delete(delete_user_avatar_file))
 }
 
 // ── Request types ──────────────────────────────────────────────────────
@@ -63,6 +69,10 @@ pub struct UpdateUserRequest {
     pub country: Option<String>,
     #[serde(default)]
     pub occupation: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub builtin_avatar: Option<String>,
     #[serde(default)]
     pub communication_style: Option<String>,
     #[serde(default)]
@@ -138,6 +148,8 @@ pub async fn create_user(
         city: req.city,
         country: req.country,
         occupation: req.occupation,
+        avatar: None,
+        builtin_avatar: None,
         communication_style: req.communication_style,
         custom: req.custom,
         created_at: now.clone(),
@@ -229,6 +241,12 @@ pub async fn update_user(
         }
         if let Some(occ) = req.occupation {
             user.occupation = Some(occ);
+        }
+        if let Some(avatar) = req.avatar {
+            user.avatar = if avatar.is_empty() { None } else { Some(avatar) };
+        }
+        if let Some(builtin) = req.builtin_avatar {
+            user.builtin_avatar = if builtin.is_empty() { None } else { Some(builtin) };
         }
         if let Some(style) = req.communication_style {
             user.communication_style = Some(style);
@@ -326,6 +344,319 @@ pub async fn activate_user(
         active_user_id: user_id,
         version,
     }))
+}
+
+// ── User Avatar API ───────────────────────────────────────────────────
+
+/// Response for GET /api/user/avatar-config
+#[derive(Debug, Serialize)]
+pub struct UserAvatarConfigResponse {
+    pub avatar: Option<String>,
+    pub builtin_avatar: Option<String>,
+}
+
+/// Request for PUT /api/user/avatar-config
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserAvatarConfigRequest {
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub builtin_avatar: Option<String>,
+}
+
+/// Response for GET /api/user/avatar-assets
+#[derive(Debug, Serialize)]
+pub struct UserAvatarAssetsResponse {
+    pub assets: Vec<UserAvatarAssetEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserAvatarAssetEntry {
+    pub relative_path: String,
+}
+
+/// Query params for avatar-file endpoint
+#[derive(Debug, Deserialize)]
+pub struct UserAvatarFileQuery {
+    pub path: String,
+}
+
+/// Check if a filename has an allowed image extension.
+fn has_image_extension(path: &str) -> bool {
+    let allowed = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| allowed.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Compute the next available avatar-XX filename in `{data_dir}/assets/`.
+fn next_avatar_name(data_dir: &std::path::Path, ext: &str) -> String {
+    let assets_dir = data_dir.join("assets");
+    let mut used = std::collections::BTreeSet::new();
+    if let Ok(entries) = std::fs::read_dir(&assets_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(cap) = name.strip_prefix("avatar-") {
+                if let Some(num) = cap.split('.').next() {
+                    if let Ok(n) = num.parse::<u32>() {
+                        used.insert(n);
+                    }
+                }
+            }
+        }
+    }
+    let mut n = 1u32;
+    while used.contains(&n) {
+        n = n.saturating_add(1);
+    }
+    format!("avatar-{:02}.{}", n, ext)
+}
+
+/// `GET /api/user/avatar-config` — get active user's avatar config.
+pub async fn get_user_avatar_config(
+    State(state): State<AppState>,
+) -> Result<Json<UserAvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+    let gw = state.gateway_state.read().await;
+    let active = gw
+        .resource_cache
+        .user_profile_list
+        .users
+        .iter()
+        .find(|u| u.is_active)
+        .cloned();
+    match active {
+        Some(user) => Ok(Json(UserAvatarConfigResponse {
+            avatar: user.avatar,
+            builtin_avatar: user.builtin_avatar,
+        })),
+        None => Ok(Json(UserAvatarConfigResponse {
+            avatar: None,
+            builtin_avatar: None,
+        })),
+    }
+}
+
+/// `PUT /api/user/avatar-config` — update active user's avatar config.
+pub async fn update_user_avatar_config(
+    State(state): State<AppState>,
+    Json(req): Json<UpdateUserAvatarConfigRequest>,
+) -> Result<Json<UserAvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+    let data_dir = get_data_dir(&state).await;
+
+    let is_active = {
+        let mut gw = state.gateway_state.write().await;
+        let users = &mut gw.resource_cache.user_profile_list.users;
+        let idx = users
+            .iter()
+            .position(|u| u.is_active)
+            .ok_or_else(|| ApiError::not_found("No active user found"))?;
+
+        let user = &mut users[idx];
+        if let Some(av) = req.avatar {
+            user.avatar = if av.is_empty() { None } else { Some(av) };
+        }
+        if let Some(bi) = req.builtin_avatar {
+            user.builtin_avatar = if bi.is_empty() { None } else { Some(bi) };
+        }
+        user.updated_at = now_iso();
+        user.is_active
+    };
+
+    // Bump version, save to disk
+    {
+        let mut gw = state.gateway_state.write().await;
+        resource_cache::rebuild_and_save_user_profile_cache(&mut gw, &data_dir);
+    }
+
+    // Hot push to running agents
+    if is_active && let Some(pusher) = &state.pusher {
+        pusher.push_user_profile().await;
+    }
+
+    // Return updated config
+    get_user_avatar_config(State(state)).await
+}
+
+/// `GET /api/user/avatar-assets` — list avatar files in `{data_dir}/assets/`.
+pub async fn list_user_avatar_assets(
+    State(state): State<AppState>,
+) -> Result<Json<UserAvatarAssetsResponse>, (StatusCode, Json<ApiError>)> {
+    let data_dir = get_data_dir(&state).await;
+    let assets_dir = data_dir.join("assets");
+    let mut entries = Vec::new();
+
+    if let Ok(dir) = std::fs::read_dir(&assets_dir) {
+        for entry in dir.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if name.starts_with("avatar-") && has_image_extension(&name) {
+                entries.push(UserAvatarAssetEntry {
+                    relative_path: format!("assets/{}", name),
+                });
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(Json(UserAvatarAssetsResponse { assets: entries }))
+}
+
+/// `GET /api/user/avatar-file?path=<relative>` — serve avatar file bytes.
+pub async fn get_user_avatar_file(
+    State(state): State<AppState>,
+    Query(query): Query<UserAvatarFileQuery>,
+) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    let data_dir = get_data_dir(&state).await;
+
+    // Path traversal guard: only allow "assets/..." paths
+    let relative = query.path.trim_start_matches('/');
+    if !relative.starts_with("assets/") {
+        return Err(ApiError::bad_request("Invalid path: must be under assets/"));
+    }
+    if relative.contains("..") {
+        return Err(ApiError::bad_request("Invalid path: path traversal detected"));
+    }
+
+    let canonical = data_dir.join(relative);
+
+    if !has_image_extension(&query.path) {
+        return Err(ApiError::bad_request(
+            "Invalid file extension: only png, jpg, jpeg, gif, webp, svg are allowed",
+        ));
+    }
+
+    let bytes = std::fs::read(&canonical).map_err(|e| {
+        ApiError::not_found(&format!("Failed to read avatar file: {}", e))
+    })?;
+
+    let content_type = match std::path::Path::new(&query.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=300")
+        .body(Body::from(bytes))
+        .unwrap())
+}
+
+/// `POST /api/user/avatar-file` — upload a new avatar file.
+///
+/// Returns the generated relative path (e.g. "assets/avatar-01.png").
+pub async fn upload_user_avatar_file(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<UserAvatarAssetEntry>, (StatusCode, Json<ApiError>)> {
+    let data_dir = get_data_dir(&state).await;
+    let assets_dir = data_dir.join("assets");
+    std::fs::create_dir_all(&assets_dir).map_err(|e| {
+        ApiError::internal(&format!("Failed to create assets dir: {}", e))
+    })?;
+
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut ext = String::from("png");
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {}", e)))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "file" {
+            let file_name = field.file_name().unwrap_or("avatar.png").to_string();
+            if let Some(e) = std::path::Path::new(&file_name)
+                .extension()
+                .and_then(|e| e.to_str())
+            {
+                ext = e.to_lowercase();
+            }
+            let data = field.bytes().await.map_err(|e| {
+                ApiError::bad_request(&format!("Failed to read file bytes: {}", e))
+            })?;
+            bytes = Some(data.to_vec());
+        }
+    }
+
+    let bytes = bytes.ok_or_else(|| ApiError::bad_request("No file uploaded"))?;
+
+    // Validate extension
+    if !has_image_extension(&format!("x.{}", ext)) {
+        return Err(ApiError::bad_request(&format!(
+            "Invalid file extension: {}; only png, jpg, jpeg, gif, webp, svg are allowed",
+            ext
+        )));
+    }
+
+    let name = next_avatar_name(&data_dir, &ext);
+    let target = assets_dir.join(&name);
+    std::fs::write(&target, &bytes).map_err(|e| {
+        ApiError::internal(&format!("Failed to write avatar file: {}", e))
+    })?;
+
+    let relative_path = format!("assets/{}", name);
+    tracing::info!(path = %relative_path, "User avatar file uploaded");
+    Ok(Json(UserAvatarAssetEntry {
+        relative_path,
+    }))
+}
+
+/// `DELETE /api/user/avatar-file?path=<relative>` — delete an avatar file.
+///
+/// If the deleted file was the active user's current avatar, clears that field.
+pub async fn delete_user_avatar_file(
+    State(state): State<AppState>,
+    Query(query): Query<UserAvatarFileQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let data_dir = get_data_dir(&state).await;
+
+    // Path traversal guard
+    let relative = query.path.trim_start_matches('/');
+    if !relative.starts_with("assets/") || relative.contains("..") {
+        return Err(ApiError::bad_request("Invalid path"));
+    }
+
+    let canonical = data_dir.join(relative);
+    std::fs::remove_file(&canonical).map_err(|e| {
+        ApiError::internal(&format!("Failed to delete avatar file: {}", e))
+    })?;
+
+    // If it was the active user's avatar, clear it
+    {
+        let mut gw = state.gateway_state.write().await;
+        let users = &mut gw.resource_cache.user_profile_list.users;
+        if let Some(user) = users.iter_mut().find(|u| u.is_active) {
+            if user.avatar.as_deref() == Some(query.path.as_str()) {
+                user.avatar = None;
+                user.updated_at = now_iso();
+            }
+        }
+    }
+
+    // Bump version, save to disk
+    {
+        let mut gw = state.gateway_state.write().await;
+        resource_cache::rebuild_and_save_user_profile_cache(&mut gw, &data_dir);
+    }
+
+    tracing::info!(path = %query.path, "User avatar file deleted");
+    Ok(Json(serde_json::json!({
+        "message": "Avatar file deleted",
+        "path": query.path,
+    })))
 }
 
 #[cfg(test)]

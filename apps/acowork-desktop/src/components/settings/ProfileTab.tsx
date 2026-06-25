@@ -1,12 +1,20 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
-import { RadioGroup } from "../common/RadioGroup";
 import { fetchActiveUser, updateUser } from "../../lib/gateway-api";
-import type { BackendUserProfile } from "../../lib/types";
+import type { BackendUserProfile, AvatarAssetEntry } from "../../lib/types";
+import {
+  fetchUserAvatarConfig,
+  updateUserAvatarConfig,
+  fetchUserAvatarAssets,
+  deleteUserAvatarFile,
+  resolveUserAvatarFileUrl,
+} from "../../lib/avatar";
+import type { UserAvatarConfig } from "../../lib/avatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
-import { Tooltip } from "../common/Tooltip";
 import i18n from "../../i18n";
 
 const TIMEZONES = [
@@ -18,14 +26,21 @@ const TIMEZONES = [
   "UTC",
 ];
 
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
 // ── Component ───────────────────────────────────────────────────────────
 
 export function ProfileTab() {
   const { t } = useTranslation();
   const { profile, setProfile } = useUserProfileStore();
   const [nameValue, setNameValue] = useState(profile.displayName);
-  const [iconOpen, setIconOpen] = useState(false);
-  const iconRef = useRef<HTMLDivElement>(null);
+
+  // ── Avatar state ───────────────────────────────────────────────────
+  const [avatarPopupOpen, setAvatarPopupOpen] = useState(false);
+  const [avatarTab, setAvatarTab] = useState<"custom" | "builtin">("builtin");
+  const [avatarConfig, setAvatarConfig] = useState<UserAvatarConfig | null>(null);
+  const [avatarAssets, setAvatarAssets] = useState<AvatarAssetEntry[]>([]);
+  const [avatarBusy, setAvatarBusy] = useState(false);
 
   const languages = [
     { value: "zh-CN", label: t("language.zhCN") },
@@ -35,19 +50,28 @@ export function ProfileTab() {
     { value: "ko", label: t("language.ko") },
   ];
 
-  // Close icon picker on outside click
+  // ── Load avatar config from backend ────────────────────────────────
   useEffect(() => {
-    if (!iconOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (iconRef.current && !iconRef.current.contains(e.target as Node)) {
-        setIconOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [iconOpen]);
+    fetchUserAvatarConfig()
+      .then((cfg) => {
+        setAvatarConfig(cfg);
+        setProfile({
+          backendAvatarUrl: cfg.avatar ?? null,
+          backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
+        });
+      })
+      .catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Backend user profile state ─────────────────────────────────────
+  // Refresh avatar assets when popup opens
+  useEffect(() => {
+    if (!avatarPopupOpen) return;
+    fetchUserAvatarAssets()
+      .then((r) => setAvatarAssets(r.assets))
+      .catch(() => {});
+  }, [avatarPopupOpen]);
+
+  // ── Load backend user profile ──────────────────────────────────────
   const [backendUser, setBackendUser] = useState<BackendUserProfile | null>(null);
   const [backendLoading, setBackendLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -121,6 +145,79 @@ export function ProfileTab() {
     }
   }, [backendUser, setProfile, saveField]);
 
+  // ── Avatar handlers ───────────────────────────────────────────────
+
+  const handleSelectCustom = async (relativePath: string) => {
+    setAvatarBusy(true);
+    try {
+      const cfg = await updateUserAvatarConfig({ avatar: relativePath, builtin_avatar: "" });
+      setAvatarConfig(cfg);
+      setProfile({
+        backendAvatarUrl: cfg.avatar ?? null,
+        backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
+      });
+    } catch (err) {
+      console.warn("[ProfileTab] Select custom avatar failed:", err);
+    } finally {
+      setAvatarBusy(false);
+      setAvatarPopupOpen(false);
+    }
+  };
+
+  const handleSelectBuiltin = async (iconId: string) => {
+    setAvatarBusy(true);
+    try {
+      const cfg = await updateUserAvatarConfig({ avatar: "", builtin_avatar: iconId });
+      setAvatarConfig(cfg);
+      setProfile({
+        backendAvatarUrl: cfg.avatar ?? null,
+        backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
+      });
+    } catch (err) {
+      console.warn("[ProfileTab] Select builtin avatar failed:", err);
+    } finally {
+      setAvatarBusy(false);
+      setAvatarPopupOpen(false);
+    }
+  };
+
+  const handleUploadClick = async () => {
+    const selected = await openDialog({
+      multiple: false,
+      filters: [{ name: "Images", extensions: IMAGE_EXTENSIONS }],
+    });
+    if (!selected || typeof selected !== "string") return;
+
+    setAvatarBusy(true);
+    try {
+      await invoke("upload_user_avatar_file", { filePath: selected });
+      const resp = await fetchUserAvatarAssets();
+      setAvatarAssets(resp.assets);
+    } catch (err) {
+      console.warn("[ProfileTab] Avatar upload failed:", err);
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const handleDeleteAvatar = async (relativePath: string) => {
+    setAvatarBusy(true);
+    try {
+      await deleteUserAvatarFile(relativePath);
+      const [assetsResp, cfg] = await Promise.all([
+        fetchUserAvatarAssets(),
+        fetchUserAvatarConfig(),
+      ]);
+      setAvatarAssets(assetsResp.assets);
+      setAvatarConfig(cfg);
+    } catch (err) {
+      console.warn("[ProfileTab] Delete avatar failed:", err);
+    } finally {
+      setAvatarBusy(false);
+      setAvatarPopupOpen(false);
+    }
+  };
+
   // ── Render ────────────────────────────────────────────────────────
 
   return (
@@ -129,42 +226,128 @@ export function ProfileTab() {
       <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
         <h2 className="mb-3 text-xs font-medium">{t("settings.profileTitle")}</h2>
 
-        {/* Live avatar preview — click to open icon picker */}
+        {/* Avatar preview — click to open picker popup */}
         <div className="flex items-center gap-4">
-          <div className="relative" ref={iconRef}>
-            <Tooltip content={t("settings.chooseIcon")} variant="plain">
-              <button
-                onClick={() => setIconOpen(!iconOpen)}
-                className="rounded-md border border-transparent p-0.5 transition-colors hover:border-zinc-300 dark:hover:border-zinc-600"
-              >
-                <UserAvatar size={64} />
-              </button>
-            </Tooltip>
-            {iconOpen && (
-              <div className="absolute left-0 z-50 mt-1 w-max rounded-md border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
-                <div className="grid grid-cols-4 gap-1">
-                  {BUILTIN_ICON_IDS.map((iconId) => (
+          <div className="relative">
+            <button
+              onClick={() => setAvatarPopupOpen((v) => !v)}
+              className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+            >
+              <UserAvatar
+                size={64}
+                avatarUrl={avatarConfig?.avatar ?? null}
+                builtinAvatarId={avatarConfig?.builtin_avatar ?? null}
+              />
+              {/* Pencil badge */}
+              <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
+                <svg viewBox="0 0 16 16" className="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L11.5 7l-3-3-.31.31a.75.75 0 0 0-.177.764l.93 3.251a.75.75 0 0 1-.927.928l-3.251-.93Z" />
+                </svg>
+              </span>
+            </button>
+
+            {/* Avatar picker popup */}
+            {avatarPopupOpen && (
+              <>
+                {/* Click-outside overlay */}
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setAvatarPopupOpen(false)}
+                />
+                <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                  {/* Tabs */}
+                  <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
                     <button
-                      key={iconId}
-                      onClick={() => {
-                        setProfile({ avatarIcon: iconId });
-                        setIconOpen(false);
-                      }}
-                      className={`flex items-center justify-center rounded-md p-1 transition-colors ${profile.avatarIcon === iconId
-                        ? "bg-zinc-200 dark:bg-zinc-600"
-                        : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                      onClick={() => setAvatarTab("custom")}
+                      className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
+                        ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
+                        : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
                         }`}
                     >
-                      <img
-                        src={BUILTIN_ICONS[iconId] ?? ""}
-                        alt={iconId}
-                        draggable={false}
-                        className="h-16 w-16 rounded-full object-cover"
-                      />
+                      Custom
                     </button>
-                  ))}
+                    <button
+                      onClick={() => setAvatarTab("builtin")}
+                      className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
+                        ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
+                        : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                        }`}
+                    >
+                      Builtin
+                    </button>
+                  </div>
+
+                  {/* Custom tab */}
+                  {avatarTab === "custom" && (
+                    <div className="grid grid-cols-4 gap-2">
+                      <button
+                        onClick={handleUploadClick}
+                        disabled={avatarBusy}
+                        className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-500 dark:hover:border-zinc-400"
+                      >
+                        <span className="text-lg">+</span>
+                      </button>
+                      {avatarAssets.map((asset) => {
+                        const isSelected = avatarConfig?.avatar === asset.relative_path;
+                        return (
+                          <div
+                            key={asset.relative_path}
+                            className={`group relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${isSelected
+                              ? "border-zinc-800 dark:border-zinc-200"
+                              : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+                              }`}
+                          >
+                            <img
+                              src={resolveUserAvatarFileUrl(asset.relative_path)}
+                              alt={asset.relative_path}
+                              draggable={false}
+                              className="h-full w-full cursor-pointer object-cover"
+                              onClick={() => handleSelectCustom(asset.relative_path)}
+                            />
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteAvatar(asset.relative_path);
+                              }}
+                              disabled={avatarBusy}
+                              className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-red-500/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Builtin tab */}
+                  {avatarTab === "builtin" && (
+                    <div className="grid grid-cols-4 gap-2">
+                      {BUILTIN_ICON_IDS.map((iconId) => {
+                        const isSelected = avatarConfig?.builtin_avatar === iconId;
+                        return (
+                          <button
+                            key={iconId}
+                            onClick={() => handleSelectBuiltin(iconId)}
+                            disabled={avatarBusy}
+                            className={`flex items-center justify-center rounded-md p-1 transition-colors ${isSelected
+                              ? "bg-zinc-200 dark:bg-zinc-600"
+                              : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                              }`}
+                          >
+                            <img
+                              src={BUILTIN_ICONS[iconId] ?? ""}
+                              alt={iconId}
+                              draggable={false}
+                              className="h-12 w-12 rounded-full object-cover"
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
+              </>
             )}
           </div>
           <div>
@@ -316,26 +499,6 @@ export function ProfileTab() {
             {t("settings.noProfile")}
           </p>
         )}
-      </div>
-
-      {/* ── Avatar Customization ───────────────────────────────────── */}
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.avatarCustomization")}</h2>
-
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400">
-            {t("settings.avatarType")}
-          </label>
-          <RadioGroup
-            name="avatarType"
-            value={profile.avatarType}
-            options={[
-              { label: t("settings.avatarTypeIcon"), value: "icon" as const },
-              { label: t("settings.avatarTypeLetter"), value: "letter" as const },
-            ]}
-            onChange={(type) => setProfile({ avatarType: type })}
-          />
-        </div>
       </div>
     </div>
   );

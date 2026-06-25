@@ -224,3 +224,25 @@ pub async fn upload_agent_file(
         .await
         .map_err(|e| e.to_string())
 }
+
+/// Upload a user avatar image file to the Gateway's `{data_dir}/assets/`.
+///
+/// The Gateway auto-generates the filename (avatar-01.png, avatar-02.png, etc.)
+/// and returns the relative path.
+#[tauri::command]
+pub async fn upload_user_avatar_file(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<serde_json::Value, String> {
+    let bytes = std::fs::read(&file_path)
+        .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("avatar.png");
+    let client = state.gateway.read().await;
+    client
+        .upload_user_avatar_file(&bytes, file_name)
+        .await
+        .map_err(|e| e.to_string())
+}

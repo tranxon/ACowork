@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
-import { clearAgentAvatarCache, normalizeBuiltinAvatarId, pickRandomBuiltinIconId } from "../lib/avatar";
+import { clearAgentAvatarCache } from "../lib/avatar";
 import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus } from "../lib/types";
 import { isSessionActive } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
@@ -17,6 +17,8 @@ const SYSTEM_AGENT_ID = "com.acowork.system";
 
 export interface AgentProfileSettings {
   displayName?: string;
+  /** @deprecated ADR-017 — avatar is now server-side (agent_config.json).
+   *  Kept for backward compat with existing localStorage profiles. */
   avatarIconId?: string | null;
   modelId?: string;
   providerId?: string;
@@ -219,20 +221,6 @@ interface AgentStoreState {
   getProfile: (agentId: string) => AgentProfileSettings;
   setProfile: (agentId: string, settings: Partial<AgentProfileSettings>) => void;
   resetProfile: (agentId: string) => void;
-  /** Assign a random built-in avatar if the agent has none yet. */
-  assignRandomAvatarIfMissing: (
-    agentId: string,
-    hasPackagedAvatar?: boolean,
-    builtinAvatarHint?: string | null,
-  ) => void;
-  /** Bulk backfill builtin avatars for all installed agents (called after fetchAgents). */
-  ensureBuiltinAvatars: (
-    agents: ReadonlyArray<{
-      agent_id: string;
-      avatar?: string | null;
-      builtin_avatar?: string | null;
-    }>,
-  ) => void;
 
   // ── UI actions ──
 
@@ -304,22 +292,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
         return { agents: next, selectedAgentId: selId, loading: false };
       });
-
-      // Backfill builtin avatars (idempotent)
-      const stateNow = get();
-      const builtinNeeded = list
-        .filter((a) => {
-          const storage = stateNow.agents[a.agent_id];
-          return storage && !storage.profile.avatarIconId;
-        })
-        .map((a) => ({
-          agent_id: a.agent_id,
-          avatar: a.avatar ?? null,
-          builtin_avatar: a.builtin_avatar ?? null,
-        }));
-      if (builtinNeeded.length > 0) {
-        get().ensureBuiltinAvatars(builtinNeeded);
-      }
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -772,63 +744,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       saveAllProfiles(allProfiles);
 
       return patchAgent(state, agentId, { profile: { ...DEFAULT_PROFILE } });
-    });
-  },
-
-  assignRandomAvatarIfMissing: (agentId, hasPackagedAvatar, builtinAvatarHint) => {
-    if (!agentId) return;
-    if (hasPackagedAvatar) return;
-    const state = get();
-    const storage = state.agents[agentId];
-    if (!storage) return;
-    if (storage.profile.avatarIconId) return;
-
-    const iconId = normalizeBuiltinAvatarId(builtinAvatarHint) ?? pickRandomBuiltinIconId();
-    if (!iconId) return;
-
-    get().setProfile(agentId, { avatarIconId: iconId });
-  },
-
-  ensureBuiltinAvatars: (agents) => {
-    if (!agents || agents.length === 0) return;
-    const state = get();
-    // Only track profiles that actually change, to avoid overwriting
-    // concurrent modifications (e.g. setProfile called between get() and set())
-    const updates: Record<string, AgentProfileSettings> = {};
-
-    for (const agent of agents) {
-      const id = agent.agent_id;
-      if (!id) continue;
-      const storage = state.agents[id];
-      if (!storage) continue;
-
-      if (agent.avatar) {
-        // Packaged avatar present — clear any stale profile iconId
-        if (storage.profile.avatarIconId) {
-          updates[id] = { ...storage.profile, avatarIconId: null };
-        }
-        continue;
-      }
-
-      if (storage.profile.avatarIconId) continue; // user already set one
-      const iconId =
-        normalizeBuiltinAvatarId(agent.builtin_avatar) ?? pickRandomBuiltinIconId();
-      if (!iconId) continue;
-      updates[id] = { ...storage.profile, avatarIconId: iconId };
-    }
-
-    if (Object.keys(updates).length === 0) return;
-    set((state) => {
-      // Merge only updated profiles into the latest state
-      const nextAgents = { ...state.agents };
-      for (const [id, profile] of Object.entries(updates)) {
-        const existing = nextAgents[id];
-        if (existing) {
-          nextAgents[id] = { ...existing, profile };
-        }
-      }
-      saveAllProfiles(profilesToRecord(nextAgents));
-      return { agents: nextAgents };
     });
   },
 

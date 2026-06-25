@@ -285,6 +285,20 @@ impl Gateway {
         if count > 0 {
             tracing::info!("Restored {} installed agent(s) from disk", count);
         }
+
+        // ADR-017: Load avatar cache and apply to in-memory manifest so
+        // list_agents returns the correct avatar even for stopped agents.
+        let data_dir = std::path::Path::new(&self.config.data_dir);
+        let avatar_cache = crate::http::agent_config::load_avatar_cache(data_dir);
+        if !avatar_cache.is_empty() {
+            for (agent_id, entry) in &avatar_cache {
+                if let Some(info) = self.state.installed_agents.get_mut(agent_id) {
+                    info.manifest.avatar = entry.avatar.clone();
+                    info.manifest.builtin_avatar = entry.builtin_avatar.clone();
+                }
+            }
+            tracing::info!("Loaded avatar cache with {} entries", avatar_cache.len());
+        }
     }
 
     /// Kill orphaned acowork-runtime processes left over from a previous Gateway run.

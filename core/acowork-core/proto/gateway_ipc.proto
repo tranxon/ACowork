@@ -99,6 +99,10 @@ message UserProfile {
   string created_at = 10;
   string updated_at = 11;
   bool is_active = 12;
+  // Custom avatar file path (relative to Gateway data_dir, e.g. "assets/avatar-01.png").
+  optional string avatar = 13;
+  // Builtin avatar icon ID (e.g. "icon-05").
+  optional string builtin_avatar = 14;
 }
 
 message UserProfileUpdate {
@@ -124,6 +128,10 @@ message AgentHelloRequest       {
   uint64 mcp_list_version = 5;
   uint64 search_list_version = 6;
   uint64 user_profile_version = 7;
+  // ADR-017: Runtime reports its current avatar config from agent_config.json
+  // so the Gateway can sync its avatar cache on agent restart.
+  optional string avatar = 8;
+  optional string builtin_avatar = 9;
 }
 message ListSessionsRequest     {}
 message GetSessionMessagesRequest { string session_id = 1; string cursor = 2; uint32 limit = 3; string direction = 4; }
@@ -207,6 +215,9 @@ message ConfigSnapshot {
   repeated string mcp_servers_json = 10;
   // Search provider config (JSON-serialized AgentSearchConfig from agent_search.json)
   optional string search_config_json = 12;
+  // ADR-017: Avatar config (from agent_config.json, queried via gRPC)
+  optional string avatar = 13;
+  optional string builtin_avatar = 14;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
@@ -244,6 +255,13 @@ message RuntimeConfigUpdate      {
     bool system_prompt_set = 13;
     // Embedding config override (JSON: {"embed_endpoint":"...","embed_model_id":"...","embed_dimension":N})
     optional string embed_config_json = 14;
+    // ADR-017: Avatar config fields (pushed from Gateway to Runtime).
+    // Use avatar_set / builtin_avatar_set to distinguish "not set" (don't change)
+    // from "set to empty" (clear the field).
+    optional string avatar = 15;
+    optional string builtin_avatar = 16;
+    bool avatar_set = 17;
+    bool builtin_avatar_set = 18;
 }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }

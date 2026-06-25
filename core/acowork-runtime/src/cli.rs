@@ -284,6 +284,14 @@ pub(crate) async fn connect_gateway_client(
         resource_cache.search_list_version,
         resource_cache.user_profile_version,
     );
+
+    // ADR-017: Read avatar from agent_config.json to report to Gateway.
+    let (avatar, builtin_avatar) =
+        match crate::agent_config::load_agent_config(work_dir_path) {
+            Ok(Some(cfg)) => (cfg.avatar, cfg.builtin_avatar),
+            _ => (None, None),
+        };
+
     match crate::grpc::client::GatewayGrpcClient::connect_and_register(
         endpoint,
         agent_id,
@@ -292,6 +300,8 @@ pub(crate) async fn connect_gateway_client(
         cached_mcp_ver,
         cached_search_ver,
         cached_user_profile_ver,
+        avatar,
+        builtin_avatar,
     )
     .await
     {
@@ -632,6 +642,12 @@ pub(crate) async fn run_gateway_loop(
                                 .iter()
                                 .map(|s| serde_json::to_string(s).unwrap_or_default())
                                 .collect();
+                                // ADR-017: Include avatar config from agent_config.json.
+                                let agent_cfg = crate::agent_config::load_agent_config(
+                                    std::path::Path::new(&work_dir),
+                                )
+                                .unwrap_or_default()
+                                .unwrap_or_default();
                                 let snapshot = proto::client_message::Payload::ConfigSnapshot(
                                     proto::ConfigSnapshot {
                                         request_id: String::new(),
@@ -648,6 +664,8 @@ pub(crate) async fn run_gateway_loop(
                                         )
                                         .unwrap_or_default()
                                         .and_then(|cfg| serde_json::to_string(&cfg).ok()),
+                                        avatar: agent_cfg.avatar.clone(),
+                                        builtin_avatar: agent_cfg.builtin_avatar.clone(),
                                     },
                                 );
                                 let response = proto::ClientMessage {
@@ -1710,6 +1728,8 @@ async fn process_gateway_recv(
                     provider: _, // ADR-012: model_switch is a separate action
                     search_config_json,
                     embed_config_json,
+                    avatar,
+                    builtin_avatar,
                 } => {
                     tracing::info!(
 
@@ -1864,15 +1884,29 @@ async fn process_gateway_recv(
                     // Persist per-agent config to workspace/config/agent_config.json.
                     // This consolidates all overrides into a single file owned by Runtime,
                     // replacing the former Gateway-side data/agent_configs/{agent_id}.json.
+                    //
+                    // Read-modify-write: load the existing config so unknown fields
+                    // are preserved during Runtime writes.
                     {
                         let overrides = &session_manager.runtime_overrides;
-                        let agent_cfg = crate::agent_config::AgentConfig {
-                            max_output_tokens: overrides.max_output_tokens,
-                            max_iterations: overrides.max_iterations,
-                            temperature: overrides.temperature,
-                            system_prompt_override: overrides.system_prompt_override.clone(),
-                            shell_approval_threshold: overrides.shell_approval_threshold.clone(),
-                        };
+                        let mut agent_cfg = crate::agent_config::load_agent_config(
+                            std::path::Path::new(&work_dir),
+                        )
+                        .unwrap_or_default()
+                        .unwrap_or_default();
+                        agent_cfg.max_output_tokens = overrides.max_output_tokens;
+                        agent_cfg.max_iterations = overrides.max_iterations;
+                        agent_cfg.temperature = overrides.temperature;
+                        agent_cfg.system_prompt_override = overrides.system_prompt_override.clone();
+                        agent_cfg.shell_approval_threshold = overrides.shell_approval_threshold.clone();
+                        // ADR-017: Apply avatar config from RuntimeConfigUpdate.
+                        // Some("path") = set, Some("") = clear, None = don't change.
+                        if let Some(ref av) = avatar {
+                            agent_cfg.avatar = if av.is_empty() { None } else { Some(av.clone()) };
+                        }
+                        if let Some(ref ba) = builtin_avatar {
+                            agent_cfg.builtin_avatar = if ba.is_empty() { None } else { Some(ba.clone()) };
+                        }
                         let _ = crate::agent_config::save_agent_config(
                             std::path::Path::new(&work_dir),
                             &agent_cfg,

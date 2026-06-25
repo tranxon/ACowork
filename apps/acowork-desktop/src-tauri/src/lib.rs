@@ -185,6 +185,7 @@ pub fn run() {
             commands::agent::clone_agent,
             commands::agent::update_agent_manifest_avatar,
             commands::agent::upload_agent_file,
+            commands::agent::upload_user_avatar_file,
             commands::chat::send_message,
             commands::chat::upload_document,
             commands::vault::list_keys,

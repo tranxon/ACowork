@@ -206,6 +206,29 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
+    /// `POST /api/user/avatar-file` — upload a user avatar image.
+    /// Returns `{ "relative_path": "assets/avatar-01.png" }`.
+    pub async fn upload_user_avatar_file(
+        &self,
+        bytes: &[u8],
+        file_name: &str,
+    ) -> Result<serde_json::Value> {
+        let form = reqwest::multipart::Form::new().part(
+            "file",
+            reqwest::multipart::Part::bytes(bytes.to_vec())
+                .file_name(file_name.to_string())
+                .mime_str("application/octet-stream")
+                .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
+        );
+        let resp = self
+            .client
+            .post(format!("{}/api/user/avatar-file", self.base_url))
+            .multipart(form)
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
     /// `DELETE /api/agents/:id`
     pub async fn uninstall_agent(&self, agent_id: &str) -> Result<GenericMessageResponse> {
         let resp = self

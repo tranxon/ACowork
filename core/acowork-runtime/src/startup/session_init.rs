@@ -213,12 +213,17 @@ pub(crate) async fn phase_b_init_session(
             .unwrap_or_default()
             .unwrap_or_default();
 
+        // Seed avatar fields from manifest.toml on first start so the
+        // effective avatar resolves to the package author's default.
         let is_first_start = !work_dir_path
             .join("config")
             .join("agent_config.json")
             .exists();
         if is_first_start {
-            let _ = crate::agent_config::save_agent_config(work_dir_path, &agent_cfg);
+            let mut seeded = agent_cfg.clone();
+            seeded.avatar = ctx.loaded.manifest.avatar.clone();
+            seeded.builtin_avatar = ctx.loaded.manifest.builtin_avatar.clone();
+            let _ = crate::agent_config::save_agent_config(work_dir_path, &seeded);
         }
 
         let has_overrides = agent_cfg.max_output_tokens.is_some()

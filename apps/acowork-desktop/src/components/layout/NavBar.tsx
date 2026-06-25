@@ -170,6 +170,8 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
         >
           <UserAvatar
             displayName={profile.displayName}
+            avatarUrl={profile.backendAvatarUrl ?? null}
+            builtinAvatarId={profile.backendBuiltinAvatarId ?? null}
             size={40}
             className="shrink-0"
           />

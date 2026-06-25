@@ -150,6 +150,8 @@ pub async fn dispatch_grpc_request(
                 req.mcp_list_version,
                 req.search_list_version,
                 req.user_profile_version,
+                req.avatar.clone(),
+                req.builtin_avatar.clone(),
                 conn_id,
                 state,
                 session_mgr,

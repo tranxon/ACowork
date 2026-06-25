@@ -16,6 +16,8 @@ const DEFAULT_PROFILE: UserProfile = {
   avatarIcon: null,
   colorPalette: "rainbow",
   avatarColors: [],
+  backendAvatarUrl: null,
+  backendBuiltinAvatarId: null,
 };
 
 // ── Persistence helpers ────────────────────────────────────────────────
@@ -33,6 +35,8 @@ function loadProfile(): UserProfile {
         avatarIcon: parsed.avatarIcon ?? DEFAULT_PROFILE.avatarIcon,
         colorPalette: validatePalette(parsed.colorPalette),
         avatarColors: Array.isArray(parsed.avatarColors) ? parsed.avatarColors : [],
+        backendAvatarUrl: parsed.backendAvatarUrl ?? null,
+        backendBuiltinAvatarId: parsed.backendBuiltinAvatarId ?? null,
       };
     }
   } catch {
@@ -43,6 +47,8 @@ function loadProfile(): UserProfile {
   return {
     ...DEFAULT_PROFILE,
     avatarIcon: pickRandomBuiltinIconId(),
+    backendAvatarUrl: null,
+    backendBuiltinAvatarId: null,
   };
 }
 

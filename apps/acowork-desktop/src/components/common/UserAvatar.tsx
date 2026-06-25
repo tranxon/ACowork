@@ -1,15 +1,10 @@
 import { useEffect, useMemo } from "react";
 import { useUserProfileStore } from "../../stores/userProfileStore";
-import { pickDeterministicBuiltinIconId, pickRandomBuiltinIconId } from "../../lib/avatar";
+import { pickDeterministicBuiltinIconId, pickRandomBuiltinIconId, resolveUserAvatarFileUrl } from "../../lib/avatar";
 import { BUILTIN_ICONS } from "../../lib/builtinIcons";
 import type { BoringAvatarVariant } from "../../lib/types";
 
 // ── Re-exports for back-compat ──────────────────────────────────────────
-// The icon catalogue (BUILTIN_ICONS, BUILTIN_ICON_IDS, AGENT_DEFAULT_PALETTE)
-// is defined in `lib/builtinIcons.ts` as a leaf module so the user-profile
-// store can read it without creating a circular import. We re-export the
-// values from here so existing consumers (ProfileTab, AgentSetupTab,
-// agentProfileStore) keep working unchanged.
 export { BUILTIN_ICONS, BUILTIN_ICON_IDS, AGENT_DEFAULT_PALETTE } from "../../lib/builtinIcons";
 
 // ── Built-in icon wrapper ────────────────────────────────────────────────
@@ -20,6 +15,21 @@ function BuiltinIconAvatar({ iconId, size, className }: { iconId: string; size: 
     <img
       src={src}
       alt={iconId}
+      draggable={false}
+      className={`rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
+      style={{ width: size, height: size }}
+    />
+  );
+}
+
+// ── Custom file avatar wrapper ───────────────────────────────────────────
+
+function CustomFileAvatar({ path, size, className }: { path: string; size: number; className?: string }) {
+  const url = resolveUserAvatarFileUrl(path);
+  return (
+    <img
+      src={url}
+      alt="User avatar"
       draggable={false}
       className={`rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
       style={{ width: size, height: size }}
@@ -38,19 +48,27 @@ export interface UserAvatarProps {
   avatarColors?: string[];
   size?: number;
   className?: string;
+  /** Custom avatar file path (from backend user profile, e.g. "assets/avatar-01.png"). */
+  avatarUrl?: string | null;
+  /** Builtin avatar icon ID (from backend user profile, e.g. "icon-05"). */
+  builtinAvatarId?: string | null;
 }
 
 /**
- * User avatar. Always renders a builtin icon — letter/gradient generation
- * has been removed in favour of the bundled icon set. If the profile has
- * no `avatarIcon` set (legacy state, or before onboarding completed), a
- * deterministic random builtin icon is shown and persisted in the background.
+ * User avatar with custom file support (ADR-017).
+ *
+ * Resolution priority:
+ * 1. Custom avatar file (via Gateway /api/user/avatar-file endpoint)
+ * 2. Builtin icon ID (from backend or local store)
+ * 3. Deterministic random builtin icon — the final fallback
  */
 export function UserAvatar({
   displayName,
   avatarIcon: _icon,
   size = 32,
   className,
+  avatarUrl,
+  builtinAvatarId,
 }: UserAvatarProps) {
   const profileIconId = useUserProfileStore((s) => s.profile.avatarIcon);
   const setProfile = useUserProfileStore((s) => s.setProfile);
@@ -61,13 +79,22 @@ export function UserAvatar({
   );
 
   // Self-heal: if no profile icon is set (legacy data, pre-onboarding),
-  // persist a random one in the background so the next render reads it
-  // from the store. Idempotent.
+  // persist a random one in the background so the next render reads it from
+  // the store. Idempotent.
   useEffect(() => {
     if (profileIconId) return;
     const iconId = pickRandomBuiltinIconId();
     if (iconId) setProfile({ avatarIcon: iconId });
   }, [profileIconId, setProfile]);
+
+  // ADR-017: Resolution priority
+  if (avatarUrl) {
+    return <CustomFileAvatar path={avatarUrl} size={size} className={className} />;
+  }
+
+  if (builtinAvatarId && BUILTIN_ICONS[builtinAvatarId]) {
+    return <BuiltinIconAvatar iconId={builtinAvatarId} size={size} className={className} />;
+  }
 
   const iconId =
     (_icon && BUILTIN_ICONS[_icon] ? _icon : null) ??

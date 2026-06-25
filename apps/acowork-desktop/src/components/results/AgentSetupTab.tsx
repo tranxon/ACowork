@@ -1,17 +1,45 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAgentStore } from "../../stores/agentStore";
-import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
+import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
+import { AgentAvatar } from "../common/AgentAvatar";
 import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
-import { Tooltip } from "../common/Tooltip";
+import {
+  clearAgentAvatarCache,
+  fetchAvatarAssets,
+  fetchAvatarConfig,
+  updateAvatarConfig,
+  deleteAvatarFile,
+  resolveAgentAvatarFileUrl,
+} from "../../lib/avatar";
+import type { AvatarAssetEntry, AvatarConfigResponse } from "../../lib/types";
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+/** Compute the next available avatar-XX filename (zero-padded to 2 digits). */
+function nextAvatarName(assets: AvatarAssetEntry[], ext: string): string {
+  const used = new Set<number>();
+  for (const a of assets) {
+    const fn = a.relative_path.split("/").pop() ?? "";
+    const m = fn.match(/^avatar-(\d+)\./i);
+    if (m) used.add(parseInt(m[1], 10));
+  }
+  let n = 1;
+  while (used.has(n)) n++;
+  return `avatar-${String(n).padStart(2, "0")}.${ext}`;
+}
+
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
 // ── Component ───────────────────────────────────────────────────────────
 
 export function AgentSetupTab() {
   const { t } = useTranslation();
-  const { agents, selectedAgentId } = useAgentStore();
+  const { agents, selectedAgentId, fetchAgents } = useAgentStore();
   const { getProfile, setProfile, resetProfile } = useAgentStore();
 
   const storage = selectedAgentId ? agents[selectedAgentId] : null;
@@ -21,27 +49,38 @@ export function AgentSetupTab() {
   // Fetch agent runtime config from Gateway API on mount
   const [_configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
-  const [iconOpen, setIconOpen] = useState(false);
-  const iconRef = useRef<HTMLDivElement>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
-  // Close icon picker on outside click
-  useEffect(() => {
-    if (!iconOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (iconRef.current && !iconRef.current.contains(e.target as Node)) {
-        setIconOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [iconOpen]);
+  // Avatar picker state (ADR-017)
+  const [avatarTab, setAvatarTab] = useState<"custom" | "builtin">("custom");
+  const [avatarPopupOpen, setAvatarPopupOpen] = useState(false);
+  const [avatarAssets, setAvatarAssets] = useState<AvatarAssetEntry[]>([]);
+  const [avatarConfig, setAvatarConfig] = useState<AvatarConfigResponse | null>(null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
 
+  // Load avatar config + assets on mount and agent switch
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    let cancelled = false;
+    setAvatarAssets([]);
+    setAvatarConfig(null);
+
+    fetchAvatarConfig(selectedAgentId)
+      .then((cfg) => { if (!cancelled) setAvatarConfig(cfg); })
+      .catch((err) => { if (!cancelled) console.debug("[AgentSetup] Avatar config fetch failed:", err); });
+
+    fetchAvatarAssets(selectedAgentId)
+      .then((resp) => { if (!cancelled) setAvatarAssets(resp.assets); })
+      .catch((err) => { if (!cancelled) console.debug("[AgentSetup] Avatar assets fetch failed:", err); });
+
+    return () => { cancelled = true; };
+  }, [selectedAgentId]);
+
+  // Fetch agent runtime config on mount
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
     setConfigLoading(true);
-    // Fetch config
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/config`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -57,17 +96,10 @@ export function AgentSetupTab() {
         });
       })
       .catch((err) => {
-        if (!cancelled) {
-          // 503 = agent not ready yet, silently retry on next mount
-          console.debug("[AgentSetup] Agent not ready:", err);
-        }
+        if (!cancelled) console.debug("[AgentSetup] Agent not ready:", err);
       })
-      .finally(() => {
-        if (!cancelled) setConfigLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => { if (!cancelled) setConfigLoading(false); });
+    return () => { cancelled = true; };
   }, [selectedAgentId]);
 
   // Listen for global resource refresh events
@@ -83,7 +115,6 @@ export function AgentSetupTab() {
             setProfile(selectedAgentId, {
               maxTokens: data.max_output_tokens,
               maxIterations: data.max_iterations,
-              temperature: data.temperature,
               shellApprovalThreshold: data.shell_approval_threshold,
               approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
               globalMaxTokens: data.global_max_output_tokens,
@@ -111,19 +142,102 @@ export function AgentSetupTab() {
       if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
       const res = await fetch(
         `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
+        { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
       );
-      if (!res.ok) {
-        console.warn("[AgentSetup] Config update failed:", res.status);
-      }
+      if (!res.ok) console.warn("[AgentSetup] Config update failed:", res.status);
     } catch {
       // silently ignore network errors
     } finally {
       setConfigSaving(false);
+    }
+  };
+
+  // ── Avatar selection handlers ──────────────────────────────────────
+
+  const handleSelectCustom = async (relativePath: string) => {
+    if (!selectedAgentId) return;
+    setAvatarBusy(true);
+    try {
+      const cfg = await updateAvatarConfig(selectedAgentId, { avatar: relativePath, builtin_avatar: "" });
+      setAvatarConfig(cfg);
+      clearAgentAvatarCache(selectedAgentId);
+      await fetchAgents();
+    } catch (err) {
+      console.warn("[AgentSetup] Select custom avatar failed:", err);
+    } finally {
+      setAvatarBusy(false);
+      setAvatarPopupOpen(false);
+    }
+  };
+
+  const handleSelectBuiltin = async (iconId: string) => {
+    if (!selectedAgentId) return;
+    setAvatarBusy(true);
+    try {
+      const cfg = await updateAvatarConfig(selectedAgentId, { avatar: "", builtin_avatar: iconId });
+      setAvatarConfig(cfg);
+      clearAgentAvatarCache(selectedAgentId);
+      await fetchAgents();
+    } catch (err) {
+      console.warn("[AgentSetup] Select builtin avatar failed:", err);
+    } finally {
+      setAvatarBusy(false);
+      setAvatarPopupOpen(false);
+    }
+  };
+
+  // ── Avatar upload (does NOT auto-select) ──────────────────────────
+
+  const handleUploadClick = async () => {
+    if (!selectedAgentId) return;
+    const selected = await openDialog({
+      multiple: false,
+      filters: [{ name: "Images", extensions: IMAGE_EXTENSIONS }],
+    });
+    if (!selected || typeof selected !== "string") return;
+
+    const ext = selected.split(".").pop()?.toLowerCase() ?? "png";
+    if (!IMAGE_EXTENSIONS.includes(ext)) return;
+
+    const relative = `assets/${nextAvatarName(avatarAssets, ext)}`;
+    setAvatarBusy(true);
+    try {
+      await invoke("upload_agent_file", {
+        agentId: selectedAgentId,
+        relativePath: relative,
+        filePath: selected,
+      });
+      // Refresh assets list — user manually selects afterwards
+      const resp = await fetchAvatarAssets(selectedAgentId);
+      setAvatarAssets(resp.assets);
+    } catch (err) {
+      console.warn("[AgentSetup] Avatar upload failed:", err);
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  // ── Avatar delete ──────────────────────────────────────────────────
+
+  const handleDeleteAvatar = async (relativePath: string) => {
+    if (!selectedAgentId) return;
+    setAvatarBusy(true);
+    try {
+      await deleteAvatarFile(selectedAgentId, relativePath);
+      // Refresh both — backend clears avatar field if deleted file was current
+      const [assetsResp, cfg] = await Promise.all([
+        fetchAvatarAssets(selectedAgentId),
+        fetchAvatarConfig(selectedAgentId),
+      ]);
+      setAvatarAssets(assetsResp.assets);
+      setAvatarConfig(cfg);
+      clearAgentAvatarCache(selectedAgentId);
+      await fetchAgents();
+    } catch (err) {
+      console.warn("[AgentSetup] Delete avatar failed:", err);
+    } finally {
+      setAvatarBusy(false);
+      setAvatarPopupOpen(false);
     }
   };
 
@@ -139,47 +253,130 @@ export function AgentSetupTab() {
 
   return (
     <div className="flex-1 overflow-y-auto p-3">
-      {/* Avatar preview — click to open icon picker */}
-      <div className="mb-4 flex items-center gap-3">
-        <div className="relative shrink-0" ref={iconRef}>
-          <Tooltip content={t("agentSetup.chooseIcon")} variant="plain">
-            <button
-              onClick={() => setIconOpen(!iconOpen)}
-              className="rounded-md border border-transparent p-0.5 transition-colors hover:border-zinc-300 dark:hover:border-zinc-600"
-            >
-              <UserAvatar
-                displayName={agentName}
-                avatarType="icon"
-                avatarIcon={profile.avatarIconId ?? undefined}
-                size={64}
+      {/* Avatar preview — click to open picker popup */}
+      <div className="mb-3 flex items-center gap-3">
+        <div className="relative">
+          <button
+            onClick={() => setAvatarPopupOpen((v) => !v)}
+            className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+          >
+            <AgentAvatar
+              agentId={selectedAgentId}
+              avatarUrl={avatarConfig?.avatar ?? null}
+              builtinAvatarId={avatarConfig?.builtin_avatar ?? null}
+              version={selectedAgent.version}
+              size={64}
+            />
+            {/* Pencil badge */}
+            <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
+              <svg viewBox="0 0 16 16" className="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg">
+                <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L11.5 7l-3-3-.31.31a.75.75 0 0 0-.177.764l.93 3.251a.75.75 0 0 1-.927.928l-3.251-.93Z" />
+              </svg>
+            </span>
+          </button>
+
+          {/* Avatar picker popup */}
+          {avatarPopupOpen && (
+            <>
+              {/* Click-outside overlay */}
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setAvatarPopupOpen(false)}
               />
-            </button>
-          </Tooltip>
-          {iconOpen && (
-            <div className="absolute left-0 z-50 mt-1 w-max rounded-md border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
-              <div className="grid grid-cols-4 gap-1">
-                {BUILTIN_ICON_IDS.map((iconId) => (
+              <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                {/* Tabs */}
+                <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
                   <button
-                    key={iconId}
-                    onClick={() => {
-                      setProfile(selectedAgentId, { avatarIconId: iconId });
-                      setIconOpen(false);
-                    }}
-                    className={`flex items-center justify-center rounded-md p-1 transition-colors ${profile.avatarIconId === iconId
-                      ? "bg-zinc-200 dark:bg-zinc-600"
-                      : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                    onClick={() => setAvatarTab("custom")}
+                    className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
+                      ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
+                      : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
                       }`}
                   >
-                    <img
-                      src={BUILTIN_ICONS[iconId] ?? ""}
-                      alt={iconId}
-                      draggable={false}
-                      className="h-16 w-16 rounded-full object-cover"
-                    />
+                    Custom
                   </button>
-                ))}
+                  <button
+                    onClick={() => setAvatarTab("builtin")}
+                    className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
+                      ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
+                      : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                      }`}
+                  >
+                    Builtin
+                  </button>
+                </div>
+
+                {/* Custom tab */}
+                {avatarTab === "custom" && (
+                  <div className="grid grid-cols-4 gap-2">
+                    <button
+                      onClick={handleUploadClick}
+                      disabled={avatarBusy}
+                      className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-500 dark:hover:border-zinc-400"
+                    >
+                      <span className="text-lg">+</span>
+                    </button>
+                    {avatarAssets.map((asset) => {
+                      const isSelected = avatarConfig?.avatar === asset.relative_path;
+                      return (
+                        <div
+                          key={asset.relative_path}
+                          className={`group relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${isSelected
+                            ? "border-zinc-800 dark:border-zinc-200"
+                            : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+                            }`}
+                        >
+                          <img
+                            src={resolveAgentAvatarFileUrl(selectedAgentId, asset.relative_path)}
+                            alt={asset.relative_path}
+                            draggable={false}
+                            className="h-full w-full cursor-pointer object-cover"
+                            onClick={() => handleSelectCustom(asset.relative_path)}
+                          />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAvatar(asset.relative_path);
+                            }}
+                            disabled={avatarBusy}
+                            className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-red-500/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Builtin tab */}
+                {avatarTab === "builtin" && (
+                  <div className="grid grid-cols-4 gap-2">
+                    {BUILTIN_ICON_IDS.map((iconId) => {
+                      const isSelected = avatarConfig?.builtin_avatar === iconId;
+                      return (
+                        <button
+                          key={iconId}
+                          onClick={() => handleSelectBuiltin(iconId)}
+                          disabled={avatarBusy}
+                          className={`flex items-center justify-center rounded-md p-1 transition-colors ${isSelected
+                            ? "bg-zinc-200 dark:bg-zinc-600"
+                            : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                            }`}
+                        >
+                          <img
+                            src={BUILTIN_ICONS[iconId] ?? ""}
+                            alt={iconId}
+                            draggable={false}
+                            className="h-12 w-12 rounded-full object-cover"
+                          />
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            </div>
+            </>
           )}
         </div>
         <div className="min-w-0 flex-1">

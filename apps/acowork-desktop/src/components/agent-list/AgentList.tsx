@@ -314,7 +314,7 @@ export function AgentList({ width }: AgentListProps) {
                   displayName={agent.display_name ?? agent.name}
                   avatarUrl={agent.avatar}
                   version={agent.version}
-                  iconId={agentsMap[agent.agent_id]?.profile?.avatarIconId}
+                  builtinAvatarId={agent.builtin_avatar}
                   size={40}
                   className={isCollapsed ? "mx-auto" : ""}
                 />

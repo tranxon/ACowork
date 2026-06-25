@@ -1715,11 +1715,11 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
-  // Agent icon from profile settings
-  const agentIconId = useAgentStore((s) => s.agents[agentId]?.profile?.avatarIconId);
   // Live names — subscribe to profile stores so name edits update all messages instantly
   // (instead of relying on the senderDisplayName snapshot captured at message creation time)
   const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
+  const userAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
+  const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
   const agentProfileName = useAgentStore((s) => s.agents[agentId]?.profile?.displayName);
   const agentInfo = useAgentStore((s) => s.agents[agentId]?.meta);
   const liveAgentName = agentProfileName ?? agentInfo?.display_name ?? agentInfo?.name ?? message.senderDisplayName;
@@ -1755,6 +1755,8 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
           </div>
           <UserAvatar
             displayName={liveUserName}
+            avatarUrl={userAvatarUrl ?? null}
+            builtinAvatarId={userBuiltinAvatarId ?? null}
             size={40}
             className="shrink-0 mt-1"
           />
@@ -1774,7 +1776,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             displayName={liveAgentName}
             avatarUrl={agentInfo?.avatar}
             version={agentInfo?.version}
-            iconId={agentIconId}
+            builtinAvatarId={agentInfo?.builtin_avatar ?? null}
             size={40}
             className="shrink-0 mt-1"
           />
@@ -1816,7 +1818,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             displayName={liveAgentName}
             avatarUrl={agentInfo?.avatar}
             version={agentInfo?.version}
-            iconId={agentIconId}
+            builtinAvatarId={agentInfo?.builtin_avatar ?? null}
             size={40}
             className="shrink-0 mt-1"
           />
@@ -1853,7 +1855,7 @@ function MessageBubble({ message, isStreaming, agentId }: { message: ChatMessage
             displayName={liveAgentName}
             avatarUrl={agentInfo?.avatar}
             version={agentInfo?.version}
-            iconId={agentIconId}
+            builtinAvatarId={agentInfo?.builtin_avatar ?? null}
             size={40}
             className="shrink-0 mt-1"
           />

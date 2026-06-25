@@ -585,19 +585,23 @@ pub async fn handle_agent_hello(
     mcp_list_version: u64,
     search_list_version: u64,
     user_profile_version: u64,
+    avatar: Option<String>,
+    builtin_avatar: Option<String>,
     conn_id: &str,
     state: &SharedState,
     session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
     tracing::info!(
-        "AgentHello received: agent_id={} version={} conn={} role={} prov_ver={} mcp_ver={} user_ver={}",
+        "AgentHello received: agent_id={} version={} conn={} role={} prov_ver={} mcp_ver={} user_ver={} avatar={:?} builtin={:?}",
         agent_id,
         version,
         conn_id,
         connection_role,
         provider_list_version,
         mcp_list_version,
-        user_profile_version
+        user_profile_version,
+        avatar,
+        builtin_avatar
     );
 
     let mut mgr = session_mgr.lock().await;
@@ -615,6 +619,26 @@ pub async fn handle_agent_hello(
         {
             let mut gw = state.write().await;
             gw.set_agent_connected(agent_id, true);
+
+            // ADR-017: Sync avatar from Runtime's agent_config.json to the
+            // Gateway's avatar cache + in-memory manifest. This handles
+            // recovery of avatar changes made while the old Gateway was running.
+            if avatar.is_some() || builtin_avatar.is_some() {
+                if let Some(info) = gw.installed_agents.get_mut(agent_id) {
+                    info.manifest.avatar = avatar.clone();
+                    info.manifest.builtin_avatar = builtin_avatar.clone();
+                }
+                // Also persist to the avatar cache file.
+                if let Some(ref config) = gw.config {
+                    let data_dir = std::path::PathBuf::from(&config.data_dir);
+                    crate::http::agent_config::update_avatar_in_cache(
+                        &data_dir,
+                        agent_id,
+                        avatar.clone(),
+                        builtin_avatar.clone(),
+                    );
+                }
+            }
         }
 
         // ── Build resource lists from in-memory cache ─────────────────

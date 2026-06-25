@@ -271,6 +271,8 @@ impl GatewayGrpcClient {
         cached_mcp_version: u64,
         cached_search_version: u64,
         cached_user_profile_version: u64,
+        avatar: Option<String>,
+        builtin_avatar: Option<String>,
     ) -> Result<(Self, AgentHelloConfig), AcoworkError> {
         Self::connect_and_register_with_role(
             endpoint,
@@ -281,6 +283,8 @@ impl GatewayGrpcClient {
             cached_mcp_version,
             cached_search_version,
             cached_user_profile_version,
+            avatar,
+            builtin_avatar,
         )
         .await
     }
@@ -298,6 +302,8 @@ impl GatewayGrpcClient {
         cached_mcp_version: u64,
         cached_search_version: u64,
         cached_user_profile_version: u64,
+        avatar: Option<String>,
+        builtin_avatar: Option<String>,
     ) -> Result<(Self, AgentHelloConfig), AcoworkError> {
         let client = Self::connect(endpoint).await?;
         let config = client
@@ -309,6 +315,8 @@ impl GatewayGrpcClient {
                 cached_mcp_version,
                 cached_search_version,
                 cached_user_profile_version,
+                avatar,
+                builtin_avatar,
             )
             .await?;
         Ok((client, config))
@@ -339,8 +347,10 @@ impl GatewayGrpcClient {
         // On reconnect, request full resource sync (versions = 0) since
         // in-memory state was lost. Resource cache file versions are
         // reloaded by the caller when the Runtime restarts.
+        // Avatar is not re-reported on reconnect — the Gateway's avatar cache
+        // file already persists it from the initial AgentHello.
         let _config = self
-            .send_agent_hello(agent_id, version, "main", 0, 0, 0, 0)
+            .send_agent_hello(agent_id, version, "main", 0, 0, 0, 0, None, None)
             .await?;
         self.flush_pending_reports().await?;
         Ok(())
@@ -467,6 +477,8 @@ impl GatewayGrpcClient {
         cached_mcp_version: u64,
         cached_search_version: u64,
         cached_user_profile_version: u64,
+        avatar: Option<String>,
+        builtin_avatar: Option<String>,
     ) -> Result<AgentHelloConfig, AcoworkError> {
         let request = GatewayRequest::AgentHello {
             agent_id: agent_id.to_string(),
@@ -476,6 +488,8 @@ impl GatewayGrpcClient {
             mcp_list_version: cached_mcp_version,
             search_list_version: cached_search_version,
             user_profile_version: cached_user_profile_version,
+            avatar,
+            builtin_avatar,
         };
 
         let resp = self.send_gateway_request(request).await?;
@@ -1054,6 +1068,17 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 provider: rcu.provider,
                 search_config_json: rcu.search_config_json,
                 embed_config_json: rcu.embed_config_json,
+                // ADR-017: Avatar fields (use _set flags to distinguish "clear" from "don't change")
+                avatar: if rcu.avatar_set {
+                    Some(rcu.avatar.unwrap_or_default())
+                } else {
+                    None
+                },
+                builtin_avatar: if rcu.builtin_avatar_set {
+                    Some(rcu.builtin_avatar.unwrap_or_default())
+                } else {
+                    None
+                },
             }
         }
         // Response messages (request_id > 0) — included for robustness
@@ -1209,6 +1234,8 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                     occupation: u.occupation,
                     communication_style: u.communication_style,
                     custom: u.custom,
+                    avatar: u.avatar,
+                    builtin_avatar: u.builtin_avatar,
                     created_at: u.created_at,
                     updated_at: u.updated_at,
                     is_active: u.is_active,

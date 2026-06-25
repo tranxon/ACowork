@@ -20,7 +20,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
-use crate::http::agent_config::{self, AgentConfigResponse, UpdateAgentConfigRequest};
+use crate::http::agent_config::{
+    self, AgentConfigResponse, UpdateAgentConfigRequest, AvatarAssetEntry, AvatarAssetsResponse,
+    AvatarConfigResponse, UpdateAvatarConfigRequest,
+};
 use crate::http::routes::{ApiError, AppState};
 use crate::lifecycle::process::is_process_alive;
 use crate::lifecycle::manager::SYSTEM_AGENT_ID;
@@ -93,6 +96,19 @@ pub fn agent_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/sessions/{session_id}/state",
             get(get_session_state),
+        )
+        // ADR-017: Avatar runtime config endpoints (work when agent is stopped)
+        .route(
+            "/api/agents/{id}/avatar-config",
+            get(get_avatar_config).put(update_avatar_config),
+        )
+        .route(
+            "/api/agents/{id}/manifest/avatar-assets",
+            get(list_avatar_assets),
+        )
+        .route(
+            "/api/agents/{id}/avatar-file",
+            get(get_avatar_file).delete(delete_avatar_file),
         )
 }
 
@@ -199,13 +215,16 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             let last_interaction_at = gw
                 .get_interaction(&info.agent_id)
                 .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            // ADR-017: Use manifest avatar for list (gRPC query would be too slow).
+            let (eff_avatar, eff_builtin, _) =
+                resolve_avatar_from_manifest(&info.manifest);
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
                 display_name: info.manifest.display_name.clone(),
                 role: info.manifest.role.clone(),
-                avatar: info.manifest.avatar.clone(),
-                builtin_avatar: info.manifest.builtin_avatar.clone(),
+                avatar: eff_avatar,
+                builtin_avatar: eff_builtin,
                 version: info.version.clone(),
                 running: actually_running,
                 connected,
@@ -281,13 +300,16 @@ pub async fn get_agent_detail(
         .unwrap_or(false);
     let connected = running_info.map(|r| r.connected).unwrap_or(false);
     let ready = running_info.map(|r| r.ready).unwrap_or(false);
+    // ADR-017: Use manifest avatar for detail page.
+    let (eff_avatar, eff_builtin, _) =
+        resolve_avatar_from_manifest(&info.manifest);
     let resp = AgentDetailResponse {
         agent_id: info.agent_id.clone(),
         name: info.name.clone(),
         display_name: info.manifest.display_name.clone(),
         role: info.manifest.role.clone(),
-        avatar: info.manifest.avatar.clone(),
-        builtin_avatar: info.manifest.builtin_avatar.clone(),
+        avatar: eff_avatar,
+        builtin_avatar: eff_builtin,
         version: info.version.clone(),
         description: info.manifest.description.clone(),
         author: info.manifest.author.clone(),
@@ -539,7 +561,516 @@ fn is_plausible_builtin_avatar_id(value: &str) -> bool {
     false
 }
 
-/// `POST /api/agents/{id}/manifest/file?path=<relative>`
+// ── ADR-017: Avatar config helpers ─────────────────────────────────────
+
+/// Resolve effective avatar from manifest only (no Runtime query).
+///
+/// Used by `list_agents` and `get_agent_detail` where querying each running
+/// agent via gRPC would be too slow. The avatar-config endpoint does a
+/// full gRPC roundtrip when the agent is running.
+///
+/// Returns `(avatar, builtin_avatar, source)`.
+fn resolve_avatar_from_manifest(
+    manifest: &AgentManifest,
+) -> (Option<String>, Option<String>, &'static str) {
+    if manifest.avatar.is_some() || manifest.builtin_avatar.is_some() {
+        return (manifest.avatar.clone(), manifest.builtin_avatar.clone(), "manifest");
+    }
+    (None, None, "fallback")
+}
+
+/// Whitelisted image extensions for avatar files.
+const AVATAR_FILE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+/// Check if a relative path has an avatar-allowed extension.
+fn has_avatar_extension(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext {
+        Some(e) => AVATAR_FILE_EXTENSIONS.contains(&e.as_str()),
+        None => false,
+    }
+}
+
+/// Validate that a relative path stays within the install directory.
+/// Returns the canonicalized absolute path or an error.
+fn validate_path_within_install(
+    install_path: &str,
+    relative_path: &str,
+) -> Result<std::path::PathBuf, (StatusCode, Json<ApiError>)> {
+    let install_dir = std::path::Path::new(install_path);
+    let canonical_install = std::fs::canonicalize(install_dir).map_err(|_| {
+        ApiError::not_found("Install directory not found for agent")
+    })?;
+    let target = install_dir.join(relative_path);
+    let canonical_target = std::fs::canonicalize(&target).map_err(|_| {
+        ApiError::not_found(&format!(
+            "File not found: {}",
+            relative_path
+        ))
+    })?;
+    if !canonical_target.starts_with(&canonical_install) {
+        return Err(ApiError::bad_request(
+            "Path traversal detected: path must stay within install directory",
+        ));
+    }
+    Ok(canonical_target)
+}
+
+/// `GET /api/agents/{id}/avatar-config` — get effective avatar configuration.
+///
+/// When the agent is running, queries the Runtime via gRPC (QueryConfig →
+/// ConfigSnapshot) for the current avatar config. When stopped, falls
+/// back to manifest.toml defaults.
+pub async fn get_avatar_config(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+    let (manifest, is_running) = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        let is_running = gw.running_agents.get(&agent_id).map(|r| r.ready).unwrap_or(false);
+        (info.manifest.clone(), is_running)
+    };
+
+    // When running, query the Runtime for the current avatar config.
+    if is_running {
+        if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+            let query = acowork_core::proto::server_message::Payload::QueryConfig(
+                acowork_core::proto::QueryConfig {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                },
+            );
+            if let Some(response) =
+                crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
+            {
+                if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
+                    response.payload
+                {
+                    let avatar = snap.avatar.filter(|s| !s.is_empty());
+                    let builtin_avatar = snap.builtin_avatar.filter(|s| !s.is_empty());
+                    let source = if avatar.is_some() || builtin_avatar.is_some() {
+                        "runtime"
+                    } else {
+                        "fallback"
+                    };
+                    return Ok(Json(AvatarConfigResponse {
+                        agent_id,
+                        avatar,
+                        builtin_avatar,
+                        source: source.to_string(),
+                    }));
+                }
+            }
+        }
+    }
+
+    // Stopped (or gRPC failed): fall back to manifest.
+    let (avatar, builtin_avatar, source) = resolve_avatar_from_manifest(&manifest);
+    Ok(Json(AvatarConfigResponse {
+        agent_id,
+        avatar,
+        builtin_avatar,
+        source: source.to_string(),
+    }))
+}
+
+/// `PUT /api/agents/{id}/avatar-config` — update avatar configuration.
+///
+/// When the agent is running, pushes a `RuntimeConfigUpdate` via gRPC
+/// so the Runtime persists the change to `agent_config.json`.
+/// When stopped, updates `manifest.toml` directly.
+pub async fn update_avatar_config(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<UpdateAvatarConfigRequest>,
+) -> Result<Json<AvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+    let (manifest, is_running) = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        let is_running = gw.running_agents.get(&agent_id).map(|r| r.ready).unwrap_or(false);
+        (info.manifest.clone(), is_running)
+    };
+
+    // Normalize: empty string = clear (None), non-empty = set, absent = don't change.
+    // Setting avatar clears builtin_avatar and vice versa.
+    let new_avatar = match &req.avatar {
+        Some(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                Some(None) // explicitly clear
+            } else {
+                Some(Some(trimmed.to_owned()))
+            }
+        }
+        None => None, // field absent — don't change
+    };
+    let new_builtin = match &req.builtin_avatar {
+        Some(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                Some(None)
+            } else {
+                // Validate builtin_avatar format
+                if !is_plausible_builtin_avatar_id(trimmed) {
+                    return Err(ApiError::bad_request(&format!(
+                        "Invalid builtin_avatar value '{}': expected 'icon-NN' or numeric 1-99",
+                        trimmed
+                    )));
+                }
+                Some(Some(trimmed.to_owned()))
+            }
+        }
+        None => None,
+    };
+
+    // Apply mutual exclusivity: setting avatar clears builtin and vice versa.
+    let (effective_avatar, effective_builtin) = {
+        let mut av = new_avatar.clone();
+        let mut ba = new_builtin.clone();
+        if let Some(Some(_)) = &av {
+            ba = Some(None);
+        }
+        if let Some(Some(_)) = &ba {
+            av = Some(None);
+        }
+        (av, ba)
+    };
+
+    // Snapshot for return value (before consuming in push/persist below).
+    let return_avatar = effective_avatar.clone();
+    let return_builtin = effective_builtin.clone();
+    let any_set = new_avatar.is_some() || new_builtin.is_some();
+
+    if is_running {
+        // Push RuntimeConfigUpdate via gRPC with avatar fields.
+        if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+            let mgr = grpc_mgr.lock().await;
+            if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+                let avatar_val = effective_avatar.as_ref()
+                    .map(|opt| opt.clone().unwrap_or_default()); // Some("") = clear, Some("path") = set
+                let builtin_val = effective_builtin.as_ref()
+                    .map(|opt| opt.clone().unwrap_or_default());
+
+                let push_result = session
+                    .push_message(acowork_core::protocol::GatewayResponse::RuntimeConfigUpdate {
+                        max_output_tokens: None,
+                        max_iterations: None,
+                        temperature: None,
+                        system_prompt_override: None,
+                        shell_approval_threshold: None,
+                        mcp_servers: None,
+                        model: None,
+                        provider: None,
+                        search_config_json: None,
+                        embed_config_json: None,
+                        avatar: avatar_val,
+                        builtin_avatar: builtin_val,
+                    })
+                    .await;
+
+                if !push_result {
+                    tracing::warn!(
+                        agent = %agent_id,
+                        "Failed to push avatar config update via gRPC"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    agent = %agent_id,
+                    "Agent marked as running but no gRPC session found"
+                );
+            }
+        }
+    }
+
+    // ADR-017: Persist avatar to the Gateway's avatar cache file (not manifest.toml).
+    // The cache file survives Gateway restarts and is the source of truth for
+    // list_agents when the agent is stopped. Running agents also get a gRPC
+    // push above; the Runtime persists to agent_config.json independently.
+    if any_set {
+        let data_dir = {
+            let gw = state.gateway_state.read().await;
+            gw.config
+                .as_ref()
+                .map(|c| std::path::PathBuf::from(&c.data_dir))
+                .unwrap_or_else(|| std::path::PathBuf::from("./data"))
+        };
+        let cache_avatar = effective_avatar.flatten();
+        let cache_builtin = effective_builtin.flatten();
+        agent_config::update_avatar_in_cache(
+            &data_dir,
+            &agent_id,
+            cache_avatar.clone(),
+            cache_builtin.clone(),
+        );
+
+        // Update in-memory manifest so list_agents returns the new value.
+        let mut gw = state.gateway_state.write().await;
+        if let Some(info) = gw.installed_agents.get_mut(&agent_id) {
+            info.manifest.avatar = cache_avatar;
+            info.manifest.builtin_avatar = cache_builtin;
+        }
+    }
+
+    // Return the effective avatar.
+    let (avatar, builtin_avatar, source) = if is_running && any_set {
+        // For running agents with changes, return the pushed values.
+        let av = return_avatar.flatten();
+        let ba = return_builtin.flatten();
+        if av.is_none() && ba.is_none() {
+            resolve_avatar_from_manifest(&manifest)
+        } else {
+            (av, ba, "runtime")
+        }
+    } else {
+        resolve_avatar_from_manifest(&manifest)
+    };
+
+    Ok(Json(AvatarConfigResponse {
+        agent_id,
+        avatar,
+        builtin_avatar,
+        source: source.to_string(),
+    }))
+}
+
+/// `GET /api/agents/{id}/manifest/avatar-assets` — list custom avatar files.
+///
+/// Scans `{install_path}/assets/` for files matching `avatar*.{ext}`.
+/// Sort: `avatar.ext` first, then `avatar-XX.ext` numerically.
+/// Does NOT require the agent to be running.
+pub async fn list_avatar_assets(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AvatarAssetsResponse>, (StatusCode, Json<ApiError>)> {
+    let install_path = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        info.install_path.clone()
+    };
+
+    let assets_dir = std::path::Path::new(&install_path).join("assets");
+    let mut entries: Vec<(String, Option<u32>)> = Vec::new();
+
+    if let Ok(read_dir) = std::fs::read_dir(&assets_dir) {
+        for entry in read_dir.flatten() {
+            let file_name = entry.file_name();
+            let name = match file_name.to_str() {
+                Some(n) => n,
+                None => continue,
+            };
+            // Match avatar*.{png,jpg,jpeg,gif,webp,svg}
+            let lower = name.to_ascii_lowercase();
+            if !lower.starts_with("avatar") {
+                continue;
+            }
+            if !has_avatar_extension(&lower) {
+                continue;
+            }
+            // Extract numeric suffix for sorting: "avatar.ext" → None (first),
+            // "avatar-XX.ext" → Some(XX)
+            let stem = std::path::Path::new(&lower)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let sort_key = if stem == "avatar" {
+                None
+            } else if let Some(suffix) = stem.strip_prefix("avatar-") {
+                suffix.parse::<u32>().ok()
+            } else {
+                None
+            };
+            entries.push((format!("assets/{}", name), sort_key));
+        }
+    }
+
+    // Sort: avatar.* first, then avatar-XX.* numerically
+    entries.sort_by(|a, b| match (a.1, b.1) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(a_n), Some(b_n)) => a_n.cmp(&b_n),
+    });
+
+    let assets = entries
+        .into_iter()
+        .map(|(path, _)| AvatarAssetEntry {
+            relative_path: path,
+        })
+        .collect();
+
+    Ok(Json(AvatarAssetsResponse {
+        agent_id,
+        assets,
+    }))
+}
+
+/// Query params for avatar-file endpoint.
+#[derive(Debug, Deserialize)]
+pub struct AvatarFileQuery {
+    pub path: String,
+}
+
+/// `GET /api/agents/{id}/avatar-file?path=<relative>` — serve a custom avatar file.
+///
+/// Path traversal guard + extension whitelist. Returns image bytes.
+/// Does NOT require the agent to be running.
+pub async fn get_avatar_file(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<AvatarFileQuery>,
+) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    let install_path = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        info.install_path.clone()
+    };
+
+    // Extension whitelist check
+    if !has_avatar_extension(&query.path) {
+        return Err(ApiError::bad_request(
+            "Invalid file extension: only png, jpg, jpeg, gif, webp, svg are allowed",
+        ));
+    }
+
+    // Path traversal guard
+    let canonical_path = validate_path_within_install(&install_path, &query.path)?;
+
+    let bytes = std::fs::read(&canonical_path).map_err(|e| {
+        ApiError::not_found(&format!(
+            "Failed to read avatar file: {}",
+            e
+        ))
+    })?;
+
+    let content_type = match std::path::Path::new(&query.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CACHE_CONTROL,
+            "public, max-age=300",
+        )
+        .body(Body::from(bytes))
+        .unwrap())
+}
+
+/// `DELETE /api/agents/{id}/avatar-file?path=<relative>` — delete a custom avatar file.
+///
+/// Path traversal guard + extension whitelist. If the deleted file was the
+/// current avatar, clears that field too (via gRPC when running, manifest
+/// when stopped).
+pub async fn delete_avatar_file(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<AvatarFileQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let (install_path, manifest, is_running) = {
+        let gw = state.gateway_state.read().await;
+        let info = gw
+            .installed_agents
+            .get(&agent_id)
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
+        let is_running = gw.running_agents.get(&agent_id).map(|r| r.ready).unwrap_or(false);
+        (info.install_path.clone(), info.manifest.clone(), is_running)
+    };
+
+    // Extension whitelist check
+    if !has_avatar_extension(&query.path) {
+        return Err(ApiError::bad_request(
+            "Invalid file extension: only png, jpg, jpeg, gif, webp, svg are allowed",
+        ));
+    }
+
+    // Path traversal guard
+    let canonical_path = validate_path_within_install(&install_path, &query.path)?;
+
+    // Delete the file
+    std::fs::remove_file(&canonical_path).map_err(|e| {
+        ApiError::internal(&format!("Failed to delete avatar file: {}", e))
+    })?;
+
+    // If the deleted file was the current avatar, clear it.
+    let needs_clear = manifest.avatar.as_deref() == Some(query.path.as_str());
+    if needs_clear {
+        if is_running {
+            // Push RuntimeConfigUpdate to clear avatar field.
+            if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+                let mgr = grpc_mgr.lock().await;
+                if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
+                    let _ = session
+                        .push_message(acowork_core::protocol::GatewayResponse::RuntimeConfigUpdate {
+                            max_output_tokens: None,
+                            max_iterations: None,
+                            temperature: None,
+                            system_prompt_override: None,
+                            shell_approval_threshold: None,
+                            mcp_servers: None,
+                            model: None,
+                            provider: None,
+                            search_config_json: None,
+                            embed_config_json: None,
+                            avatar: Some(String::new()), // empty = clear
+                            builtin_avatar: None,
+                        })
+                        .await;
+                }
+            }
+        }
+
+        // ADR-017: Clear avatar in the Gateway's cache file for BOTH running
+        // and stopped agents so the change survives a Gateway restart.
+        let data_dir = {
+            let gw = state.gateway_state.read().await;
+            gw.config
+                .as_ref()
+                .map(|c| std::path::PathBuf::from(&c.data_dir))
+                .unwrap_or_else(|| std::path::PathBuf::from("./data"))
+        };
+        agent_config::update_avatar_in_cache(&data_dir, &agent_id, None, None);
+
+        // Update in-memory manifest.
+        {
+            let mut gw = state.gateway_state.write().await;
+            if let Some(info) = gw.installed_agents.get_mut(&agent_id) {
+                info.manifest.avatar = None;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "message": "Avatar file deleted",
+        "path": query.path,
+    })))
+}
 ///
 /// Write a single file into the agent's install directory at the given
 /// relative path. Used by the Publish wizard to upload a custom avatar
@@ -1484,6 +2015,8 @@ pub async fn update_agent_config(
                     provider: None,
                     search_config_json: None,
                     embed_config_json: build_embed_config_json(&state).await,
+                    avatar: None,
+                    builtin_avatar: None,
                 })
                 .await;
             if !push_result {
@@ -1694,6 +2227,8 @@ pub async fn update_agent_mcp_servers(
                     provider: None,
                     search_config_json: None,
                     embed_config_json: build_embed_config_json(&state).await,
+                    avatar: None,
+                    builtin_avatar: None,
                 })
                 .await;
             if !push_result {
@@ -1891,6 +2426,8 @@ pub async fn update_agent_search_config(
                     provider: None,
                     search_config_json: Some(providers_json),
                     embed_config_json: build_embed_config_json(&state).await,
+                    avatar: None,
+                    builtin_avatar: None,
                 })
                 .await;
             if !push_result {

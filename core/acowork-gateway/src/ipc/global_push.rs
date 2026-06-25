@@ -260,6 +260,8 @@ impl GlobalResourcePusher {
                                 _ => None,
                             }
                         },
+                        avatar: None,
+                        builtin_avatar: None,
                     })
                     .await;
                 if ok {
@@ -401,6 +403,8 @@ impl GlobalResourcePusher {
                         provider: None,
                         search_config_json: None,
                         embed_config_json: Some(embed_config_json.clone()),
+                        avatar: None,
+                        builtin_avatar: None,
                     })
                     .await;
 

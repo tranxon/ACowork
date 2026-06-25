@@ -18,6 +18,7 @@ export interface AgentListResponse {
   display_name: string | null;
   role: string | null;
   avatar: string | null;
+  builtin_avatar?: string;
   version: string;
   running: boolean;
   connected: boolean;
@@ -690,6 +691,10 @@ export interface UserProfile {
   colorPalette: ColorPalette;
   /** Custom colors override (when non-empty) */
   avatarColors: string[];
+  /** Backend custom avatar file path (e.g. "assets/avatar-01.png"), synced from Gateway. */
+  backendAvatarUrl?: string | null;
+  /** Backend builtin avatar icon ID (e.g. "icon-05"), synced from Gateway. */
+  backendBuiltinAvatarId?: string | null;
 }
 
 // ── Backend User Profile (Gateway /api/users) ─────────────────────────
@@ -708,6 +713,10 @@ export interface BackendUserProfile {
   created_at: string;
   updated_at: string;
   is_active: boolean;
+  /** Custom avatar path (relative to Gateway data_dir, e.g. "assets/avatar-01.png") */
+  avatar?: string | null;
+  /** Builtin avatar icon ID (e.g. "icon-05") */
+  builtin_avatar?: string | null;
 }
 
 /** Response from GET /api/users */
@@ -927,5 +936,37 @@ export interface EmbeddingTestResponse {
   dimension?: number | null;
   latency_ms?: number | null;
   error?: string | null;
+}
+
+// ── Avatar config types (ADR-017) ─────────────────────────────────────
+
+/** Effective avatar configuration from GET /api/agents/:id/avatar-config */
+export interface AvatarConfigResponse {
+  agent_id: string;
+  /** Effective custom avatar path (relative to install dir). Null when none. */
+  avatar: string | null;
+  /** Effective builtin avatar icon ID (e.g. "icon-05"). Null when none. */
+  builtin_avatar: string | null;
+  /** Source of the effective value: "runtime" | "config" | "manifest" | "fallback" */
+  source: "runtime" | "config" | "manifest" | "fallback";
+}
+
+/** PUT request body for PUT /api/agents/:id/avatar-config */
+export interface UpdateAvatarConfigRequest {
+  /** Set to a path to select, "" to clear, omit to leave unchanged */
+  avatar?: string;
+  /** Set to an icon ID to select, "" to clear, omit to leave unchanged */
+  builtin_avatar?: string;
+}
+
+/** A single avatar asset file in the install directory */
+export interface AvatarAssetEntry {
+  relative_path: string;
+}
+
+/** Response from GET /api/agents/:id/manifest/avatar-assets */
+export interface AvatarAssetsResponse {
+  agent_id: string;
+  assets: AvatarAssetEntry[];
 }
 

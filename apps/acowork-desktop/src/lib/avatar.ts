@@ -31,6 +31,62 @@
 
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "./builtinIcons";
 import { getGatewayUrl } from "./config";
+import type {
+  AvatarAssetsResponse,
+  AvatarConfigResponse,
+  UpdateAvatarConfigRequest,
+} from "./types";
+
+// ── ADR-017: Avatar config API helpers ──────────────────────────────────
+
+/** Build URL for a custom avatar file in the agent's install directory. */
+export function resolveAgentAvatarFileUrl(agentId: string, relativePath: string): string {
+  return `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/avatar-file?path=${encodeURIComponent(relativePath)}`;
+}
+
+/** Fetch the list of custom avatar assets from the agent's install directory. */
+export async function fetchAvatarAssets(agentId: string): Promise<AvatarAssetsResponse> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/manifest/avatar-assets`,
+  );
+  if (!resp.ok) throw new Error(`Failed to fetch avatar assets: ${resp.status}`);
+  return resp.json();
+}
+
+/** Fetch the effective avatar config (works when agent is stopped). */
+export async function fetchAvatarConfig(agentId: string): Promise<AvatarConfigResponse> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/avatar-config`,
+  );
+  if (!resp.ok) throw new Error(`Failed to fetch avatar config: ${resp.status}`);
+  return resp.json();
+}
+
+/** Update the avatar config (works when agent is stopped). */
+export async function updateAvatarConfig(
+  agentId: string,
+  req: UpdateAvatarConfigRequest,
+): Promise<AvatarConfigResponse> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/avatar-config`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  if (!resp.ok) throw new Error(`Failed to update avatar config: ${resp.status}`);
+  return resp.json();
+}
+
+/** Delete a custom avatar file from the agent's install directory. */
+export async function deleteAvatarFile(agentId: string, relativePath: string): Promise<void> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/avatar-file?path=${encodeURIComponent(relativePath)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`Failed to delete avatar file: ${resp.status}`);
+}
 
 /**
  * Build the Gateway URL that serves the agent's packaged avatar (if any).
@@ -214,4 +270,59 @@ export function pickDeterministicBuiltinIconId(seed: string): string | null {
   }
   const idx = Math.abs(hash) % BUILTIN_ICON_IDS.length;
   return BUILTIN_ICON_IDS[idx] ?? null;
+}
+
+// ── User Avatar API helpers ─────────────────────────────────────────────
+
+/** Response from GET /api/user/avatar-config */
+export interface UserAvatarConfig {
+  avatar: string | null;
+  builtin_avatar: string | null;
+}
+
+/** Request body for PUT /api/user/avatar-config */
+export interface UpdateUserAvatarConfigRequest {
+  avatar?: string | null;
+  builtin_avatar?: string | null;
+}
+
+/** Build URL for serving a user avatar file. */
+export function resolveUserAvatarFileUrl(relativePath: string): string {
+  return `${getGatewayUrl()}/api/user/avatar-file?path=${encodeURIComponent(relativePath)}`;
+}
+
+/** Fetch the active user's avatar config. */
+export async function fetchUserAvatarConfig(): Promise<UserAvatarConfig> {
+  const resp = await fetch(`${getGatewayUrl()}/api/user/avatar-config`);
+  if (!resp.ok) throw new Error(`Failed to fetch user avatar config: ${resp.status}`);
+  return resp.json();
+}
+
+/** Update the active user's avatar config. */
+export async function updateUserAvatarConfig(
+  req: UpdateUserAvatarConfigRequest,
+): Promise<UserAvatarConfig> {
+  const resp = await fetch(`${getGatewayUrl()}/api/user/avatar-config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) throw new Error(`Failed to update user avatar config: ${resp.status}`);
+  return resp.json();
+}
+
+/** Fetch the list of custom avatar assets. */
+export async function fetchUserAvatarAssets(): Promise<AvatarAssetsResponse> {
+  const resp = await fetch(`${getGatewayUrl()}/api/user/avatar-assets`);
+  if (!resp.ok) throw new Error(`Failed to fetch user avatar assets: ${resp.status}`);
+  return resp.json();
+}
+
+/** Delete a custom user avatar file. */
+export async function deleteUserAvatarFile(relativePath: string): Promise<void> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/user/avatar-file?path=${encodeURIComponent(relativePath)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(`Failed to delete user avatar file: ${resp.status}`);
 }

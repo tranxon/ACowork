@@ -424,6 +424,12 @@ pub struct UserProfile {
     /// Occupation / domain (optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occupation: Option<String>,
+    /// Custom avatar path (relative to Gateway data_dir, e.g. "assets/avatar-01.png")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    /// Builtin avatar icon ID (e.g. "icon-05")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_avatar: Option<String>,
     /// Communication style preference (optional)
     /// e.g. "concise", "detailed", "casual"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,6 +600,12 @@ pub enum GatewayRequest {
         /// Runtime's cached user profile version (0 = never synced)
         #[serde(default)]
         user_profile_version: u64,
+        /// ADR-017: Runtime's current avatar config from agent_config.json.
+        /// Gateway uses this to sync its avatar cache on agent restart.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builtin_avatar: Option<String>,
     },
     /// List sessions request (S1.14)
     ///
@@ -665,6 +677,11 @@ pub enum GatewayRequest {
         /// Search provider config (JSON-serialized AgentSearchConfig from agent_search.json)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         search_config_json: Option<String>,
+        /// ADR-017: Avatar config from agent_config.json
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builtin_avatar: Option<String>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1005,6 +1022,14 @@ pub enum GatewayResponse {
         /// Format: {"embed_endpoint":"http://127.0.0.1:18080/v1","embed_model_id":"bge-small-zh-v1.5","embed_dimension":512}
         #[serde(default, skip_serializing_if = "Option::is_none")]
         embed_config_json: Option<String>,
+        /// ADR-017: Custom avatar path override.
+        /// Some("path") = set, Some("") = clear, None = don't change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
+        /// ADR-017: Builtin avatar icon ID override.
+        /// Some("icon-05") = set, Some("") = clear, None = don't change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builtin_avatar: Option<String>,
     },
     /// Query config request (Gateway → Runtime)
     ///

@@ -738,21 +738,10 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         setInstalling(agent?.name ?? resourceName);
         await invoke("install_bundled_agent", { resourceName, devMode: true });
       }
-      // Refresh the agent list so the global backfill (ensureBuiltinAvatars)
-      // runs and assigns a random builtin icon to each freshly installed
-      // agent that doesn't ship its own avatar. Each manifest's
-      // `builtin_avatar` hint is preferred over a random pick.
+      // Refresh the agent list so newly installed agents appear.
+      // ADR-017: Avatar assignment is now server-side (agent_config.json
+      // seeded from manifest on first start). No frontend backfill needed.
       await useAgentStore.getState().fetchAgents();
-      // Belt-and-suspenders: explicitly backfill again in case fetchAgents
-      // failed or the bundled agent list was empty.
-      const installed = useAgentStore.getState().agents;
-      useAgentStore.getState().ensureBuiltinAvatars(
-        Object.values(installed).map((s) => ({
-          agent_id: s.meta.agent_id,
-          avatar: s.meta.avatar ?? null,
-          builtin_avatar: s.meta.builtin_avatar ?? null,
-        })),
-      );
       setInstalling(null);
     } catch (err) {
       setInstalling(null);

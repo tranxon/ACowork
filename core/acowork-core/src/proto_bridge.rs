@@ -319,6 +319,8 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 mcp_list_version,
                 search_list_version,
                 user_profile_version,
+                avatar,
+                builtin_avatar,
             } => Some(proto::client_message::Payload::AgentHello(
                 proto::AgentHelloRequest {
                     agent_id: agent_id.clone(),
@@ -328,6 +330,8 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                     mcp_list_version: *mcp_list_version,
                     search_list_version: *search_list_version,
                     user_profile_version: *user_profile_version,
+                    avatar: avatar.clone(),
+                    builtin_avatar: builtin_avatar.clone(),
                 },
             )),
             protocol::GatewayRequest::ListSessions => Some(
@@ -365,6 +369,8 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 shell_approval_threshold,
                 mcp_servers,
                 search_config_json,
+                avatar,
+                builtin_avatar,
             } => {
                 let mcp_json: Vec<String> = mcp_servers
                     .iter()
@@ -382,6 +388,8 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         shell_approval_threshold: shell_approval_threshold.clone(),
                         mcp_servers_json: mcp_json,
                         search_config_json: search_config_json.clone(),
+                        avatar: avatar.clone(),
+                        builtin_avatar: builtin_avatar.clone(),
                     },
                 ))
             }
@@ -647,6 +655,8 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 provider,
                 search_config_json,
                 embed_config_json,
+                avatar,
+                builtin_avatar,
             } => {
                 let mcp_servers_set = mcp_servers.is_some();
                 let system_prompt_set = system_prompt_override.is_some();
@@ -659,6 +669,8 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                             .collect()
                     })
                     .unwrap_or_default();
+                let avatar_set = avatar.is_some();
+                let builtin_avatar_set = builtin_avatar.is_some();
                 Some(proto::server_message::Payload::RuntimeConfigUpdate(
                     proto::RuntimeConfigUpdate {
                         max_output_tokens: *max_output_tokens,
@@ -675,6 +687,10 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         mcp_servers_set,
                         system_prompt_set,
                         embed_config_json: embed_config_json.clone(),
+                        avatar: avatar.clone(),
+                        builtin_avatar: builtin_avatar.clone(),
+                        avatar_set,
+                        builtin_avatar_set,
                     },
                 ))
             }
@@ -717,6 +733,8 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     created_at: u.created_at.clone(),
                     updated_at: u.updated_at.clone(),
                     is_active: u.is_active,
+                    avatar: u.avatar.clone(),
+                    builtin_avatar: u.builtin_avatar.clone(),
                 });
                 Some(proto::server_message::Payload::UserProfileUpdate(
                     proto::UserProfileUpdate {
