@@ -160,11 +160,11 @@
   /* ~zinc-400 for dark mode */
 
   /* Chat palette (dark) — auto-flips the @theme light values (6 tokens) */
-  --color-chat-bubble: hsl(240 3.8% 15.7% / 0.6);
+  --color-chat-bubble: hsl(240 3.8% 15.7% / 0.7);
   /* = zinc-800, #27272a — message surface */
-  --color-chat-title: hsl(240 5.2% 26.1% / 0.6);
+  --color-chat-title: hsl(240 5.2% 26.1% / 0.7);
   /* = zinc-700, #3f3f46 — block title (lighter than body) */
-  --color-chat-body: hsl(240 5.9% 10% / 0.6);
+  --color-chat-body: hsl(240 5.9% 10% / 0.7);
   /* = zinc-900, #18181b — block body (darker, closer to panel) */
   --color-chat-border: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — container border */
