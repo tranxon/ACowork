@@ -929,3 +929,46 @@ export interface EmbeddingTestResponse {
   error?: string | null;
 }
 
+// ── Migration types ───────────────────────────────────────────────────────
+
+/** Migration progress for a single agent — matches GET /api/embedding-models/migration-progress */
+export interface AgentMigrationProgress {
+  agent_id: string;
+  request_id: string;
+  target_model_id: string;
+  target_dimension: number;
+  progress?: {
+    rebuilt: number;
+    total_scanned: number;
+    errors: number;
+    phase: string;
+    label: string;
+  } | null;
+  done: boolean;
+  error?: string | null;
+}
+
+/** Response from GET /api/embedding-models/migration-progress */
+export interface MigrationProgressResponse {
+  agents: AgentMigrationProgress[];
+}
+
+/** Agent entry returned in migration-required response */
+export interface MigrationAgentEntry {
+  agent_id: string;
+  name: string;
+  is_running: boolean;
+  has_active_sessions: boolean;
+  migration_status?: string | null;
+}
+
+/** Response from select_model when migration is required */
+export interface SelectModelMigrationResponse {
+  model_id: string;
+  status: string;
+  message: string;
+  new_dimension: number;
+  old_dimension?: number | null;
+  agents: MigrationAgentEntry[];
+}
+

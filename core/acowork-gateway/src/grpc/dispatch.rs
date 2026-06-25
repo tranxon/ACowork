@@ -61,8 +61,11 @@ pub async fn dispatch_grpc_request(
                 return handle_ask_question_grpc(&params, bridge_tx).await;
             }
 
-            // S1.14: Check if this is a session response from Runtime
-            if req.action == "session_response" {
+            // Migration complete: update RunningAgentInfo.migration state
+            if req.target == "gateway" && req.action == "migration_complete" {
+                handle_migration_complete(&params, conn_id, state, session_mgr).await
+            } else if req.action == "session_response" {
+                // S1.14: Check if this is a session response from Runtime
                 if let Some(pending) = session_pending {
                     handle_session_response_grpc(&params, pending).await;
                 }
@@ -245,6 +248,31 @@ pub async fn dispatch_grpc_request(
                 let event_type = crate::http::routes::BridgeEventType::from_action(&req.action)
                     .unwrap_or_else(crate::http::routes::BridgeEventType::default_for_unknown);
 
+                // Capture migration progress fields before params is moved.
+                let is_migration_progress = req.action == "embedding_migration_progress";
+                let migration_processed = params
+                    .get("processed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let migration_total = params
+                    .get("total")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let migration_errors = params
+                    .get("errors")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let migration_phase = params
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("reembed")
+                    .to_string();
+                let migration_label = params
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
                 // Transparent passthrough: Gateway is a dumb pipe, not a protocol
                 // translator. Only the Chunk event needs a minimal rename (content→delta)
                 // to match the frontend's long-established streaming protocol.
@@ -257,13 +285,29 @@ pub async fn dispatch_grpc_request(
 
                 if let Some(tx) = bridge_tx {
                     let event = BridgeEvent {
-                        agent_id,
+                        agent_id: agent_id.clone(),
                         message_id: format!("chunk-{}", chrono::Utc::now().timestamp_millis()),
                         event_type,
                         payload,
                     };
                     if let Err(e) = tx.send(event) {
                         tracing::debug!("Failed to broadcast stream chunk: {}", e);
+                    }
+                }
+
+                // Migration progress: also update RunningAgentInfo.migration
+                if is_migration_progress {
+                    let mut gw = state.write().await;
+                    if let Some(info) = gw.running_agents.get_mut(&agent_id) {
+                        if let Some(ref mut m) = info.migration {
+                            m.progress = Some((
+                                migration_processed,
+                                migration_total,
+                                migration_errors,
+                                migration_phase,
+                                migration_label,
+                            ));
+                        }
                     }
                 }
             }
@@ -308,6 +352,53 @@ pub fn is_stream_chunk(msg: &proto::ClientMessage) -> bool {
         msg.payload,
         Some(proto::client_message::Payload::StreamChunk(_))
     )
+}
+
+/// Handle migration_complete IntentSend from Runtime.
+///
+/// Updates RunningAgentInfo.migration state to reflect completion or failure.
+async fn handle_migration_complete(
+    params: &serde_json::Value,
+    conn_id: &str,
+    state: &SharedState,
+    session_mgr: &Arc<Mutex<SessionManager>>,
+) -> GatewayResponse {
+    let success = params
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let error_msg = params
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Resolve agent_id from connection
+    let agent_id = {
+        let mgr = session_mgr.lock().await;
+        mgr.get_session(conn_id)
+            .and_then(|s| s.agent_id.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+
+    let mut gw = state.write().await;
+    if let Some(info) = gw.running_agents.get_mut(&agent_id) {
+        if let Some(ref mut m) = info.migration {
+            m.done = true;
+            if !success {
+                m.error = error_msg;
+            }
+            tracing::info!(
+                agent_id = %agent_id,
+                success = success,
+                error = ?m.error,
+                "Migration completed"
+            );
+        }
+    }
+
+    GatewayResponse::IntentDelivered {
+        message_id: format!("msg-migration-{}", chrono::Utc::now().timestamp_millis()),
+    }
 }
 
 /// Handle tool_approval_needed IntentSend from Runtime (C2).

@@ -1,21 +1,29 @@
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
-import type { HealthResponse, GatewayStatus, LocalGatewayState } from "../lib/types";
+import type { HealthResponse, GatewayStatus, LocalGatewayState, AgentMigrationProgress } from "../lib/types";
+import { fetchMigrationProgress } from "../lib/gateway-api";
 
 interface GatewayStore {
   status: GatewayStatus;
   health: HealthResponse | null;
   localState: LocalGatewayState;
+  /** Migration progress for all agents (polled from Gateway) */
+  migrationProgress: Record<string, AgentMigrationProgress>;
   checkHealth: () => Promise<void>;
   startLocalGateway: () => Promise<void>;
   stopLocalGateway: () => Promise<void>;
   checkLocalStatus: () => Promise<void>;
+  /** Poll migration progress from Gateway, returns true if any migration is in progress */
+  pollMigrationProgress: () => Promise<boolean>;
+  /** Update migration progress for a single agent (from WebSocket event) */
+  updateMigrationProgress: (agentId: string, reconstructed: number, totalScanned: number) => void;
 }
 
 export const useGatewayStore = create<GatewayStore>((set, get) => ({
   status: "disconnected",
   health: null,
   localState: "idle",
+  migrationProgress: {},
 
   checkHealth: async () => {
     try {
@@ -78,5 +86,44 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
       // Leave localState unchanged so we don't clobber a valid "running"
       // state from a previous successful start.
     }
+  },
+
+  pollMigrationProgress: async () => {
+    if (get().status !== "connected") return false;
+    try {
+      const resp = await fetchMigrationProgress();
+      const progress: Record<string, AgentMigrationProgress> = {};
+      let anyInProgress = false;
+      for (const agent of resp.agents) {
+        progress[agent.agent_id] = agent;
+        if (!agent.done && !agent.error) anyInProgress = true;
+      }
+      set({ migrationProgress: progress });
+      return anyInProgress;
+    } catch {
+      return false;
+    }
+  },
+
+  updateMigrationProgress: (agentId: string, reconstructed: number, totalScanned: number) => {
+    set((state) => {
+      const existing = state.migrationProgress[agentId];
+      if (!existing) return state;
+      return {
+        migrationProgress: {
+          ...state.migrationProgress,
+          [agentId]: {
+            ...existing,
+            progress: {
+              rebuilt: reconstructed,
+              total_scanned: totalScanned,
+              errors: existing.progress?.errors ?? 0,
+              phase: "reembed",
+              label: existing.progress?.label ?? "",
+            },
+          },
+        },
+      };
+    });
   },
 }));

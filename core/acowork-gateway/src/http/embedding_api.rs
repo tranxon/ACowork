@@ -18,6 +18,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::AppState;
+use crate::gateway::state::AgentMigrationState;
 use crate::lifecycle::embed;
 
 // ── Response types ─────────────────────────────────────────────────────
@@ -88,6 +89,44 @@ pub struct SelectModelRequest {
     /// dimension_mismatch status.
     #[serde(default)]
     pub force: bool,
+}
+
+/// Agent info returned when dimension change requires migration.
+#[derive(Debug, Serialize)]
+pub struct MigrationAgentEntry {
+    /// Agent ID
+    pub agent_id: String,
+    /// Agent display name
+    pub name: String,
+    /// Whether this agent is currently running (must be running for migration)
+    pub is_running: bool,
+    /// Whether this agent has active LLM sessions (must stop before migration)
+    pub has_active_sessions: bool,
+    /// Current migration status (None = not started)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration_status: Option<String>,
+}
+
+/// Response for select_model when dimension changes and migration is required.
+#[derive(Debug, Serialize)]
+pub struct SelectModelMigrationResponse {
+    pub model_id: String,
+    pub status: String,
+    pub message: String,
+    /// New embedding dimension
+    pub new_dimension: usize,
+    /// Old embedding dimension
+    pub old_dimension: Option<usize>,
+    /// Agents that will need migration
+    pub agents: Vec<MigrationAgentEntry>,
+}
+
+/// Request for starting migration.
+#[derive(Debug, Deserialize)]
+pub struct StartMigrationRequest {
+    /// Agent IDs to migrate (empty or absent = all running agents)
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
 }
 
 // ── Route handlers ─────────────────────────────────────────────────────
@@ -331,9 +370,75 @@ pub async fn select_model(
                 }
             }
 
+            // If dimension changed, return migration info instead of pushing config.
+            // Frontend will show migration queue UI; user confirms → POST start-migration.
+            if dimension_changed {
+                let agents: Vec<MigrationAgentEntry> = gw
+                    .running_agents
+                    .values()
+                    .map(|info| MigrationAgentEntry {
+                        agent_id: info.agent_id.clone(),
+                        name: info.agent_id.clone(), // Name resolved later by frontend
+                        is_running: true,
+                        has_active_sessions: false, // Unknown until agent is queried
+                        migration_status: info.migration.as_ref().map(|m| {
+                            if m.done { "completed".to_string() }
+                            else if m.error.is_some() { "failed".to_string() }
+                            else { "pending".to_string() }
+                        }),
+                    })
+                    .collect();
+
+                // Also include installed but not running agents (for frontend info)
+                let running_ids: std::collections::HashSet<&str> = gw
+                    .running_agents
+                    .keys()
+                    .map(|s| s.as_str())
+                    .collect();
+                let mut all_agents = agents;
+                for (aid, info) in &gw.installed_agents {
+                    if !running_ids.contains(aid.as_str()) {
+                        all_agents.push(MigrationAgentEntry {
+                            agent_id: aid.clone(),
+                            name: info.name.clone(),
+                            is_running: false,
+                            has_active_sessions: false,
+                            migration_status: None,
+                        });
+                    }
+                }
+
+                drop(gw);
+
+                tracing::info!(
+                    model_id = %model_id,
+                    dimension = new_dim,
+                    old_dimension = current_dim,
+                    agent_count = all_agents.len(),
+                    "Embedding model switched — migration required"
+                );
+
+                return (
+                    StatusCode::OK,
+                    Json(SelectModelMigrationResponse {
+                        model_id,
+                        status: "migration_required".to_string(),
+                        message: format!(
+                            "Model loaded. Migration required: dimension changed {} → {}.",
+                            current_dim.unwrap_or(0),
+                            new_dim
+                        ),
+                        new_dimension: new_dim,
+                        old_dimension: current_dim,
+                        agents: all_agents,
+                    }),
+                )
+                    .into_response();
+            }
+
             drop(gw);
 
-            // B7: Push EmbeddingConfigUpdate to all running Runtimes
+            // Same dimension — push to all running agents immediately
             if let Some(ref pusher) = state.pusher {
                 pusher.push_embedding_config().await;
             }
@@ -343,24 +448,13 @@ pub async fn select_model(
                 dimension = new_dim,
                 dimension_changed,
                 previous_model = ?current_model_id,
-                "Embedding model switched"
+                "Embedding model switched (same dimension)"
             );
-
-            let message = if dimension_changed {
-                format!(
-                    "Model loaded. Dimension changed ({} → {}), \
-                     Runtime will rebuild memory embeddings automatically.",
-                    current_dim.unwrap_or(0),
-                    new_dim
-                )
-            } else {
-                "Model loaded and activated".to_string()
-            };
 
             Json(EmbeddingModelActionResponse {
                 model_id,
                 status: "loaded".to_string(),
-                message,
+                message: "Model loaded and activated".to_string(),
             })
             .into_response()
         }
@@ -606,6 +700,193 @@ pub async fn delete_model(
     }
 }
 
+// ── Migration endpoints ──────────────────────────────────────────────────
+
+/// GET /api/embedding-models/migration-progress — get migration progress for all agents.
+pub async fn get_migration_progress(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let gw = state.gateway_state.read().await;
+
+    let agents: Vec<serde_json::Value> = gw
+        .running_agents
+        .values()
+        .filter_map(|info| {
+            info.migration.as_ref().map(|m| {
+                serde_json::json!({
+                    "agent_id": info.agent_id,
+                    "request_id": m.request_id,
+                    "target_model_id": m.target_model_id,
+                    "target_dimension": m.target_dimension,
+                    "progress": m.progress.as_ref().map(|(rebuilt, scanned, errors, phase, label)| {
+                        serde_json::json!({
+                            "rebuilt": rebuilt,
+                            "total_scanned": scanned,
+                            "errors": errors,
+                            "phase": phase,
+                            "label": label,
+                        })
+                    }),
+                    "done": m.done,
+                    "error": m.error,
+                })
+            })
+        })
+        .collect();
+
+    drop(gw);
+
+    Json(serde_json::json!({
+        "agents": agents,
+    }))
+}
+
+/// POST /api/embedding-models/{id}/start-migration — start embedding migration for agents.
+pub async fn start_migration(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(req): Json<StartMigrationRequest>,
+) -> impl IntoResponse {
+    // Read embed config
+    let (embed_endpoint, embed_model_id, embed_dimension) = {
+        let gw = state.gateway_state.read().await;
+        let eps = match &gw.embed_process {
+            Some(eps) => eps,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(EmbeddingModelActionResponse {
+                        model_id,
+                        status: "error".to_string(),
+                        message: "Embedding service is not running".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let endpoint = format!("http://127.0.0.1:{}/v1", eps.port);
+        let mid = eps.active_model_id.clone().unwrap_or_default();
+        let dim = eps.active_dimension.unwrap_or(0);
+        (endpoint, mid, dim)
+    };
+
+    // Determine target agents
+    let target_agents: Vec<String> = if req.agent_ids.is_empty() {
+        // Default: all running agents
+        let gw = state.gateway_state.read().await;
+        gw.running_agents.keys().cloned().collect()
+    } else {
+        req.agent_ids
+    };
+
+    if target_agents.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(EmbeddingModelActionResponse {
+                model_id,
+                status: "error".to_string(),
+                message: "No agents to migrate. Start some agents first.".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Verify all target agents are running
+    {
+        let gw = state.gateway_state.read().await;
+        for aid in &target_agents {
+            if !gw.is_running(aid) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(EmbeddingModelActionResponse {
+                        model_id: model_id.clone(),
+                        status: "error".to_string(),
+                        message: format!(
+                            "Agent '{}' is not running. Please start it before migrating.",
+                            aid
+                        ),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Send MigrationStart to each agent and update their migration state
+    let mut started = 0u32;
+    let mut errors = Vec::new();
+
+    let pusher = match &state.pusher {
+        Some(p) if p.has_grpc_mgr() => p.clone(),
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(EmbeddingModelActionResponse {
+                    model_id,
+                    status: "error".to_string(),
+                    message: "gRPC session manager not available".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    for aid in &target_agents {
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Mark migration state in RunningAgentInfo
+        {
+            let mut gw = state.gateway_state.write().await;
+            if let Some(info) = gw.running_agents.get_mut(aid) {
+                info.migration = Some(AgentMigrationState {
+                    request_id: request_id.clone(),
+                    target_model_id: embed_model_id.clone(),
+                    target_dimension: embed_dimension,
+                    progress: None,
+                    done: false,
+                    error: None,
+                });
+            }
+        }
+
+        // Send MigrationStart to the agent
+        if pusher
+            .push_migration_start(aid, &request_id, &embed_endpoint, &embed_model_id, embed_dimension)
+            .await
+        {
+            started += 1;
+            tracing::info!(
+                agent_id = %aid,
+                request_id = %request_id,
+                "Sent MigrationStart to agent"
+            );
+        } else {
+            errors.push(format!("{}: push failed", aid));
+        }
+    }
+
+    if errors.is_empty() {
+        Json(EmbeddingModelActionResponse {
+            model_id,
+            status: "migration_started".to_string(),
+            message: format!("Migration started for {} agent(s)", started),
+        })
+        .into_response()
+    } else {
+        Json(EmbeddingModelActionResponse {
+            model_id,
+            status: "partial".to_string(),
+            message: format!(
+                "Migration started for {} agent(s), {} errors: {}",
+                started,
+                errors.len(),
+                errors.join("; ")
+            ),
+        })
+        .into_response()
+    }
+}
+
 // ── Router ─────────────────────────────────────────────────────────────
 
 /// Build the embedding models API router.
@@ -617,4 +898,6 @@ pub fn embedding_routes() -> Router<AppState> {
         .route("/api/embedding-models/{id}/select", post(select_model))
         .route("/api/embedding-models/{id}/status", get(get_model_status))
         .route("/api/embedding-models/{id}", delete(delete_model))
+        .route("/api/embedding-models/migration-progress", get(get_migration_progress))
+        .route("/api/embedding-models/{id}/start-migration", post(start_migration))
 }

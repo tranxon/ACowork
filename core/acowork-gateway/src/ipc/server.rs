@@ -1080,6 +1080,8 @@ mod tests {
                 dev_mode: false,
                 debug_port: None,
                 workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
             });
         }
 

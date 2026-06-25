@@ -1,16 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import type { EmbeddingModelWithStatus } from "../../lib/types";
+import type { EmbeddingModelWithStatus, SelectModelMigrationResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
-import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel } from "../../lib/gateway-api";
+import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel, startMigration, selectEmbeddingModelWithMigration } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
 import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2 } from "lucide-react";
 
 export function EmbeddingModelTab() {
     const { t } = useTranslation();
     const status = useGatewayStore((s) => s.status);
+    const migrationProgress = useGatewayStore((s) => s.migrationProgress);
+    const pollMigrationProgress = useGatewayStore((s) => s.pollMigrationProgress);
     const [models, setModels] = useState<EmbeddingModelWithStatus[]>([]);
     const [activeModelId, setActiveModelId] = useState<string | null>(null);
     const [serviceRunning, setServiceRunning] = useState(false);
@@ -22,6 +24,11 @@ export function EmbeddingModelTab() {
     const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
     const [error, setError] = useState<string | null>(null);
     const [dimensionConfirm, setDimensionConfirm] = useState<{ modelId: string; message: string } | null>(null);
+    const [migrationResponse, setMigrationResponse] = useState<SelectModelMigrationResponse | null>(null);
+    const [migrationAgentIds, setMigrationAgentIds] = useState<Set<string>>(new Set());
+    const [migrationStarting, setMigrationStarting] = useState(false);
+    const [migrationStarted, setMigrationStarted] = useState(false);
+    const migrationPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<EmbeddingTestResponse | null>(null);
 
@@ -190,12 +197,31 @@ export function EmbeddingModelTab() {
         setSelectingId(modelId);
         setError(null);
         try {
-            const result = await selectEmbeddingModel(modelId, force);
-            if (result.status === "dimension_mismatch") {
-                setDimensionConfirm({ modelId, message: result.message });
-                return;
+            if (force) {
+                // Use migration-aware endpoint for forced selects
+                const result = await selectEmbeddingModelWithMigration(modelId, force);
+                if ("agents" in result && result.status === "migration_required") {
+                    // Dimension changed — show migration agent list
+                    setMigrationResponse(result);
+                    setMigrationAgentIds(new Set(result.agents.filter(a => a.is_running).map(a => a.agent_id)));
+                    setSelectingId(null);
+                    await loadModels();
+                    return;
+                }
+                // Same dimension or simple loaded response
+                if (result.status === "loaded" || result.status === "migration_started") {
+                    setMigrationResponse(null);
+                    setMigrationStarted(false);
+                }
+                await loadModels();
+            } else {
+                const result = await selectEmbeddingModel(modelId, force);
+                if (result.status === "dimension_mismatch") {
+                    setDimensionConfirm({ modelId, message: result.message });
+                    return;
+                }
+                await loadModels();
             }
-            await loadModels();
         } catch (e) {
             setError(e instanceof Error ? e.message : "Select failed");
         } finally {
@@ -208,6 +234,57 @@ export function EmbeddingModelTab() {
         setDimensionConfirm(null);
         await handleSelect(dimensionConfirm.modelId, true);
     }, [dimensionConfirm, handleSelect]);
+
+    const handleStartMigration = useCallback(async () => {
+        if (!migrationResponse || migrationAgentIds.size === 0) return;
+        const modelId = migrationResponse.model_id;
+        setMigrationStarting(true);
+        setError(null);
+        try {
+            const agentIds = Array.from(migrationAgentIds);
+            await startMigration(modelId, agentIds);
+            setMigrationStarted(true);
+            // Start polling migration progress
+            if (migrationPollingRef.current) clearInterval(migrationPollingRef.current);
+            migrationPollingRef.current = setInterval(async () => {
+                const inProgress = await pollMigrationProgress();
+                if (!inProgress) {
+                    if (migrationPollingRef.current) {
+                        clearInterval(migrationPollingRef.current);
+                        migrationPollingRef.current = null;
+                    }
+                    setMigrationStarted(false);
+                    await loadModels();
+                }
+            }, 2000);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "Migration start failed");
+        } finally {
+            setMigrationStarting(false);
+        }
+    }, [migrationResponse, migrationAgentIds, pollMigrationProgress, loadModels]);
+
+    const handleMigrationCancel = useCallback(() => {
+        setMigrationResponse(null);
+        setMigrationAgentIds(new Set());
+        setMigrationStarted(false);
+        if (migrationPollingRef.current) {
+            clearInterval(migrationPollingRef.current);
+            migrationPollingRef.current = null;
+        }
+    }, []);
+
+    const toggleMigrationAgent = useCallback((agentId: string) => {
+        setMigrationAgentIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(agentId)) {
+                next.delete(agentId);
+            } else {
+                next.add(agentId);
+            }
+            return next;
+        });
+    }, []);
 
     const handleTest = useCallback(async () => {
         setTesting(true);
@@ -326,6 +403,20 @@ export function EmbeddingModelTab() {
                 </div>
             )}
 
+            {/* Migration panel */}
+            {migrationResponse && (
+                <MigrationPanel
+                    migrationResponse={migrationResponse}
+                    migrationAgentIds={migrationAgentIds}
+                    migrationStarting={migrationStarting}
+                    migrationStarted={migrationStarted}
+                    migrationProgress={migrationProgress}
+                    onToggleAgent={toggleMigrationAgent}
+                    onStartMigration={handleStartMigration}
+                    onCancel={handleMigrationCancel}
+                />
+            )}
+
             {/* Model list */}
             <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
                 <div className="mb-3 flex items-center justify-between">
@@ -391,6 +482,154 @@ export function EmbeddingModelTab() {
                     onCancel={() => setDeleteConfirm(null)}
                 />
             )}
+        </div>
+    );
+}
+
+/** Migration progress panel — shows agent migration queue and progress */
+function MigrationPanel({
+    migrationResponse,
+    migrationAgentIds,
+    migrationStarting,
+    migrationStarted,
+    migrationProgress,
+    onToggleAgent,
+    onStartMigration,
+    onCancel,
+}: {
+    migrationResponse: SelectModelMigrationResponse;
+    migrationAgentIds: Set<string>;
+    migrationStarting: boolean;
+    migrationStarted: boolean;
+    migrationProgress: Record<string, { progress?: { rebuilt: number; total_scanned: number; errors: number; phase: string; label: string } | null; done: boolean; error?: string | null }>;
+    onToggleAgent: (agentId: string) => void;
+    onStartMigration: () => void;
+    onCancel: () => void;
+}) {
+    const allDone = migrationResponse.agents
+        .filter((a) => migrationAgentIds.has(a.agent_id))
+        .every((a) => {
+            const p = migrationProgress[a.agent_id];
+            return p?.done;
+        });
+
+    return (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
+            <h2 className="mb-2 text-xs font-medium text-amber-800 dark:text-amber-300">
+                {migrationStarted
+                    ? "Embedding Migration in Progress"
+                    : "Embedding Dimension Migration Required"}
+            </h2>
+            <p className="mb-3 text-[11px] text-amber-700 dark:text-amber-400">
+                {migrationResponse.message}
+                {` (Old: ${migrationResponse.old_dimension ?? "?"}, New: ${migrationResponse.new_dimension})`}
+            </p>
+
+            {/* Agent list */}
+            <div className="mb-3 space-y-1.5">
+                {migrationResponse.agents.map((agent) => {
+                    const isSelected = migrationAgentIds.has(agent.agent_id);
+                    const prog = migrationProgress[agent.agent_id];
+                    const pct = prog?.progress?.total_scanned
+                        ? Math.round((prog.progress.rebuilt / prog.progress.total_scanned) * 100)
+                        : 0;
+                    const isDone = prog?.done;
+                    const hasError = prog?.error;
+
+                    return (
+                        <div
+                            key={agent.agent_id}
+                            className="flex items-center gap-2 rounded border border-amber-200 bg-white px-3 py-2 text-xs dark:border-amber-700 dark:bg-zinc-800"
+                        >
+                            {/* Checkbox (only before migration starts) */}
+                            {!migrationStarted && (
+                                <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    disabled={!agent.is_running}
+                                    onChange={() => onToggleAgent(agent.agent_id)}
+                                    className="h-3.5 w-3.5"
+                                />
+                            )}
+
+                            {/* Agent name */}
+                            <span className="min-w-[100px] truncate font-medium">
+                                {agent.name !== agent.agent_id ? agent.name : agent.agent_id}
+                            </span>
+
+                            {/* Status badge */}
+                            {!agent.is_running ? (
+                                <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
+                                    Not Running
+                                </span>
+                            ) : isDone ? (
+                                <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900/50 dark:text-green-400">
+                                    Done ✓
+                                </span>
+                            ) : hasError ? (
+                                <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/50 dark:text-red-400">
+                                    Failed ✗
+                                </span>
+                            ) : migrationStarted && prog ? (
+                                <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/50 dark:text-blue-400">
+                                    {pct}%
+                                </span>
+                            ) : (
+                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/50 dark:text-amber-400">
+                                    Pending
+                                </span>
+                            )}
+
+                            {/* Progress bar */}
+                            {migrationStarted && prog && !isDone && !hasError && (
+                                <div className="ml-auto flex w-24 items-center gap-1">
+                                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                                        <div
+                                            className="h-full rounded-full bg-blue-500 transition-all"
+                                            style={{ width: `${pct}%` }}
+                                        />
+                                    </div>
+                                    <span className="text-[10px] tabular-nums text-zinc-500">
+                                        {prog.progress?.rebuilt ?? 0}/{prog.progress?.total_scanned ?? "?"}
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-2">
+                {!migrationStarted ? (
+                    <>
+                        <button
+                            onClick={onStartMigration}
+                            disabled={migrationStarting || migrationAgentIds.size === 0}
+                            className="rounded bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                        >
+                            {migrationStarting ? "Starting..." : "Start Migration"}
+                        </button>
+                        <button
+                            onClick={onCancel}
+                            className="rounded bg-zinc-200 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                        >
+                            Cancel
+                        </button>
+                    </>
+                ) : allDone ? (
+                    <button
+                        onClick={onCancel}
+                        className="rounded bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700"
+                    >
+                        Migration Complete — Dismiss
+                    </button>
+                ) : (
+                    <span className="text-xs text-amber-700 dark:text-amber-400">
+                        ⏳ Migrating agents... Do not close this panel.
+                    </span>
+                )}
+            </div>
         </div>
     );
 }

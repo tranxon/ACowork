@@ -65,6 +65,8 @@ pub enum BridgeEventType {
     AskQuestion,
     /// Todo list updated (Runtime → frontend, per-session task tracking)
     TodoListUpdated,
+    /// Embedding migration progress (Gateway → frontend, shows migration queue)
+    EmbeddingMigrationProgress,
     /// Unknown/unrecognized action — payload is forwarded as-is so the
     /// frontend can decide what to do. This avoids silently treating new
     /// Runtime event types as "done" (which would break streaming state).
@@ -93,6 +95,7 @@ impl BridgeEventType {
             "todo_list_updated" => Some(Self::TodoListUpdated),
             "compacting_started" => Some(Self::CompactingStarted),
             "compacting_ended" => Some(Self::CompactingEnded),
+            "embedding_migration_progress" => Some(Self::EmbeddingMigrationProgress),
             _ => None,
         }
     }
@@ -125,6 +128,7 @@ impl BridgeEventType {
             Self::TodoListUpdated => "todo_list_updated",
             Self::CompactingStarted => "compacting_started",
             Self::CompactingEnded => "compacting_ended",
+            Self::EmbeddingMigrationProgress => "embedding_migration_progress",
             Self::Unknown => "unknown",
         }
     }

@@ -746,6 +746,11 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             protocol::GatewayResponse::EmbeddingConfigUpdate { .. } => Some(
                 proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
             ),
+            // MigrationStart — no proto message defined (same pattern as EmbeddingConfigUpdate).
+            // This variant is only used in direct IPC scenarios.
+            protocol::GatewayResponse::MigrationStart { .. } => Some(
+                proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
+            ),
         };
 
         proto::ServerMessage {

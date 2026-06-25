@@ -261,6 +261,19 @@ impl GrafeoStore {
         embed_fn: impl Fn(&str) -> Option<Vec<f32>>,
         new_dim: usize,
     ) -> Result<RebuildStats> {
+        self.migrate_embedding_dimension_with_progress(embed_fn, new_dim, None::<&dyn Fn(u64, u64)>)
+    }
+
+    /// Migrate with a progress callback.
+    ///
+    /// `progress_cb` is called with `(processed, total)` after each node is
+    /// re-embedded. `None` disables progress reporting.
+    pub fn migrate_embedding_dimension_with_progress(
+        &self,
+        embed_fn: impl Fn(&str) -> Option<Vec<f32>>,
+        new_dim: usize,
+        progress_cb: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<RebuildStats> {
         tracing::info!(
             old_dim = self.hnsw_config.dim,
             new_dim,
@@ -268,7 +281,7 @@ impl GrafeoStore {
         );
 
         // Step 1: Re-embed all nodes with the new provider.
-        let stats = self.rebuild_embeddings(&embed_fn, new_dim)?;
+        let stats = self.rebuild_embeddings_with_progress(&embed_fn, new_dim, progress_cb)?;
 
         // Step 2: Drop all old HNSW vector indexes.
         for label in [
@@ -344,9 +357,62 @@ impl GrafeoStore {
         embed_fn: impl Fn(&str) -> Option<Vec<f32>>,
         new_dim: usize,
     ) -> Result<RebuildStats> {
+        self.rebuild_embeddings_with_progress(embed_fn, new_dim, None::<&dyn Fn(u64, u64)>)
+    }
+
+    /// Rebuild all embeddings with progress reporting.
+    ///
+    /// `progress_cb` is called with `(processed, total)` after each node is
+    /// re-embedded. `None` disables progress reporting. `total` is the count of
+    /// nodes that have an existing embedding (skipped nodes are counted as
+    /// processed with no callback).
+    pub fn rebuild_embeddings_with_progress(
+        &self,
+        embed_fn: impl Fn(&str) -> Option<Vec<f32>>,
+        new_dim: usize,
+        progress_cb: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<RebuildStats> {
         use crate::types::labels;
 
         let mut stats = RebuildStats::default();
+
+        // Count total embeddable nodes for progress reporting.
+        let total_embeddable: u64 = if progress_cb.is_some() {
+            let mut count = 0u64;
+            for label in [
+                labels::EPISODIC,
+                labels::KNOWLEDGE,
+                labels::PROCEDURAL,
+                labels::AUTOBIOGRAPHICAL,
+            ] {
+                let graph = self.db.graph_store();
+                let node_ids = graph.nodes_by_label(label);
+                for &node_id in &node_ids {
+                    let node = match self.db.get_node(node_id) {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    let has_embedding = node
+                        .properties_as_btree()
+                        .into_iter()
+                        .any(|(k, v)| k.as_str() == "embedding" && v.as_vector().is_some());
+                    if has_embedding {
+                        let has_content = node
+                            .properties_as_btree()
+                            .into_iter()
+                            .any(|(k, v)| k.as_str() == "content" && v.as_str().is_some_and(|s| !s.is_empty()));
+                        if has_content {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        } else {
+            0
+        };
+
+        let mut processed: u64 = 0;
 
         for label in [
             labels::EPISODIC,
@@ -412,6 +478,11 @@ impl GrafeoStore {
                     None => {
                         stats.errors += 1;
                     }
+                }
+
+                processed += 1;
+                if let Some(ref cb) = progress_cb {
+                    cb(processed, total_embeddable);
                 }
             }
         }

@@ -12,6 +12,8 @@ import type {
   EmbeddingModelActionResponse,
   EmbeddingModelStatusResponse,
   EmbeddingTestResponse,
+  MigrationProgressResponse,
+  SelectModelMigrationResponse,
 } from "./types";
 import { getGatewayUrl } from "./config";
 
@@ -243,4 +245,45 @@ export async function testEmbeddingModel(
   });
   if (!resp.ok) throw new Error(`Test request failed: ${resp.status}`);
   return resp.json();
+}
+
+/** Start embedding dimension migration for agents */
+export async function startMigration(
+  modelId: string,
+  agentIds: string[],
+  gatewayUrl = getGatewayUrl(),
+): Promise<EmbeddingModelActionResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-models/${modelId}/start-migration`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_ids: agentIds }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error((data as EmbeddingModelActionResponse).message ?? `Migration start failed: ${resp.status}`);
+  return data as EmbeddingModelActionResponse;
+}
+
+/** Get embedding migration progress for all agents */
+export async function fetchMigrationProgress(
+  gatewayUrl = getGatewayUrl(),
+): Promise<MigrationProgressResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-models/migration-progress`);
+  if (!resp.ok) throw new Error(`Failed to fetch migration progress: ${resp.status}`);
+  return resp.json();
+}
+
+/** Select embedding model and return full migration response (handles 200 with migration info) */
+export async function selectEmbeddingModelWithMigration(
+  modelId: string,
+  force: boolean,
+  gatewayUrl = getGatewayUrl(),
+): Promise<SelectModelMigrationResponse | EmbeddingModelActionResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-models/${modelId}/select`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ force }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error((data as EmbeddingModelActionResponse).message ?? `Select failed: ${resp.status}`);
+  return data as SelectModelMigrationResponse | EmbeddingModelActionResponse;
 }

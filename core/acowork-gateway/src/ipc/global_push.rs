@@ -423,4 +423,45 @@ impl GlobalResourcePusher {
             tracing::info!(pushed, failed, "Embedding config push complete");
         }
     }
+
+    /// Push a `MigrationStart` command to a single agent by ID.
+    ///
+    /// Returns true if the message was successfully queued for delivery.
+    /// Used by the embedding migration HTTP endpoint to start per-agent
+    /// dimension migration.
+    pub async fn push_migration_start(
+        &self,
+        agent_id: &str,
+        request_id: &str,
+        embed_endpoint: &str,
+        embed_model_id: &str,
+        embed_dimension: usize,
+    ) -> bool {
+        let grpc_session_mgr = match &self.grpc_session_mgr {
+            Some(mgr) => mgr.clone(),
+            None => {
+                tracing::warn!("No gRPC session manager, cannot push MigrationStart");
+                return false;
+            }
+        };
+
+        let mgr = grpc_session_mgr.lock().await;
+        if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
+            let msg = GatewayResponse::MigrationStart {
+                request_id: request_id.to_string(),
+                embed_endpoint: embed_endpoint.to_string(),
+                embed_model_id: embed_model_id.to_string(),
+                embed_dimension,
+            };
+            session.push_message(msg).await
+        } else {
+            tracing::warn!(agent = %agent_id, "Agent not found in gRPC session manager");
+            false
+        }
+    }
+
+    /// Check if the GlobalResourcePusher has a usable gRPC session manager.
+    pub fn has_grpc_mgr(&self) -> bool {
+        self.grpc_session_mgr.is_some()
+    }
 }

@@ -1932,6 +1932,189 @@ async fn process_gateway_recv(
                     LoopAction::Continue
                 }
 
+                GatewayResponse::MigrationStart {
+                    request_id,
+                    embed_endpoint,
+                    embed_model_id,
+                    embed_dimension,
+                } => {
+                    tracing::info!(
+                        request_id = %request_id,
+                        endpoint = %embed_endpoint,
+                        model_id = %embed_model_id,
+                        dimension = embed_dimension,
+                        "Received MigrationStart from Gateway — starting embedding dimension migration"
+                    );
+
+                    // Stop all sessions to prevent concurrent memory writes
+                    // during migration (the user already acknowledged this).
+                    session_manager.fire_urgent_stop_all();
+
+                    let store = session_manager.memory_store().cloned();
+                    let outbound = grpc_client.outbound_sender();
+                    let req_id = request_id.clone();
+                    let endpoint = embed_endpoint.clone();
+                    let model_id = embed_model_id.clone();
+                    let dim = embed_dimension;
+
+                    if let Some(store) = store {
+                        let old_dim = store.embedding_dim();
+
+                        tokio::spawn(async move {
+                            // Build the new embedding provider for re-embedding.
+                            let migration_provider =
+                                crate::embedding::remote::RemoteEmbeddingProvider::with_config(
+                                    &endpoint,
+                                    None,
+                                    &model_id,
+                                    dim,
+                                );
+                            let migration_provider = std::sync::Arc::new(migration_provider)
+                                as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
+
+                            // Use spawn_blocking so the sync migration (with
+                            // handle.block_on for async embed calls) doesn't
+                            // starve the tokio worker pool.
+                            let result = tokio::task::spawn_blocking({
+                                let outbound = outbound.clone();
+                                let req_id = req_id.clone();
+                                let store = store.clone();
+                                let provider = migration_provider.clone();
+
+                                move || {
+                                    let handle = tokio::runtime::Handle::current();
+
+                                    // Progress callback: sends a StreamChunk to
+                                    // Gateway so the frontend can show progress.
+                                    let progress_cb = |processed: u64, total: u64| {
+                                        let params = serde_json::json!({
+                                            "request_id": req_id,
+                                            "processed": processed,
+                                            "total": total,
+                                            "phase": "reembed",
+                                        });
+                                        let msg = acowork_core::proto::ClientMessage {
+                                            request_id: 0,
+                                            payload: Some(
+                                                acowork_core::proto::client_message::Payload::StreamChunk(
+                                                    acowork_core::proto::StreamChunk {
+                                                        target: "http-api".to_string(),
+                                                        action: "embedding_migration_progress".to_string(),
+                                                        params_json: params.to_string(),
+                                                    },
+                                                ),
+                                            ),
+                                        };
+                                        let _ = outbound.try_send(msg);
+                                    };
+
+                                    // Embed closure: bridges async embed into sync.
+                                    let provider_for_fn = provider.clone();
+                                    let embed_fn = move |text: &str| -> Option<Vec<f32>> {
+                                        let text_owned = text.to_string();
+                                        match handle.block_on(provider_for_fn.embed(&text_owned)) {
+                                            Ok(vec) => Some(vec),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "Re-embedding failed during migration"
+                                                );
+                                                None
+                                            }
+                                        }
+                                    };
+
+                                    store.migrate_embedding_dimension_with_progress(
+                                        embed_fn,
+                                        dim,
+                                        Some(&progress_cb),
+                                    )
+                                }
+                            })
+                            .await;
+
+                            // Report completion or failure back to Gateway.
+                            match result {
+                                Ok(Ok(stats)) => {
+                                    tracing::info!(
+                                        request_id = %req_id,
+                                        old_dim,
+                                        new_dim = dim,
+                                        rebuilt = stats.rebuilt,
+                                        skipped = stats.skipped_no_embedding + stats.skipped_no_content,
+                                        errors = stats.errors,
+                                        "Embedding dimension migration complete"
+                                    );
+
+                                    // Notify Gateway of completion via IntentSend.
+                                    let params = serde_json::json!({
+                                        "request_id": req_id,
+                                        "success": true,
+                                        "old_dim": old_dim,
+                                        "new_dim": dim,
+                                        "rebuilt": stats.rebuilt,
+                                        "skipped": stats.skipped_no_embedding + stats.skipped_no_content,
+                                        "errors": stats.errors,
+                                    });
+                                    let msg = acowork_core::proto::ClientMessage {
+                                        request_id: 0,
+                                        payload: Some(
+                                            acowork_core::proto::client_message::Payload::IntentSend(
+                                                acowork_core::proto::IntentSendRequest {
+                                                    target: "gateway".to_string(),
+                                                    action: "migration_complete".to_string(),
+                                                    params_json: params.to_string(),
+                                                    r#async: false,
+                                                },
+                                            ),
+                                        ),
+                                    };
+                                    let _ = outbound.send(msg).await;
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::error!(
+                                        request_id = %req_id,
+                                        error = %e,
+                                        "Embedding dimension migration failed"
+                                    );
+                                    let params = serde_json::json!({
+                                        "request_id": req_id,
+                                        "success": false,
+                                        "error": format!("{}", e),
+                                    });
+                                    let msg = acowork_core::proto::ClientMessage {
+                                        request_id: 0,
+                                        payload: Some(
+                                            acowork_core::proto::client_message::Payload::IntentSend(
+                                                acowork_core::proto::IntentSendRequest {
+                                                    target: "gateway".to_string(),
+                                                    action: "migration_complete".to_string(),
+                                                    params_json: params.to_string(),
+                                                    r#async: false,
+                                                },
+                                            ),
+                                        ),
+                                    };
+                                    let _ = outbound.send(msg).await;
+                                }
+                                Err(join_err) => {
+                                    tracing::error!(
+                                        request_id = %req_id,
+                                        error = %join_err,
+                                        "Migration task panicked"
+                                    );
+                                }
+                            }
+                        });
+                    } else {
+                        tracing::warn!(
+                            "MigrationStart received but no memory store available — skipping migration"
+                        );
+                    }
+
+                    LoopAction::Continue
+                }
+
                 _ => {
                     tracing::debug!("Ignoring non-IntentReceived Gateway message");
                     LoopAction::Continue

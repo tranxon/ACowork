@@ -93,6 +93,8 @@ impl LifecycleManager {
             dev_mode,
             debug_port,
             workspace_config_json: None,
+            current_embed_dim: None,
+            migration: None,
         });
 
         tracing::info!("Started agent: {} (PID: {})", agent_id, pid);

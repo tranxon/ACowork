@@ -1048,6 +1048,21 @@ pub enum GatewayResponse {
         /// Embedding dimension of the active model (e.g. 512)
         embed_dimension: usize,
     },
+    /// Start embedding dimension migration (Gateway → Runtime).
+    ///
+    /// Sent by Gateway when the user confirms migration for a specific agent.
+    /// The Runtime must re-embed all memory nodes and rebuild HNSW indexes.
+    /// Progress is reported via GatewayRequest::MigrationProgress.
+    MigrationStart {
+        /// Unique request ID for correlating progress/completion messages
+        request_id: String,
+        /// Embedding service endpoint URL
+        embed_endpoint: String,
+        /// Active embedding model ID
+        embed_model_id: String,
+        /// Embedding dimension of the new model
+        embed_dimension: usize,
+    },
 }
 
 /// MCP server configuration definition (transport-agnostic, shared between Gateway and Runtime).

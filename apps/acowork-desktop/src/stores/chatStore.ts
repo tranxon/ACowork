@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem } from "../lib/types";
 import { useAgentStore } from "./agentStore";
+import { useGatewayStore } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { getGatewayUrl } from "../lib/config";
@@ -2180,6 +2181,17 @@ function handleMessageEvent(
         set((state) => updateSessionState(state, agentId, sid, { isCompacting: false }));
       }
       break;
+
+    case "embedding_migration_progress": {
+      // Forward migration progress from WebSocket to gatewayStore.
+      // agentId comes from the per-agent WebSocket connection context.
+      const processed = data.processed as number;
+      const total = data.total as number;
+      if (processed != null && total != null) {
+        useGatewayStore.getState().updateMigrationProgress(agentId, processed, total);
+      }
+      break;
+    }
 
     case "context_usage": {
       if (sid) {

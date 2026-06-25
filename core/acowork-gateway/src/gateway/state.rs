@@ -41,6 +41,29 @@ pub struct RunningAgentInfo {
     /// Populated by Runtime via UpdateWorkspaceConfig IPC after AgentHello.
     /// Cleared when agent disconnects. NOT persisted to disk.
     pub workspace_config_json: Option<String>,
+    /// Current embedding dimension (reported by Runtime during AgentHello).
+    /// Used by Gateway to detect which agents need dimension migration.
+    pub current_embed_dim: Option<usize>,
+    /// Current embedding migration state.
+    /// None = no migration in progress; Some = migration active.
+    pub migration: Option<AgentMigrationState>,
+}
+
+/// Per-agent embedding migration state tracked by Gateway.
+#[derive(Debug, Clone)]
+pub struct AgentMigrationState {
+    /// Correlation request ID
+    pub request_id: String,
+    /// New embed model ID
+    pub target_model_id: String,
+    /// New embedding dimension
+    pub target_dimension: usize,
+    /// Current progress: (rebuilt, total_scanned, errors, phase, label)
+    pub progress: Option<(u64, u64, u64, String, String)>,
+    /// Whether migration is complete
+    pub done: bool,
+    /// Error message if migration failed
+    pub error: Option<String>,
 }
 
 /// Shared permission store type (same as IPC server)
@@ -284,6 +307,8 @@ mod tests {
             dev_mode: false,
             debug_port: None,
             workspace_config_json: None,
+            current_embed_dim: None,
+            migration: None,
         });
         assert!(state.is_running("com.example.weather"));
 
