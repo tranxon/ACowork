@@ -160,8 +160,8 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
 function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
   return (
     <div className="text-center">
-      <div className="text-4xl">🎉</div>
-      <h1 className="mt-4 text-2xl font-bold">Welcome to AgentCowork</h1>
+      <div className="text-4xl">🎉🎉🎉</div>
+      <h1 className="mt-4 text-2xl font-bold">Welcome to <span style={{ color: "#FBBC05" }}>A</span><span style={{ color: "#34A853" }}>co</span><span style={{ color: "#4285F4" }}>work</span></h1>
       <p className="mt-2 text-sm text-zinc-500">Let's quickly set up your Agent environment</p>
       <div className="mt-8 space-y-3">
         <button
