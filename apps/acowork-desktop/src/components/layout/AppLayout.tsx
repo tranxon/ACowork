@@ -401,8 +401,11 @@ export function AppLayout() {
 
   return (
     <div className="flex h-full w-full flex-col backdrop-blur-sm" style={{ backgroundColor: glassBg } as React.CSSProperties}>
-      {/* Custom title bar */}
-      <TitleBar />
+      {/* Custom title bar — macOS only. On Windows/Linux, decorations:true
+          already provides a native title bar, and titleBarStyle:"Overlay"
+          is macOS-only. Rendering this on Windows would cause double
+          title bars and duplicate window control buttons. */}
+      {navigator.platform.includes("Mac") && <TitleBar />}
 
       {/* Gateway disconnected banner */}
       {gatewayStatus !== "connected" && <GatewayBanner />}
