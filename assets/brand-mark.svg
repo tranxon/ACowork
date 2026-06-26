@@ -5,5 +5,5 @@
         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
         font-size="80"
         font-weight="700"
-        letter-spacing="-2.4"><tspan fill="#FBBC05">A</tspan><tspan fill="#34A853">co</tspan><tspan fill="#4285F4">work</tspan></text>
+        letter-spacing="-2.4"><tspan fill="#FBBC05">A</tspan><tspan fill="#34A853" dx="5">Co</tspan><tspan fill="#4285F4">work</tspan></text>
 </svg>
