@@ -1,12 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/tauri-v2-schema/main/schema.json",
-  "productName": "AgentCowork",
+  "productName": "ACowork",
   "version": "0.1.0",
   "identifier": "com.acowork.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run core:build:debug && npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run core:build && npm run build",
+    "beforeBuildCommand": "npm run core:build:release && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -25,7 +25,7 @@
     },
     "windows": [
       {
-        "title": "AgentCowork",
+        "title": "ACowork",
         "width": 1200,
         "height": 800,
         "minWidth": 1024,
