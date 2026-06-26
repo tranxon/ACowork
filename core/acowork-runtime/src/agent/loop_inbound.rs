@@ -14,9 +14,10 @@
 use acowork_core::providers::traits::{ChatMessage, MessageRole};
 
 use crate::agent::inbound::InboundMessage;
-use crate::agent::loop_::{AgentLoop, ChunkEvent, IterationResult};
+use crate::agent::loop_::{AgentLoop, ChunkEvent, ControlDecision, IterationResult};
 use crate::agent::loop_session::strip_think_block;
 use crate::agent::session_state::SessionStatus;
+use crate::debug::controller::DebugState;
 
 // ── D1 Deduplication: shared message injection helper ──
 
@@ -137,33 +138,41 @@ impl AgentLoop {
         }
     }
 
-    /// Non-blocking check for stop signals.
+    /// Non-blocking check for ALL control signals (Stop, Pause, DebugStop).
     ///
-    /// Drains `inbound_rx` looking for `Stop` messages. Non-stop messages
-    /// are buffered into `session.deferred_inbound` for later re-injection
-    /// by `drain_inbound_queue()`. This preserves user messages that
-    /// arrive while we're checking for stops (the "Stop to queue" UX).
-    pub(crate) fn poll_stop(&mut self) -> bool {
-        let mut should_stop = false;
+    /// This is the single, unified checkpoint that every blocking wait point
+    /// in the agent loop calls.  It replaces the ad-hoc `poll_stop()` + scattered
+    /// `DebugState` checks with one exhaustive decision.
+    ///
+    /// Checks three sources in order:
+    /// 1. `pending_interrupt` — set by sub-modules when a control signal was
+    ///    consumed during a nested blocking wait (e.g. approval subsystem)
+    /// 2. `inbound_rx` — `InboundMessage::Stop` / `UserOp::StopLoop` from
+    ///    the Gateway chat-panel stop button
+    /// 3. `DebugController::state` — `Paused` / `Stopped` set by the debug
+    ///    panel (checked via non-blocking `try_lock()`)
+    ///
+    /// Non-stop, non-pause messages are buffered into `deferred_inbound`
+    /// for later re-injection by `drain_inbound_queue()`.
+    pub(crate) fn poll_control(&mut self) -> ControlDecision {
+        // 1. Check pending_interrupt — set by sub-modules when a control signal
+        //    was consumed during a nested blocking wait.
+        if let Some(interrupt) = self.pending_interrupt.take() {
+            return interrupt;
+        }
+
+        // 2. Check inbound channel for Stop messages
         while let Ok(msg) = self.inbound_rx.try_recv() {
             match msg {
                 InboundMessage::Stop { .. } => {
-                    should_stop = true;
-                    // Consume and continue — drain all pending stops
+                    return ControlDecision::Stop;
                 }
                 InboundMessage::UserOperation(op) => {
                     match &op {
                         crate::agent::inbound::UserOp::StopLoop { .. } => {
-                            should_stop = true;
-                            // Consume and continue — drain all pending stops
+                            return ControlDecision::Stop;
                         }
                         _ => {
-                            // Buffer non-Stop UserOp for re-injection
-                            // by drain_inbound_queue().
-                            tracing::info!(
-                                op = ?std::mem::discriminant(&op),
-                                "poll_stop(): buffering UserOp for re-injection by drain_inbound_queue()"
-                            );
                             self.session
                                 .deferred_inbound
                                 .push(InboundMessage::UserOperation(op));
@@ -171,17 +180,32 @@ impl AgentLoop {
                     }
                 }
                 other => {
-                    // Buffer non-Stop messages for re-injection at the
-                    // next drain_inbound_queue() call.
-                    tracing::info!(
-                        msg_type = ?std::mem::discriminant(&other),
-                        "poll_stop(): buffering non-Stop message for re-injection by drain_inbound_queue()"
-                    );
                     self.session.deferred_inbound.push(other);
                 }
             }
         }
-        should_stop
+
+        // 3. Check debug controller state (non-blocking try_lock)
+        if let Some(ctrl) = self.core.debug_observer.debug_ctrl() {
+            if let Ok(guard) = ctrl.try_lock() {
+                match guard.state {
+                    DebugState::Paused => return ControlDecision::Pause,
+                    DebugState::Stopped => return ControlDecision::Stop,
+                    _ => {}
+                }
+            }
+        }
+
+        ControlDecision::Continue
+    }
+
+    /// Non-blocking check for stop signals.
+    ///
+    /// Thin wrapper around [`poll_control`] for callers that only need
+    /// to drain Stop messages (e.g. `run_inner` consuming redundant
+    /// channel-based Stops after the Notify has already aborted the stream).
+    pub(crate) fn poll_stop(&mut self) -> bool {
+        self.poll_control() == ControlDecision::Stop
     }
 
     /// Drain inbound message queue (non-blocking).

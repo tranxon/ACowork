@@ -36,4 +36,8 @@ pub struct DebugHandles {
     pub debug_event_tx: DebugEventSender,
     pub rewind_notify: Arc<Notify>,
     pub resume_notify: Arc<Notify>,
+    /// Unified control-signal notify shared with `AgentCore::urgent_stop`.
+    /// Fired by debug server (pause/stop) and chat-panel stop path so that
+    /// every blocking `select!` in the agent loop wakes up immediately.
+    pub control_notify: Arc<Notify>,
 }

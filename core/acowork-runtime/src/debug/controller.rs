@@ -188,6 +188,15 @@ pub struct DebugController {
     /// `notify_one()` so the SessionTask wakes up and re-runs the
     /// agent loop with the saved user message.
     pub resume_notify: Arc<Notify>,
+    /// Unified control-signal notification.
+    ///
+    /// Fired by the debug server (pause/stop) and by `fire_urgent_stop`
+    /// (chat-panel stop) so that every blocking wait point in the agent
+    /// loop receives immediate wakeup for ALL control signals (Stop,
+    /// Pause, DebugStop).  This Arc is shared with `AgentCore::urgent_stop`
+    /// so that both the debug server and the chat-panel path fire the
+    /// same edge-triggered Notify.
+    pub control_notify: Arc<Notify>,
     /// The model name used for the current session's token counting.
     /// Set by [`AgentLoop::capture_context_snapshot`] so that context
     /// patches (via `patchContext`) can use model-aware token estimates.
@@ -208,6 +217,7 @@ impl DebugController {
             re_execute_pending: false,
             rewind_notify: Arc::new(Notify::const_new()),
             resume_notify: Arc::new(Notify::const_new()),
+            control_notify: Arc::new(Notify::const_new()),
             current_model: None,
         }
     }
@@ -267,6 +277,24 @@ impl DebugController {
     /// without holding the controller mutex.
     pub fn resume_notify_handle(&self) -> Arc<Notify> {
         self.resume_notify.clone()
+    }
+
+    /// Clone the control notification handle.
+    ///
+    /// Used to share the same `Arc<Notify>` between `AgentCore::urgent_stop`
+    /// and `DebugController` so that both chat-panel stop and debug pause/stop
+    /// fire the same edge-triggered notify.
+    pub fn control_notify_handle(&self) -> Arc<Notify> {
+        self.control_notify.clone()
+    }
+
+    /// Fire the control notification — wakes one blocked `select!` branch.
+    ///
+    /// Called by `debugger.pause` and `debugger.stop` RPC handlers to
+    /// immediately interrupt the agent loop's in-flight blocking waits
+    /// (LLM streaming, tool execution, approval wait).
+    pub fn notify_control(&self) {
+        self.control_notify.notify_one();
     }
 
     /// Set the re-execute pending flag.

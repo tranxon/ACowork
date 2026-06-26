@@ -477,6 +477,7 @@ impl DebugProtocolServer {
                 self.last_active_session_id = Some(session_id.clone());
                 ctrl.state = DebugState::Paused;
                 let iteration = ctrl.iteration;
+                ctrl.notify_control();
                 send_event(
                     &self.event_tx,
                     &session_id,
@@ -485,7 +486,7 @@ impl DebugProtocolServer {
                         iteration,
                     },
                 );
-                tracing::info!("Debug: pause — agent loop will pause at next check");
+                tracing::info!("Debug: pause — agent loop will pause immediately");
                 Ok(JsonRpcResponse::success(id.clone(), serde_json::json!({})))
             }
 
@@ -516,6 +517,7 @@ impl DebugProtocolServer {
                 self.last_active_session_id = Some(session_id.clone());
                 ctrl.state = DebugState::Stopped;
                 let iteration = ctrl.iteration;
+                ctrl.notify_control();
                 send_event(
                     &self.event_tx,
                     &session_id,

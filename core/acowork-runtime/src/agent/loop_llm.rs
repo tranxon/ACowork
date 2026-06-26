@@ -17,7 +17,7 @@ use chrono::Utc;
 use futures::StreamExt;
 
 use super::context::ContextBuilder;
-use super::loop_::{AgentLoop, ChunkEvent};
+use super::loop_::{AgentLoop, ChunkEvent, ControlDecision};
 use crate::error::{Result, RuntimeError};
 
 impl AgentLoop {
@@ -103,16 +103,30 @@ impl AgentLoop {
                 event = stream.next() => {
                     match event {
                         Some(event) => {
-                            // Check for user stop before processing each stream event
-                            if self.poll_stop() {
-                                tracing::info!("LLM stream stopped by user — aborting");
-                                let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
-                                    content: accumulated_content.clone(),
-                                });
-                                return Ok(build_stopped_response(
-                                    accumulated_content,
-                                    accumulated_reasoning_content,
-                                ));
+                            // Check for control signals before processing each stream event
+                            match self.poll_control() {
+                                ControlDecision::Stop => {
+                                    tracing::info!("LLM stream stopped by user — aborting");
+                                    let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
+                                        content: accumulated_content.clone(),
+                                    });
+                                    return Ok(build_stopped_response(
+                                        accumulated_content,
+                                        accumulated_reasoning_content,
+                                    ));
+                                }
+                                ControlDecision::Pause => {
+                                    tracing::info!("LLM stream paused by debug — aborting");
+                                    self.pending_interrupt = Some(ControlDecision::Pause);
+                                    let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
+                                        content: accumulated_content.clone(),
+                                    });
+                                    return Ok(build_stopped_response(
+                                        accumulated_content,
+                                        accumulated_reasoning_content,
+                                    ));
+                                }
+                                ControlDecision::Continue => {}
                             }
                             match event {
                 StreamEvent::Content(chunk) => {
@@ -293,7 +307,16 @@ impl AgentLoop {
                 // Urgent stop via Notify — fired by Gateway gRPC
                 // for immediate LLM stream cancellation.
                 _ = self.core.urgent_stop.as_ref().unwrap().notified() => {
-                    tracing::info!("LLM stream stopped via Notify — aborting");
+                    match self.poll_control() {
+                        ControlDecision::Stop => {
+                            tracing::info!("LLM stream stopped via Notify — aborting");
+                        }
+                        ControlDecision::Pause => {
+                            tracing::info!("LLM stream paused via Notify — aborting");
+                            self.pending_interrupt = Some(ControlDecision::Pause);
+                        }
+                        ControlDecision::Continue => {}
+                    }
                     let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
                         content: accumulated_content.clone(),
                     });
@@ -302,22 +325,36 @@ impl AgentLoop {
                         accumulated_reasoning_content,
                     ));
                 }
-                // Periodic stop polling during stream idle periods.
+                // Periodic control polling during stream idle periods.
                 // tokio::select! polls ALL branches simultaneously:
                 // - When stream has data ready: event branch wins immediately, sleep is dropped
                 // - When stream is idle (waiting for next chunk): sleep fires every 500ms
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                    if self.poll_stop() {
-                        tracing::info!(
-                            "LLM stream stopped by user during idle period — aborting"
-                        );
-                        let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
-                            content: accumulated_content.clone(),
-                        });
-                        return Ok(build_stopped_response(
-                            accumulated_content,
-                            accumulated_reasoning_content,
-                        ));
+                    match self.poll_control() {
+                        ControlDecision::Stop => {
+                            tracing::info!(
+                                "LLM stream stopped by user during idle period — aborting"
+                            );
+                            let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
+                                content: accumulated_content.clone(),
+                            });
+                            return Ok(build_stopped_response(
+                                accumulated_content,
+                                accumulated_reasoning_content,
+                            ));
+                        }
+                        ControlDecision::Pause => {
+                            tracing::info!("LLM stream paused during idle period — aborting");
+                            self.pending_interrupt = Some(ControlDecision::Pause);
+                            let _ = self.core.try_send_chunk(ChunkEvent::Stopped {
+                                content: accumulated_content.clone(),
+                            });
+                            return Ok(build_stopped_response(
+                                accumulated_content,
+                                accumulated_reasoning_content,
+                            ));
+                        }
+                        ControlDecision::Continue => {}
                     }
                 }
             }

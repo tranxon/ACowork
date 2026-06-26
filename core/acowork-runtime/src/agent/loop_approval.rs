@@ -17,7 +17,7 @@
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::inbound::InboundMessage;
-use crate::agent::loop_::{AgentLoop, ChunkEvent};
+use crate::agent::loop_::{AgentLoop, ChunkEvent, ControlDecision};
 use crate::agent::session_state::SessionStatus;
 use crate::security::approval_gate::ApprovalRequest;
 
@@ -91,6 +91,8 @@ impl AgentLoop {
     /// Returns `ApprovalDecision` with the user's choice, auto-rejects
     /// on Stop signal, channel close, or timeout (5 minutes).
     async fn await_approval_decision(&mut self, request_id: &str) -> ApprovalDecision {
+        // Snapshot control_notify for the select! branch (conditional on DevMode).
+        let ctrl_notify = self.core.debug_observer.control_notify().cloned();
         loop {
             tokio::select! {
                 // Primary: wait for the matching approval decision from inbound channel
@@ -137,6 +139,10 @@ impl AgentLoop {
                                 request_id = %request_id,
                                 "Approval stopped, auto-rejecting"
                             );
+                            // Set pending_interrupt so poll_control() propagates
+                            // the stop signal upward through execute_tools_parallel
+                            // → execute_single_iteration → run_inner.
+                            self.pending_interrupt = Some(ControlDecision::Stop);
                             return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
                         }
                         Some(other) => {
@@ -176,6 +182,37 @@ impl AgentLoop {
                         }
                     }
                 }
+                // DevMode control-signal wakeup (Pause / DebugStop).
+                // Fires immediately when the debug server calls notify_control(),
+                // providing sub-500ms response times for Pause during approval wait.
+                _ = async {
+                    if let Some(ref notify) = ctrl_notify {
+                        notify.notified().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    match self.poll_control() {
+                        ControlDecision::Pause => {
+                            tracing::info!(
+                                request_id = %request_id,
+                                "Approval paused via debug — auto-rejecting"
+                            );
+                            // pending_interrupt is set by poll_control's
+                            // check of DebugController state. Return rejection
+                            // so the tool task gets its oneshot resolved.
+                            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
+                        }
+                        ControlDecision::Stop => {
+                            tracing::info!(
+                                request_id = %request_id,
+                                "Approval stopped via debug — auto-rejecting"
+                            );
+                            return ApprovalDecision { approved: false, allow_all_session: false, reason: None };
+                        }
+                        ControlDecision::Continue => {}
+                    }
+                }
                 // Timeout: auto-reject to prevent permanent deadlock when
                 // a concurrent approval request is orphaned.
                 _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
@@ -205,6 +242,7 @@ impl AgentLoop {
             timeout_seconds.unwrap_or(APPROVAL_TIMEOUT_SECS as u32) as u64,
         );
 
+        let ctrl_notify = self.core.debug_observer.control_notify().cloned();
         let timeout_future = tokio::time::timeout(timeout_duration, async {
             loop {
                 tokio::select! {
@@ -237,6 +275,7 @@ impl AgentLoop {
                                     request_id = %request_id,
                                     "Question wait stopped, returning cancelled"
                                 );
+                                self.pending_interrupt = Some(ControlDecision::Stop);
                                 return "[Cancelled: user stopped]".to_string();
                             }
                             Some(other) => {
@@ -267,6 +306,26 @@ impl AgentLoop {
                             None => {
                                 tracing::warn!("Approval channel closed during question wait");
                             }
+                        }
+                    }
+                    // DevMode control-signal wakeup (Pause / DebugStop)
+                    _ = async {
+                        if let Some(ref notify) = ctrl_notify {
+                            notify.notified().await
+                        } else {
+                            std::future::pending().await
+                        }
+                    } => {
+                        match self.poll_control() {
+                            ControlDecision::Pause => {
+                                tracing::info!("Question wait paused via debug");
+                                return "[Cancelled: debug paused]".to_string();
+                            }
+                            ControlDecision::Stop => {
+                                tracing::info!("Question wait stopped via debug");
+                                return "[Cancelled: debug stopped]".to_string();
+                            }
+                            ControlDecision::Continue => {}
                         }
                     }
                 }

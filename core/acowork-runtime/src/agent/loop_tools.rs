@@ -27,7 +27,7 @@ use crate::security::approval_gate::{ApprovalGate, ApprovalRequest};
 use crate::security::shell_risk::{self, ShellRisk};
 use acowork_core::ShellApprovalThreshold;
 
-use super::loop_::{AgentLoop, ChunkEvent};
+use super::loop_::{AgentLoop, ChunkEvent, ControlDecision};
 use super::loop_approval::ApprovalHandle;
 
 impl AgentLoop {
@@ -38,14 +38,15 @@ impl AgentLoop {
     ///
     /// Returns results in the same order as input tool calls.
     /// Individual tool failures are captured as error strings, not propagated.
-    /// Returns (results, was_stopped) — `was_stopped` is `true` when the user
-    /// clicked Stop during tool execution, so the caller should not continue the loop.
+    /// Returns (results, interrupt) — `interrupt` is `Some(ControlDecision)` when
+    /// a control signal (Stop/Pause) was received during tool execution, telling
+    /// the caller whether to exit or pause the loop.
     pub(crate) async fn execute_tools_parallel(
         &mut self,
         tool_calls: &[ToolCall],
-    ) -> (Vec<String>, bool) {
+    ) -> (Vec<String>, Option<ControlDecision>) {
         if tool_calls.is_empty() {
-            return (Vec::new(), false);
+            return (Vec::new(), None);
         }
 
         tracing::info!(
@@ -153,7 +154,7 @@ impl AgentLoop {
         let mut deadline = Instant::now() + iteration_timeout;
         let mut collected: Vec<(usize, String)> = Vec::with_capacity(all_indices.len());
         let total = all_indices.len();
-        let mut should_stop = false;
+        let mut interrupt: Option<ControlDecision> = None;
 
         if use_gateway_approval {
             // ── Gateway mode: 4-way select (results / timeout / approval / interrupt) ──
@@ -185,6 +186,20 @@ impl AgentLoop {
                                 // against the iteration deadline.
                                 let remaining = deadline.saturating_duration_since(Instant::now());
                                 self.handle_approval_request(req, decision_tx).await;
+                                // After approval handling, check for control signals
+                                // that arrived during the wait (Stop/Pause).
+                                // poll_control() checks pending_interrupt set by
+                                // await_approval_decision when it consumed a Stop/Pause.
+                                match self.poll_control() {
+                                    c @ (ControlDecision::Stop | ControlDecision::Pause) => {
+                                        for handle in &handles {
+                                            handle.abort();
+                                        }
+                                        interrupt = Some(c);
+                                        break;
+                                    }
+                                    ControlDecision::Continue => {}
+                                }
                                 deadline = Instant::now() + remaining;
                             }
                             None => {
@@ -196,27 +211,33 @@ impl AgentLoop {
                     // (Stop / Restart-in-Debug) for immediate tool cancellation.
                     // Takes priority over the 500ms poll fallback.
                     _ = self.core.urgent_stop.as_ref().unwrap().notified() => {
-                        tracing::info!("Urgent stop via Notify — aborting tools");
-                        for handle in &handles {
-                            handle.abort();
+                        match self.poll_control() {
+                            c @ (ControlDecision::Stop | ControlDecision::Pause) => {
+                                tracing::info!(signal = ?c, "Control signal via Notify — aborting tools");
+                                for handle in &handles {
+                                    handle.abort();
+                                }
+                                interrupt = Some(c);
+                                break;
+                            }
+                            ControlDecision::Continue => {}
                         }
-                        should_stop = true;
-                        break;
                     }
-                    // Periodic stop polling during tool execution.
+                    // Periodic control polling during tool execution.
                     // Without this branch, a slow tool (e.g. file_read on large file)
                     // would block the select! at rx.recv() until timeout, making
-                    // STOP unresponsive for potentially minutes.
+                    // control signals unresponsive for potentially minutes.
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                        if self.poll_stop() {
-                            tracing::info!(
-                                "User stop detected during tool execution — aborting"
-                            );
-                            for handle in &handles {
-                                handle.abort();
+                        match self.poll_control() {
+                            c @ (ControlDecision::Stop | ControlDecision::Pause) => {
+                                tracing::info!(signal = ?c, "Control signal detected during tool execution — aborting");
+                                for handle in &handles {
+                                    handle.abort();
+                                }
+                                interrupt = Some(c);
+                                break;
                             }
-                            should_stop = true;
-                            break;
+                            ControlDecision::Continue => {}
                         }
                     }
                 }
@@ -243,23 +264,29 @@ impl AgentLoop {
                         break;
                     }
                     _ = self.core.urgent_stop.as_ref().unwrap().notified() => {
-                        tracing::info!("Urgent stop via Notify — aborting tools");
-                        for handle in &handles {
-                            handle.abort();
+                        match self.poll_control() {
+                            c @ (ControlDecision::Stop | ControlDecision::Pause) => {
+                                tracing::info!(signal = ?c, "Control signal via Notify — aborting tools");
+                                for handle in &handles {
+                                    handle.abort();
+                                }
+                                interrupt = Some(c);
+                                break;
+                            }
+                            ControlDecision::Continue => {}
                         }
-                        should_stop = true;
-                        break;
                     }
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                        if self.poll_stop() {
-                            tracing::info!(
-                                "User stop detected during tool execution — aborting"
-                            );
-                            for handle in &handles {
-                                handle.abort();
+                        match self.poll_control() {
+                            c @ (ControlDecision::Stop | ControlDecision::Pause) => {
+                                tracing::info!(signal = ?c, "Control signal detected during tool execution — aborting");
+                                for handle in &handles {
+                                    handle.abort();
+                                }
+                                interrupt = Some(c);
+                                break;
                             }
-                            should_stop = true;
-                            break;
+                            ControlDecision::Continue => {}
                         }
                     }
                 }
@@ -292,7 +319,7 @@ impl AgentLoop {
             );
         }
 
-        (results, should_stop)
+        (results, interrupt)
     }
 }
 
@@ -697,14 +724,14 @@ impl AgentLoop {
     /// results back in original order. Also merges with pre-blocked results
     /// from `pre_check_loop_detection`.
     ///
-    /// Returns `(tool_results, was_stopped)`.
+    /// Returns `(tool_results, interrupt)`.
     pub(crate) async fn dispatch_and_merge_tools(
         &mut self,
         calls_to_execute: Vec<ToolCall>,
         deduped_calls: &[ToolCall],
         blocked_info: &[(usize, LoopPattern)],
         context_builder: &mut ContextBuilder,
-    ) -> (Vec<String>, bool) {
+    ) -> (Vec<String>, Option<ControlDecision>) {
         // Intercept special tools
         let mut ask_question_results: Vec<(usize, String)> = Vec::new();
         let mut todo_write_results: Vec<(usize, String)> = Vec::new();
@@ -725,7 +752,7 @@ impl AgentLoop {
         // Execute non-question tools in parallel
         let calls_for_parallel: Vec<ToolCall> =
             parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
-        let (parallel_results, was_stopped) =
+        let (parallel_results, interrupt) =
             self.execute_tools_parallel(&calls_for_parallel).await;
 
         // Merge results: ask_question + todo_write + parallel, mapped back to original indices
@@ -771,7 +798,7 @@ impl AgentLoop {
             }
         }
 
-        (tool_results, was_stopped)
+        (tool_results, interrupt)
     }
 
     /// Persist tool results to JSONL and emit ToolResult chunk events.

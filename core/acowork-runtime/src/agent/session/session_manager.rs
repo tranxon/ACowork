@@ -294,9 +294,13 @@ impl SessionManager {
         // controller so the debug server's notify_one() calls align with SessionTask.
         let per_session_debug = if let Some(ref handles) = self.runtime_debug_handles {
             let ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
-            let (per_rewind, per_resume) = {
+            let (per_rewind, per_resume, per_control) = {
                 let guard = ctrl.lock().await;
-                (guard.rewind_notify_handle(), guard.resume_notify_handle())
+                (
+                    guard.rewind_notify_handle(),
+                    guard.resume_notify_handle(),
+                    guard.control_notify_handle(),
+                )
             };
             self.debug_controllers
                 .write()
@@ -307,6 +311,7 @@ impl SessionManager {
                 debug_event_tx: handles.debug_event_tx.for_session(session_id.clone()),
                 rewind_notify: per_rewind,
                 resume_notify: per_resume,
+                control_notify: per_control,
             })
         } else {
             None
@@ -1533,21 +1538,27 @@ After installation, ask the user to re-enable the MCP server.",
                     debug_event_tx: debug_event_tx.clone(),
                     rewind_notify: guard.rewind_notify_handle(),
                     resume_notify: guard.resume_notify_handle(),
+                    control_notify: guard.control_notify_handle(),
                 }
             } else {
                 // No sessions exist yet — create a minimal controller just for
                 // its notify handles. Its iteration/phase state will never be read.
                 let ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
                 let ctrl_for_lock = ctrl.clone();
-                let (rw, rs) = {
+                let (rw, rs, rc) = {
                     let guard = ctrl_for_lock.lock().await;
-                    (guard.rewind_notify_handle(), guard.resume_notify_handle())
+                    (
+                        guard.rewind_notify_handle(),
+                        guard.resume_notify_handle(),
+                        guard.control_notify_handle(),
+                    )
                 };
                 DebugHandles {
                     debug_ctrl: ctrl,
                     debug_event_tx: debug_event_tx.clone(),
                     rewind_notify: rw,
                     resume_notify: rs,
+                    control_notify: rc,
                 }
             }
         };
@@ -1598,15 +1609,20 @@ After installation, ask the user to re-enable the MCP server.",
             // The debug server calls ctrl.resume_notify.notify_one() on this
             // same controller instance, so SessionTask must wait on the same
             // Notify arcs.
-            let (per_rewind, per_resume) = {
+            let (per_rewind, per_resume, per_control) = {
                 let guard = per_session_ctrl.lock().await;
-                (guard.rewind_notify_handle(), guard.resume_notify_handle())
+                (
+                    guard.rewind_notify_handle(),
+                    guard.resume_notify_handle(),
+                    guard.control_notify_handle(),
+                )
             };
             let per_session_handles = DebugHandles {
                 debug_ctrl: per_session_ctrl,
                 debug_event_tx: handles.debug_event_tx.for_session(sid.clone()),
                 rewind_notify: per_rewind,
                 resume_notify: per_resume,
+                control_notify: per_control,
             };
 
             // Bypass path: write debug handles into pending_debug_handles so

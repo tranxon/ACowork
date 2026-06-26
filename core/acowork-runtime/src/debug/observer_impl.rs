@@ -37,6 +37,7 @@ pub struct DebugObserverImpl {
     event_tx: DebugEventSender,
     rewind_notify: Arc<Notify>,
     resume_notify: Arc<Notify>,
+    control_notify: Arc<Notify>,
     /// Pending debug handles injected by SessionManager while the agent loop
     /// is already running. The bypass injection path.
     pending_injection: Option<Arc<tokio::sync::Mutex<Option<DebugHandles>>>>,
@@ -50,6 +51,7 @@ impl DebugObserverImpl {
             event_tx: handles.debug_event_tx,
             rewind_notify: handles.rewind_notify,
             resume_notify: handles.resume_notify,
+            control_notify: handles.control_notify,
             pending_injection: None,
         }
     }
@@ -72,6 +74,11 @@ impl DebugObserverImpl {
     /// Access the resume notify handle.
     pub fn resume_notify(&self) -> &Arc<Notify> {
         &self.resume_notify
+    }
+
+    /// Access the control notify handle.
+    pub fn control_notify(&self) -> &Arc<Notify> {
+        &self.control_notify
     }
 
     /// Access the event sender.

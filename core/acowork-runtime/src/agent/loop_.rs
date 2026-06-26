@@ -183,6 +183,20 @@ impl ChunkEvent {
     }
 }
 
+/// Unified control signal returned by `poll_control()`.
+///
+/// Replaces the ad-hoc `poll_stop() -> bool` and scattered `DebugState` checks
+/// with a single, exhaustive decision that every blocking wait point evaluates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControlDecision {
+    /// No control signal — continue normally
+    Continue,
+    /// Stop the loop (Chat Stop or debugger.stop)
+    Stop,
+    /// Pause execution (debugger.pause) — abort current work, await resume
+    Pause,
+}
+
 /// Result of executing a single iteration of the agent loop.
 ///
 /// This is the shared building block used by both:
@@ -196,6 +210,8 @@ pub(crate) enum IterationResult {
     ToolCallsExecuted,
     /// Agent was stopped by user request
     Stopped(String),
+    /// Agent was paused by debug panel — iteration aborted, await resume
+    Paused,
 }
 
 /// Agent loop runner
@@ -223,6 +239,12 @@ pub struct AgentLoop {
     /// The thinking_mode from the most recent build_chat_request() call.
     /// Preserved for emergency trim retry in call_llm_streaming_inner().
     pub(crate) last_thinking_mode: Option<String>,
+    /// Pending control signal set by sub-modules when a control interrupt
+    /// (Stop/Pause) is detected during a nested blocking wait.  Consumed by
+    /// `poll_control()` at the next checkpoint so that interrupt intent is
+    /// never lost — even when the original channel/notify event has been
+    /// consumed by a sub-module's own `select!` loop.
+    pub(crate) pending_interrupt: Option<ControlDecision>,
 }
 
 impl AgentLoop {
@@ -267,6 +289,7 @@ impl AgentLoop {
             last_input_chars: 0,
             last_reasoning_effort: None,
             last_thinking_mode: None,
+            pending_interrupt: None,
         };
         // Initialize persistent model ratio store from agent config dir.
         let ratio_config_dir = Path::new(&loop_.core.config.work_dir).join("config");
@@ -337,6 +360,7 @@ impl AgentLoop {
             last_input_chars: 0,
             last_reasoning_effort: None,
             last_thinking_mode: None,
+            pending_interrupt: None,
         };
         // Inject approval_handle into AgentCore so execute_tools_parallel can detect Gateway mode
         session_loop.core.approval_handle = Some(approval_handle);
@@ -642,6 +666,18 @@ impl AgentLoop {
                     tracing::debug!(iteration, "Loop iteration complete, continuing");
                     continue;
                 }
+                IterationResult::Paused => {
+                    // ADR-014: Streaming → Paused (iteration aborted, await resume)
+                    self.transition_status(SessionStatus::Paused {
+                        iteration: Some(iteration),
+                        max_iterations: Some(self.core.config.max_iterations),
+                        retry_info: None,
+                    });
+                    tracing::info!(iteration, "Iteration paused via debug panel — await resume");
+                    // The next iteration's step ① (await_debug_resume) will block
+                    // until resume/stop/rewind is received.
+                    continue;
+                }
             }
         }
     }
@@ -660,22 +696,29 @@ impl AgentLoop {
         if let Some(ctrl) = ctrl {
             let rewind_notify = self.core.debug_observer.rewind_notify().cloned();
             loop {
-                // Check for Chat Panel STOP
-                if self.poll_stop() {
-                    tracing::info!("Debug: agent loop stopped via inbound channel");
-                    let mut ctrl_guard = ctrl.lock().await;
-                    let iteration = ctrl_guard.iteration;
-                    ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
-                    drop(ctrl_guard);
-                    if let Some(event_tx) = self.core.debug_observer.debug_event_tx() {
-                        let _ = event_tx.send(
-                            crate::debug::server::DebugEvent::ExecutionStateChanged {
-                                new_state: crate::debug::controller::DebugState::Stopped,
-                                iteration,
-                            },
-                        );
+                // Check for control signals (Stop via chat panel or debug)
+                match self.poll_control() {
+                    ControlDecision::Stop => {
+                        tracing::info!("Debug: agent loop stopped via poll_control");
+                        let mut ctrl_guard = ctrl.lock().await;
+                        let iteration = ctrl_guard.iteration;
+                        ctrl_guard.state = crate::debug::controller::DebugState::Stopped;
+                        drop(ctrl_guard);
+                        if let Some(event_tx) = self.core.debug_observer.debug_event_tx() {
+                            let _ = event_tx.send(
+                                crate::debug::server::DebugEvent::ExecutionStateChanged {
+                                    new_state: crate::debug::controller::DebugState::Stopped,
+                                    iteration,
+                                },
+                            );
+                        }
+                        return Some(IterationResult::Stopped(String::new()));
                     }
-                    return Some(IterationResult::Stopped(String::new()));
+                    ControlDecision::Pause => {
+                        // Pause was set by debug panel while we were in this loop.
+                        // Fall through to the state check below which handles Paused.
+                    }
+                    ControlDecision::Continue => {}
                 }
 
                 // Consume any pending rewind
@@ -828,6 +871,23 @@ impl AgentLoop {
         let response = self
             .call_llm_streaming(&chat_request, context_builder)
             .await?;
+
+        // After LLM call, check for control signals that might have interrupted
+        // the stream (e.g. Pause via debug panel).  The LLM streaming select!
+        // sets `pending_interrupt` when it detects Pause and returns a stopped
+        // response — we consume that interrupt here to decide the iteration outcome.
+        match self.poll_control() {
+            ControlDecision::Stop => {
+                tracing::info!("Stopped during LLM call");
+                return Ok(self.handle_stopped(&response.content).await);
+            }
+            ControlDecision::Pause => {
+                tracing::info!("Paused during LLM call");
+                return Ok(IterationResult::Paused);
+            }
+            ControlDecision::Continue => {}
+        }
+
         self.core
             .debug_observer
             .on_phase_enter(crate::debug::protocol::DebugPhase::LlmCall)
@@ -873,10 +933,17 @@ impl AgentLoop {
         let deduped_calls = self.prepare_tool_calls(&response);
         let (calls_to_execute, blocked_info) = self.pre_check_loop_detection(&deduped_calls);
 
-        // ── ⑥ Pre-tool stop check ──
-        if self.poll_stop() {
-            tracing::info!("Stopped before tool execution — saving partial response");
-            return Ok(self.handle_stopped(&response.content).await);
+        // ── ⑥ Pre-tool control check ──
+        match self.poll_control() {
+            ControlDecision::Stop => {
+                tracing::info!("Stopped before tool execution — saving partial response");
+                return Ok(self.handle_stopped(&response.content).await);
+            }
+            ControlDecision::Pause => {
+                tracing::info!("Paused before tool execution");
+                return Ok(IterationResult::Paused);
+            }
+            ControlDecision::Continue => {}
         }
 
         // ── ⑦ Dispatch + merge tool results ──
@@ -884,7 +951,7 @@ impl AgentLoop {
             .debug_observer
             .on_phase_enter(crate::debug::protocol::DebugPhase::ToolExecution)
             .await;
-        let (tool_results, was_stopped) = self
+        let (tool_results, interrupt) = self
             .dispatch_and_merge_tools(
                 calls_to_execute,
                 &deduped_calls,
@@ -932,10 +999,17 @@ impl AgentLoop {
         // ── ⑨ Post-execution loop detection ──
         self.post_check_loop_detection(&deduped_calls, &tool_results, &blocked_info)?;
 
-        // ── ⑩ Post-tool stop check ──
-        if was_stopped {
-            tracing::info!("Stopped during tool execution — saving partial results");
-            return Ok(self.handle_stopped(&response.content).await);
+        // ── ⑩ Post-tool control check ──
+        match interrupt {
+            Some(ControlDecision::Stop) => {
+                tracing::info!("Stopped during tool execution — saving partial results");
+                return Ok(self.handle_stopped(&response.content).await);
+            }
+            Some(ControlDecision::Pause) => {
+                tracing::info!("Paused during tool execution");
+                return Ok(IterationResult::Paused);
+            }
+            _ => {}
         }
 
         // ── ⑪ Debug phase completion ──

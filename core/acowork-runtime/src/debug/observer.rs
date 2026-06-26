@@ -306,6 +306,18 @@ impl DebugObserverSlot {
         }
     }
 
+    /// Access the control notify handle (DevMode only).
+    ///
+    /// Returns the unified `Arc<Notify>` shared with `AgentCore::urgent_stop`.
+    /// The debug server fires this for pause/stop; the agent loop's blocking
+    /// `select!` branches await `notified()` for immediate wakeup.
+    pub fn control_notify(&self) -> Option<&Arc<Notify>> {
+        match self {
+            DebugObserverSlot::Production => None,
+            DebugObserverSlot::Dev(obs) => Some(obs.control_notify()),
+        }
+    }
+
     /// Access the debug controller (DevMode only).
     pub fn debug_ctrl(&self) -> Option<&Arc<tokio::sync::Mutex<DebugController>>> {
         match self {
