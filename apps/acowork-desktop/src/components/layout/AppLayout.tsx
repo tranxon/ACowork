@@ -457,7 +457,11 @@ export function AppLayout() {
           </div>
         )}
 
-        {/* Right Nav Bar — always rendered, clicking expands panel */}
+        {/* Right rail — 40px column. Renders the agent-config nav buttons in
+            the chat view; in other views an empty placeholder of the same
+            width and top/bottom padding is kept so the window chrome stays
+            symmetric and switching tabs only changes the central content.
+            Glass background bleeds through both branches (no explicit bg). */}
         {currentView === "chat" && (
           <RightNavBar
             activeTab={activeTab}
@@ -493,6 +497,14 @@ export function AppLayout() {
               <p className="text-sm text-zinc-400 dark:text-zinc-500">TODO</p>
             </div>
           </div>
+        )}
+
+        {/* Right rail placeholder for non-chat views — keeps the 40px right
+            column reserved so window chrome stays symmetric when switching
+            between nav targets. Positioned last so it always sits at the
+            right edge, regardless of which central panel is active. */}
+        {currentView !== "chat" && (
+          <aside className="w-10 shrink-0 py-2 dark:border-zinc-800" aria-hidden="true" />
         )}
       </div>
 
