@@ -62,21 +62,21 @@ fn main() {
             println!("cargo:warning=Copied onnxruntime.dll to bin/");
         }
     } else if cfg!(target_os = "macos") {
-        for lib_name in &["libonnxruntime.dylib"] {
-            let src = target_dir.join(lib_name);
-            let dst = bin_dir.join(lib_name);
-            if src.exists() {
-                let _ = std::fs::copy(&src, &dst);
-            }
+        // Single-element array keeps the copy step symmetric with the
+        // Windows ONNX branch above without an extra loop construct.
+        let lib_name = "libonnxruntime.dylib";
+        let src = target_dir.join(lib_name);
+        let dst = bin_dir.join(lib_name);
+        if src.exists() {
+            let _ = std::fs::copy(&src, &dst);
         }
     } else {
         // Linux
-        for lib_name in &["libonnxruntime.so"] {
-            let src = target_dir.join(lib_name);
-            let dst = bin_dir.join(lib_name);
-            if src.exists() {
-                let _ = std::fs::copy(&src, &dst);
-            }
+        let lib_name = "libonnxruntime.so";
+        let src = target_dir.join(lib_name);
+        let dst = bin_dir.join(lib_name);
+        if src.exists() {
+            let _ = std::fs::copy(&src, &dst);
         }
     }
 
@@ -140,13 +140,13 @@ fn main() {
     println!("cargo:rerun-if-changed={}", lsp_config_path.display());
     // LSP install scripts (each file individually).
     let lsp_install_src = workspace_root.join("assets").join("lsp_install");
-    if lsp_install_src.exists() {
-        if let Ok(entries) = std::fs::read_dir(&lsp_install_src) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    println!("cargo:rerun-if-changed={}", path.display());
-                }
+    if lsp_install_src.exists()
+        && let Ok(entries) = std::fs::read_dir(&lsp_install_src)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                println!("cargo:rerun-if-changed={}", path.display());
             }
         }
     }
