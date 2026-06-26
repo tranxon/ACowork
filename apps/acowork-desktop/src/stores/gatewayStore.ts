@@ -1,21 +1,7 @@
 import { create } from "zustand";
+import { getGatewayUrl } from "../lib/config";
 import type { HealthResponse, GatewayStatus, LocalGatewayState, AgentMigrationProgress } from "../lib/types";
 import { fetchMigrationProgress } from "../lib/gateway-api";
-
-/**
- * Shape of the result returned by the Rust `check_gateway_health` Tauri
- * command. The probe is performed by the Tauri backend (reqwest), not by
- * the WebView, so it is unaffected by the Gateway's CORS allowlist —
- * the Tauri WebView origins (`http://tauri.localhost` on Windows,
- * `tauri://localhost` on macOS) are not in the Gateway's restrictive
- * default allowlist, which would silently block a direct
- * `fetch(${baseUrl}/health)` from the MSI-installed app.
- */
-interface GatewayHealthResult {
-  connected: boolean;
-  health: HealthResponse | null;
-  error: string | null;
-}
 
 interface GatewayStore {
   status: GatewayStatus;
@@ -41,18 +27,10 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
 
   checkHealth: async () => {
     try {
-      // Probe the Gateway via the Rust Tauri command, NOT a direct
-      // fetch(). The latter is CORS-blocked in the MSI-installed app
-      // because the Gateway's default allowlist does not include the
-      // Tauri WebView origin. Going through Rust-side reqwest is
-      // browser-free and works identically in dev and production.
-      const { invoke } = await import("@tauri-apps/api/core");
-      const result = await invoke<GatewayHealthResult>("check_gateway_health");
-      if (result.connected && result.health) {
-        set({ status: "connected", health: result.health });
-      } else {
-        set({ status: "error", health: null });
-      }
+      const resp = await fetch(`${getGatewayUrl()}/health`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const health = await resp.json() as HealthResponse;
+      set({ status: "connected", health });
     } catch {
       set({ status: "error", health: null });
     }

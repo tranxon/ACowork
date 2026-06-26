@@ -206,7 +206,6 @@ pub fn run() {
             commands::gateway::start_local_gateway,
             commands::gateway::stop_local_gateway,
             commands::gateway::get_local_gateway_status,
-            commands::gateway::check_gateway_health,
             commands::gateway::ensure_system_agent,
         ])
         .setup(|app| {
