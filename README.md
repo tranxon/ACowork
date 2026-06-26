@@ -95,36 +95,144 @@ Acowork treats every Agent like an **app on your phone**. Each `.agent` package 
 
 ---
 
-## 🚀 Quick Start
+## 🛠️ Build & Run
+
+ACowork ships with a set of cross-platform build scripts under [`dev/`](./dev/). Prefer them over calling `cargo` directly — they handle ONNX Runtime discovery, build-profile switching, target-directory creation, and the runtime resource staging (`offline_providers.json`, `embedding_models.json`) that the Gateway and Embedding Runtime binaries read from their working directory at startup.
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (nightly)
-- [Node.js](https://nodejs.org/) >= 18
-- A running [Gateway + Runtime](https://github.com/tranxon/acowork-ai#-running-the-backend) locally
-
-### Quick Start
+| Tool         | Version       | Notes                                                                                                                                  |
+| ------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust         | **nightly**   | `rustup default nightly`                                                                                                               |
+| Node.js      | >= 18         | Desktop App and Tauri CLI                                                                                                              |
+| PowerShell   | 7.x           | Required on Windows (`.ps1` scripts); `pwsh` recommended                                                                               |
+| ONNX Runtime | auto-managed  | Installed by `dev/setup_ort.*` into `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                                           |
+| Windows      | WebView2 + VS Build Tools | Pre-installed on Windows 11; older versions need [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) |
+| macOS        | Xcode CLT + Homebrew + `pkg-config` + `cmake` | `dev/build_macos.sh` auto-installs missing tools via `brew`                                                          |
+| Linux        | Tauri v2 WebKitGTK deps + `build-essential` | See [Tauri prerequisites](https://tauri.app/start/prerequisites/)                                                    |
 
 ```bash
-git clone https://github.com/tranxon/acowork-ai.git
-cd acowork-ai
+git clone https://github.com/tranxon/ACowork.git
+cd ACowork
+```
 
-# 1. Start the backend services (Gateway + Runtime)
-cd core && cargo build --release
-# Run Gateway & Runtime binaries from target/release/
+### 1. Install ONNX Runtime (one-time)
 
-# 2. Start the desktop app (browser-only UI mode)
-cd ../apps/acowork-desktop
+```bash
+# Windows (recommended)
+.\dev\setup_ort.ps1
+# Optional: -Version "1.21.0"  -Reinstall  -NoMirror
+
+# macOS / Linux / WSL / Git Bash
+./dev/setup_ort.sh
+# Optional: --version 1.21.0  --reinstall  --no-mirror
+```
+
+After install the dynamic libraries land in `.ort/onnxruntime-<plat>-<arch>-<ver>/lib/` and the scripts in [`dev/build_core.*`](#2-build-the-backend-gateway--runtime--embed) will auto-detect them.
+
+### 2. Build the Backend (Gateway + Runtime + Embed)
+
+```bash
+# Windows PowerShell — default: build release, do not start
+.\dev\build_core.ps1
+.\dev\build_core.ps1 -Debug           # debug profile (note: PowerShell switches use a single dash, --debug is a no-op)
+.\dev\build_core.ps1 -Start           # release + stop old processes + start Gateway
+.\dev\build_core.ps1 -Debug -Start    # debug + restart
+
+# bash (Linux / macOS / WSL / Git Bash) — default: build release AND start Gateway
+./dev/build_core.sh
+./dev/build_core.sh --debug           # debug profile
+./dev/build_core.sh --debug --no-start   # debug, do not start
+./dev/build_core.sh --skip-embed         # skip acowork-embed
+```
+
+**Profile resolution** (highest priority first):
+
+1. CLI flag: `-Debug` (PowerShell) or `--debug` / `--release` (bash)
+2. Environment variable: `$env:ACOWORK_BUILD_PROFILE` (PowerShell) or `$ACOWORK_BUILD_PROFILE` (bash)
+3. Default: `release`
+
+> Debug profile auto-exports `ACOWORK_GATEWAY_LOG_LEVEL=debug` for any child process spawned by the script, so a follow-up `target\debug\acowork-gateway.exe` (or `target/debug/acowork-gateway`) launched from the same shell inherits verbose logging.
+
+### 3. macOS One-Click Build (Apple Silicon first-class)
+
+```bash
+./dev/build_macos.sh               # Apple Silicon + CoreML, release (recommended)
+./dev/build_macos.sh --debug       # debug profile
+./dev/build_macos.sh --cpu         # CPU only (Intel Mac or compatibility)
+./dev/build_macos.sh --skip-embed  # skip acowork-embed
+```
+
+Auto-detects architecture, enables CoreML on arm64, downloads/copies ONNX Runtime, configures a Cargo registry mirror on first run, and runs `brew install pkg-config cmake` when missing.
+
+### 4. Run the Desktop App
+
+The Desktop App is a **frontend only** — it talks to Gateway over HTTP (`http://127.0.0.1:19876`) and never persists state on its own. Start it after the Gateway is running.
+
+```bash
+cd apps/acowork-desktop
 npm install
-npm run dev      # → http://localhost:5173
 
-# 3. Or build the full Tauri desktop app
-cd ../apps/acowork-desktop
-npm install
+# Option A — Browser-only dev server
+npm run dev                        # → http://localhost:5173
+
+# Option B — Full Tauri v2 desktop window
 npm run tauri dev
 ```
 
-### Write Your First Agent
+### 5. Package a Desktop Installer (optional)
+
+```bash
+# Windows — produces MSI/NSIS bundles under apps\acowork-desktop\src-tauri\target\release\bundle\
+.\dev\package_desktop_windows.ps1
+# Optional: -ReinstallOrt  -NoMirror
+
+# macOS
+./dev/package_desktop_macos.sh
+
+# Linux
+./dev/package_desktop_linux.sh
+```
+
+These scripts locate `.ort/`, copy `onnxruntime.{dll,dylib,so}` into `apps/acowork-desktop/src-tauri/bin/`, then run `npm run tauri build`.
+
+### 6. Build & Sign an Agent Package
+
+```bash
+# Windows — single agent
+.\dev\build-agent.ps1 examples\senior-engineer-agent
+
+# Windows — every example
+.\dev\build-agent.ps1 -All
+
+# bash — single agent
+./dev/build-agent.sh examples/senior-engineer-agent
+
+# bash — all examples
+for d in examples/*/; do [ -f "$d/manifest.toml" ] && ./dev/build-agent.sh "$d"; done
+```
+
+Each run zips the agent directory, generates developer signing keys on first invocation (`examples/.signing-keys/`), signs the package to `<agent_id>.agent`, verifies the signature, and drops the unsigned copy.
+
+### 7. Run CI Locally
+
+```bash
+cd core
+cargo check --all
+cargo clippy --all-targets -- -D warnings
+cargo test --all
+```
+
+Or use the bundled script:
+
+```bash
+./dev/ci.sh all         # check + clippy + test + integration
+./dev/ci.sh clippy      # clippy only
+./dev/ci.sh test        # unit tests only
+./dev/ci.sh integration # e2e + (when MINIMAX_API_KEY is set) real-LLM integration
+```
+
+### 📝 Try It: Write a Manifest in 30 Seconds
 
 All you need is a `manifest.toml` + a prompt file:
 
@@ -146,25 +254,13 @@ tools = ["web_search", "read_file", "write_file"]
 ```
 
 ```markdown
-# prompts/system.md
+<!-- prompts/system.md -->
 You are a QA Agent, helping users with quality management and code review.
 ```
 
-### Package, Sign, and Run
+Then run `.\dev\build-agent.ps1 .\com.example.qa-agent` (or the bash equivalent) to produce `com.example.qa-agent.agent` and install it into your local Gateway.
 
-```bash
-# Package into .agent bundle
-acowork-sign package ./qa-agent/ -o qa-agent.agent
-
-# Install to local Gateway and run
-acowork-gateway install qa-agent.agent
-acowork-gateway start com.example.qa-agent
-
-# Chat mode
-acowork-gateway chat --agent com.example.qa-agent "Help me review this code"
-```
-
-> **Status**: The project is in **design phase**. Core Rust crate architecture is defined, detailed design docs are complete, but implementation has not started. The above is the target API design.
+> **Status**: ACowork is in **alpha**. The Gateway, Runtime, Grafeo memory engine, and Desktop App are under active development. Most of the command set above is the supported workflow today; agent-install UX (e.g., `acowork-gateway install …`) is still being stabilized.
 
 ---
 
