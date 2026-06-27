@@ -50,13 +50,13 @@ export function HarnessPage() {
         ))}
       </div>
 
-      {/* Tab content */}
+      {/* Tab content — CSS visibility preserves component state across tab switches */}
       <div className="flex-1 overflow-y-auto p-6">
-        {activeTab === "providers" && <ProvidersTab />}
-        {activeTab === "search" && <SearchTab />}
-        {activeTab === "mcp" && <McpTab />}
-        {activeTab === "embedding" && <EmbeddingModelTab />}
-        {activeTab === "lsp" && <LspTab />}
+        <div style={{ display: activeTab === "providers" ? "block" : "none" }}><ProvidersTab /></div>
+        <div style={{ display: activeTab === "search" ? "block" : "none" }}><SearchTab /></div>
+        <div style={{ display: activeTab === "mcp" ? "block" : "none" }}><McpTab /></div>
+        <div style={{ display: activeTab === "embedding" ? "block" : "none" }}><EmbeddingModelTab /></div>
+        <div style={{ display: activeTab === "lsp" ? "block" : "none" }}><LspTab /></div>
       </div>
     </div>
   );

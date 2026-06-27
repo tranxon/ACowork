@@ -11,6 +11,7 @@ use acowork_core::Budget;
 use acowork_core::protocol::ProtocolType;
 use acowork_core::protocol::{SearchKeyEntry, SearchProviderListItem};
 use acowork_core::tools::traits::Tool;
+use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -377,8 +378,27 @@ impl SessionManager {
         }
 
         // Spawn the session task with panic isolation.
+        // catch_unwind ensures that if SessionTask::run() panics, we log the
+        // panic with the session_id before the task terminates. Without this,
+        // tokio::spawn silently swallows the panic and the only symptom is a
+        // "Session channel closed" warning with no root cause.
+        let sid = session_id.clone();
         let join_handle = tokio::spawn(async move {
-            task.run().await;
+            let result = std::panic::AssertUnwindSafe(task.run())
+                .catch_unwind()
+                .await;
+            if let Err(panic_err) = result {
+                let msg = panic_err
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic_err.downcast_ref::<String>().map(|s| s.as_str()))
+                    .unwrap_or("<non-string panic payload>");
+                tracing::error!(
+                    session_id = %sid,
+                    panic.payload = %msg,
+                    "SessionTask panicked — session will be unreachable until re-activation"
+                );
+            }
         });
 
         let handle = SessionHandle {

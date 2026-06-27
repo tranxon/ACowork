@@ -167,6 +167,10 @@ impl Cli {
         // Initialize tracing with reload support
         let log_reload_handle = init_tracing(&config.log_level, config.log_file_size_mb, config.log_file_count);
 
+        // Install global panic hook AFTER tracing is initialized so panic
+        // messages are captured in both stderr and the rolling log file.
+        acowork_core::logging::install_panic_hook();
+
         let mut gateway = Gateway::new(config)?;
 
         match self.command {

@@ -501,17 +501,17 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
         </div>
       )}
 
-      {/* ── Memory tab content ────────────────────────────────────── */}
-      {activeTab === "memory" && <MemoryPanel />}
+      {/* ── Memory tab content — CSS visibility preserves component state across tab switches ── */}
+      <div style={{ display: activeTab === "memory" ? "block" : "none" }}><MemoryPanel /></div>
 
       {/* ── Setup tab content ─────────────────────────────────────── */}
-      {activeTab === "setup" && <AgentSetupTab />}
+      <div style={{ display: activeTab === "setup" ? "block" : "none" }}><AgentSetupTab /></div>
 
       {/* ── Tools tab content ─────────────────────────────────────── */}
-      {activeTab === "tools" && <ToolsTab />}
+      <div style={{ display: activeTab === "tools" ? "block" : "none" }}><ToolsTab /></div>
 
       {/* ── Workspace tab content ─────────────────────────────────── */}
-      {activeTab === "workspace" && <WorkspaceExplorer />}
+      <div style={{ display: activeTab === "workspace" ? "block" : "none" }}><WorkspaceExplorer /></div>
     </div>
 
   );

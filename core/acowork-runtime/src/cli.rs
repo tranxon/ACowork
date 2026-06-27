@@ -91,6 +91,10 @@ impl Cli {
         // Initialize tracing/logging and obtain reload handle
         let reload_handle = self.init_tracing();
 
+        // Install global panic hook AFTER tracing is initialized so panic
+        // messages are captured in both stderr and the rolling log file.
+        acowork_core::logging::install_panic_hook();
+
         // Build runtime config from CLI args
         let config = RuntimeConfig::from_cli(&self);
         tracing::info!(

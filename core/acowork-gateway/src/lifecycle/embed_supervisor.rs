@@ -222,7 +222,7 @@ async fn run_supervisor(
                     tracing::info!("Embed monitor session ended cleanly");
                     return;
                 }
-                exit @ MonitorExit::HeartbeatTimeout | exit @ MonitorExit::ConnectionLost => exit,
+                exit @ MonitorExit::HeartbeatTimeout { .. } | exit @ MonitorExit::ConnectionLost => exit,
             };
 
         // During startup grace, failures don't count — the embed is
@@ -238,11 +238,25 @@ async fn run_supervisor(
         let embed_alive = try_connect_events(port).await;
 
         match exit_reason {
-            MonitorExit::HeartbeatTimeout => {
-                // SSE had established heartbeats, then they stopped.
-                // The HTTP server may still be responding (stuck in
-                // deadlock or ONNX hang). Kill + restart.
-                tracing::warn!("Embed heartbeat timeout — killing stuck process");
+            MonitorExit::HeartbeatTimeout { elapsed_secs } => {
+                // SSE heartbeats stopped, but the embed may still be healthy —
+                // the watchdog itself could have been starved (e.g. by a
+                // blocking LSP install on the same tokio runtime). Before
+                // killing, probe /health to confirm the embed is truly stuck.
+                let health = super::embed::check_embed_health(port).await;
+                if health.is_some() {
+                    tracing::warn!(
+                        elapsed_secs,
+                        "Embed heartbeat timeout, but /health probe succeeded — \
+                         likely watchdog starvation, not embed stuck. Reconnecting without kill."
+                    );
+                    continue;
+                }
+                // /health probe also failed — embed is truly stuck.
+                tracing::warn!(
+                    elapsed_secs,
+                    "Embed heartbeat timeout — /health probe also failed, killing stuck process"
+                );
                 if embed_alive {
                     let pid = state.read().await.embed_process.as_ref().map(|e| e.pid);
                     if let Some(p) = pid
@@ -412,7 +426,10 @@ enum MonitorExit {
     /// Process ended naturally (monitor session saw process go away).
     Clean,
     /// Heartbeat stream went silent for > HEARTBEAT_TIMEOUT.
-    HeartbeatTimeout,
+    HeartbeatTimeout {
+        /// How long since the last heartbeat was received.
+        elapsed_secs: u64,
+    },
     /// SSE connection lost for non-timeout reasons (network, restart, etc.).
     ConnectionLost,
 }
@@ -482,6 +499,14 @@ async fn run_monitor_session(
         tracing::warn!(error = %e, "Initial /health bootstrap failed; continuing with SSE only");
     }
 
+    // Verify the model can actually produce embeddings, not just respond
+    // to HTTP. A model that loaded but is stuck in ONNX will pass /health
+    // but fail inference. This is a non-fatal check — we log a warning
+    // and continue; agents have fallback to text search.
+    if !probe_inference(port).await {
+        tracing::warn!("Embed inference probe failed — model may not be fully loaded");
+    }
+
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut last_heartbeat = Instant::now();
@@ -495,11 +520,12 @@ async fn run_monitor_session(
             // Periodic check: did the heartbeat go stale?
             _ = watchdog.tick() => {
                 if last_heartbeat.elapsed() > HEARTBEAT_TIMEOUT {
+                    let elapsed_secs = last_heartbeat.elapsed().as_secs();
                     tracing::warn!(
-                        elapsed_secs = last_heartbeat.elapsed().as_secs(),
+                        elapsed_secs,
                         "Embed heartbeat timeout"
                     );
-                    return MonitorExit::HeartbeatTimeout;
+                    return MonitorExit::HeartbeatTimeout { elapsed_secs };
                 }
                 // Also check whether the shared state was cleared by
                 // the reaper (process died). If so, end the session
@@ -654,6 +680,44 @@ async fn bootstrap_state_from_health(
         }
     }
     Ok(())
+}
+
+/// Probe the embed's actual inference capability by sending a lightweight
+/// embedding request. Unlike /health (which only checks HTTP liveness),
+/// this verifies the ONNX model is loaded and can produce embeddings.
+///
+/// Returns `true` if the embed returns a valid embedding vector.
+async fn probe_inference(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let body = serde_json::json!({"input": "health check"});
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return false;
+            }
+            // Verify the response contains a valid embedding.
+            match resp.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    json.get("data")
+                        .and_then(|d| d.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|item| item.get("embedding"))
+                        .and_then(|emb| emb.as_array())
+                        .map(|arr| !arr.is_empty())
+                        .unwrap_or(false)
+                }
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
 }
 
 /// Try once to connect to `http://127.0.0.1:{port}/events` and confirm

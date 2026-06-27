@@ -101,32 +101,73 @@ impl EmbeddingModel {
         // Disable padding — we handle padding manually in the batch logic
         tokenizer.with_padding(None);
 
-        // Load ONNX session
-        tracing::info!(path = %onnx_path.display(), "Creating ONNX session builder...");
-        let mut builder = Session::builder()
-            .map_err(|e| ModelError::Session(format!("Failed to create session builder: {e}")))?;
+        // Load ONNX session with retry — ONNX Runtime Initialize() can
+        // fail transiently, especially after a previous process was SIGKILL'd
+        // and OS resources haven't been fully released yet.
+        const ONNX_LOAD_MAX_RETRIES: u32 = 3;
+        const ONNX_LOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
-        tracing::info!(path = %onnx_path.display(), "Loading ONNX model from file...");
-        let session = builder
-            .commit_from_file(onnx_path)
-            .map_err(|e| ModelError::Session(format!("Failed to load ONNX model: {e}")))?;
+        let mut last_err = None;
+        for attempt in 1..=ONNX_LOAD_MAX_RETRIES {
+            tracing::info!(
+                attempt,
+                path = %onnx_path.display(),
+                "Creating ONNX session builder..."
+            );
+            let mut builder = Session::builder().map_err(|e| {
+                ModelError::Session(format!("Failed to create session builder: {e}"))
+            })?;
 
-        tracing::info!(
-            model_id,
-            dimension,
-            max_tokens,
-            pooling = ?pooling,
-            "Loaded ONNX embedding model"
-        );
+            tracing::info!(
+                attempt,
+                path = %onnx_path.display(),
+                "Loading ONNX model from file..."
+            );
+            match builder.commit_from_file(onnx_path) {
+                Ok(session) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            attempt,
+                            "ONNX model loaded successfully after retry"
+                        );
+                    }
 
-        Ok(Self {
-            session: Arc::new(std::sync::Mutex::new(session)),
-            tokenizer,
-            pooling,
-            dimension,
-            max_tokens,
-            model_id: model_id.to_string(),
-        })
+                    tracing::info!(
+                        model_id,
+                        dimension,
+                        max_tokens,
+                        pooling = ?pooling,
+                        "Loaded ONNX embedding model"
+                    );
+
+                    return Ok(Self {
+                        session: Arc::new(std::sync::Mutex::new(session)),
+                        tokenizer,
+                        pooling,
+                        dimension,
+                        max_tokens,
+                        model_id: model_id.to_string(),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "ONNX session load failed, will retry"
+                    );
+                    last_err = Some(e);
+                    if attempt < ONNX_LOAD_MAX_RETRIES {
+                        std::thread::sleep(ONNX_LOAD_RETRY_DELAY);
+                    }
+                }
+            }
+        }
+
+        Err(ModelError::Session(format!(
+            "Failed to load ONNX model after {} attempts: {:?}",
+            ONNX_LOAD_MAX_RETRIES,
+            last_err
+        )))
     }
 
     /// Generate embedding for a single text.

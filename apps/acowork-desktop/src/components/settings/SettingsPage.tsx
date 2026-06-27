@@ -44,12 +44,12 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
         ))}
       </div>
 
-      {/* Tab content */}
+      {/* Tab content — CSS visibility preserves component state across tab switches */}
       <div className="flex-1 overflow-y-auto p-6">
-        {activeTab === "gateway" && <GatewayTab />}
-        {activeTab === "appearance" && <AppearanceTab />}
-        {activeTab === "general" && <GeneralTab />}
-        {activeTab === "profile" && <ProfileTab />}
+        <div style={{ display: activeTab === "gateway" ? "block" : "none" }}><GatewayTab /></div>
+        <div style={{ display: activeTab === "appearance" ? "block" : "none" }}><AppearanceTab /></div>
+        <div style={{ display: activeTab === "general" ? "block" : "none" }}><GeneralTab /></div>
+        <div style={{ display: activeTab === "profile" ? "block" : "none" }}><ProfileTab /></div>
       </div>
     </div>
   );

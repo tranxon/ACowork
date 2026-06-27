@@ -1,4 +1,5 @@
-//! Logging utilities: size-based rolling file appender and shared tracing timer.
+//! Logging utilities: size-based rolling file appender, shared tracing timer,
+//! and global panic hook.
 //!
 //! Used by both Gateway and Agent Runtime for consistent log file naming
 //! (YYYYMMDD_HHMMSS.log) and auto-split behaviour.
@@ -188,4 +189,41 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SizeRollingFileAppender {
     fn make_writer_for(&'a self, _meta: &tracing::Metadata<'_>) -> Self::Writer {
         self
     }
+}
+
+/// Install a global panic hook that routes panic information into the tracing
+/// log system (and thus into both stderr and the rolling log file).
+///
+/// This MUST be called **after** the tracing subscriber has been initialized
+/// (i.e. after `init_tracing` / `init_logging`), otherwise the panic message
+/// will be lost because the subscriber isn't ready yet.
+///
+/// With this hook installed, every panic — including those inside
+/// `tokio::spawn` tasks that would otherwise be silently swallowed — produces
+/// an `ERROR`-level tracing event with the panic payload and location.
+pub fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Extract a human-readable payload string.
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<non-string panic payload>");
+
+        // Emit to tracing so it appears in both stderr and the log file.
+        tracing::error!(
+            panic.payload = %payload,
+            panic.location = %info
+                .location()
+                .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+                .unwrap_or_else(|| "<unknown location>".to_string()),
+            "PANIC"
+        );
+
+        // Also call the default hook so the panic still prints to stderr
+        // (useful for terminal visibility and for the OS crash reporter).
+        default_hook(info);
+    }));
 }

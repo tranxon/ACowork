@@ -10,6 +10,7 @@
 pub mod proto_bridge;
 pub mod proto {
     #![allow(clippy::large_enum_variant)]
+    #![allow(clippy::result_large_err)]
     tonic::include_proto!("acowork.ipc.v1");
 }
 
@@ -24,6 +25,7 @@ pub mod memory;
 pub mod packaging;
 pub mod path_utils;
 pub mod permission;
+pub mod process;
 pub mod protocol;
 pub mod providers;
 pub mod tools;
@@ -47,6 +49,7 @@ pub use packaging::{
 };
 pub use path_utils::{is_absolute, resolve};
 pub use permission::{Permission, ShellApprovalThreshold};
+pub use process::{IdleTimeoutError, ProcessOutput, run_command_with_idle_timeout, run_with_idle_timeout};
 pub use providers::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, ImageUrlPart, Provider, ProviderError,
     ProviderErrorType, StreamEvent,

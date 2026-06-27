@@ -23,6 +23,10 @@ async fn main() {
     // Initialize logging
     init_logging(&cli.log_level);
 
+    // Install global panic hook AFTER tracing is initialized so panic
+    // messages are captured in the log output.
+    acowork_core::logging::install_panic_hook();
+
     tracing::info!("ACowork Embedding Runtime starting");
     tracing::info!(addr = %cli.listen_addr(), "Listen address");
 
