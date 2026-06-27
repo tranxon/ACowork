@@ -23,11 +23,22 @@ $Binary = "rust-analyzer"
 function Install-Server {
     Write-Host "[1/3] Installing rust-analyzer..."
 
-    # Already on PATH?
+    # Already on PATH and actually runnable?
+    # rustup creates a proxy at ~/.cargo/bin/rust-analyzer.exe that exists
+    # on PATH but fails at runtime if the component isn't installed for the
+    # active toolchain.  `--version` catches this — the proxy exits non-zero.
     $existing = Get-Command $Binary -ErrorAction SilentlyContinue
     if ($existing) {
-        Write-Host "rust-analyzer already on PATH at $($existing.Source)" -ForegroundColor Green
-        return
+        $versionOk = $false
+        try {
+            & $Binary --version 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $versionOk = $true }
+        } catch { }
+        if ($versionOk) {
+            Write-Host "rust-analyzer already on PATH at $($existing.Source)" -ForegroundColor Green
+            return
+        }
+        Write-Host "rust-analyzer proxy found but --version failed — installing component..." -ForegroundColor Yellow
     }
 
     # Not on PATH — search ~/.cargo/bin (rustup/rust default install location)
@@ -36,11 +47,17 @@ function Install-Server {
     if (Test-Path $candidate) {
         Write-Host "Found rust-analyzer at $candidate — adding $cargoBin to PATH..." -ForegroundColor Yellow
         Add-ToPath $cargoBin
-        return
-    }
+        $versionOk = $false
+        try {
+            & $Binary --version 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $versionOk = $true }
+        } catch { }
+        if ($versionOk) { return }
+    fi
 
-    # Not installed — run rustup component add
+    # Not installed or broken proxy — install the component
     if (Get-Command rustup -ErrorAction SilentlyContinue) {
+        Write-Host "Installing rust-analyzer component via rustup..."
         rustup component add rust-analyzer
     } else {
         Write-Host "ERROR: rustup not found. Install Rust first: https://rustup.rs" -ForegroundColor Red
@@ -50,11 +67,18 @@ function Install-Server {
 
 # -- Phase 2: Verify --------------------------------------------------
 function Verify-Server {
-    Write-Host "[2/3] Verifying rust-analyzer is on PATH..."
+    Write-Host "[2/3] Verifying rust-analyzer is on PATH and runnable..."
     $cmd = Get-Command $Binary -ErrorAction SilentlyContinue
     if ($cmd) {
-        Write-Host "OK: rust-analyzer found at $($cmd.Source)" -ForegroundColor Green
-        return
+        $versionOk = $false
+        try {
+            & $Binary --version 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $versionOk = $true }
+        } catch { }
+        if ($versionOk) {
+            Write-Host "OK: rust-analyzer found at $($cmd.Source)" -ForegroundColor Green
+            return
+        }
     }
 
     # Still not found — search ~/.cargo/bin
@@ -65,12 +89,19 @@ function Verify-Server {
         Add-ToPath $cargoBin
         $cmd = Get-Command $Binary -ErrorAction SilentlyContinue
         if ($cmd) {
-            Write-Host "OK: rust-analyzer found at $($cmd.Source)" -ForegroundColor Green
-            return
+            $versionOk = $false
+            try {
+                & $Binary --version 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { $versionOk = $true }
+            } catch { }
+            if ($versionOk) {
+                Write-Host "OK: rust-analyzer found at $($cmd.Source)" -ForegroundColor Green
+                return
+            }
         }
     }
 
-    Write-Host "ERROR: rust-analyzer not found on PATH after install" -ForegroundColor Red
+    Write-Host "ERROR: rust-analyzer not found or not runnable on PATH after install" -ForegroundColor Red
     exit 1
 }
 

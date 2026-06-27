@@ -28,8 +28,11 @@ add_to_path() {
 install() {
     echo "[1/3] Installing rust-analyzer..."
 
-    # Already on PATH?
-    if command -v "$BINARY" &>/dev/null; then
+    # Already on PATH and actually runnable?
+    # rustup creates a proxy at ~/.cargo/bin/rust-analyzer that exists on PATH
+    # but fails at runtime if the component isn't installed for the active
+    # toolchain.  `--version` catches this — the proxy exits non-zero.
+    if command -v "$BINARY" &>/dev/null && "$BINARY" --version &>/dev/null; then
         echo "rust-analyzer already on PATH at $(command -v "$BINARY")"
         return 0
     fi
@@ -40,11 +43,15 @@ install() {
     if [[ -x "$candidate" ]]; then
         echo "Found rust-analyzer at $candidate — adding $cargo_bin to PATH..."
         add_to_path "$cargo_bin"
-        return 0
+        # Re-check after PATH update
+        if command -v "$BINARY" &>/dev/null && "$BINARY" --version &>/dev/null; then
+            return 0
+        fi
     fi
 
-    # Not installed
+    # Not installed or broken proxy — install the component
     if command -v rustup &>/dev/null; then
+        echo "Installing rust-analyzer component via rustup..."
         rustup component add rust-analyzer
     else
         echo "ERROR: rustup not found. Install Rust first: https://rustup.rs"
@@ -54,8 +61,8 @@ install() {
 
 # ── Phase 2: Verify ──────────────────────────────────────────────────
 verify() {
-    echo "[2/3] Verifying rust-analyzer is on PATH..."
-    if command -v "$BINARY" &>/dev/null; then
+    echo "[2/3] Verifying rust-analyzer is on PATH and runnable..."
+    if command -v "$BINARY" &>/dev/null && "$BINARY" --version &>/dev/null; then
         echo "OK: rust-analyzer found at $(command -v "$BINARY")"
         return 0
     fi
@@ -66,13 +73,13 @@ verify() {
     if [[ -x "$candidate" ]]; then
         echo "Found rust-analyzer at $candidate — adding $cargo_bin to PATH..."
         add_to_path "$cargo_bin"
-        if command -v "$BINARY" &>/dev/null; then
+        if command -v "$BINARY" &>/dev/null && "$BINARY" --version &>/dev/null; then
             echo "OK: rust-analyzer found at $(command -v "$BINARY")"
             return 0
         fi
     fi
 
-    echo "ERROR: rust-analyzer not found on PATH after install"
+    echo "ERROR: rust-analyzer not found or not runnable on PATH after install"
     exit 1
 }
 

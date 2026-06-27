@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { cn } from "../../lib/utils";
-import { getGatewayUrl } from "../../lib/config";
 import { fetchLspServers, fetchLspStatus, fetchLspInstallScript, runLspInstall } from "../../lib/gateway-api";
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
@@ -108,83 +107,30 @@ export function LspTab() {
     }
   }, [status, loadServers, loadStatus]);
 
-  /** Check if an LSP server is available by attempting a WebSocket handshake */
+  /** Check if an LSP server is available by querying Gateway's PATH lookup */
   const handleCheck = useCallback(async (language: string) => {
     setCheckingLangs((prev) => new Set(prev).add(language));
     setHealthStatus((prev) => ({ ...prev, [language]: "checking" }));
     setHealthErrors((prev) => ({ ...prev, [language]: null }));
 
-    const httpUrl = getGatewayUrl();
-    const wsUrl = httpUrl.replace(/^http/, "ws");
-    const url = `${wsUrl}/lsp/${encodeURIComponent(language)}`;
-
     try {
-      const ws = new WebSocket(url);
-
-      const result = await new Promise<{ installed: boolean; error?: string }>((resolve) => {
-        const timeout = setTimeout(() => {
-          ws.close();
-          resolve({ installed: false, error: "Connection timed out" });
-        }, 5000);
-
-        ws.onopen = () => {
-          clearTimeout(timeout);
-          // Send a minimal JSON-RPC message to trigger a response
-          ws.send(JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "initialize",
-            params: {
-              processId: null,
-              capabilities: {},
-              rootUri: null,
-            },
-          }));
-        };
-
-        ws.onmessage = (event) => {
-          clearTimeout(timeout);
-          try {
-            const data = JSON.parse(event.data);
-            if (data.result?.capabilities || data.id === 1) {
-              resolve({ installed: true });
-            } else if (data.error) {
-              resolve({ installed: true, error: data.error.message });
-            } else {
-              resolve({ installed: true });
-            }
-          } catch {
-            resolve({ installed: true });
-          }
-          ws.close();
-        };
-
-        ws.onerror = () => {
-          clearTimeout(timeout);
-          resolve({ installed: false, error: "Connection failed" });
-        };
-
-        ws.onclose = (e) => {
-          clearTimeout(timeout);
-          if (e.code !== 1000 && e.code !== 1005) {
-            resolve({ installed: false, error: `Connection closed (${e.code})` });
-          }
-        };
+      const entries: LspServerStatusEntry[] = await fetchLspStatus();
+      // Update status for all languages from the backend response.
+      // This also clears the "checking" state for languages the user
+      // didn't explicitly click — harmless since loadStatus already
+      // seeded them on mount.
+      setHealthStatus((prev) => {
+        const next = { ...prev };
+        for (const entry of entries) {
+          next[entry.language] = entry.installed ? "installed" : "not_installed";
+        }
+        return next;
       });
-
-      setHealthStatus((prev) => ({
-        ...prev,
-        [language]: result.installed ? "installed" : "not_installed",
-      }));
-      setHealthErrors((prev) => ({
-        ...prev,
-        [language]: result.error ?? null,
-      }));
     } catch (e) {
       setHealthStatus((prev) => ({ ...prev, [language]: "error" }));
       setHealthErrors((prev) => ({
         ...prev,
-        [language]: e instanceof Error ? e.message : "Unknown error",
+        [language]: e instanceof Error ? e.message : "Status check failed",
       }));
     } finally {
       setCheckingLangs((prev) => {

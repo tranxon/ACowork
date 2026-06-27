@@ -23,6 +23,25 @@
 //! NOT individual WebSocket sessions. This avoids re-indexing (e.g. rust-analyzer)
 //! every time the Desktop App reconnects.
 //!
+//! ## Install Status Probe
+//!
+//! `GET /api/lsp/status` reports whether each configured language has a
+//! runnable LSP command on PATH. The probe is **two-stage**:
+//!
+//! 1. Try `{command} --version` (2 s timeout). Fast path for most servers
+//!    (rust-analyzer, clangd, yaml-language-server, typescript-language-server,
+//!    pylsp, pyright, marksman, ...). Also catches broken rustup proxies.
+//! 2. Fall back to spawning the command with the language's configured
+//!    launch args (`--stdio` for vscode-langservers-extracted servers
+//!    and friends) and a **piped stdin**. If the process stays alive past
+//!    a 500 ms grace window, it's a stdio-mode LSP server waiting for a
+//!    client connection — report runnable. A piped stdin is required:
+//!    `vscode-json-language-server` etc. throw `Connection input stream
+//!    is not set` and exit immediately if stdin is `/dev/null`.
+//!
+//! `kill_on_drop(true)` ensures the probe process is reaped on every
+//! exit path. See [`verify_command_runnable`].
+//!
 //! ## Configuration
 //!
 //! LSP server specifications are loaded from `lsp_servers.json` at startup.
@@ -415,10 +434,13 @@ fn builtin_lsp_defaults() -> LspServersConfig {
 /// Resolve the LSP server command and launch arguments for a given language.
 ///
 /// Looks up the canonical language in `lsp_servers.json`, then tries each
-/// candidate on PATH. Returns `LspServerSpec` with the found command,
-/// the server-specific args, plus install hint/script for UI display.
-/// Returns `None` if no candidate command is found on PATH.
-fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
+/// candidate on PATH. Each found candidate is verified by
+/// [`verify_command_runnable`] (two-stage: `--version` then spawn-with-args).
+///
+/// Returns `LspServerSpec` with the found command, the server-specific args,
+/// plus install hint/script for UI display.
+/// Returns `None` if no runnable candidate command is found.
+async fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
     let lang_lower = language.to_lowercase();
     let canonical = canonical_language(&lang_lower);
     let cfg = lsp_servers_config();
@@ -434,9 +456,22 @@ fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
     }
     let entry = entry.unwrap();
 
-    // Find first candidate that exists on PATH.
+    // Find first candidate that exists on PATH AND can actually run.
     for cmd in &entry.candidates {
         if let Some(found) = find_on_path(cmd) {
+            // Verify the command is actually runnable (not just a broken proxy
+            // or a stdio-mode LSP server that lacks `--version`). We pass
+            // `entry.args` so the fallback spawn probe uses the real launch
+            // arguments (e.g. `--stdio` for vscode-langservers-extracted).
+            if !verify_command_runnable(&found, &entry.args).await {
+                tracing::warn!(
+                    "[LSP] Command '{}' (with args {:?}) not runnable — skipping",
+                    found,
+                    entry.args
+                );
+                continue;
+            }
+
             tracing::info!(
                 "[LSP] Found LSP command for '{}' (canonical '{}'): {}, args: {:?}",
                 language,
@@ -460,9 +495,93 @@ fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
         canonical,
         entry.candidates
     );
-    // Return spec with install_hint even if command not found, so the
-    // handler can give a useful error message.
     None
+}
+
+/// Verify a command is actually runnable before reporting it as a usable
+/// LSP server on the `/api/lsp/status` endpoint.
+///
+/// Two-stage probe:
+///
+/// 1. **Fast path — `--version`**: most LSP servers (rust-analyzer, clangd,
+///    marksman, yaml-language-server, typescript-language-server, pylsp,
+///    pyright, …) implement `--version` and exit 0. This stage also
+///    catches broken rustup proxies that exist on PATH but fail at
+///    runtime because the active toolchain is missing the component.
+///
+/// 2. **Fallback — spawn with the language's actual launch args**: the
+///    `vscode-langservers-extracted` package (json / css / html servers)
+///    is a **stdio-mode LSP server with no `--version` flag**. Calling
+///    `--version` on it throws `Connection input stream is not set` and
+///    exits 1, so stage 1 always fails for it. As a fallback we spawn
+///    the binary with the args configured in `lsp_servers.json` (e.g.
+///    `--stdio`) and a **piped stdin**, then wait 500 ms:
+///
+///    - **still alive** → it's a stdio-mode LSP server waiting for a
+///      client connection → runnable
+///    - **already exited** → the binary can't run with the configured
+///      args (wrong version, missing native lib, etc.) → not runnable
+///
+///    A piped stdin is **required**: when stdin is `/dev/null` these
+///    servers immediately detect "no input stream" and exit. With a
+///    real pipe they sit in their event loop awaiting LSP frames.
+///
+/// `kill_on_drop(true)` ensures the probe process is reaped on every
+/// exit path (success, timeout, panic, cancellation) — no zombie.
+async fn verify_command_runnable(command: &str, args: &[String]) -> bool {
+    use std::process::Stdio;
+
+    // Stage 1: --version
+    if let Ok(Ok(output)) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::process::Command::new(command)
+            .arg("--version")
+            .output(),
+    )
+    .await
+        && output.status.success()
+    {
+        return true;
+    }
+
+    // Stage 2: spawn with the real launch args + piped stdin.
+    let mut child = match tokio::process::Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped()) // <-- critical for vscode-langservers-extracted
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false, // command cannot be spawned at all
+    };
+
+    // CRITICAL: explicitly take the stdin handle and keep it alive for
+    // the duration of the probe. If we let `child` own stdin, the pipe's
+    // parent end would be dropped (either when the timeout future is
+    // dropped, or earlier in some tokio edge cases), the child would
+    // see EOF on stdin, and any stdio-mode LSP server would exit
+    // immediately. Holding `_stdin` open keeps the pipe alive.
+    let mut _stdin = child.stdin.take();
+
+    // 500ms grace window: long enough for slow startup of native LSP
+    // servers (jvm-based jdtls, etc. — those still go through stage 1
+    // successfully), short enough that the status endpoint stays snappy.
+    // On timeout the future is dropped; kill_on_drop reaps the child.
+    let exited_within_window =
+        tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
+            .await
+            .is_ok(); // Ok = exited within 500ms → broken or wrong args
+
+    // Explicitly close stdin before returning so the child sees EOF
+    // immediately (avoids leaving a zombie waiting for a parent that
+    // will never write). If `child.wait()` already completed the process
+    // is gone and this is a no-op.
+    _stdin.take();
+    drop(_stdin);
+
+    !exited_within_window // still alive after 500ms → stdio LSP server, OK
 }
 
 /// Check if a command exists on the system PATH.
@@ -531,21 +650,20 @@ pub async fn lsp_servers_list(State(_state): State<AppState>) -> Json<LspServers
 /// installed" badges and disable the Install button for already-installed
 /// servers, without having to spawn N WebSocket handshakes on mount.
 pub async fn lsp_status_list(State(_state): State<AppState>) -> Json<Vec<LspServerStatusEntry>> {
-    Json(compute_lsp_status())
+    Json(compute_lsp_status().await)
 }
 
 /// Pure helper: compute installation status for every configured language.
 ///
 /// Extracted from [`lsp_status_list`] so unit tests can validate the result
 /// shape without constructing an [`AppState`].
-fn compute_lsp_status() -> Vec<LspServerStatusEntry> {
+async fn compute_lsp_status() -> Vec<LspServerStatusEntry> {
     let cfg = lsp_servers_config();
     // Iterate in deterministic (sorted) order so the response is stable
     // across calls — makes UI diffing and testing predictable.
-    let mut entries: Vec<LspServerStatusEntry> = cfg
-        .servers
-        .keys()
-        .map(|lang| match resolve_lsp_command(lang) {
+    let mut entries: Vec<LspServerStatusEntry> = Vec::new();
+    for lang in cfg.servers.keys() {
+        let entry = match resolve_lsp_command(lang).await {
             Some(spec) => LspServerStatusEntry {
                 language: spec.language,
                 installed: true,
@@ -556,8 +674,9 @@ fn compute_lsp_status() -> Vec<LspServerStatusEntry> {
                 installed: false,
                 command: None,
             },
-        })
-        .collect();
+        };
+        entries.push(entry);
+    }
     entries.sort_by(|a, b| a.language.cmp(&b.language));
     entries
 }
@@ -849,7 +968,7 @@ pub async fn lsp_handler(
     };
 
     // Resolve LSP command
-    let spec = match resolve_lsp_command(&lang_lower) {
+    let spec = match resolve_lsp_command(&lang_lower).await {
         Some(spec) => {
             tracing::info!(
                 "[LSP] lsp_handler — LSP command resolved: '{}' args={:?} for language '{}'",
@@ -1328,26 +1447,26 @@ mod tests {
         assert_eq!(parse_content_length("Content-Length: abc"), None);
     }
 
-    #[test]
-    fn test_resolve_lsp_command_known_languages() {
+    #[tokio::test]
+    async fn test_resolve_lsp_command_known_languages() {
         // These may return None if the binary is not on PATH,
         // but should not panic.
-        let _ = resolve_lsp_command("rust");
-        let _ = resolve_lsp_command("python");
-        let _ = resolve_lsp_command("go");
+        let _ = resolve_lsp_command("rust").await;
+        let _ = resolve_lsp_command("python").await;
+        let _ = resolve_lsp_command("go").await;
     }
 
-    #[test]
-    fn test_resolve_lsp_command_unknown_language() {
-        assert!(resolve_lsp_command("brainfuck").is_none());
-        assert!(resolve_lsp_command("").is_none());
+    #[tokio::test]
+    async fn test_resolve_lsp_command_unknown_language() {
+        assert!(resolve_lsp_command("brainfuck").await.is_none());
+        assert!(resolve_lsp_command("").await.is_none());
     }
 
-    #[test]
-    fn test_resolve_lsp_command_case_insensitive() {
+    #[tokio::test]
+    async fn test_resolve_lsp_command_case_insensitive() {
         // Both "Rust" and "rust" should resolve to the same canonical language
-        let lower = resolve_lsp_command("rust");
-        let upper = resolve_lsp_command("Rust");
+        let lower = resolve_lsp_command("rust").await;
+        let upper = resolve_lsp_command("Rust").await;
         // Compare the language field (canonical name) rather than full struct
         // since LspServerSpec doesn't derive PartialEq
         let lower_lang = lower.map(|s| s.language.clone());
@@ -1401,10 +1520,10 @@ mod tests {
     /// assert structural invariants: count matches the config, languages
     /// are unique, and each entry's `installed`/`command` fields are
     /// consistent with each other.
-    #[test]
-    fn test_compute_lsp_status_invariants() {
+    #[tokio::test]
+    async fn test_compute_lsp_status_invariants() {
         let cfg = lsp_servers_config();
-        let status = compute_lsp_status();
+        let status = compute_lsp_status().await;
 
         // Count and content match the config.
         assert_eq!(status.len(), cfg.servers.len());
@@ -1455,5 +1574,114 @@ mod tests {
         let json_installed = serde_json::to_string(&entry_installed).unwrap();
         assert!(json_installed.contains("\"command\":\"rust-analyzer\""));
         assert!(json_installed.contains("\"installed\":true"));
+    }
+
+    // ── verify_command_runnable two-stage probe ──────────────────────────
+    //
+    // We exercise the function against three synthetic shell scripts that
+    // mimic the three real-world cases the probe has to handle:
+    //
+    //   1. A normal CLI tool that supports `--version` (rust-analyzer,
+    //      clangd, yaml-language-server, typescript-language-server, ...).
+    //   2. A stdio-mode LSP server with no `--version` flag
+    //      (vscode-langservers-extracted: json / css / html) that
+    //      sits in `read` when launched with `--stdio` + piped stdin.
+    //   3. A broken binary that fails on every invocation.
+    //
+    // We also verify the spawn-failure path (command does not exist).
+
+    /// Write a bash script to a temp file with the given body and make it
+    /// executable. Returns the absolute path.
+    fn write_fake_binary(body: &str) -> std::path::PathBuf {
+        let dir = ::tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fake_lsp.sh");
+        std::fs::write(&path, format!("#!/usr/bin/env bash\n{}\n", body))
+            .expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        // Leak the tempdir so the script outlives the test. Background
+        // processes spawned by the test (case 2) need the file to remain
+        // on disk; once the timeout drops the future, kill_on_drop
+        // reaps the child and the leaked dir is freed at process exit.
+        let path_clone = path.clone();
+        std::mem::forget(dir);
+        path_clone
+    }
+
+    #[tokio::test]
+    async fn verify_runnable_stage1_version_succeeds() {
+        // Case 1: --version exits 0 → runnable, regardless of what
+        // stage 2 would do.
+        let path = write_fake_binary(
+            "if [ \"$1\" = \"--version\" ]; then echo 1.0; exit 0; fi\n\
+             # If somehow reached without --version, also exit 0 (shouldn't happen).\n\
+             exit 0",
+        );
+        let path_str = path.to_str().unwrap();
+        assert!(
+            verify_command_runnable(path_str, &[]).await,
+            "a binary whose --version exits 0 must be reported runnable"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_runnable_stage2_stdio_lsp_server() {
+        // Case 2: --version exits 1, but with --stdio + piped stdin the
+        // process sits in `read` awaiting input — exactly the
+        // vscode-langservers-extracted behaviour.
+        let path = write_fake_binary(
+            "if [ \"$1\" = \"--version\" ]; then exit 1; fi\n\
+             if [ \"$1\" = \"--stdio\" ]; then\n\
+                 # Block on stdin, mirroring how a real stdio LSP server\n\
+                 # waits for LSP frames. The probe's piped stdin keeps the\n\
+                 # pipe open, so this read never returns and the process\n\
+                 # stays alive past the 500ms grace window.\n\
+                 read -r _ || exit 0\n\
+             fi\n\
+             exit 1",
+        );
+        let path_str = path.to_str().unwrap();
+        let args = vec!["--stdio".to_string()];
+        assert!(
+            verify_command_runnable(path_str, &args).await,
+            "a stdio-mode LSP server (no --version, blocks on stdin) \
+             must be reported runnable via the spawn fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_runnable_broken_binary_returns_false() {
+        // Case 3: --version fails AND with the configured args the
+        // process exits within 500ms. Broken.
+        let path = write_fake_binary(
+            "if [ \"$1\" = \"--version\" ]; then exit 1; fi\n\
+             # Stage 2 spawn: also exit 1 immediately.\n\
+             exit 1",
+        );
+        let path_str = path.to_str().unwrap();
+        let args = vec!["--stdio".to_string()];
+        assert!(
+            !verify_command_runnable(path_str, &args).await,
+            "a binary that fails --version and also exits within 500ms \
+             with the configured args must be reported not runnable"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_runnable_nonexistent_command_returns_false() {
+        // Stage 1 fails (no such command, exec error), stage 2 spawn
+        // also fails (the OS returns ENOENT). Must be false.
+        assert!(
+            !verify_command_runnable(
+                "acowork_lsp_definitely_not_a_real_binary_xyz",
+                &[]
+            )
+            .await,
+            "a nonexistent command must be reported not runnable"
+        );
     }
 }
