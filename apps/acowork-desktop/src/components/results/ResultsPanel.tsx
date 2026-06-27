@@ -223,7 +223,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
   }, [selectedAgent?.running, activeTab]);
 
   return (
-    <div className="relative flex flex-col bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900 rounded-lg ml-1" style={{ width }}>
+    <div className="relative flex flex-col bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900 rounded-xl ml-1" style={{ width }}>
       {/* Resize handle overlay — sits at the left edge */}
       <div
         className="absolute -left-1 top-0 bottom-0 w-1 cursor-col-resize z-10 group"

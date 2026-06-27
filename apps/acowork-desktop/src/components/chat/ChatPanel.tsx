@@ -1056,7 +1056,7 @@ export function ChatPanel() {
   return (
     <>
       <div
-        className="flex flex-1 min-w-[288px] flex-col bg-[#FAFAFA] dark:bg-zinc-900 rounded-lg overflow-hidden"
+        className="flex flex-1 min-w-[288px] flex-col bg-[#FAFAFA] dark:bg-zinc-900 rounded-xl overflow-hidden"
       >
         {/* LLM config warning */}
         {hasLlmConfig === false && (

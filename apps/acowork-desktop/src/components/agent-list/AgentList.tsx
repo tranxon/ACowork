@@ -244,7 +244,7 @@ export function AgentList({ width }: AgentListProps) {
 
   return (
     <div
-      className="flex flex-col bg-[#EEEEF0] dark:bg-[#2F2F30] rounded-lg"
+      className="flex flex-col bg-[#EEEEF0] dark:bg-[#2F2F30] rounded-xl"
       style={{ width: width ?? 240 }}
     >
       {/* Header — search input */}

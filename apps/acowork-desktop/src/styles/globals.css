@@ -32,11 +32,11 @@
   --color-chat-user-text: hsl(240 10% 3.9%);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
 
-  /* Border radius — 3-tier unified scale
+  /* Border radius — 4-tier unified scale
      sm (4px): buttons, inputs, labels, badges
      md (6px): card containers, dialogs, message boxes
-     lg (8px): panel containers, layout wrappers
-     xl (12px): reserved, not yet applied */
+     lg (8px): popovers, banners (small floating UI)
+     xl (12px): panel containers, layout wrappers */
   --radius: 4px;
   --radius-sm: 4px;
   --radius-md: 6px;
