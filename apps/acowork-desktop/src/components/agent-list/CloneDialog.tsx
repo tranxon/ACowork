@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 import { cn } from "../../lib/utils";
 import { StyledInput } from "../common/StyledInput";
 import type { CloneMode, CloneResponse } from "../../lib/types";
@@ -171,9 +172,7 @@ export function CloneDialog({
 
           {/* Error */}
           {error && (
-            <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-900/20 dark:text-red-400">
-              {error}
-            </div>
+            <ErrorBox message={error} onClose={() => setError(null)} />
           )}
         </div>
 

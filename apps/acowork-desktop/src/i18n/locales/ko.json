@@ -23,7 +23,12 @@
     "loading": "로딩 중...",
     "remove": "제거",
     "back": "뒤로",
-    "backToList": "목록으로 돌아가기"
+    "backToList": "목록으로 돌아가기",
+    "copy": "복사",
+    "copied": "복사됨",
+    "showDetails": "세부 정보 보기",
+    "hideDetails": "세부 정보 숨기기",
+    "ariaLabelCopyError": "오류 메시지 복사"
   },
   "time": {
     "justNow": "방금",

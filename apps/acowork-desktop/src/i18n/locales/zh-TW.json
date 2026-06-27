@@ -23,7 +23,12 @@
     "loading": "載入中...",
     "remove": "移除",
     "back": "返回",
-    "backToList": "返回清單"
+    "backToList": "返回清單",
+    "copy": "複製",
+    "copied": "已複製",
+    "showDetails": "顯示詳細資料",
+    "hideDetails": "隱藏詳細資料",
+    "ariaLabelCopyError": "複製錯誤訊息"
   },
   "time": {
     "justNow": "剛剛",

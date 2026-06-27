@@ -18,6 +18,7 @@ import { ProviderPicker } from "./ProviderPicker";
 import { AddProviderFlow } from "./AddProviderFlow";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
+import { ErrorBox } from "../common/ErrorBox";
 import { TabButton } from "../common/tab";
 
 type HarnessTab = "providers" | "search" | "mcp" | "embedding" | "lsp";
@@ -818,7 +819,9 @@ function McpTab() {
         </div>
 
         {error && (
-          <p className="mt-2 text-xs text-red-500">{error}</p>
+          <div className="mt-2">
+            <ErrorBox message={error} onClose={() => useMcpStore.setState({ error: null })} />
+          </div>
         )}
 
         {loading && catalog.length === 0 && (
@@ -894,7 +897,9 @@ function McpTab() {
                   )}
                   {/* Show health error inline */}
                   {status === "unhealthy" && healthErr && (
-                    <p className="mt-1 text-[10px] text-red-500 break-all">{healthErr}</p>
+                    <div className="mt-1">
+                      <ErrorBox message={healthErr} className="!p-2 !text-[10px]" />
+                    </div>
                   )}
                 </div>
               );
@@ -1115,10 +1120,11 @@ function McpTab() {
                     {t("harnessMcp.connFailed")}
                   </h3>
                 </div>
-                <div className="mb-3 rounded bg-red-50 p-2 dark:bg-red-900/20">
-                  <p className="text-[11px] text-red-600 dark:text-red-400 break-all whitespace-pre-wrap">
-                    {probeResult.error}
-                  </p>
+                <div className="mb-3">
+                  <ErrorBox
+                    message={t("harnessMcp.connFailed")}
+                    details={probeResult.error ?? undefined}
+                  />
                 </div>
                 <p className="text-[10px] text-zinc-400 mb-3">{probeResult.duration_ms}ms</p>
                 <div className="flex gap-2">

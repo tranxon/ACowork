@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { ChevronRight, ChevronDown, Folder, FolderOpen, HardDrive } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 import { cn } from "../../lib/utils";
 import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 
@@ -239,8 +240,8 @@ export function RemoteFolderPicker({ onSelect, onCancel }: RemoteFolderPickerPro
                             {t("workspace.explorer.loading")}
                         </div>
                     ) : error ? (
-                        <div className="flex flex-col items-center justify-center py-8 text-xs text-zinc-400">
-                            <span className="text-red-500 mb-2">{error}</span>
+                        <div className="flex flex-col items-center justify-center gap-3 py-8 text-xs text-zinc-400">
+                            <ErrorBox message={error} className="max-w-md" />
                             <button
                                 onClick={() => void fetchEntries(currentPath)}
                                 className="rounded-md px-3 py-1 text-xs bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-700 dark:hover:bg-zinc-600"

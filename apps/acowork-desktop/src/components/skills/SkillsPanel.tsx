@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Sparkles, FolderPlus, Check, Loader2, AlertCircle, X } from "lucide-react";
+import { Sparkles, FolderPlus, Check, Loader2, X } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 
 export function SkillsPanel() {
   const { t } = useTranslation();
@@ -261,10 +262,7 @@ export function SkillsPanel() {
 
             {/* Error / Success messages */}
             {importError && (
-              <div className="mb-3 flex items-center gap-2 rounded-md bg-red-50 p-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
-                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                {importError}
-              </div>
+              <ErrorBox message={importError} onClose={() => setImportError(null)} />
             )}
             {importSuccess && (
               <div className="mb-3 flex items-center gap-2 rounded-md bg-green-50 p-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-300">

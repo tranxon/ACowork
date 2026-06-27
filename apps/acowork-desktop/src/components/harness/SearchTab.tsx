@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchKeyEntry, SearchProviderDef } from "../../lib/types";
-import { cn } from "../../lib/utils";
 import { StyledInput } from "../common/StyledInput";
 import { SEARCH_PROVIDERS, lookupSearchProvider, searchKeyPlaceholder } from "../../lib/search-providers";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 import { getGatewayUrl } from "../../lib/config";
 
 /** Search Provider configuration tab — mirrors ProvidersTab layout */
@@ -269,15 +269,13 @@ export function SearchTab() {
               </div>
 
               {/* Test Result */}
-              {testResult && (
-                <div className={cn(
-                  "rounded-md px-3 py-2 text-xs",
-                  testResult.success
-                    ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
-                    : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
-                )}>
+              {testResult && testResult.success && (
+                <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
                   {testResult.message}
                 </div>
+              )}
+              {testResult && !testResult.success && (
+                <ErrorBox message={testResult.message} />
               )}
               {testing && (
                 <div className="text-xs text-zinc-400">{t("harnessSearch.testing")}</div>

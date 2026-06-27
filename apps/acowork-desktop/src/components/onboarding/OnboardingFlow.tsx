@@ -12,6 +12,7 @@ import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 import type { GatewayMode, ModelInfo } from "../../lib/types";
 import { RadioGroup } from "../common/RadioGroup";
 import { StyledInput } from "../common/StyledInput";
+import { ErrorBox } from "../common/ErrorBox";
 import brandMark from "../../../../../assets/brand-mark.svg";
 
 const TOTAL_STEPS = 5;
@@ -294,7 +295,9 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
               )}
             </div>
             {localError && (
-              <p className="mt-1 text-xs text-red-500">{startError ?? "Could not start local Gateway"}</p>
+              <div className="mt-1">
+                <ErrorBox message={startError ?? "Could not start local Gateway"} />
+              </div>
             )}
             {!localConnected && !starting && (
               <button
@@ -829,7 +832,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           <p className="text-xs text-zinc-400">Installing: {installing}</p>
         )}
         {installError && (
-          <p className="text-xs text-red-500">{installError}</p>
+          <ErrorBox message={installError} />
         )}
       </div>
 

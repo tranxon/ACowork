@@ -23,7 +23,12 @@
     "loading": "Loading...",
     "remove": "Remove",
     "back": "Back",
-    "backToList": "Back to list"
+    "backToList": "Back to list",
+    "copy": "Copy",
+    "copied": "Copied",
+    "showDetails": "Show details",
+    "hideDetails": "Hide details",
+    "ariaLabelCopyError": "Copy error message"
   },
   "time": {
     "justNow": "Just now",

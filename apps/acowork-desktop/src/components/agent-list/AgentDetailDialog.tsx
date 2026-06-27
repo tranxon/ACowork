@@ -4,6 +4,7 @@ import type { AgentDetail } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 
 interface AgentDetailDialogProps {
   open: boolean;
@@ -81,8 +82,8 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
         )}
 
         {error && (
-          <div className="rounded-md bg-red-50 p-3 text-sm text-red-600 dark:bg-red-950 dark:text-red-400">
-            Failed to load agent details: {error}
+          <div className="text-sm">
+            <ErrorBox message={`Failed to load agent details: ${error}`} onClose={() => setError(null)} />
           </div>
         )}
 

@@ -213,6 +213,21 @@ body {
   flex-direction: column;
 }
 
+/* Allow text selection on error/alert regions.
+   `body` sets `user-select: none` (Tauri desktop drag-region), so any
+   inline red error box that doesn't opt in becomes unselectable and
+   uncopyable. We rely on two escape hatches:
+     1. [role="alert"] / [role="alertdialog"] — semantic HTML hook
+     2. [data-error] / .error-message — explicit opt-in for error text
+   Component-level <ErrorBox> adds `select-text` for double safety. */
+[role="alert"],
+[role="alertdialog"],
+[data-error],
+.error-message {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 /* Scrollbar — themed via --ui-scrollbar-* tokens */
 ::-webkit-scrollbar {
   width: var(--ui-scrollbar-size);

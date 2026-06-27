@@ -9,6 +9,7 @@ import { ModelCapEditor } from "./ModelCapEditor";
 import { ProviderPicker } from "./ProviderPicker";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ChevronLeft } from "lucide-react";
+import { ErrorBox } from "../common/ErrorBox";
 
 interface AddProviderFlowProps {
   open: boolean;
@@ -608,15 +609,13 @@ export function AddProviderFlow({
               )}
 
               {/* Test result */}
-              {testResult && (
-                <div className={cn(
-                  "rounded-md px-3 py-2 text-xs",
-                  testResult.success
-                    ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
-                    : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
-                )}>
+              {testResult && testResult.success && (
+                <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
                   {testResult.message}
                 </div>
+              )}
+              {testResult && !testResult.success && (
+                <ErrorBox message={testResult.message} />
               )}
             </div>
           )}
@@ -682,9 +681,7 @@ export function AddProviderFlow({
                 </div>
               )}
               {customDiscoverError && (
-                <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-400">
-                  {t("harness.discoverFailed")}: {customDiscoverError}
-                </div>
+                <ErrorBox message={`${t("harness.discoverFailed")}: ${customDiscoverError}`} />
               )}
 
               {/* Model selection */}
@@ -801,13 +798,13 @@ export function AddProviderFlow({
         <div className="shrink-0 flex items-center justify-between gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
           {/* Status on the left */}
           <div className="flex-1 min-w-0">
-            {step === "add" && testResult && (
-              <div className={cn(
-                "rounded-md px-3 py-1.5 text-xs truncate",
-                testResult.success
-                  ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
-                  : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400"
-              )}>
+            {step === "add" && testResult && testResult.success && (
+              <div className="truncate rounded-md bg-green-50 px-3 py-1.5 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
+                {testResult.message}
+              </div>
+            )}
+            {step === "add" && testResult && !testResult.success && (
+              <div className="truncate text-xs text-red-600 dark:text-red-400" title={testResult.message}>
                 {testResult.message}
               </div>
             )}

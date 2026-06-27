@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 import type {
   PreparePublishResponse,
   BuildPublishResponse,
@@ -358,13 +359,11 @@ export function PublishWizard({
                 </div>
               ))}
               {checkResult.errors.length > 0 && (
-                <div className="rounded-md bg-red-50 px-3 py-2 dark:bg-red-900/20">
-                  {checkResult.errors.map((e, i) => (
-                    <p key={i} className="text-xs text-red-600 dark:text-red-400">
-                      {e}
-                    </p>
-                  ))}
-                </div>
+                <ErrorBox
+                  message={`${checkResult.errors.length} validation error(s)`}
+                  details={checkResult.errors.join("\n")}
+                  onClose={() => setCheckResult(null)}
+                />
               )}
               {checkResult.warnings.length > 0 && (
                 <div className="rounded-md bg-yellow-50 px-3 py-2 dark:bg-yellow-900/20">
@@ -492,9 +491,7 @@ export function PublishWizard({
 
           {/* Error */}
           {error && (
-            <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-900/20 dark:text-red-400">
-              {error}
-            </div>
+            <ErrorBox message={error} onClose={() => setError(null)} />
           )}
         </div>
 
@@ -719,7 +716,7 @@ function AvatarPickerSubForm({
       )}
 
       {pickerError && (
-        <p className="text-xs text-red-600 dark:text-red-400">{pickerError}</p>
+        <ErrorBox message={pickerError} onClose={() => setPickerError(null)} />
       )}
 
       {/* Hidden file input — currently unused (we use Tauri dialog instead)

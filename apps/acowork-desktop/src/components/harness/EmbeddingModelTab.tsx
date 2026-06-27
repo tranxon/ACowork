@@ -4,6 +4,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { EmbeddingModelWithStatus, SelectModelMigrationResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
+import { ErrorBox } from "../common/ErrorBox";
 import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel, startMigration, selectEmbeddingModelWithMigration } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
 import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2 } from "lucide-react";
@@ -398,9 +399,10 @@ export function EmbeddingModelTab() {
 
             {/* Error message */}
             {error && (
-                <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
-                    {error}
-                </div>
+                <ErrorBox
+                    message={error}
+                    onClose={() => setError(null)}
+                />
             )}
 
             {/* Migration panel */}

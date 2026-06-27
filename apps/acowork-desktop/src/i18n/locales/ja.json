@@ -23,7 +23,12 @@
     "loading": "読み込み中...",
     "remove": "削除",
     "back": "戻る",
-    "backToList": "リストに戻る"
+    "backToList": "リストに戻る",
+    "copy": "コピー",
+    "copied": "コピーしました",
+    "showDetails": "詳細を表示",
+    "hideDetails": "詳細を非表示",
+    "ariaLabelCopyError": "エラーメッセージをコピー"
   },
   "time": {
     "justNow": "たった今",

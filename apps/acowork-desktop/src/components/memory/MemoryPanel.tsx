@@ -3,9 +3,10 @@ import { useMemoryStore } from "../../stores/memoryStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
-import { AlertTriangle, Info } from "lucide-react";
+import { Info } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
+import { ErrorBox } from "../common/ErrorBox";
 
 export function MemoryPanel() {
   const { t } = useTranslation();
@@ -158,9 +159,8 @@ export function MemoryPanel() {
 
       {/* Error banner */}
       {error && (
-        <div className="flex items-center gap-1.5 border-b border-red-200 bg-red-50 px-3 py-1.5 dark:border-red-900 dark:bg-red-950">
-          <AlertTriangle className="h-3 w-3 text-red-600 dark:text-red-400" />
-          <span className="text-[11px] text-red-700 dark:text-red-300">{error}</span>
+        <div className="border-b border-red-200 dark:border-red-900">
+          <ErrorBox message={error} className="!rounded-none !border-0" />
         </div>
       )}
 

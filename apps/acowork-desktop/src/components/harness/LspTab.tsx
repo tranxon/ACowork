@@ -6,6 +6,7 @@ import { getGatewayUrl } from "../../lib/config";
 import { fetchLspServers, fetchLspInstallScript, runLspInstall } from "../../lib/gateway-api";
 import type { LspServersConfig, LspServerEntry, LspHealthStatus } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
+import { ErrorBox } from "../common/ErrorBox";
 
 /** Language display names for UI */
 const LANGUAGE_LABELS: Record<string, string> = {
@@ -238,8 +239,8 @@ export function LspTab() {
 
         {/* Error message */}
         {error && (
-          <div className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
-            {error}
+          <div className="mb-3">
+            <ErrorBox message={error} onClose={() => setError(null)} />
           </div>
         )}
 

@@ -23,7 +23,12 @@
     "loading": "加载中...",
     "remove": "移除",
     "back": "返回",
-    "backToList": "返回列表"
+    "backToList": "返回列表",
+    "copy": "复制",
+    "copied": "已复制",
+    "showDetails": "显示详情",
+    "hideDetails": "隐藏详情",
+    "ariaLabelCopyError": "复制错误信息"
   },
   "time": {
     "justNow": "刚刚",

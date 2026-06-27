@@ -2,11 +2,12 @@ import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useSkillStore } from "../../stores/skillStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { SkillDetail } from "./SkillDetail";
-import { RefreshCw, AlertTriangle, Wrench, FolderPlus, X, Loader2 } from "lucide-react";
+import { RefreshCw, Wrench, FolderPlus, X, Loader2 } from "lucide-react";
 import { useToast } from "../common/ToastProvider";
 import { cn } from "../../lib/utils";
 import { StyledInput } from "../common/StyledInput";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 
 export function SkillBrowser() {
   const { t } = useTranslation();
@@ -159,9 +160,8 @@ export function SkillBrowser() {
 
       {/* Error banner */}
       {error && (
-        <div className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-6 py-2 dark:border-red-900 dark:bg-red-950">
-          <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
-          <span className="text-xs text-red-700 dark:text-red-300">{error}</span>
+        <div className="border-b border-red-200 dark:border-red-900">
+          <ErrorBox message={error} className="!rounded-none !border-0" />
         </div>
       )}
 
@@ -328,10 +328,7 @@ export function SkillBrowser() {
 
             {/* Error message */}
             {importError && (
-              <div className="mb-3 flex items-center gap-2 rounded-md bg-red-50 p-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                {importError}
-              </div>
+              <ErrorBox message={importError} onClose={() => setImportError(null)} />
             )}
 
             {/* Actions */}

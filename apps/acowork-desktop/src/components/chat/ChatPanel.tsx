@@ -9,6 +9,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ErrorBox } from "../common/ErrorBox";
 import type { ToolApprovalNeededEvent } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
@@ -1098,10 +1099,11 @@ export function ChatPanel() {
 
             {loadError && !isLoadingSession && (
               <div className="flex h-full flex-col items-center justify-center gap-3 px-4">
-                <div className="text-sm text-red-500 dark:text-red-400">{t("chatPanel.sessionLoadFailed")}</div>
-                <div className="max-w-xs text-center text-xs text-zinc-500 dark:text-zinc-400">
-                  {loadError}
-                </div>
+                <ErrorBox
+                  message={t("chatPanel.sessionLoadFailed")}
+                  details={loadError}
+                  className="max-w-md"
+                />
                 <button
                   onClick={() => {
                     const sessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
