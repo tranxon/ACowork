@@ -43,6 +43,21 @@ if (-not (Test-Path $BinDir)) {
 Copy-Item -Path $OrtDll -Destination (Join-Path $BinDir "onnxruntime.dll") -Force
 Write-Host "Bundled ORT DLL: $OrtDll" -ForegroundColor Green
 
+# Bundle LSP Relay binary (sibling of acowork-gateway.exe, ADR-019).
+# The Gateway locates it via `current_exe().parent().join("acowork-lsp-relay.exe")`,
+# so without this copy the Tauri app's Gateway supervisor will fail to spawn LSP
+# and Monaco / runtime codebase tool will silently lose all LSP features.
+$LspRelayBin = Join-Path $WorkspaceRoot "target\release\acowork-lsp-relay.exe"
+if (Test-Path $LspRelayBin) {
+    Copy-Item -Path $LspRelayBin -Destination (Join-Path $BinDir "acowork-lsp-relay.exe") -Force
+    Write-Host "Bundled LSP Relay binary: $LspRelayBin" -ForegroundColor Green
+} else {
+    Write-Host "WARN: acowork-lsp-relay.exe not found at $LspRelayBin." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Without it, Gateway startup will fail with:" -ForegroundColor Yellow
+    Write-Host "        acowork-lsp-relay binary not found" -ForegroundColor Yellow
+}
+
 Push-Location $DesktopDir
 try {
     npm run tauri build

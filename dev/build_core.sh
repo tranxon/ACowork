@@ -126,10 +126,17 @@ stop_process() {
 
 # Step 1: Stop running processes (only when we are about to start a new one)
 if [ "$START_GATEWAY" = "true" ]; then
-    echo -e "${YELLOW}[1/5] Stopping running Gateway, Runtime, and Embed processes...${NC}"
+    echo -e "${YELLOW}[1/5] Stopping running Gateway, Runtime, Embed, and LSP Relay processes...${NC}"
     stop_process "acowork-gateway" "Gateway"
     stop_process "acowork-runtime" "Runtime"
     stop_process "acowork-embed"  "Embed"
+    # The LSP Relay runs in its own process group (see
+    # core/acowork-gateway/src/lifecycle/lsp_relay.rs: cmd.process_group(0)),
+    # so a Gateway shutdown does NOT cascade a SIGHUP/SIGTERM to it — we must
+    # explicitly kill it to avoid leaving an orphan binding port 19878, which
+    # would otherwise be attached by the new gateway via
+    # attach_existing_lsp_relay() but owned by a now-dead parent.
+    stop_process "acowork-lsp-relay" "LSP Relay"
 
     # Ensure embed port is released before starting a new gateway.
     # On Unix, pkill may not have finished releasing port 18080 within the
@@ -149,6 +156,21 @@ if [ "$START_GATEWAY" = "true" ]; then
                 break
             fi
         done
+
+        # Free LSP Relay port 19878 (see note above about process_group(0)).
+        # Independent counter so embed-port wait doesn't pre-empt the relay-port wait.
+        if command -v fuser &>/dev/null; then
+            fuser -k 19878/tcp 2>/dev/null || true
+        fi
+        lsp_waited=0
+        while command -v ss &>/dev/null && ss -tlnp 2>/dev/null | grep -q ":19878 "; do
+            sleep 0.5
+            lsp_waited=$((lsp_waited + 1))
+            if [ $lsp_waited -ge 6 ]; then
+                echo -e "${RED}  WARNING: Port 19878 still in use after 3s${NC}"
+                break
+            fi
+        done
     fi
     echo ""
 fi
@@ -162,7 +184,7 @@ else
     cargo_args=(cargo build -p acowork-gateway)
 fi
 if "${cargo_args[@]}" 2>&1 | tee /tmp/gateway_build.log; then
-    if grep -q "error" /tmp/gateway_build.log 2>/dev/null; then
+    if grep -q "error\[" /tmp/gateway_build.log 2>/dev/null; then
         echo -e "${RED}  Gateway build failed with errors.${NC}"
         exit 1
     fi
@@ -181,7 +203,7 @@ else
     cargo_args=(cargo build -p acowork-runtime)
 fi
 if "${cargo_args[@]}" 2>&1 | tee /tmp/runtime_build.log; then
-    if grep -q "error" /tmp/runtime_build.log 2>/dev/null; then
+    if grep -q "error\[" /tmp/runtime_build.log 2>/dev/null; then
         echo -e "${RED}  Runtime build failed with errors.${NC}"
         exit 1
     fi
@@ -265,7 +287,7 @@ else
         cargo_args=(cargo build -p acowork-embed)
     fi
     if "${cargo_args[@]}" 2>&1 | tee /tmp/embed_build.log; then
-        if grep -q "error" /tmp/embed_build.log 2>/dev/null; then
+        if grep -q "error\[" /tmp/embed_build.log 2>/dev/null; then
             echo -e "${RED}  Embedding Runtime build failed with errors.${NC}"
             exit 1
         fi
@@ -277,6 +299,36 @@ else
 
 fi # end SKIP_EMBED check
 rm -f /tmp/embed_build.log
+echo ""
+
+# Step 3.6: Build LSP Relay (standalone binary, sibling of acowork-gateway)
+#
+# The Gateway spawns `acowork-lsp-relay` as a sibling process (ADR-019). It
+# locates the binary via `current_exe().parent().join(...)` — see
+# core/acowork-gateway/src/lifecycle/lsp_relay.rs::spawn_lsp_relay. If the
+# sibling binary is missing, Gateway startup fails with:
+#   GatewayError::Lifecycle("acowork-lsp-relay binary not found at ...")
+#
+# We unconditionally build (no --skip-lsp-relay flag) because every Gateway
+# needs an LSP Relay process to serve the runtime codebase tool and the
+# desktop Monaco client.
+echo -e "${YELLOW}[3.6/5] Building LSP Relay ($PROFILE mode)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-lsp-relay)
+else
+    cargo_args=(cargo build -p acowork-lsp-relay)
+fi
+if "${cargo_args[@]}" 2>&1 | tee /tmp/lsp_relay_build.log; then
+    if grep -q "error\[" /tmp/lsp_relay_build.log 2>/dev/null; then
+        echo -e "${RED}  LSP Relay build failed with errors.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}  LSP Relay build completed.${NC}"
+else
+    echo -e "${RED}  LSP Relay build failed.${NC}"
+    exit 1
+fi
+rm -f /tmp/lsp_relay_build.log
 echo ""
 
 # Step 4: Copy offline_providers.json from assets to target dir

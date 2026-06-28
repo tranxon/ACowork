@@ -55,5 +55,20 @@ mkdir -p "$BIN_DIR"
 cp "$ORT_LIB" "$BIN_DIR/libonnxruntime.dylib"
 echo -e "${GREEN}Bundled ORT library: $ORT_LIB${NC}"
 
+# Bundle LSP Relay binary (sibling of acowork-gateway, ADR-019).
+# The Gateway locates it via `current_exe().parent().join("acowork-lsp-relay")`,
+# so without this copy the Tauri app's Gateway supervisor will fail to spawn LSP
+# and Monaco / runtime codebase tool will silently lose all LSP features.
+LSP_RELAY_BIN="$WORKSPACE_ROOT/target/release/acowork-lsp-relay"
+if [ -f "$LSP_RELAY_BIN" ]; then
+    cp "$LSP_RELAY_BIN" "$BIN_DIR/acowork-lsp-relay"
+    echo -e "${GREEN}Bundled LSP Relay binary: $LSP_RELAY_BIN${NC}"
+else
+    echo -e "${YELLOW}WARN: acowork-lsp-relay not found at $LSP_RELAY_BIN.${NC}"
+    echo -e "${YELLOW}      Run ./dev/build_macos.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Without it, Gateway startup will fail with:${NC}"
+    echo -e "${YELLOW}        acowork-lsp-relay binary not found${NC}"
+fi
+
 cd "$DESKTOP_DIR"
 npm run tauri build

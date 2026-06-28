@@ -168,7 +168,13 @@ echo ""
 
 # ── Step 1: Stop old processes ──────────────────────────────────────────────
 echo -e "${YELLOW}[1/6] Stopping old processes...${NC}"
-for proc in acowork-gateway acowork-runtime acowork-embed; do
+# LSP Relay is included because it runs in its own process group (see
+# core/acowork-gateway/src/lifecycle/lsp_relay.rs: cmd.process_group(0)),
+# so a Gateway shutdown does NOT cascade termination to it — we must kill it
+# explicitly to avoid leaving an orphan binding port 19878, which would
+# otherwise be attached by the new gateway via attach_existing_lsp_relay()
+# but owned by a now-dead parent.
+for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay; do
     pids=$(pgrep -f "$proc" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         pkill -f "$proc" 2>/dev/null || true
@@ -178,6 +184,10 @@ done
 # Free embed port
 if command -v fuser &>/dev/null; then
     fuser -k 18080/tcp 2>/dev/null || true
+fi
+# Free LSP Relay port 19878 (see process_group note above).
+if command -v fuser &>/dev/null; then
+    fuser -k 19878/tcp 2>/dev/null || true
 fi
 sleep 1
 echo -e "${GREEN}  ✓ Process cleanup complete${NC}"
@@ -242,8 +252,8 @@ else
         exit 1
     fi
 
-    # Step 4.5: Copy downloaded ONNX Runtime to .ort/ (for subsequent scripts)
-    echo -e "${YELLOW}  [4.5] Syncing ONNX Runtime to .ort/...${NC}"
+    # Step 4.1: Copy downloaded ONNX Runtime to .ort/ (for subsequent scripts)
+    echo -e "${YELLOW}  [4.1] Syncing ONNX Runtime to .ort/...${NC}"
 
     ORT_TARGET_DIR="$WORKSPACE_ROOT/.ort/onnxruntime-osx-aarch64-latest/lib"
     mkdir -p "$ORT_TARGET_DIR"
@@ -268,6 +278,30 @@ else
     fi
     echo ""
 fi
+
+# ── Step 4.5: Build LSP Relay ───────────────────────────────────────────────
+#
+# The Gateway spawns `acowork-lsp-relay` as a sibling process (ADR-019). It
+# locates the binary via `current_exe().parent().join(...)` — see
+# core/acowork-gateway/src/lifecycle/lsp_relay.rs::spawn_lsp_relay. If the
+# sibling binary is missing, Gateway startup fails with:
+#   GatewayError::Lifecycle("acowork-lsp-relay binary not found at ...")
+#
+# Unconditional: every Gateway needs an LSP Relay process to serve the
+# runtime codebase tool and the desktop Monaco client.
+echo -e "${YELLOW}[4.5/6] Building LSP Relay ($PROFILE)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-lsp-relay)
+else
+    cargo_args=(cargo build -p acowork-lsp-relay)
+fi
+if "${cargo_args[@]}" 2>&1 | tail -20; then
+    echo -e "${GREEN}  ✓ LSP Relay compiled successfully${NC}"
+else
+    echo -e "${RED}  ✗ LSP Relay compile failed${NC}"
+    exit 1
+fi
+echo ""
 
 # ── Step 5: Copy resource files ─────────────────────────────────────────────
 #
@@ -295,7 +329,7 @@ echo ""
 echo -e "${YELLOW}[6/6] Done!${NC}"
 echo ""
 echo -e "${CYAN}Build artifacts:${NC}"
-ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 
 echo -e "${CYAN}Next steps:${NC}"
