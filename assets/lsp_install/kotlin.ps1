@@ -46,8 +46,11 @@ function Find-KotlinLs {
 
     # 2. Common install paths
     $searchDirs += @(
+        "$INSTALL_DIR\server\bin",
         "$INSTALL_DIR\bin",
+        "$env:ProgramFiles\kotlin-language-server\server\bin",
         "$env:ProgramFiles\kotlin-language-server\bin",
+        "$env:LOCALAPPDATA\kotlin-language-server\server\bin",
         "$env:LOCALAPPDATA\kotlin-language-server\bin"
     )
 
@@ -85,17 +88,85 @@ function Install-KotlinLs {
     }
 
     # Not installed — download from GitHub releases
-    Write-Host "kotlin-language-server not found."
-    Write-Host ""
-    Write-Host "Automatic download from GitHub releases is not yet implemented for Windows."
-    Write-Host "Please install manually:"
-    Write-Host "  1. Download the latest Windows binary from: $GITHUB_RELEASES"
-    Write-Host "  2. Extract to $INSTALL_DIR"
-    Write-Host "  3. Add $INSTALL_DIR\bin to your PATH"
-    Write-Host ""
-    Write-Host "Or install the VS Code 'Kotlin Language' extension (fwcd.kotlin),"
-    Write-Host "which bundles kotlin-language-server."
-    exit 1
+    Write-Host "kotlin-language-server not found. Downloading from GitHub releases..."
+    Write-Host "  Source: $GITHUB_RELEASES"
+    Write-Host "  Target: $INSTALL_DIR"
+    Write-Host "  Note: ~87 MB download — this may take a few minutes..." -ForegroundColor Yellow
+
+    $tempZip = "$env:TEMP\kotlin-language-server.zip"
+
+    # Remove stale temp files
+    if (Test-Path $tempZip) { Remove-Item $tempZip -Force }
+
+    try {
+        # Download from GitHub latest release (redirect URL).
+        # Use curl.exe instead of Invoke-WebRequest because:
+        # - Invoke-WebRequest -UseBasicParsing produces NO output during download,
+        #   which triggers the idle-timeout watchdog (60s with no stdout/stderr).
+        # - curl.exe prints progress to stderr, keeping the watchdog alive.
+        Write-Host "  Downloading (curl)..." 
+        $curlArgs = @(
+            "-L", "-o", $tempZip,
+            "--progress-bar",
+            "https://github.com/fwcd/kotlin-language-server/releases/latest/download/server.zip"
+        )
+        & curl.exe @curlArgs 2>&1 | ForEach-Object {
+            # Forward curl's stderr progress to stdout so the idle watchdog sees output
+            Write-Host $_
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl exited with code $LASTEXITCODE"
+        }
+
+        $sizeMB = [math]::Round((Get-Item $tempZip).Length / 1MB, 1)
+        Write-Host "  Downloaded: ${sizeMB}MB" -ForegroundColor Green
+
+        # Create install directory
+        if (Test-Path $INSTALL_DIR) {
+            Write-Host "  Removing previous installation..."
+            Remove-Item $INSTALL_DIR -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
+
+        # Extract
+        Write-Host "  Extracting..."
+        Expand-Archive -Path $tempZip -DestinationPath $INSTALL_DIR -Force
+
+        # The server.zip contains a 'server/' directory with the binary inside.
+        # Typical layout: server/bin/kotlin-language-server.bat
+        $binDir = Join-Path $INSTALL_DIR "server\bin"
+        if (-not (Test-Path $binDir)) {
+            # Some releases may have a different layout — search for the binary
+            $found = Get-ChildItem $INSTALL_DIR -Recurse -Filter "kotlin-language-server*" `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+                $binDir = Split-Path $found.FullName -Parent
+            }
+        }
+
+        if (Test-Path $binDir) {
+            Write-Host "  Extraction complete: kotlin-language-server installed at $binDir" -ForegroundColor Green
+            Add-ToPath $binDir
+        } else {
+            throw "Extraction completed but kotlin-language-server binary not found"
+        }
+    } catch {
+        $msg = "ERROR: Failed to download or extract kotlin-language-server: $_"
+        [Console]::Error.WriteLine($msg)
+        Write-Host $msg -ForegroundColor Red
+        Write-Host ""
+        Write-Host "You can install manually:" -ForegroundColor Yellow
+        Write-Host "  1. Download the latest server.zip from: $GITHUB_RELEASES"
+        Write-Host "  2. Extract to $INSTALL_DIR"
+        Write-Host "  3. Add $INSTALL_DIR\server\bin to your PATH"
+        Write-Host ""
+        Write-Host "Or install the VS Code 'Kotlin Language' extension (fwcd.kotlin),"
+        Write-Host "which bundles kotlin-language-server."
+        exit 1
+    } finally {
+        # Clean up temp file
+        if (Test-Path $tempZip) { Remove-Item $tempZip -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 # -- Phase 2: Verify ------------------------------------------------

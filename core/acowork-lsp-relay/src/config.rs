@@ -452,10 +452,16 @@ pub async fn resolve_lsp_command(language: &str) -> Option<LspServerSpec> {
 }
 
 /// Verify a command is actually runnable (two-stage probe).
+///
+/// Stage 1 tries `--version` (fast path for most tools).
+/// Stage 2 spawns the server with its real launch args, sends a minimal
+/// LSP initialize handshake on stdin, and checks that the process stays
+/// alive for at least 500 ms.  This is necessary for servers like jdtls
+/// that validate stdin input and exit quickly on EOF / empty pipe.
 pub async fn verify_command_runnable(command: &str, args: &[String]) -> bool {
     use std::process::Stdio;
 
-    // Stage 1: --version
+    // Stage 1: --version (fast path for tools that support it).
     if let Ok(Ok(output)) = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio::process::Command::new(command)
@@ -469,6 +475,8 @@ pub async fn verify_command_runnable(command: &str, args: &[String]) -> bool {
     }
 
     // Stage 2: spawn with real launch args + piped stdin.
+    // Write a minimal LSP initialize request so that servers which
+    // validate their input (e.g. jdtls) don't exit immediately.
     let mut child = match tokio::process::Command::new(command)
         .args(args)
         .stdin(Stdio::piped())
@@ -481,17 +489,34 @@ pub async fn verify_command_runnable(command: &str, args: &[String]) -> bool {
         Err(_) => return false,
     };
 
-    let mut _stdin = child.stdin.take();
+    // Send LSP initialize handshake to keep the server alive during probe.
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
 
-    let exited_within_window =
-        tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
-            .await
-            .is_ok();
+        let init =
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":"file:///tmp"}}"#;
+        let header = format!("Content-Length: {}\r\n\r\n", init.len());
+        // Best-effort write — if the process has already exited this will fail,
+        // which is fine because the timeout below will catch it.
+        let _ = stdin.write_all(header.as_bytes()).await;
+        let _ = stdin.write_all(init.as_bytes()).await;
 
-    _stdin.take();
-    drop(_stdin);
+        // Keep stdin in scope so the pipe stays open during the wait.
+        // Dropping it would close the pipe and may cause the server to exit.
+        //
+        // Use a 5-second window: JVM-based servers (jdtls, kotlin-language-server)
+        // can take several seconds to start.  If the process is still alive after
+        // 5 seconds, it's considered runnable.
+        let exited_within_window =
+            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                .await
+                .is_ok();
 
-    !exited_within_window
+        drop(stdin);
+        !exited_within_window
+    } else {
+        false
+    }
 }
 
 /// Check if a command exists on the system PATH.
@@ -532,26 +557,45 @@ pub fn find_on_path(cmd: &str) -> Option<String> {
 // `find_lsp_binary` unifies the discovery logic: first try PATH, then
 // search language-specific known install directories.
 
-/// Find an LSP binary: first check PATH, then search known install locations,
-/// then check the profile PATH cache (populated after successful installs).
+/// Find an LSP binary: first search known install locations (more reliable),
+/// then check PATH, then check the profile PATH cache (populated after
+/// successful installs).
+///
+/// Known install locations are searched before PATH because PATH may contain
+/// stale wrapper scripts (e.g. jdtls.cmd pointing to an old VS Code extension
+/// version). Direct discovery from known locations is more reliable.
 fn find_lsp_binary(cmd: &str, language: &str) -> Option<String> {
-    // 1. Check PATH (existing logic)
-    if let Some(found) = find_on_path(cmd) {
-        return Some(found);
+    // 1. Search language-specific known locations (more reliable than PATH).
+    for dir in known_install_dirs(language) {
+        // On Windows, try common extensions (.exe, .cmd, .bat) in addition
+        // to the bare command name — many LSP servers ship as .bat wrappers.
+        let candidates: Vec<PathBuf> = if cfg!(windows) {
+            vec![
+                dir.join(format!("{}.exe", cmd)),
+                dir.join(format!("{}.cmd", cmd)),
+                dir.join(format!("{}.bat", cmd)),
+                dir.join(cmd),
+            ]
+        } else {
+            vec![dir.join(cmd)]
+        };
+
+        for full in &candidates {
+            if full.is_file() {
+                tracing::info!(
+                    "[LSP] Found '{}' for '{}' in known install dir: {}",
+                    cmd,
+                    language,
+                    full.display()
+                );
+                return Some(full.to_string_lossy().into_owned());
+            }
+        }
     }
 
-    // 2. Search language-specific known locations
-    for dir in known_install_dirs(language) {
-        let full = dir.join(cmd);
-        if full.is_file() {
-            tracing::info!(
-                "[LSP] Found '{}' for '{}' in known install dir: {}",
-                cmd,
-                language,
-                full.display()
-            );
-            return Some(full.to_string_lossy().into_owned());
-        }
+    // 2. Check PATH (may contain stale wrappers — known dirs are preferred).
+    if let Some(found) = find_on_path(cmd) {
+        return Some(found);
     }
 
     // 3. Check profile PATH cache (populated by refresh_path_from_profiles)
@@ -590,8 +634,19 @@ fn known_install_dirs(language: &str) -> Vec<PathBuf> {
             dirs.push(PathBuf::from("/opt/jdtls/bin"));
             dirs.push(home.join("jdtls/bin"));
             dirs.push(home.join(".jdtls/bin"));
-            // VS Code Java extension (redhat.java)
-            dirs.extend(vscode_extension_dirs("redhat.java-", &["server/bin"]));
+            // Windows install location (JDTLS_INSTALL_DIR in java.ps1).
+            // This is where the install script creates the clean jdtls.cmd
+            // wrapper (VS Code's jdtls.bat has 'pause' and is NOT usable).
+            #[cfg(windows)]
+            {
+                if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
+                    dirs.push(PathBuf::from(&local_appdata).join("jdtls/bin"));
+                }
+            }
+            // NOTE: VS Code Java extension (redhat.java) is intentionally
+            // NOT included here — its jdtls.bat has a 'pause' that hangs
+            // the process.  The install script creates a clean wrapper at
+            // the LOCALAPPDATA path above.
         }
         "go" => {
             // GOPATH/bin
@@ -616,6 +671,15 @@ fn known_install_dirs(language: &str) -> Vec<PathBuf> {
             dirs.push(PathBuf::from("/usr/local/bin"));
             dirs.push(PathBuf::from("/opt/homebrew/bin"));
             dirs.push(PathBuf::from("/usr/bin"));
+            // Windows install location (INSTALL_DIR in kotlin.ps1)
+            // server.zip extracts to server/bin/kotlin-language-server.bat
+            #[cfg(windows)]
+            {
+                if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
+                    dirs.push(PathBuf::from(&local_appdata).join("kotlin-language-server/server/bin"));
+                    dirs.push(PathBuf::from(&local_appdata).join("kotlin-language-server/bin"));
+                }
+            }
         }
         "clangd" | "c" => {
             // VS Code clangd extension
