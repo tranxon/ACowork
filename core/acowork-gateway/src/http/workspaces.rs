@@ -952,11 +952,15 @@ pub async fn read_raw_file(
     ))
 }
 
+/// Response type for streaming file responses.
+type StreamFileResponse =
+    Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)>;
+
 /// Serve a raw file from a resolved workspace root with MIME and containment checks.
 fn serve_workspace_file_from_root(
     workspace_root: String,
     file_rel_path: &str,
-) -> Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)> {
+) -> StreamFileResponse {
     if file_rel_path.is_empty() || file_rel_path == "/" {
         return Err(ApiError::bad_request("Missing file path"));
     }
@@ -1005,7 +1009,7 @@ fn serve_workspace_file_from_root(
 pub async fn serve_ws_file(
     State(state): State<AppState>,
     Path((agent_id, file_rel_path)): Path<(String, String)>,
-) -> Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)> {
+) -> StreamFileResponse {
     let workspace_root = resolve_workspace_root(&state, &agent_id, None).await?;
     serve_workspace_file_from_root(workspace_root, &file_rel_path)
 }
@@ -1017,7 +1021,7 @@ pub async fn serve_ws_file(
 pub async fn serve_workspace_ws_file(
     State(state): State<AppState>,
     Path((agent_id, workspace_id, file_rel_path)): Path<(String, String, String)>,
-) -> Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)> {
+) -> StreamFileResponse {
     let workspace_root = resolve_workspace_root(&state, &agent_id, Some(&workspace_id)).await?;
     serve_workspace_file_from_root(workspace_root, &file_rel_path)
 }

@@ -62,6 +62,13 @@ pub struct AgentHelloConfig {
     pub embed_model_id: Option<String>,
     /// Embedding dimension of the active model (e.g. 512).
     pub embed_dimension: Option<usize>,
+
+    // ── LSP Relay (delivered via AgentHello) ──
+    /// LSP Relay HTTP endpoint (e.g. "http://127.0.0.1:19878").
+    /// None when the LSP Relay is not running.
+    /// Used by the codebase tool to connect directly to the relay.
+    pub lsp_relay_endpoint: Option<String>,
+
     // ── Runtime Config Overrides (removed Phase 5) ──
     // Per-agent config is now loaded from workspace/config/agent_config.json.
     // AgentHelloResult no longer carries runtime_* fields.
@@ -263,6 +270,7 @@ impl GatewayGrpcClient {
     }
 
     /// Convenience: connect as "main" role and send AgentHello.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_and_register(
         endpoint: &str,
         agent_id: &str,
@@ -559,6 +567,12 @@ impl GatewayGrpcClient {
                             None
                         } else {
                             Some(result.embed_dimension as usize)
+                        },
+                        // LSP Relay endpoint (field 36).
+                        lsp_relay_endpoint: if result.lsp_relay_endpoint.is_empty() {
+                            None
+                        } else {
+                            Some(result.lsp_relay_endpoint)
                         },
                     };
                     Ok(config)
@@ -1137,6 +1151,7 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 embed_endpoint: None, // TODO: add to proto definition
                 embed_model_id: None,
                 embed_dimension: None,
+                lsp_relay_endpoint: None,
             }
         }
         Some(ServerPayload::KeyReleaseResult(r)) => GatewayResponse::KeyReleaseResult {

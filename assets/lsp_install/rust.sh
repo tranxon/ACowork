@@ -4,9 +4,40 @@
 
 set -euo pipefail
 
+# Cross-platform timeout helper (macOS doesn't ship `timeout`).
+_timeout() {
+    local seconds="$1"; shift
+    if command -v gtimeout &>/dev/null; then
+        gtimeout "$seconds" "$@"
+    elif command -v timeout &>/dev/null; then
+        timeout "$seconds" "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV' -- "$seconds" "$@"
+    fi
+}
+
 BINARY="rust-analyzer"
 
 # ── Helpers ────────────────────────────────────────────────────────
+
+# Search VS Code extension for bundled rust-analyzer binary.
+find_vscode_rust_analyzer() {
+    for ext_dir in "$HOME/.vscode/extensions/rust-lang.rust-analyzer-"*; do
+        local candidate="$ext_dir/server/rust-analyzer"
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    for ext_dir in "$HOME/.vscode-insiders/extensions/rust-lang.rust-analyzer-"*; do
+        local candidate="$ext_dir/server/rust-analyzer"
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
 
 add_to_path() {
     local dir="$1"
@@ -14,10 +45,32 @@ add_to_path() {
         *:"$dir":*) ;;
         *) export PATH="$PATH:$dir" ;;
     esac
-    local profile_file
-    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        [[ -f "$f" ]] && { profile_file="$f"; break; }
-    done
+    # Persist to shell profile — detect current shell and choose the
+    # appropriate profile file. zsh users get .zshrc (or .zprofile),
+    # bash users get .bashrc (or .bash_profile), others fall back to
+    # the traditional .profile.
+    local profile_file=""
+    case "${SHELL:-}" in
+        */zsh)
+            for f in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile"; do
+                [[ -f "$f" ]] && { profile_file="$f"; break; }
+            done
+            # If no zsh profile exists, create .zshrc
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.zshrc"
+            ;;
+        */bash)
+            for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+                [[ -f "$f" ]] && { profile_file="$f"; break; }
+            done
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.bashrc"
+            ;;
+        *)
+            for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+                [[ -f "$f" ]] && { profile_file="$f"; break; }
+            done
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.profile"
+            ;;
+    esac
     if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
         echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
         echo "Added $dir to $profile_file for persistence."
@@ -67,6 +120,19 @@ verify() {
         return 0
     fi
 
+    # Check VS Code extension
+    local vscode_bin
+    if vscode_bin=$(find_vscode_rust_analyzer); then
+        local vscode_dir
+        vscode_dir=$(dirname "$vscode_bin")
+        echo "Found rust-analyzer from VS Code extension at $vscode_bin — adding to PATH..."
+        add_to_path "$vscode_dir"
+        if command -v "$BINARY" &>/dev/null && "$BINARY" --version &>/dev/null; then
+            echo "OK: rust-analyzer found at $(command -v "$BINARY")"
+            return 0
+        fi
+    fi
+
     # Search ~/.cargo/bin
     local cargo_bin="$HOME/.cargo/bin"
     local candidate="$cargo_bin/$BINARY"
@@ -94,7 +160,7 @@ health_check() {
     header="Content-Length: ${#init_msg}\r\n\r\n"
 
     local response
-    response=$(printf "${header}${init_msg}" | timeout 10 "$BINARY" 2>/dev/null | head -c 4096 || true)
+    response=$(printf "${header}${init_msg}" | _timeout 10 "$BINARY" 2>/dev/null | head -c 4096 || true)
 
     if [[ -n "$response" && "$response" == *"Content-Length"* ]]; then
         echo "OK: rust-analyzer responds to LSP initialize (stdio mode)"

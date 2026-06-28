@@ -763,6 +763,7 @@
     "installing": "설치 중...",
     "checkStatus": "확인",
     "checking": "확인 중...",
+    "pendingCheck": "확인 대기 중...",
     "installSuccess": "설치가 완료되었습니다",
     "installFailed": "설치에 실패했습니다",
     "viewScript": "설치 스크립트 보기",
@@ -775,6 +776,7 @@
     "candidates": "사용 가능한 명령어",
     "connectToGateway": "게이트웨이에 연결하여 LSP 서버 관리",
     "refresh": "새로고침",
-    "loading": "로딩 중..."
+    "loading": "로딩 중...",
+    "refreshing": "새로고침 중..."
   }
 }

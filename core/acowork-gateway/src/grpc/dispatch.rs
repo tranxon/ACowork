@@ -300,16 +300,16 @@ pub async fn dispatch_grpc_request(
                 // Migration progress: also update RunningAgentInfo.migration
                 if is_migration_progress {
                     let mut gw = state.write().await;
-                    if let Some(info) = gw.running_agents.get_mut(&agent_id) {
-                        if let Some(ref mut m) = info.migration {
-                            m.progress = Some((
-                                migration_processed,
-                                migration_total,
-                                migration_errors,
-                                migration_phase,
-                                migration_label,
-                            ));
-                        }
+                    if let Some(info) = gw.running_agents.get_mut(&agent_id)
+                        && let Some(ref mut m) = info.migration
+                    {
+                        m.progress = Some((
+                            migration_processed,
+                            migration_total,
+                            migration_errors,
+                            migration_phase,
+                            migration_label,
+                        ));
                     }
                 }
             }
@@ -383,19 +383,19 @@ async fn handle_migration_complete(
     };
 
     let mut gw = state.write().await;
-    if let Some(info) = gw.running_agents.get_mut(&agent_id) {
-        if let Some(ref mut m) = info.migration {
-            m.done = true;
-            if !success {
-                m.error = error_msg;
-            }
-            tracing::info!(
-                agent_id = %agent_id,
-                success = success,
-                error = ?m.error,
-                "Migration completed"
-            );
+    if let Some(info) = gw.running_agents.get_mut(&agent_id)
+        && let Some(ref mut m) = info.migration
+    {
+        m.done = true;
+        if !success {
+            m.error = error_msg;
         }
+        tracing::info!(
+            agent_id = %agent_id,
+            success = success,
+            error = ?m.error,
+            "Migration completed"
+        );
     }
 
     GatewayResponse::IntentDelivered {

@@ -4,7 +4,40 @@
 
 set -euo pipefail
 
+# Cross-platform timeout helper (macOS doesn't ship `timeout`).
+_timeout() {
+    local seconds="$1"; shift
+    if command -v gtimeout &>/dev/null; then
+        gtimeout "$seconds" "$@"
+    elif command -v timeout &>/dev/null; then
+        timeout "$seconds" "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV' -- "$seconds" "$@"
+    fi
+}
+
 BINARY="clangd"
+
+# ── Helpers ────────────────────────────────────────────────────────
+
+# Search VS Code extension for bundled clangd binary.
+find_vscode_clangd() {
+    for ext_dir in "$HOME/.vscode/extensions/llvm-vs-code-extensions.vscode-clangd-"*; do
+        local candidate="$ext_dir/clangd"
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    for ext_dir in "$HOME/.vscode-insiders/extensions/llvm-vs-code-extensions.vscode-clangd-"*; do
+        local candidate="$ext_dir/clangd"
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
 
 # ── Phase 1: Install ──────────────────────────────────────────────────
 install() {
@@ -13,6 +46,43 @@ install() {
     # Already on PATH?
     if command -v "$BINARY" &>/dev/null; then
         echo "clangd already on PATH at $(command -v "$BINARY")"
+        return
+    fi
+
+    # Check VS Code extension (vscode-clangd bundles clangd)
+    local vscode_bin
+    if vscode_bin=$(find_vscode_clangd); then
+        local vscode_dir
+        vscode_dir=$(dirname "$vscode_bin")
+        echo "Found clangd from VS Code extension at $vscode_bin — adding to PATH..."
+        export PATH="$PATH:$vscode_dir"
+        # Persist to shell profile — detect current shell and choose the
+        # appropriate profile file.
+        local profile_file=""
+        case "${SHELL:-}" in
+            */zsh)
+                for f in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile"; do
+                    [[ -f "$f" ]] && { profile_file="$f"; break; }
+                done
+                [[ -z "$profile_file" ]] && profile_file="$HOME/.zshrc"
+                ;;
+            */bash)
+                for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+                    [[ -f "$f" ]] && { profile_file="$f"; break; }
+                done
+                [[ -z "$profile_file" ]] && profile_file="$HOME/.bashrc"
+                ;;
+            *)
+                for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+                    [[ -f "$f" ]] && { profile_file="$f"; break; }
+                done
+                [[ -z "$profile_file" ]] && profile_file="$HOME/.profile"
+                ;;
+        esac
+        if [[ -n "${profile_file:-}" ]] && ! grep -q "$vscode_dir" "$profile_file" 2>/dev/null; then
+            echo "export PATH=\"\$PATH:$vscode_dir\"" >> "$profile_file"
+            echo "Added to $profile_file for persistence."
+        fi
         return
     fi
 
@@ -30,15 +100,29 @@ install() {
             echo "Found clangd at $p — adding $dir to PATH..."
             # Add to current session
             export PATH="$PATH:$dir"
-            # Add to shell profile for persistence
-            local profile_file
-            if [[ -f "$HOME/.bashrc" ]]; then
-                profile_file="$HOME/.bashrc"
-            elif [[ -f "$HOME/.zshrc" ]]; then
-                profile_file="$HOME/.zshrc"
-            elif [[ -f "$HOME/.profile" ]]; then
-                profile_file="$HOME/.profile"
-            fi
+            # Persist to shell profile — detect current shell and choose the
+            # appropriate profile file.
+            local profile_file=""
+            case "${SHELL:-}" in
+                */zsh)
+                    for f in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile"; do
+                        [[ -f "$f" ]] && { profile_file="$f"; break; }
+                    done
+                    [[ -z "$profile_file" ]] && profile_file="$HOME/.zshrc"
+                    ;;
+                */bash)
+                    for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+                        [[ -f "$f" ]] && { profile_file="$f"; break; }
+                    done
+                    [[ -z "$profile_file" ]] && profile_file="$HOME/.bashrc"
+                    ;;
+                *)
+                    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+                        [[ -f "$f" ]] && { profile_file="$f"; break; }
+                    done
+                    [[ -z "$profile_file" ]] && profile_file="$HOME/.profile"
+                    ;;
+            esac
             if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
                 echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
                 echo "Added to $profile_file for persistence."
@@ -84,6 +168,19 @@ verify() {
         return
     fi
 
+    # Check VS Code extension
+    local vscode_bin
+    if vscode_bin=$(find_vscode_clangd); then
+        local vscode_dir
+        vscode_dir=$(dirname "$vscode_bin")
+        echo "Found clangd from VS Code extension at $vscode_bin — adding to PATH..."
+        export PATH="$PATH:$vscode_dir"
+        if command -v "$BINARY" &>/dev/null; then
+            echo "OK: clangd found at $(command -v "$BINARY")"
+            return
+        fi
+    fi
+
     # Still not found — search common LLVM install locations
     local llvm_paths=(
         "/usr/bin/clangd"
@@ -97,14 +194,29 @@ verify() {
             dir=$(dirname "$p")
             echo "Found clangd at $p — adding $dir to PATH..."
             export PATH="$PATH:$dir"
-            local profile_file
-            if [[ -f "$HOME/.bashrc" ]]; then
-                profile_file="$HOME/.bashrc"
-            elif [[ -f "$HOME/.zshrc" ]]; then
-                profile_file="$HOME/.zshrc"
-            elif [[ -f "$HOME/.profile" ]]; then
-                profile_file="$HOME/.profile"
-            fi
+            # Persist to shell profile — detect current shell and choose the
+            # appropriate profile file.
+            local profile_file=""
+            case "${SHELL:-}" in
+                */zsh)
+                    for f in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile"; do
+                        [[ -f "$f" ]] && { profile_file="$f"; break; }
+                    done
+                    [[ -z "$profile_file" ]] && profile_file="$HOME/.zshrc"
+                    ;;
+                */bash)
+                    for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+                        [[ -f "$f" ]] && { profile_file="$f"; break; }
+                    done
+                    [[ -z "$profile_file" ]] && profile_file="$HOME/.bashrc"
+                    ;;
+                *)
+                    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+                        [[ -f "$f" ]] && { profile_file="$f"; break; }
+                    done
+                    [[ -z "$profile_file" ]] && profile_file="$HOME/.profile"
+                    ;;
+            esac
             if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
                 echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
             fi
@@ -129,7 +241,7 @@ health_check() {
     header="Content-Length: ${#init_msg}\r\n\r\n"
 
     local response
-    response=$(printf "${header}${init_msg}" | timeout 10 "$BINARY" 2>/dev/null | head -c 4096 || true)
+    response=$(printf "${header}${init_msg}" | _timeout 10 "$BINARY" 2>/dev/null | head -c 4096 || true)
 
     if [[ -n "$response" && "$response" == *"Content-Length"* ]]; then
         echo "OK: clangd responds to LSP initialize (stdio mode)"

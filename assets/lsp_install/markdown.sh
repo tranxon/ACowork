@@ -5,6 +5,18 @@
 
 set -euo pipefail
 
+# Cross-platform timeout helper (macOS doesn't ship `timeout`).
+_timeout() {
+    local seconds="$1"; shift
+    if command -v gtimeout &>/dev/null; then
+        gtimeout "$seconds" "$@"
+    elif command -v timeout &>/dev/null; then
+        timeout "$seconds" "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV' -- "$seconds" "$@"
+    fi
+}
+
 BINARY="marksman"
 
 # ── Phase 1: Install ──────────────────────────────────────────────────
@@ -123,7 +135,7 @@ health_check() {
     header="Content-Length: ${#init_msg}\r\n\r\n"
 
     local response
-    response=$(printf "${header}${init_msg}" | timeout 10 "$BINARY" 2>/dev/null | head -c 4096 || true)
+    response=$(printf "${header}${init_msg}" | _timeout 10 "$BINARY" 2>/dev/null | head -c 4096 || true)
 
     if [[ -n "$response" && "$response" == *"Content-Length"* ]]; then
         echo "OK: marksman responds to LSP initialize (stdio mode)"

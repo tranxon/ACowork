@@ -15,7 +15,6 @@ pub mod intent;
 pub mod interaction_store;
 pub mod ipc;
 pub mod lifecycle;
-pub mod lsp;
 pub mod package_manager;
 pub mod rate;
 pub mod resource_cache;

@@ -14,12 +14,45 @@ import type {
   EmbeddingTestResponse,
   MigrationProgressResponse,
   SelectModelMigrationResponse,
-  LspServersConfig,
+  LspEndpointResponse,
   LspInstallScriptResponse,
   LspInstallRunResponse,
   LspServerStatusEntry,
+  LspServersWithStatus,
 } from "./types";
 import { getGatewayUrl } from "./config";
+
+// ── LSP Relay endpoint cache ───────────────────────────────────────────
+//
+// The relay endpoint is queried once and cached. On error or invalidation,
+// the cache is cleared so the next call re-fetches.
+
+let relayEndpointCache: Promise<LspEndpointResponse | null> | null = null;
+
+/**
+ * Get the cached LSP Relay endpoint, fetching from Gateway if needed.
+ *
+ * Returns `null` when the relay is not available (not running or not ready).
+ * On fetch error, the cache is cleared so the next call retries.
+ */
+export async function getCachedLspRelayEndpoint(
+  gatewayUrl = getGatewayUrl(),
+): Promise<LspEndpointResponse | null> {
+  if (!relayEndpointCache) {
+    relayEndpointCache = fetchLspEndpoint(gatewayUrl)
+      .then((ep) => (ep.available && ep.port != null ? ep : null))
+      .catch((err) => {
+        relayEndpointCache = null; // Clear cache on error
+        throw err;
+      });
+  }
+  return relayEndpointCache;
+}
+
+/** Invalidate the cached LSP Relay endpoint (e.g. after connection failure). */
+export function invalidateLspRelayEndpointCache(): void {
+  relayEndpointCache = null;
+}
 
 /** Fetch all providers from Gateway's models cache */
 export async function fetchProviders(
@@ -295,19 +328,72 @@ export async function selectEmbeddingModelWithMigration(
 
 // ── LSP API ──────────────────────────────────────────────────────────────
 
-/** Fetch all configured LSP servers from Gateway */
-export async function fetchLspServers(
+/**
+ * Fetch the LSP Relay endpoint from the Gateway.
+ *
+ * The Gateway manages the LSP Relay process and exposes its address via
+ * `GET /api/lsp/endpoint`. Desktop App and Agent Runtime use this to
+ * discover the relay, then connect directly.
+ *
+ * Returns `{ available: false, port: null }` when the relay is not running.
+ */
+export async function fetchLspEndpoint(
   gatewayUrl = getGatewayUrl(),
-): Promise<LspServersConfig> {
-  const resp = await fetch(`${gatewayUrl}/api/lsp/servers`);
-  if (!resp.ok) throw new Error(`Failed to fetch LSP servers: ${resp.status}`);
+): Promise<LspEndpointResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/lsp/endpoint`);
+  if (!resp.ok) throw new Error(`Failed to fetch LSP endpoint: ${resp.status}`);
   return resp.json();
 }
 
 /**
- * Fetch per-language LSP installation status from the Gateway.
+ * Build the base HTTP URL for the LSP Relay.
  *
- * The backend probes `PATH` for each configured candidate command and
+ * Returns `null` if the relay is not available.
+ */
+export async function getLspRelayUrl(
+  gatewayUrl = getGatewayUrl(),
+): Promise<string | null> {
+  const ep = await fetchLspEndpoint(gatewayUrl);
+  if (!ep.available || ep.port == null) return null;
+  return `http://${ep.host}:${ep.port}`;
+}
+
+// ── LSP Relay direct API (servers / status / install) ───────────────────
+//
+// These functions call the LSP Relay directly (not through the Gateway).
+// The caller must provide the relay base URL, typically obtained via
+// `getLspRelayUrl()`.
+
+/**
+ * Fetch configured LSP servers together with per-language install status
+ * in a single round-trip.
+ *
+ * This is the preferred initial-load / Refresh call: the UI gets the
+ * server list and the install badges atomically, so it never renders
+ * a row whose status has not yet been resolved. The backend runs the
+ * PATH probes with bounded concurrency (4 in flight), keeping total
+ * wall time roughly bounded by a single probe timeout (~2s worst case).
+ */
+export async function fetchLspServersWithStatus(
+  relayUrl: string,
+): Promise<LspServersWithStatus> {
+  const resp = await fetch(`${relayUrl}/api/lsp/servers-with-status`);
+  if (!resp.ok) {
+    throw new Error(
+      `Failed to fetch LSP servers with status: ${resp.status}`,
+    );
+  }
+  return resp.json();
+}
+
+/**
+ * Re-probe per-language LSP installation status from the LSP Relay.
+ *
+ * Used by the per-row Check button: the user has already seen the
+ * list, so we only need to re-probe status — there's no need to
+ * re-fetch the server config.
+ *
+ * The relay probes `PATH` for each configured candidate command and
  * returns whether a usable binary was found. This is the source of
  * truth for the UI's "installed" badge and is used to disable the
  * Install button for already-installed servers.
@@ -316,29 +402,29 @@ export async function fetchLspServers(
  * LSP process — it's a fast PATH lookup, so it's safe to call on mount.
  */
 export async function fetchLspStatus(
-  gatewayUrl = getGatewayUrl(),
+  relayUrl: string,
 ): Promise<LspServerStatusEntry[]> {
-  const resp = await fetch(`${gatewayUrl}/api/lsp/status`);
+  const resp = await fetch(`${relayUrl}/api/lsp/status`);
   if (!resp.ok) throw new Error(`Failed to fetch LSP status: ${resp.status}`);
   return resp.json();
 }
 
-/** Fetch install script content for a language */
+/** Fetch install script content for a language from the LSP Relay */
 export async function fetchLspInstallScript(
   language: string,
-  gatewayUrl = getGatewayUrl(),
+  relayUrl: string,
 ): Promise<LspInstallScriptResponse> {
-  const resp = await fetch(`${gatewayUrl}/api/lsp/install/${encodeURIComponent(language)}`);
+  const resp = await fetch(`${relayUrl}/api/lsp/install/${encodeURIComponent(language)}`);
   if (!resp.ok) throw new Error(`Failed to fetch install script: ${resp.status}`);
   return resp.json();
 }
 
-/** Run the install script for a language */
+/** Run the install script for a language on the LSP Relay */
 export async function runLspInstall(
   language: string,
-  gatewayUrl = getGatewayUrl(),
+  relayUrl: string,
 ): Promise<LspInstallRunResponse> {
-  const resp = await fetch(`${gatewayUrl}/api/lsp/install/${encodeURIComponent(language)}`, {
+  const resp = await fetch(`${relayUrl}/api/lsp/install/${encodeURIComponent(language)}`, {
     method: "POST",
   });
   const data = await resp.json();

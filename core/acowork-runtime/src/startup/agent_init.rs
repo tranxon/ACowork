@@ -296,6 +296,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         .map(|c| !c.search_key_vault.is_empty())
         .unwrap_or(false);
 
+    let lsp_relay_endpoint = hello_config
+        .as_ref()
+        .and_then(|c| c.lsp_relay_endpoint.clone());
+
     let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(Some(
         emb_provider.clone(),
     )));
@@ -311,6 +315,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Some(memory_session.clone()),
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
+        lsp_relay_endpoint,
     ) {
         registry.register(tool);
     }

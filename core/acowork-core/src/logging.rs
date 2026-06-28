@@ -191,6 +191,28 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SizeRollingFileAppender {
     }
 }
 
+/// Initialize tracing to write to stderr.
+///
+/// This is intended for subprocesses (embed, lsp-relay) whose stdout is
+/// consumed by the parent (Gateway) as protocol data, while stderr is
+/// redirected to a log file by the Gateway's spawn logic.
+///
+/// Usage in subprocess `main()`:
+/// ```ignore
+/// acowork_core::logging::init_subprocess_logging(&cli.log_level);
+/// ```
+pub fn init_subprocess_logging(level: &str) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .with_thread_ids(false)
+        .init();
+}
+
 /// Install a global panic hook that routes panic information into the tracing
 /// log system (and thus into both stderr and the rolling log file).
 ///

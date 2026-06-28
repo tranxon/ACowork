@@ -716,6 +716,13 @@ pub async fn handle_agent_hello(
             .as_ref()
             .and_then(|eps| eps.active_dimension);
 
+        // ── LSP Relay endpoint (from lsp_relay_process state) ──
+        let lsp_relay_endpoint = gw
+            .lsp_relay_process
+            .as_ref()
+            .filter(|eps| eps.ready)
+            .map(|eps| format!("http://127.0.0.1:{}", eps.port));
+
         drop(gw);
 
         // ── User identity (version-driven diff sync) ──
@@ -748,6 +755,7 @@ pub async fn handle_agent_hello(
             embed_endpoint,
             embed_model_id,
             embed_dimension,
+            lsp_relay_endpoint,
         }
     } else {
         tracing::warn!("AgentHello from unknown connection {}", conn_id);
@@ -768,6 +776,7 @@ pub async fn handle_agent_hello(
             embed_endpoint: None,
             embed_model_id: None,
             embed_dimension: None,
+            lsp_relay_endpoint: None,
         }
     }
 }

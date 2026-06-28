@@ -5,21 +5,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Pooling strategy for embedding models.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolingStrategy {
     /// Use [CLS] token output (BGE models).
+    #[default]
     Cls,
     /// Mean pooling over token embeddings weighted by attention_mask (MiniLM).
     Mean,
     /// Use last token output (causal LMs).
     LastToken,
-}
-
-impl Default for PoolingStrategy {
-    fn default() -> Self {
-        Self::Cls
-    }
 }
 
 /// Embedding model entry in embedding_models.json.
@@ -199,10 +194,10 @@ impl ModelRegistry {
     fn build_candidates(data_dir: &Path) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
         candidates.push(data_dir.join("embedding_models.json"));
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                candidates.push(exe_dir.join("embedding_models.json"));
-            }
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(exe_dir) = exe_path.parent()
+        {
+            candidates.push(exe_dir.join("embedding_models.json"));
         }
         candidates
     }
@@ -235,10 +230,10 @@ impl ModelRegistry {
     /// Get the ONNX file path for a model, respecting variant selection.
     pub fn onnx_path(&self, model_id: &str, variant: &str) -> Option<String> {
         let model = self.get(model_id)?;
-        if let Some(variants) = &model.onnx_variants {
-            if let Some(path) = variants.get(variant) {
-                return Some(path.clone());
-            }
+        if let Some(variants) = &model.onnx_variants
+            && let Some(path) = variants.get(variant)
+        {
+            return Some(path.clone());
         }
         // Fallback to the default onnx_file
         Some(model.onnx_file.clone())

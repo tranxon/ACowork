@@ -56,7 +56,7 @@ pub struct AppState {
     /// Event bus for the /events SSE endpoint. Publishes heartbeats and
     /// state transitions; the gateway subscribes to learn which model
     /// is loaded and to detect a stuck embed process.
-    pub event_bus: EventBus,
+    pub event_bus: EventBus<BusState>,
 }
 
 // ── OpenAI API types ────────────────────────────────────────────────────
@@ -344,14 +344,14 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
     // Also include the currently loaded model
     let mut data = data;
-    if let Some(id) = current_id {
-        if !data.iter().any(|m| m.id == id) {
-            data.push(ModelEntry {
-                id,
-                object: "model".to_string(),
-                owned_by: "acowork-embed".to_string(),
-            });
-        }
+    if let Some(id) = current_id
+        && !data.iter().any(|m| m.id == id)
+    {
+        data.push(ModelEntry {
+            id,
+            object: "model".to_string(),
+            owned_by: "acowork-embed".to_string(),
+        });
     }
 
     Json(ModelListResponse {

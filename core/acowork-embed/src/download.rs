@@ -128,6 +128,12 @@ pub struct DownloadProgress {
     pub current_file: std::sync::Mutex<String>,
 }
 
+impl Default for DownloadProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DownloadProgress {
     /// Create a new progress tracker with zero state.
     pub fn new() -> Self {
@@ -554,8 +560,7 @@ async fn download_single(
     // corrupted or server-error response that should be replaced.
     let resume_offset: u64 = std::fs::metadata(&tmp_path)
         .map(|m| m.len())
-        .unwrap_or(0)
-        .max(0);
+        .unwrap_or(0);
     let resume = resume_offset > 4096;
 
     // Build the request. Include a Range header if resuming.
@@ -577,7 +582,7 @@ async fn download_single(
             .unwrap_or("");
         let total_from_range = content_range
             .split('/')
-            .last()
+            .next_back()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         progress

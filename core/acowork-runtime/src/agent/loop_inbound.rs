@@ -186,13 +186,13 @@ impl AgentLoop {
         }
 
         // 3. Check debug controller state (non-blocking try_lock)
-        if let Some(ctrl) = self.core.debug_observer.debug_ctrl() {
-            if let Ok(guard) = ctrl.try_lock() {
-                match guard.state {
-                    DebugState::Paused => return ControlDecision::Pause,
-                    DebugState::Stopped => return ControlDecision::Stop,
-                    _ => {}
-                }
+        if let Some(ctrl) = self.core.debug_observer.debug_ctrl()
+            && let Ok(guard) = ctrl.try_lock()
+        {
+            match guard.state {
+                DebugState::Paused => return ControlDecision::Pause,
+                DebugState::Stopped => return ControlDecision::Stop,
+                _ => {}
             }
         }
 

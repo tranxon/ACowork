@@ -340,8 +340,9 @@ pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> R
 
     // Get Tauri resource directory — where bundled assets (lsp_servers.json,
     // lsp_install/, offline_providers.json, etc.) are extracted.
-    // Pass it to Gateway via ACOWORK_LSP_CONFIG_DIR so Gateway can find
-    // LSP config files in local mode.
+    // Pass it to Gateway via ACOWORK_LSP_CONFIG_DIR env var. The Gateway
+    // passes this to the LSP Relay subprocess, which uses it to locate
+    // lsp_servers.json and install scripts.
     let resource_dir = app_handle
         .path()
         .resource_dir()

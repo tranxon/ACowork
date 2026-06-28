@@ -639,34 +639,32 @@ pub async fn get_avatar_config(
     };
 
     // When running, query the Runtime for the current avatar config.
-    if is_running {
-        if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-            let query = acowork_core::proto::server_message::Payload::QueryConfig(
-                acowork_core::proto::QueryConfig {
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                },
-            );
-            if let Some(response) =
-                crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
-            {
-                if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
-                    response.payload
-                {
-                    let avatar = snap.avatar.filter(|s| !s.is_empty());
-                    let builtin_avatar = snap.builtin_avatar.filter(|s| !s.is_empty());
-                    let source = if avatar.is_some() || builtin_avatar.is_some() {
-                        "runtime"
-                    } else {
-                        "fallback"
-                    };
-                    return Ok(Json(AvatarConfigResponse {
-                        agent_id,
-                        avatar,
-                        builtin_avatar,
-                        source: source.to_string(),
-                    }));
-                }
-            }
+    if is_running
+        && let Some(ref grpc_mgr) = state.grpc_session_mgr
+    {
+        let query = acowork_core::proto::server_message::Payload::QueryConfig(
+            acowork_core::proto::QueryConfig {
+                request_id: uuid::Uuid::new_v4().to_string(),
+            },
+        );
+        if let Some(response) =
+            crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
+            && let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
+                response.payload
+        {
+            let avatar = snap.avatar.filter(|s| !s.is_empty());
+            let builtin_avatar = snap.builtin_avatar.filter(|s| !s.is_empty());
+            let source = if avatar.is_some() || builtin_avatar.is_some() {
+                "runtime"
+            } else {
+                "fallback"
+            };
+            return Ok(Json(AvatarConfigResponse {
+                agent_id,
+                avatar,
+                builtin_avatar,
+                source: source.to_string(),
+            }));
         }
     }
 

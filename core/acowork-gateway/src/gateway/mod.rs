@@ -690,6 +690,115 @@ impl Gateway {
             );
         }
 
+        // Spawn the LSP Relay process (acowork-lsp-relay).
+        // This is optional — if the binary is not found, LSP functionality
+        // is unavailable but the Gateway continues normally.
+        // The relay runs as an independent process with its own HTTP server,
+        // WebSocket LSP relay, and LSP process pool.
+        // See ADR-019 for the full architecture rationale.
+        let mut lsp_relay_child = None;
+        let mut lsp_relay_supervisor_cfg: Option<
+            crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig,
+        > = None;
+        {
+            let data_dir = std::path::PathBuf::from(&self.config.data_dir);
+            let lsp_relay_port = crate::lifecycle::lsp_relay::LSP_RELAY_DEFAULT_PORT;
+            let gateway_health_url = format!(
+                "http://127.0.0.1:{}/health",
+                self.config.http.port
+            );
+
+            // Check if an LSP Relay is already running on the expected port
+            let existing_health =
+                crate::lifecycle::lsp_relay::check_lsp_relay_health(lsp_relay_port).await;
+            if let Some(health) = existing_health {
+                let relay_state =
+                    crate::lifecycle::lsp_relay::attach_existing_lsp_relay(lsp_relay_port, Some(health));
+                tracing::info!(
+                    port = relay_state.port,
+                    ready = relay_state.ready,
+                    "Reusing existing LSP Relay process"
+                );
+                {
+                    let mut gw = shared_state.write().await;
+                    gw.lsp_relay_process = Some(relay_state);
+                }
+                lsp_relay_supervisor_cfg =
+                    Some(crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig {
+                        data_dir,
+                        port: lsp_relay_port,
+                        gateway_health_url,
+                    });
+            } else {
+                match crate::lifecycle::lsp_relay::spawn_lsp_relay(
+                    &data_dir,
+                    lsp_relay_port,
+                    &gateway_health_url,
+                )
+                .await
+                {
+                    Ok((relay_state, child)) => {
+                        tracing::info!(
+                            pid = relay_state.pid,
+                            port = relay_state.port,
+                            "LSP Relay process spawned"
+                        );
+                        {
+                            let mut gw = shared_state.write().await;
+                            gw.lsp_relay_process = Some(relay_state);
+                        }
+                        lsp_relay_child = Some(child);
+                        lsp_relay_supervisor_cfg =
+                            Some(crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig {
+                                data_dir,
+                                port: lsp_relay_port,
+                                gateway_health_url,
+                            });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to spawn LSP Relay (LSP functionality will be unavailable)"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Spawn LSP Relay process reaper — clears state when the child exits.
+        if let Some(mut child) = lsp_relay_child {
+            let child_pid = child.id();
+            let state_for_reaper = shared_state.clone();
+            tokio::spawn(async move {
+                let Some(target_pid) = child_pid else {
+                    return;
+                };
+                let exit_status = child.wait().await;
+                tracing::warn!(
+                    pid = target_pid,
+                    exit_status = ?exit_status,
+                    "LSP Relay process exited"
+                );
+                let mut gw = state_for_reaper.write().await;
+                let still_ours = gw
+                    .lsp_relay_process
+                    .as_ref()
+                    .map(|eps| eps.pid == target_pid)
+                    .unwrap_or(false);
+                if still_ours {
+                    gw.lsp_relay_process = None;
+                }
+            });
+        }
+
+        // Start the LSP Relay supervisor (SSE heartbeat monitoring + restart).
+        if let Some(sup_cfg) = lsp_relay_supervisor_cfg.take() {
+            crate::lifecycle::lsp_relay_supervisor::start_lsp_relay_supervisor(
+                sup_cfg,
+                shared_state.clone(),
+            );
+        }
+
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -785,6 +894,20 @@ impl Gateway {
                         tracing::info!(pid = embed_state.pid, "Shutting down embedding service");
                         if let Err(e) = crate::lifecycle::embed::kill_embed_process(embed_state.pid).await {
                             tracing::warn!(error = %e, "Failed to kill embedding service process");
+                        }
+                    }
+                }
+
+                // Kill the LSP Relay process before exiting.
+                // This prevents acowork-lsp-relay from becoming an orphan process.
+                {
+                    let gw = shared_state.read().await;
+                    if let Some(ref relay_state) = gw.lsp_relay_process
+                        && relay_state.pid != 0
+                    {
+                        tracing::info!(pid = relay_state.pid, "Shutting down LSP Relay");
+                        if let Err(e) = crate::lifecycle::lsp_relay::kill_lsp_relay(relay_state.pid).await {
+                            tracing::warn!(error = %e, "Failed to kill LSP Relay process");
                         }
                     }
                 }
@@ -963,7 +1086,6 @@ mod tests {
             max_output_tokens_limit: 32768,
             embedding_model: None,
             hf_mirrors: Vec::new(),
-            lsp_config_dir: None,
         }
     }
 

@@ -20,8 +20,8 @@ use acowork_embed::shutdown::Shutdown;
 async fn main() {
     let cli = Cli::parse();
 
-    // Initialize logging
-    init_logging(&cli.log_level);
+    // Initialize logging to stderr (Gateway redirects stderr → embed.log)
+    acowork_core::logging::init_subprocess_logging(&cli.log_level);
 
     // Install global panic hook AFTER tracing is initialized so panic
     // messages are captured in the log output.
@@ -318,14 +318,9 @@ async fn shutdown_signal(shutdown: Arc<Shutdown>) {
 }
 
 /// Initialize the tracing subscriber.
+/// Replaced by acowork_core::logging::init_subprocess_logging — kept as
+/// a thin wrapper for now to avoid breaking pub API if referenced elsewhere.
+#[allow(dead_code)]
 fn init_logging(level: &str) {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_thread_ids(false)
-        .init();
+    acowork_core::logging::init_subprocess_logging(level);
 }

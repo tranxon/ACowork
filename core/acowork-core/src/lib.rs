@@ -18,6 +18,8 @@ pub mod budget;
 pub mod crlf;
 pub mod defaults;
 pub mod error;
+pub mod event_bus;
+pub mod health;
 pub mod intent;
 pub mod logging;
 pub mod manifest;
@@ -28,6 +30,8 @@ pub mod permission;
 pub mod process;
 pub mod protocol;
 pub mod providers;
+pub mod shutdown;
+pub mod supervisor;
 pub mod tools;
 
 // Re-exports for convenience
@@ -54,4 +58,5 @@ pub use providers::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, ImageUrlPart, Provider, ProviderError,
     ProviderErrorType, StreamEvent,
 };
+pub use shutdown::{Shutdown, install_signal_handlers};
 pub use tools::{Tool, ToolResult, ToolSpec};

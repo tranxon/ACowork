@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { cn } from "../../lib/utils";
-import { fetchLspServers, fetchLspStatus, fetchLspInstallScript, runLspInstall } from "../../lib/gateway-api";
+import { fetchLspServersWithStatus, fetchLspStatus, fetchLspInstallScript, runLspInstall, getLspRelayUrl } from "../../lib/gateway-api";
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
@@ -41,7 +40,7 @@ export function LspTab() {
   const { t } = useTranslation();
   const status = useGatewayStore((s) => s.status);
   const [config, setConfig] = useState<LspServersConfig | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [healthStatus, setHealthStatus] = useState<Record<string, LspHealthStatus>>({});
   const [healthErrors, setHealthErrors] = useState<Record<string, string | null>>({});
@@ -50,71 +49,108 @@ export function LspTab() {
   const [installResults, setInstallResults] = useState<Record<string, { success: boolean; stdout: string; stderr: string }>>({});
   const [scriptDialog, setScriptDialog] = useState<{ language: string; script: string; filename: string } | null>(null);
   const [scriptLoading, setScriptLoading] = useState(false);
+  /** LSP Relay base URL (e.g. "http://127.0.0.1:19878"), null when not available */
+  const [relayUrl, setRelayUrl] = useState<string | null>(null);
 
-  const loadServers = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const resp = await fetchLspServers();
-      setConfig(resp);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load LSP servers");
-    } finally {
-      setLoading(false);
+  // Mirror `config` into a ref so `loadAll` can read the current server
+  // list without depending on it (and therefore without re-creating the
+  // callback and re-triggering the load effect on every config update).
+  const configRef = useRef<LspServersConfig | null>(null);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
+  // Discover LSP Relay endpoint when Gateway is connected
+  useEffect(() => {
+    if (status !== "connected") {
+      setRelayUrl(null);
+      return;
     }
-  }, []);
+    let cancelled = false;
+    getLspRelayUrl()
+      .then((url) => {
+        if (!cancelled) setRelayUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setRelayUrl(null);
+      });
+    return () => { cancelled = true; };
+  }, [status]);
 
-  /**
-   * Fetch per-language install status from the backend (PATH probe) and
-   * seed healthStatus from it.
-   *
-   * Runs on mount so the UI shows the correct installed / not-installed
-   * state immediately — without it every server would appear as unknown
-   * until the user manually clicks Check, and the Install button would
-   * be available even for already-installed servers (the original bug).
-   *
-   * Failure is non-fatal: we keep whatever state was there (likely the
-   * initial empty map), and the user can still trigger a Check manually.
-   */
-  const loadStatus = useCallback(async () => {
+  const loadAll = useCallback(async () => {
+    if (!relayUrl) return;
+    setRefreshing(true);
+    setError(null);
+
+    // Pre-flight: mark every currently-known language as "checking" so
+    // any visible badges immediately enter loading state instead of
+    // flashing stale "installed / not_installed" values while the
+    // backend re-probes PATH. On first load `config` is still null so
+    // this is a no-op (the list area shows "loading servers...").
+    const known = configRef.current;
+    if (known) {
+      const langs = Object.keys(known.servers);
+      if (langs.length > 0) {
+        setHealthStatus((prev) => {
+          const next: Record<string, LspHealthStatus> = { ...prev };
+          for (const lang of langs) {
+            next[lang] = "checking";
+          }
+          return next;
+        });
+      }
+    }
+
     try {
-      const entries: LspServerStatusEntry[] = await fetchLspStatus();
+      // Single round-trip: server list + per-language install status.
+      // The backend runs PATH probes with bounded concurrency so total
+      // wall time is capped regardless of language count.
+      const resp = await fetchLspServersWithStatus(relayUrl);
+      setConfig(resp.servers);
       setHealthStatus((prev) => {
-        const next = { ...prev };
-        for (const entry of entries) {
-          // Only seed if the user has not started a manual check / install
-          // for this language since the request was issued. A checking
-          // value means a probe is in flight; leave it alone.
-          const current = next[entry.language];
-          if (current === "checking" || current === "error") continue;
-          next[entry.language] = entry.installed ? "installed" : "not_installed";
+        const next: Record<string, LspHealthStatus> = { ...prev };
+        for (const lang of Object.keys(resp.servers.servers)) {
+          const entry = resp.status[lang];
+          if (entry) {
+            next[lang] = entry.installed ? "installed" : "not_installed";
+          } else {
+            // Backend guarantees 1:1 keys; treat a missing status
+            // entry as "unknown" so the UI can render a defensive
+            // pending badge instead of leaving the row bare.
+            next[lang] = "unknown";
+          }
         }
         return next;
       });
     } catch (e) {
-      // Silent — do not surface to user; the empty initial state plus the
-      // manual Check button still give them a recovery path.
-      console.warn("Failed to fetch LSP status:", e);
+      setError(e instanceof Error ? e.message : "Failed to load LSP servers");
+    } finally {
+      setRefreshing(false);
     }
-  }, []);
+  }, [relayUrl]);
 
   useEffect(() => {
-    if (status === "connected") {
-      // Run in parallel: config drives the server list, status drives
-      // the per-row badges and the Install-button gating.
-      void loadServers();
-      void loadStatus();
+    if (status === "connected" && relayUrl) {
+      // Single combined fetch (servers + status) replaces the previous
+      // two-parallel-request pattern. Eliminates the race window where
+      // the server list was visible but badges had not yet been resolved.
+      void loadAll();
     }
-  }, [status, loadServers, loadStatus]);
+  }, [status, relayUrl, loadAll]);
 
-  /** Check if an LSP server is available by querying Gateway's PATH lookup */
+  /** Check if an LSP server is available by querying the relay's PATH lookup */
   const handleCheck = useCallback(async (language: string) => {
+    // relayUrl is guaranteed non-null: the Check button is only rendered
+    // after the early-return above for `!relayUrl`. Use an early return
+    // to satisfy TypeScript's flow analysis (matches the `!` pattern
+    // used in `handleInstall`).
+    if (!relayUrl) return;
     setCheckingLangs((prev) => new Set(prev).add(language));
     setHealthStatus((prev) => ({ ...prev, [language]: "checking" }));
     setHealthErrors((prev) => ({ ...prev, [language]: null }));
 
     try {
-      const entries: LspServerStatusEntry[] = await fetchLspStatus();
+      const entries: LspServerStatusEntry[] = await fetchLspStatus(relayUrl);
       // Update status for all languages from the backend response.
       // This also clears the "checking" state for languages the user
       // didn't explicitly click — harmless since loadStatus already
@@ -139,13 +175,14 @@ export function LspTab() {
         return next;
       });
     }
-  }, []);
+  }, [relayUrl]);
 
   /** View install script for a language */
   const handleViewScript = useCallback(async (language: string) => {
+    if (!relayUrl) return;
     setScriptLoading(true);
     try {
-      const resp = await fetchLspInstallScript(language);
+      const resp = await fetchLspInstallScript(language, relayUrl);
       setScriptDialog({
         language: resp.language,
         script: resp.script,
@@ -156,14 +193,17 @@ export function LspTab() {
     } finally {
       setScriptLoading(false);
     }
-  }, []);
+  }, [relayUrl]);
 
   /** Run install script for a language */
   const handleInstall = useCallback(async (language: string) => {
+    // No guard needed: the UI only renders Install buttons when relayUrl is
+    // available (see the early return above). If this function is called
+    // without a relayUrl, fail loudly so the bug is immediately visible.
     setInstallingLangs((prev) => new Set(prev).add(language));
     setError(null);
     try {
-      const result = await runLspInstall(language);
+      const result = await runLspInstall(language, relayUrl!);
       setInstallResults((prev) => ({
         ...prev,
         [language]: {
@@ -191,12 +231,23 @@ export function LspTab() {
         return next;
       });
     }
-  }, []);
+  }, [relayUrl]);
 
   if (status !== "connected") {
     return (
       <div className="max-w-lg">
         <p className="text-xs text-zinc-400">{t("harnessLsp.connectToGateway")}</p>
+      </div>
+    );
+  }
+
+  if (!relayUrl) {
+    return (
+      <div className="max-w-lg">
+        <p className="text-xs text-zinc-400">
+          LSP Relay not available. The relay process may not be running.
+          Ensure the Gateway started the LSP Relay successfully.
+        </p>
       </div>
     );
   }
@@ -211,15 +262,16 @@ export function LspTab() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("harnessLsp.lspServerManagement")}</h2>
           <button
-            onClick={() => {
-              void loadServers();
-              void loadStatus();
-            }}
-            disabled={loading}
+            onClick={() => void loadAll()}
+            disabled={refreshing}
             className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300"
           >
-            <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
-            {loading ? t("harnessLsp.loading") : t("harnessLsp.refresh")}
+            {refreshing ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            {refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
           </button>
         </div>
 
@@ -231,12 +283,12 @@ export function LspTab() {
         )}
 
         {/* Loading state */}
-        {loading && serverEntries.length === 0 && (
+        {refreshing && serverEntries.length === 0 && (
           <p className="text-xs text-zinc-400">{t("harnessLsp.loadingServers")}</p>
         )}
 
         {/* Empty state */}
-        {!loading && serverEntries.length === 0 && (
+        {!refreshing && serverEntries.length === 0 && (
           <p className="text-xs text-zinc-400">{t("harnessLsp.noLspServers")}</p>
         )}
 
@@ -347,9 +399,32 @@ function LspServerCard({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold">{langLabel}</span>
-              {/* Health indicator */}
+              {/* Health indicator — order matters:
+                  - "unknown": status hasn't been resolved yet (defensive
+                    fallback when the backend returns fewer status entries
+                    than server entries). Renders a neutral pending badge
+                    so the row is never empty.
+                  - "checking": a probe is in flight (either the auto probe
+                    triggered by loadAll / Refresh, or a manual per-row
+                    Check). Amber distinguishes user-initiated probes from
+                    the neutral pending state.
+                  - "installed" / "not_installed": terminal states from
+                    the most recent successful probe.
+                  - "error": error message is rendered below. */}
+              {healthStatus === "unknown" && (
+                <span
+                  data-testid="lsp-pending-badge"
+                  className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400"
+                >
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                  {t("harnessLsp.pendingCheck")}
+                </span>
+              )}
               {healthStatus === "checking" && (
-                <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                <span
+                  data-testid="lsp-checking-badge"
+                  className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                >
                   <Loader2 className="h-2.5 w-2.5 animate-spin" />
                   {t("harnessLsp.checking")}
                 </span>

@@ -479,13 +479,22 @@ impl AgentLoop {
             "Built chat request for LLM (after preemptive trim)"
         );
 
-        // Merge MCP tool definitions into the LLM request right before
-        // injection. MCP tools are kept separate from builtin tools and
-        // only mixed here (LLM injection) + in debug snapshot capture.
+        // Inject MCP server tool definitions into the LLM request.
+        //
+        // `chat_request.tools` contains built-in tool definitions from
+        // `tool_definitions` (set at startup, does not include MCP tools).
+        // MCP server tools live separately in `self.core.mcp_tools` and must
+        // be injected here before each LLM call.
+        //
+        // We iterate `self.core.mcp_tools` directly — NOT `self.core.all_tools`
+        // filtered by name prefix — because `all_tools` mixes built-in tools
+        // (mcp_install, mcp_uninstall) with MCP server tools, and filtering by
+        // "mcp_" prefix would re-inject built-in tools and cause
+        // "Tool names must be unique" 400 errors.
         if let Some(ref mut tools) = chat_request.tools {
-            for tool in &self.core.all_tools {
-                let spec = tool.spec();
-                if spec.name.starts_with("mcp_") {
+            if let Some(ref mcp_tools) = self.core.mcp_tools {
+                for tool in mcp_tools {
+                    let spec = tool.spec();
                     let val = serde_json::to_value(&spec).unwrap_or_default();
                     tools.push(val);
                 }

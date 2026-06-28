@@ -6,6 +6,7 @@ use crate::cron::CronScheduler;
 use crate::cron::store::CronStore;
 use crate::interaction_store::InteractionStore;
 use crate::lifecycle::embed::EmbedProcessState;
+use crate::lifecycle::lsp_relay::LspRelayProcessState;
 use crate::rate::bucket::RateLimiter;
 use crate::resource_cache::ResourceCache;
 use crate::vault::VaultFacade;
@@ -94,6 +95,9 @@ pub struct GatewayState {
     pub resource_cache: ResourceCache,
     /// Embedding service process state (None if not started).
     pub embed_process: Option<EmbedProcessState>,
+    /// LSP Relay process state (None if not started).
+    /// Managed by the LSP Relay supervisor — spawn / monitor / restart.
+    pub lsp_relay_process: Option<LspRelayProcessState>,
     /// Last user-interaction timestamp per agent (`agent_id` -> UTC time).
     /// In-memory mirror of the on-disk interaction store; source of truth
     /// for the `GET /api/agents` sort order. Persists across agent
@@ -121,6 +125,7 @@ impl GatewayState {
             ipc_sessions: None,
             resource_cache: ResourceCache::default(),
             embed_process: None,
+            lsp_relay_process: None,
             last_interactions: HashMap::new(),
             interaction_store: None,
         }

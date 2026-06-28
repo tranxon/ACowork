@@ -34,6 +34,12 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
+use acowork_core::health::supervisor_defaults;
+use acowork_core::supervisor::{
+    HeartbeatStatus, HeartbeatWatchdog, RestartHistory, SseFrame, backoff_with_jitter,
+    parse_sse_frame,
+};
+
 use crate::gateway::state::GatewayState;
 use crate::ipc::global_push::GlobalResourcePusher;
 
@@ -44,18 +50,8 @@ use super::embed::spawn_embed_process;
 /// from ipc::server, and ipc::server shouldn't import lifecycle).
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
-/// Heartbeat cadence from embed (must match `event_bus::spawn_heartbeat`).
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connect / reconnect backoff bounds.
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
-/// Restart backoff bounds (separate from reconnect — this is for the
-/// process itself after a confirmed failure).
-const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
-const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
-/// Window over which `MAX_RESTART_ATTEMPTS` is counted.
-const RESTART_WINDOW: Duration = Duration::from_secs(5 * 60);
-/// Give up after this many restarts within `RESTART_WINDOW`.
-const MAX_RESTART_ATTEMPTS: u32 = 5;
 
 /// Configuration passed in from the gateway when starting the supervisor.
 /// Holds the same args used to spawn the initial embed instance so we
@@ -88,47 +84,6 @@ struct StateEvent {
 #[derive(Debug, Deserialize)]
 struct StateEventEnvelope {
     state: StateEvent,
-}
-
-/// Tracks consecutive restart attempts to enforce `MAX_RESTART_ATTEMPTS`.
-struct RestartHistory {
-    /// Timestamps of recent restarts within the last `RESTART_WINDOW`.
-    attempts: Vec<Instant>,
-}
-
-impl RestartHistory {
-    fn new() -> Self {
-        Self {
-            attempts: Vec::new(),
-        }
-    }
-
-    /// Record a restart attempt, pruning anything older than the window.
-    /// Returns the number of attempts now in the window (after pruning).
-    fn record(&mut self) -> usize {
-        let now = Instant::now();
-        self.attempts
-            .retain(|t| now.duration_since(*t) < RESTART_WINDOW);
-        self.attempts.push(now);
-        self.attempts.len()
-    }
-}
-
-/// Compute exponential backoff with jitter, clamped to `[min, max]`.
-fn backoff_with_jitter(attempt: u32, min: Duration, max: Duration) -> Duration {
-    let exp = 1u64 << attempt.min(6); // cap shift to avoid overflow
-    let base_ms = (min.as_millis() as u64).saturating_mul(exp);
-    let capped_ms = base_ms.min(max.as_millis() as u64);
-    // ±20% jitter
-    let jitter = (capped_ms as f64 * 0.2) as u64;
-    let low = capped_ms.saturating_sub(jitter);
-    let high = capped_ms.saturating_add(jitter);
-    let chosen = if high > low {
-        low + (Instant::now().elapsed().subsec_nanos() as u64) % (high - low + 1)
-    } else {
-        capped_ms
-    };
-    Duration::from_millis(chosen)
 }
 
 /// Shared state handle for the supervisor and the HTTP layer. Re-exports
@@ -176,13 +131,11 @@ async fn run_supervisor(
     // supervisor successfully connects once, it transitions to the
     // normal mode where any disconnection IS a restart trigger.
     let mut in_startup_grace = true;
-    const STARTUP_GRACE: Duration = Duration::from_secs(10);
-    const STARTUP_POLL: Duration = Duration::from_secs(2);
 
     // Wait for the initial embed to bind and start serving /events.
     // Don't count failures during this period against the restart budget.
     {
-        let deadline = Instant::now() + STARTUP_GRACE;
+        let deadline = Instant::now() + supervisor_defaults::STARTUP_GRACE;
         loop {
             if try_connect_events(port).await {
                 tracing::info!("Initial embed is serving /events");
@@ -199,19 +152,19 @@ async fn run_supervisor(
                 if embed_process_alive(&state, port).await {
                     tracing::warn!(
                         "Initial embed has not bound /events within {:?}, but process is still running; continuing startup wait",
-                        STARTUP_GRACE
+                        supervisor_defaults::STARTUP_GRACE
                     );
-                    sleep(STARTUP_POLL).await;
+                    sleep(supervisor_defaults::STARTUP_POLL).await;
                     continue;
                 }
                 tracing::warn!(
                     "Initial embed did not respond within {:?} and process is not alive; entering restart loop",
-                    STARTUP_GRACE
+                    supervisor_defaults::STARTUP_GRACE
                 );
                 in_startup_grace = false;
                 break;
             }
-            sleep(STARTUP_POLL).await;
+            sleep(supervisor_defaults::STARTUP_POLL).await;
         }
     }
 
@@ -229,7 +182,7 @@ async fn run_supervisor(
         // probably just slow to boot.
         if in_startup_grace {
             tracing::warn!("Embed monitor session ended during startup grace — retrying shortly");
-            sleep(STARTUP_POLL).await;
+            sleep(supervisor_defaults::STARTUP_POLL).await;
             continue;
         }
 
@@ -284,7 +237,7 @@ async fn run_supervisor(
             tracing::info!(
                 "Embed HTTP is not ready yet, but process is still alive; waiting instead of restarting"
             );
-            sleep(STARTUP_POLL).await;
+            sleep(supervisor_defaults::STARTUP_POLL).await;
             continue;
         }
 
@@ -293,8 +246,8 @@ async fn run_supervisor(
             gw.embed_process = None;
         }
 
-        let attempts = history.record();
-        if attempts as u32 > MAX_RESTART_ATTEMPTS {
+        let attempts = history.record(supervisor_defaults::RESTART_WINDOW);
+        if attempts as u32 > supervisor_defaults::MAX_RESTART_ATTEMPTS {
             tracing::error!(
                 attempts,
                 "Embed restart limit exceeded; giving up and clearing gateway embed state"
@@ -306,8 +259,11 @@ async fn run_supervisor(
             return;
         }
 
-        let backoff =
-            backoff_with_jitter(attempts as u32, RESTART_BACKOFF_MIN, RESTART_BACKOFF_MAX);
+        let backoff = backoff_with_jitter(
+            attempts as u32,
+            supervisor_defaults::RESTART_BACKOFF_MIN,
+            supervisor_defaults::RESTART_BACKOFF_MAX,
+        );
         tracing::info!(attempt = attempts, ?backoff, "Restarting embed process");
         sleep(backoff).await;
 
@@ -391,7 +347,7 @@ async fn run_supervisor(
         // same logic as the initial startup grace, but inlined here
         // so it runs after every restart, not just the first one.
         {
-            let deadline = Instant::now() + STARTUP_GRACE;
+            let deadline = Instant::now() + supervisor_defaults::STARTUP_GRACE;
             loop {
                 if try_connect_events(port).await {
                     tracing::info!("Restarted embed is serving /events");
@@ -405,18 +361,18 @@ async fn run_supervisor(
                     if embed_process_alive(&state, port).await {
                         tracing::warn!(
                             "Restarted embed has not bound /events within {:?}, but process is still running; continuing startup wait",
-                            STARTUP_GRACE
+                            supervisor_defaults::STARTUP_GRACE
                         );
-                        sleep(STARTUP_POLL).await;
+                        sleep(supervisor_defaults::STARTUP_POLL).await;
                         continue;
                     }
                     tracing::warn!(
                         "Restarted embed did not respond within {:?} and process is not alive; entering monitor anyway",
-                        STARTUP_GRACE
+                        supervisor_defaults::STARTUP_GRACE
                     );
                     break;
                 }
-                sleep(STARTUP_POLL).await;
+                sleep(supervisor_defaults::STARTUP_POLL).await;
             }
         }
     }
@@ -509,23 +465,26 @@ async fn run_monitor_session(
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
-    let mut last_heartbeat = Instant::now();
 
     // Heartbeat watchdog — fires when no heartbeat for too long.
-    let mut watchdog = tokio::time::interval(Duration::from_secs(2));
-    watchdog.tick().await; // discard the immediate first tick
+    let mut watchdog = HeartbeatWatchdog::new(
+        Duration::from_secs(2),
+        supervisor_defaults::HEARTBEAT_TIMEOUT,
+    );
 
     loop {
         tokio::select! {
             // Periodic check: did the heartbeat go stale?
-            _ = watchdog.tick() => {
-                if last_heartbeat.elapsed() > HEARTBEAT_TIMEOUT {
-                    let elapsed_secs = last_heartbeat.elapsed().as_secs();
-                    tracing::warn!(
-                        elapsed_secs,
-                        "Embed heartbeat timeout"
-                    );
-                    return MonitorExit::HeartbeatTimeout { elapsed_secs };
+            status = watchdog.tick() => {
+                match status {
+                    HeartbeatStatus::Ok => {}
+                    HeartbeatStatus::Timeout { elapsed_secs } => {
+                        tracing::warn!(
+                            elapsed_secs,
+                            "Embed heartbeat timeout"
+                        );
+                        return MonitorExit::HeartbeatTimeout { elapsed_secs };
+                    }
                 }
                 // Also check whether the shared state was cleared by
                 // the reaper (process died). If so, end the session
@@ -546,11 +505,13 @@ async fn run_monitor_session(
                             let frame: String = buffer.drain(..idx + 2).collect();
                             match parse_sse_frame(&frame) {
                                 Some(SseFrame::Heartbeat) => {
-                                    last_heartbeat = Instant::now();
+                                    watchdog.beat();
                                 }
-                                Some(SseFrame::State(s)) => {
-                                    last_heartbeat = Instant::now();
-                                    apply_state_event(state, pusher, s).await;
+                                Some(SseFrame::State(raw_json)) => {
+                                    watchdog.beat();
+                                    if let Ok(env) = serde_json::from_str::<StateEventEnvelope>(&raw_json) {
+                                        apply_state_event(state, pusher, env.state).await;
+                                    }
                                 }
                                 Some(SseFrame::Comment(_)) | None => {
                                     // SSE comment (e.g., "lagged:3") or
@@ -570,46 +531,6 @@ async fn run_monitor_session(
                 }
             }
         }
-    }
-}
-
-enum SseFrame {
-    Heartbeat,
-    State(StateEvent),
-    /// SSE comment line (e.g. `:lagged:3`).
-    #[allow(dead_code)]
-    Comment(String),
-}
-
-/// Minimal SSE frame parser. Handles the subset that axum's `Sse`
-/// produces: `event: <name>`, `data: <payload>`, blank line, and
-/// `:comment` lines.
-fn parse_sse_frame(frame: &str) -> Option<SseFrame> {
-    let mut event_name: Option<String> = None;
-    let mut data_lines: Vec<String> = Vec::new();
-
-    for line in frame.lines() {
-        if let Some(rest) = line.strip_prefix("event:") {
-            event_name = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("data:") {
-            data_lines.push(rest.trim_start().to_string());
-        } else if let Some(rest) = line.strip_prefix(':') {
-            // SSE comment. If no event was collected, this is a no-op;
-            // surface it so the caller can log lagged lines, etc.
-            if event_name.is_none() && data_lines.is_empty() {
-                return Some(SseFrame::Comment(rest.trim().to_string()));
-            }
-        }
-        // Other fields (id:, retry:) are ignored.
-    }
-
-    let payload = data_lines.join("\n");
-    match event_name.as_deref() {
-        Some("heartbeat") => Some(SseFrame::Heartbeat),
-        Some("state") => serde_json::from_str::<StateEventEnvelope>(&payload)
-            .map(|env| SseFrame::State(env.state))
-            .ok(),
-        _ => None,
     }
 }
 

@@ -19,6 +19,10 @@
       "args": [
         "--stdio"
       ],
+      "candidate_args": {
+        "pylsp": [],
+        "python-lsp-server": []
+      },
       "install_hint": "pip install python-lsp-server",
       "install_script": "python",
       "description": "Python language server"
@@ -122,6 +126,15 @@
       "install_hint": "Download Eclipse JDT Language Server: https://download.eclipse.org/jdtls/",
       "install_script": "java",
       "description": "Eclipse JDT Language Server for Java"
+    },
+    "kotlin": {
+      "candidates": [
+        "kotlin-language-server"
+      ],
+      "args": [],
+      "install_hint": "brew install kotlin-language-server (macOS) or download from https://github.com/fwcd/kotlin-language-server",
+      "install_script": "kotlin",
+      "description": "Kotlin language server (defaults to stdio, no --stdio flag)"
     }
   }
 }

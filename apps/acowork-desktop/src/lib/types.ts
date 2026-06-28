@@ -863,7 +863,22 @@ export interface AgentSearchConfig {
 
 // ── LSP types ────────────────────────────────────────────────────────────
 
-/** LSP server entry — matches acowork_gateway::lsp::LspServerEntry */
+/**
+ * Response from `GET /api/lsp/endpoint` (Gateway).
+ *
+ * Desktop App queries this to discover the LSP Relay's address, then
+ * connects directly to the relay's WebSocket and HTTP API.
+ */
+export interface LspEndpointResponse {
+  /** Whether the LSP Relay process is running and ready */
+  available: boolean;
+  /** Relay host (always "127.0.0.1" for local mode) */
+  host: string;
+  /** Relay port (null when not available) */
+  port: number | null;
+}
+
+/** LSP server entry — matches acowork_lsp_relay::config::LspServerEntry */
 export interface LspServerEntry {
   /** Candidate command names (tried in order) */
   candidates: string[];
@@ -879,12 +894,32 @@ export interface LspServerEntry {
   description: string;
 }
 
-/** LSP servers config — matches acowork_gateway::lsp::LspServersConfig */
+/** LSP servers config — matches acowork_lsp_relay::config::LspServersConfig */
 export interface LspServersConfig {
   /** Schema version */
   version: number;
   /** Language-keyed server entries (canonical language names only) */
   servers: Record<string, LspServerEntry>;
+}
+
+/**
+ * Combined response from `GET /api/lsp/servers-with-status`.
+ *
+ * Returns the configured LSP server list together with per-language
+ * install status in a single round-trip. Used on initial load and on
+ * Refresh so the server list and install badges arrive atomically —
+ * avoiding the 1–2s window where the list was visible but badges
+ * had not yet been resolved.
+ *
+ * The keys of `servers` and `status` are guaranteed to match 1:1 by
+ * the backend. A language present in `servers` but missing from
+ * `status` should be treated as "unknown" by the UI.
+ */
+export interface LspServersWithStatus {
+  /** Configured LSP servers */
+  servers: LspServersConfig;
+  /** Per-language install status, keyed by canonical language */
+  status: Record<string, LspServerStatusEntry>;
 }
 
 /** LSP install script response from GET /api/lsp/install/{language} */

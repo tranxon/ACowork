@@ -175,6 +175,12 @@ message AgentHelloResult {
   string embed_endpoint = 33;
   string embed_model_id = 34;
   uint64 embed_dimension = 35;
+
+  // ── LSP Relay ──
+  // LSP Relay HTTP endpoint (e.g. "http://127.0.0.1:19878").
+  // Set when Gateway has spawned acowork-lsp-relay; empty otherwise.
+  // The Runtime's codebase tool uses this to connect directly to the relay.
+  string lsp_relay_endpoint = 36;
   
   // Fields 3-10: removed (was provider, model, api_key, base_url, models,
   //   model_capabilities, max_output_tokens_limit, protocol_type).

@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     middleware::{self, Next},
-    routing::{get, post},
+    routing::get,
 };
 use axum::extract::Request;
 use serde::{Deserialize, Serialize};
@@ -192,8 +192,6 @@ pub struct AppState {
     pub pusher: Option<Arc<GlobalResourcePusher>>,
     /// Whether CORS is enabled (allows any origin for remote Desktop connections)
     pub cors_enabled: bool,
-    /// Shared LSP process pool (lifecycle bound to Gateway, not WebSocket)
-    pub lsp_pool: std::sync::Arc<crate::lsp::LspPool>,
 }
 
 impl AppState {
@@ -217,7 +215,6 @@ impl AppState {
             grpc_session_mgr: None,
             pusher: None,
             cors_enabled: false,
-            lsp_pool: std::sync::Arc::new(crate::lsp::LspPool::new()),
         }
     }
 
@@ -242,7 +239,6 @@ impl AppState {
             grpc_session_mgr: None,
             pusher: None,
             cors_enabled: false,
-            lsp_pool: std::sync::Arc::new(crate::lsp::LspPool::new()),
         }
     }
 }
@@ -342,17 +338,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::http::fs_browse::fs_routes())
-        .route("/lsp/{language}", get(crate::lsp::lsp_handler))
-        .route("/api/lsp/servers", get(crate::lsp::lsp_servers_list))
-        .route("/api/lsp/status", get(crate::lsp::lsp_status_list))
-        .route(
-            "/api/lsp/install/{language}",
-            get(crate::lsp::lsp_install_script),
-        )
-        .route(
-            "/api/lsp/install/{language}",
-            post(crate::lsp::lsp_install_run),
-        )
+        .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -546,6 +532,36 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
     })
 }
 
+// ── LSP Relay endpoint ────────────────────────────────────────────────
+
+/// Response for `GET /api/lsp/endpoint` — returns the LSP Relay address.
+///
+/// Desktop App and Agent Runtime use this endpoint to discover the LSP Relay,
+/// then connect directly to its WebSocket and JSON-RPC API.
+#[derive(Debug, Serialize)]
+pub struct LspEndpointResponse {
+    pub available: bool,
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+/// `GET /api/lsp/endpoint` — return the LSP Relay's address.
+pub async fn lsp_endpoint(State(state): State<AppState>) -> Json<LspEndpointResponse> {
+    let gw = state.gateway_state.read().await;
+    match &gw.lsp_relay_process {
+        Some(eps) if eps.ready => Json(LspEndpointResponse {
+            available: true,
+            host: "127.0.0.1".to_string(),
+            port: Some(eps.port),
+        }),
+        _ => Json(LspEndpointResponse {
+            available: false,
+            host: "127.0.0.1".to_string(),
+            port: None,
+        }),
+    }
+}
+
 // ── Error response helpers ────────────────────────────────────────────
 
 /// Standard API error response
@@ -653,6 +669,50 @@ mod tests {
     fn test_build_router() {
         let state = test_app_state();
         let _router = build_router(state);
+    }
+
+    // ── LSP endpoint tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_lsp_endpoint_unavailable_when_no_relay() {
+        let state = test_app_state();
+        let resp = lsp_endpoint(State(state)).await;
+        assert!(!resp.available);
+        assert_eq!(resp.host, "127.0.0.1");
+        assert!(resp.port.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_lsp_endpoint_available_when_ready() {
+        let state = test_app_state();
+        {
+            let mut gw = state.gateway_state.write().await;
+            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
+                pid: 12345,
+                port: 19878,
+                ready: true,
+            });
+        }
+        let resp = lsp_endpoint(State(state)).await;
+        assert!(resp.available);
+        assert_eq!(resp.host, "127.0.0.1");
+        assert_eq!(resp.port, Some(19878));
+    }
+
+    #[tokio::test]
+    async fn test_lsp_endpoint_unavailable_when_not_ready() {
+        let state = test_app_state();
+        {
+            let mut gw = state.gateway_state.write().await;
+            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
+                pid: 12345,
+                port: 19878,
+                ready: false,
+            });
+        }
+        let resp = lsp_endpoint(State(state)).await;
+        assert!(!resp.available);
+        assert!(resp.port.is_none());
     }
 
     // ── BridgeEventType tests ────────────────────────────────────────────────

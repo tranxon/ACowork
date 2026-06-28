@@ -138,9 +138,6 @@ pub(crate) async fn start_http_server(
     app_state.pusher = pusher;
     app_state.cors_enabled = http_config.cors_enabled;
 
-    // Start background LSP pool reaper (evicts idle processes after timeout)
-    crate::lsp::LspPool::start_reaper(Arc::clone(&app_state.lsp_pool));
-
     // Clean up stale pidfile from a previous run (if any). This is purely
     // for housekeeping — mutual exclusion is handled by port probing below.
     cleanup_stale_pidfile(data_dir);

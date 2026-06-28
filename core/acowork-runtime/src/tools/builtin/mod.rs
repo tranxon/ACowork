@@ -22,6 +22,7 @@
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 
 pub mod ask_user_question;
+pub mod codebase;
 pub mod content_search;
 pub mod doc_reader;
 pub mod file_edit;
@@ -79,6 +80,7 @@ pub fn all_builtin_tools(
     memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
+    lsp_relay_endpoint: Option<String>,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -133,6 +135,13 @@ pub fn all_builtin_tools(
         let search_engine =
             WebSearchEngine::new(Vec::new(), Duration::from_millis(tool_http_timeout_ms));
         tools.push(Arc::new(web_search::WebSearchTool::new(search_engine)));
+    }
+
+    // Only register codebase when the LSP Relay is available.
+    // Without the relay, the tool always fails with "LSP Relay not available",
+    // wasting LLM inference tokens on doomed calls.
+    if let Some(endpoint) = lsp_relay_endpoint {
+        tools.push(Arc::new(codebase::CodebaseTool::new(endpoint)));
     }
 
     // Append platform-specific shell tools

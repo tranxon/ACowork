@@ -36,6 +36,7 @@ import {
     buildLspWsUrl,
     ensureVscodeApiInitialized,
 } from "./useLspClient";
+import { invalidateLspRelayEndpointCache } from "../lib/gateway-api";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -296,7 +297,7 @@ export function useLspClientPool(
             st.handshakeDone = false;
 
             const t0 = performance.now();
-            const wsUrl = buildLspWsUrl(language, agentId, workspaceId);
+            const wsUrl = await buildLspWsUrl(language, workspaceRoot);
             console.log("[LSP] pool connecting —", language, "url:", wsUrl);
 
             let ws: WebSocket;
@@ -655,6 +656,9 @@ export function useLspClientPool(
             } catch (err) {
                 if (st.cancelled) return;
                 console.error("[LSP] pool connect failed —", language, err);
+                // Invalidate relay endpoint cache so the next attempt
+                // re-fetches from the Gateway (relay may have restarted).
+                invalidateLspRelayEndpointCache();
                 st.client = null;
                 st.status = "error";
                 st.statusMessage = formatLspError(language, String(err));

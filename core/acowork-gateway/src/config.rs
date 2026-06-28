@@ -110,13 +110,6 @@ pub struct GatewayConfig {
     pub hf_mirrors: Vec<String>,
     #[serde(default)]
     pub embedding_model: Option<String>,
-    /// LSP config directory (contains lsp_servers.json and lsp_install/).
-    ///
-    /// In local mode (Desktop App), this is the Tauri resource_dir where
-    /// LSP config files are bundled. In remote mode (standalone Gateway),
-    /// this is unset and Gateway falls back to scanning exe_dir.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lsp_config_dir: Option<String>,
 }
 
 /// HTTP API configuration
@@ -222,8 +215,7 @@ impl GatewayConfig {
     /// yet at this point.
     pub(crate) fn migrate_legacy_layout() {
         let new_root = project_root();
-        if new_root.exists() {
-        }
+        let _ = new_root.exists();
 
         #[cfg(not(windows))]
         {
@@ -238,41 +230,41 @@ impl GatewayConfig {
                 return;
             }
 
-            if let Some(old) = legacy_config_dir() {
-                if old.exists() {
-                    let dest = new_root.join("config");
-                    match std::fs::rename(&old, &dest) {
-                        Ok(()) => eprintln!(
-                            "[acowork-gateway] Migrated legacy config dir: {} -> {}",
-                            old.display(),
-                            dest.display()
-                        ),
-                        Err(e) => eprintln!(
-                            "[acowork-gateway] WARN: failed to migrate legacy config dir ({} -> {}): {}. Please move manually.",
-                            old.display(),
-                            dest.display(),
-                            e
-                        ),
-                    }
+            if let Some(old) = legacy_config_dir()
+                && old.exists()
+            {
+                let dest = new_root.join("config");
+                match std::fs::rename(&old, &dest) {
+                    Ok(()) => eprintln!(
+                        "[acowork-gateway] Migrated legacy config dir: {} -> {}",
+                        old.display(),
+                        dest.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "[acowork-gateway] WARN: failed to migrate legacy config dir ({} -> {}): {}. Please move manually.",
+                        old.display(),
+                        dest.display(),
+                        e
+                    ),
                 }
             }
 
-            if let Some(old) = legacy_data_dir() {
-                if old.exists() {
-                    let dest = new_root.join("data");
-                    match std::fs::rename(&old, &dest) {
-                        Ok(()) => eprintln!(
-                            "[acowork-gateway] Migrated legacy data dir: {} -> {}",
-                            old.display(),
-                            dest.display()
-                        ),
-                        Err(e) => eprintln!(
-                            "[acowork-gateway] WARN: failed to migrate legacy data dir ({} -> {}): {}. Please move manually.",
-                            old.display(),
-                            dest.display(),
-                            e
-                        ),
-                    }
+            if let Some(old) = legacy_data_dir()
+                && old.exists()
+            {
+                let dest = new_root.join("data");
+                match std::fs::rename(&old, &dest) {
+                    Ok(()) => eprintln!(
+                        "[acowork-gateway] Migrated legacy data dir: {} -> {}",
+                        old.display(),
+                        dest.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "[acowork-gateway] WARN: failed to migrate legacy data dir ({} -> {}): {}. Please move manually.",
+                        old.display(),
+                        dest.display(),
+                        e
+                    ),
                 }
             }
         }
@@ -373,14 +365,14 @@ impl GatewayConfig {
                     .unwrap_or_default();
                 // Allow ACOWORK_GATEWAY_HTTP_PORT env var to override the
                 // configured port (used by E2E tests and manual testing).
-                if let Ok(port_str) = std::env::var("ACOWORK_GATEWAY_HTTP_PORT") {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        http.port = port;
-                        // Ensure port_max is at least port+10 to allow
-                        // auto-increment on conflict.
-                        if http.port_max < port + 10 {
-                            http.port_max = port + 10;
-                        }
+                if let Ok(port_str) = std::env::var("ACOWORK_GATEWAY_HTTP_PORT")
+                    && let Ok(port) = port_str.parse::<u16>()
+                {
+                    http.port = port;
+                    // Ensure port_max is at least port+10 to allow
+                    // auto-increment on conflict.
+                    if http.port_max < port + 10 {
+                        http.port_max = port + 10;
                     }
                 }
                 http
@@ -398,10 +390,6 @@ impl GatewayConfig {
                 .map(|c| c.hf_mirrors.clone())
                 .unwrap_or_default(),
             embedding_model: file_config.as_ref().and_then(|c| c.embedding_model.clone()),
-            lsp_config_dir: cli
-                .lsp_config_dir
-                .clone()
-                .or_else(|| file_config.as_ref().and_then(|c| c.lsp_config_dir.clone())),
         })
     }
 
@@ -491,7 +479,6 @@ impl Default for GatewayConfig {
             max_output_tokens_limit: default_max_output_tokens_limit(),
             hf_mirrors: Vec::new(),
             embedding_model: None,
-            lsp_config_dir: None,
         }
     }
 }
@@ -499,10 +486,10 @@ impl Default for GatewayConfig {
 /// Legacy XDG layout — `~/.config/acowork-gateway/`.
 #[cfg(not(windows))]
 fn legacy_config_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("acowork-gateway"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("acowork-gateway"));
     }
     std::env::var("HOME")
         .ok()
@@ -513,10 +500,10 @@ fn legacy_config_dir() -> Option<PathBuf> {
 /// Legacy XDG layout — `~/.local/share/acowork-gateway/`.
 #[cfg(not(windows))]
 fn legacy_data_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("acowork-gateway"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("acowork-gateway"));
     }
     std::env::var("HOME")
         .ok()

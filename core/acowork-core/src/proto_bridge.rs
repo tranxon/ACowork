@@ -439,6 +439,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 embed_endpoint,
                 embed_model_id,
                 embed_dimension,
+                lsp_relay_endpoint,
             } => {
                 let _ = (
                     provider_list,
@@ -479,6 +480,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         embed_endpoint: embed_endpoint.clone().unwrap_or_default(),
                         embed_model_id: embed_model_id.clone().unwrap_or_default(),
                         embed_dimension: embed_dimension.unwrap_or(0) as u64,
+                        lsp_relay_endpoint: lsp_relay_endpoint.clone().unwrap_or_default(),
                     },
                 ))
             }

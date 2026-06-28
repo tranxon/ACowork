@@ -26,7 +26,7 @@ import {
 import { MonacoLanguageClient } from "monaco-languageclient";
 import { MonacoVscodeApiWrapper } from "monaco-languageclient/vscodeApiWrapper";
 import type { MonacoVscodeApiConfig } from "monaco-languageclient/vscodeApiWrapper";
-import { getGatewayUrl } from "../lib/config";
+import { getCachedLspRelayEndpoint, invalidateLspRelayEndpointCache } from "../lib/gateway-api";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -112,17 +112,27 @@ export function adaptWebSocket(ws: WebSocket): IWebSocket {
 
 // ── WebSocket URL builder ──────────────────────────────────────────────
 
-/** Build the Gateway LSP WebSocket URL from an HTTP Gateway URL */
-export function buildLspWsUrl(language: string, agentId?: string, workspaceId?: string): string {
-    const httpUrl = getGatewayUrl();
-    const wsUrl = httpUrl.replace(/^http/, "ws");
+/**
+ * Build the LSP Relay WebSocket URL for a given language.
+ *
+ * Queries the Gateway for the LSP Relay endpoint (cached), then constructs
+ * a direct WebSocket URL to the relay process. The relay's WebSocket
+ * handler expects `workspace_root` as a query parameter.
+ *
+ * @throws if the LSP Relay is not available (not running or not ready).
+ */
+export async function buildLspWsUrl(language: string, workspaceRoot?: string): Promise<string> {
+    const ep = await getCachedLspRelayEndpoint();
+    if (!ep || ep.port == null) {
+        throw new Error("LSP Relay not available");
+    }
+    const wsUrl = `ws://${ep.host}:${ep.port}`;
     let url = `${wsUrl}/lsp/${encodeURIComponent(language)}`;
     const params = new URLSearchParams();
-    if (agentId) params.set("agent_id", agentId);
-    if (workspaceId) params.set("workspace_id", workspaceId);
+    if (workspaceRoot) params.set("workspace_root", workspaceRoot);
     const qs = params.toString();
     const result = qs ? `${url}?${qs}` : url;
-    console.log("[LSP] buildLspWsUrl — httpUrl:", httpUrl, "→ wsUrl:", wsUrl, "→ result:", result);
+    console.log("[LSP] buildLspWsUrl — relay endpoint:", `${ep.host}:${ep.port}`, "→ result:", result);
     return result;
 }
 
@@ -307,8 +317,8 @@ export function useLspClient(
             }
             handshakeDoneRef.current = false;
 
-            const wsUrl = buildLspWsUrl(language!, agentId, workspaceId);
-            console.log("[LSP] connect() called — language:", language, "agentId:", agentId, "workspaceId:", workspaceId);
+            const wsUrl = await buildLspWsUrl(language!, workspaceRoot);
+            console.log("[LSP] connect() called — language:", language, "workspaceRoot:", workspaceRoot);
             console.log("[LSP] WebSocket URL:", wsUrl);
 
             let ws: WebSocket;
@@ -624,6 +634,10 @@ export function useLspClient(
                         console.error("[LSP] Error message:", err.message);
                         console.error("[LSP] Error stack:", err.stack);
                     }
+                    // Invalidate relay endpoint cache so the next attempt
+                    // re-fetches from the Gateway (relay may have restarted
+                    // on a different port).
+                    invalidateLspRelayEndpointCache();
                     clientRef.current = null;
                     setClient(null);
                     setStatus("error");

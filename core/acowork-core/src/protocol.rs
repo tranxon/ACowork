@@ -775,6 +775,13 @@ pub enum GatewayResponse {
         /// None when the embedding service is not running.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         embed_dimension: Option<usize>,
+
+        // ── LSP Relay ──
+        /// LSP Relay HTTP endpoint (e.g. "http://127.0.0.1:19878").
+        /// None when the LSP Relay is not running.
+        /// Used by the codebase tool to connect directly to the relay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lsp_relay_endpoint: Option<String>,
     },
     /// API key release result
     KeyReleaseResult {

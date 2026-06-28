@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::tools::output;
 
 const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
-const MAX_LINES_PER_CALL: usize = 200;
+const MAX_LINES_PER_CALL: usize = 400;
 
 /// File read tool — fragment reader, not a whole-file reader
 pub struct FileReadTool;
@@ -26,13 +26,13 @@ impl FileReadTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "file_read".to_string(),
-            description: "Read a specific range of lines from a file, with line numbers. This is a fragment reader — both start_line (1-based) and end_line (inclusive) are required. Read at most 200 lines per call; for longer ranges, paginate across multiple calls. Always use content_search first to locate the relevant line numbers before calling this tool.".to_string(),
+            description: "Read a specific range of lines from a file, with line numbers. This is a fragment reader — both start_line (1-based) and end_line (inclusive) are required. Read at most 400 lines per call; for longer ranges, paginate across multiple calls. Always use content_search first to locate the relevant line numbers before calling this tool.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Relative path to the file" },
                     "start_line": { "type": "integer", "description": "Starting line number (1-based). Required. Must be > 0." },
-                    "end_line": { "type": "integer", "description": "Ending line number (inclusive). Required. Must be >= start_line. At most 200 lines per call — paginate if you need more." }
+                    "end_line": { "type": "integer", "description": "Ending line number (inclusive). Required. Must be >= start_line. At most 400 lines per call — paginate if you need more." }
                 },
                 "required": ["path", "start_line", "end_line"]
             }),

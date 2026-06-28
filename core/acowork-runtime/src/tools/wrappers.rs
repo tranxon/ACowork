@@ -201,12 +201,8 @@ impl PathGuardedTool {
                     let popped = components
                         .iter()
                         .rposition(|c| matches!(c, std::path::Component::Normal(_)));
-                    if let Some(pos) = popped {
-                        components.truncate(pos);
-                    } else {
-                        // ".." escapes root — path traversal
-                        return None;
-                    }
+                    let pos = popped?;
+                    components.truncate(pos);
                 }
             }
         }

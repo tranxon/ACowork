@@ -753,6 +753,7 @@
     "installing": "Installing...",
     "checkStatus": "Check",
     "checking": "Checking...",
+    "pendingCheck": "Pending check...",
     "installSuccess": "Installation completed successfully",
     "installFailed": "Installation failed",
     "viewScript": "View Install Script",
@@ -765,6 +766,7 @@
     "candidates": "Available commands",
     "connectToGateway": "Connect to Gateway to manage LSP servers",
     "refresh": "Refresh",
-    "loading": "Loading..."
+    "loading": "Loading...",
+    "refreshing": "Refreshing..."
   }
 }

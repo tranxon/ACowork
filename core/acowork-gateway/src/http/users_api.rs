@@ -399,12 +399,11 @@ fn next_avatar_name(data_dir: &std::path::Path, ext: &str) -> String {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some(cap) = name.strip_prefix("avatar-") {
-                if let Some(num) = cap.split('.').next() {
-                    if let Ok(n) = num.parse::<u32>() {
-                        used.insert(n);
-                    }
-                }
+            if let Some(cap) = name.strip_prefix("avatar-")
+                && let Some(num) = cap.split('.').next()
+                && let Ok(n) = num.parse::<u32>()
+            {
+                used.insert(n);
             }
         }
     }
@@ -638,11 +637,11 @@ pub async fn delete_user_avatar_file(
     {
         let mut gw = state.gateway_state.write().await;
         let users = &mut gw.resource_cache.user_profile_list.users;
-        if let Some(user) = users.iter_mut().find(|u| u.is_active) {
-            if user.avatar.as_deref() == Some(query.path.as_str()) {
-                user.avatar = None;
-                user.updated_at = now_iso();
-            }
+        if let Some(user) = users.iter_mut().find(|u| u.is_active)
+            && user.avatar.as_deref() == Some(query.path.as_str())
+        {
+            user.avatar = None;
+            user.updated_at = now_iso();
         }
     }
 

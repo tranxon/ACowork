@@ -768,6 +768,7 @@
     "installing": "安装中...",
     "checkStatus": "检查",
     "checking": "检查中...",
+    "pendingCheck": "检测中...",
     "installSuccess": "安装成功",
     "installFailed": "安装失败",
     "viewScript": "查看安装脚本",
@@ -780,6 +781,7 @@
     "candidates": "可用命令",
     "connectToGateway": "连接网关以管理 LSP 服务器",
     "refresh": "刷新",
-    "loading": "加载中..."
+    "loading": "加载中...",
+    "refreshing": "刷新中..."
   }
 }

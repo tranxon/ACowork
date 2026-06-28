@@ -10,6 +10,7 @@ members = [
     "acowork-sign",
     "acowork-tool-sdk",
     "acowork-embed",
+    "acowork-lsp-relay",
 ]
 resolver = "2"
 
@@ -25,8 +26,17 @@ tokio = { version = "1.50", default-features = false, features = ["rt-multi-thre
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `preserve_order` keeps `serde_json::Map` (and therefore `serde_json::Value::Object`)
+# in insertion order rather than sorting alphabetically via `BTreeMap`. The harness
+# LSP tab relies on this: with alphabetical order, the same LSP list reorders
+# mid-response when round-tripped through `serde_json::Value`.
+serde_json = { version = "1.0", features = ["preserve_order"] }
 bincode = { version = "2.0", features = ["serde", "derive"] }
+
+# Insertion-order preserving maps (HashMap with deterministic iteration).
+# Used by the LSP relay to keep the configured server list in the order
+# the operator wrote in `lsp_servers.json` — `HashMap` would randomize it.
+indexmap = { version = "2", features = ["serde"] }
 
 # Error handling
 anyhow = "1.0"
@@ -180,3 +190,4 @@ acowork-gateway = { path = "acowork-gateway" }
 acowork-vault = { path = "acowork-vault" }
 acowork-sign = { path = "acowork-sign" }
 acowork-embed = { path = "acowork-embed" }
+acowork-lsp-relay = { path = "acowork-lsp-relay" }

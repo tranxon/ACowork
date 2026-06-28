@@ -10,6 +10,18 @@
 
 set -euo pipefail
 
+# Cross-platform timeout helper (macOS doesn't ship `timeout`).
+_timeout() {
+    local seconds="$1"; shift
+    if command -v gtimeout &>/dev/null; then
+        gtimeout "$seconds" "$@"
+    elif command -v timeout &>/dev/null; then
+        timeout "$seconds" "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV' -- "$seconds" "$@"
+    fi
+}
+
 BINARY="jdtls"
 
 # JDT LS snapshot download URL (always the latest build)
@@ -30,13 +42,41 @@ add_to_path() {
         *:"$dir":*) ;;
         *) export PATH="$PATH:$dir" ;;
     esac
+    # Persist to shell profile — detect current shell and choose the
+    # appropriate profile file. zsh users get .zshrc (or .zprofile),
+    # bash users get .bashrc (or .bash_profile), others fall back to
+    # the traditional .profile.
     local profile_file=""
-    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        if [[ -f "$f" ]]; then
-            profile_file="$f"
-            break
-        fi
-    done
+    case "${SHELL:-}" in
+        */zsh)
+            for f in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile"; do
+                if [[ -f "$f" ]]; then
+                    profile_file="$f"
+                    break
+                fi
+            done
+            # If no zsh profile exists, create .zshrc
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.zshrc"
+            ;;
+        */bash)
+            for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+                if [[ -f "$f" ]]; then
+                    profile_file="$f"
+                    break
+                fi
+            done
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.bashrc"
+            ;;
+        *)
+            for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+                if [[ -f "$f" ]]; then
+                    profile_file="$f"
+                    break
+                fi
+            done
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.profile"
+            ;;
+    esac
     if [[ -n "${profile_file:-}" ]] && ! grep -qF "$dir" "$profile_file" 2>/dev/null; then
         echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
     fi
@@ -75,7 +115,8 @@ find_jdtls_dir() {
         "$HOME/jdtls/bin" \
         "$HOME/.jdtls/bin" \
         "$HOME/.local/jdtls/bin" \
-        "$HOME/.local/share/jdtls/bin"; do
+        "$HOME/.local/share/jdtls/bin" \
+        "$HOME/Library/Application Support/jdtls/bin"; do
         [[ -d "$dir" ]] || continue
         for name in jdtls jdtls.py; do
             if [[ -x "$dir/$name" ]]; then
@@ -291,7 +332,7 @@ health_check() {
     header="Content-Length: ${#init_msg}\r\n\r\n"
 
     local response
-    response=$(printf "${header}${init_msg}" | timeout 15 "$BINARY" 2>/dev/null | head -c 4096 || true)
+    response=$(printf "${header}${init_msg}" | _timeout 15 "$BINARY" 2>/dev/null | head -c 4096 || true)
 
     if [[ -n "$response" && "$response" == *"Content-Length"* ]]; then
         echo "OK: jdtls responds to LSP initialize (stdio mode)"

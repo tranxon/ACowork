@@ -14,6 +14,18 @@
 
 set -euo pipefail
 
+# Cross-platform timeout helper (macOS doesn't ship `timeout`).
+_timeout() {
+    local seconds="$1"; shift
+    if command -v gtimeout &>/dev/null; then
+        gtimeout "$seconds" "$@"
+    elif command -v timeout &>/dev/null; then
+        timeout "$seconds" "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV' -- "$seconds" "$@"
+    fi
+}
+
 BINARY="vscode-css-language-server"
 LEGACY_BINARY="vscode-css-languageserver"
 NPM_PACKAGE="vscode-langservers-extracted"
@@ -26,10 +38,32 @@ add_to_path() {
         *:"$dir":*) ;;
         *) export PATH="$PATH:$dir" ;;
     esac
-    local profile_file
-    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        [[ -f "$f" ]] && { profile_file="$f"; break; }
-    done
+    # Persist to shell profile — detect current shell and choose the
+    # appropriate profile file. zsh users get .zshrc (or .zprofile),
+    # bash users get .bashrc (or .bash_profile), others fall back to
+    # the traditional .profile.
+    local profile_file=""
+    case "${SHELL:-}" in
+        */zsh)
+            for f in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile"; do
+                [[ -f "$f" ]] && { profile_file="$f"; break; }
+            done
+            # If no zsh profile exists, create .zshrc
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.zshrc"
+            ;;
+        */bash)
+            for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+                [[ -f "$f" ]] && { profile_file="$f"; break; }
+            done
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.bashrc"
+            ;;
+        *)
+            for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+                [[ -f "$f" ]] && { profile_file="$f"; break; }
+            done
+            [[ -z "$profile_file" ]] && profile_file="$HOME/.profile"
+            ;;
+    esac
     if [[ -n "${profile_file:-}" ]] && ! grep -q "$dir" "$profile_file" 2>/dev/null; then
         echo "export PATH=\"\$PATH:$dir\"" >> "$profile_file"
         echo "Added $dir to $profile_file for persistence."
@@ -150,7 +184,7 @@ health_check() {
     fi
 
     local response
-    response=$(printf "${header}${init_msg}" | timeout 10 "$cmd" --stdio 2>/dev/null | head -c 4096 || true)
+    response=$(printf "${header}${init_msg}" | _timeout 10 "$cmd" --stdio 2>/dev/null | head -c 4096 || true)
 
     if [[ -n "$response" && "$response" == *"Content-Length"* ]]; then
         echo "OK: $cmd responds to LSP initialize (--stdio mode)"
