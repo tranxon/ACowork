@@ -549,19 +549,19 @@ export function AppLayout() {
             <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
               <Bot className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />
               <span className="text-zinc-600 dark:text-zinc-400">{t("statusBar.agent")}: </span>
-              <span className="font-medium text-zinc-800 dark:text-zinc-100">{agentDisplayName}</span>
+              <span className="font-medium text-zinc-600 dark:text-zinc-400">{agentDisplayName}</span>
             </span>
             <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
               <MessagesSquare className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />
               <span className="text-zinc-600 dark:text-zinc-400">{t("statusBar.sessions")}: </span>
-              <span className="tabular-nums font-medium text-zinc-800 dark:text-zinc-100">{openSessionCount}</span>
+              <span className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400">{openSessionCount}</span>
             </span>
             {contextUsage && (
               <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
                 <Cpu className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />
                 <span className="text-zinc-600 dark:text-zinc-400">{t("statusBar.context")}: </span>
                 <span
-                  className="tabular-nums font-medium text-zinc-800 dark:text-zinc-100"
+                  className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400"
                   style={{
                     color:
                       contextUsage.usage_percent >= 90
@@ -572,7 +572,7 @@ export function AppLayout() {
                   {contextUsage.usage_percent}%
                 </span>
                 <span className="text-zinc-400 dark:text-zinc-500"> | </span>
-                <span className="tabular-nums font-medium text-zinc-800 dark:text-zinc-100">
+                <span className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400">
                   {formatTokenCount(contextUsage.total_tokens)}/{formatTokenCount(contextUsage.context_window)}
                 </span>
               </span>

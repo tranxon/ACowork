@@ -19,8 +19,6 @@ async function getTauriDialog() {
   return _dialogModule;
 }
 
-const CONTEXT_MENU_FONT_SIZE: React.CSSProperties = { fontSize: "var(--ui-font-size, 0.875rem)" };
-
 interface FileTreeNodeProps {
   entry: TreeEntry;
   depth: number;
@@ -237,82 +235,82 @@ export const FileTreeNode = memo(function FileTreeNode({
       {contextMenu && createPortal(
         <div
           ref={menuRef}
-          className="fixed z-[100] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+          className="context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           <button
+            type="button"
             onClick={handleAddToChat}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
-            style={CONTEXT_MENU_FONT_SIZE}
+            className="context-menu-item"
           >
-            <MessageSquarePlus className="h-3.5 w-3.5 text-zinc-400" />
+            <MessageSquarePlus className="context-menu-item__icon" />
             {t("workspace.contextMenu.addToChat")}
           </button>
           {isPreviewable && (
             <button
+              type="button"
               onClick={handlePreview}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
-              style={CONTEXT_MENU_FONT_SIZE}
+              className="context-menu-item"
             >
-              <Eye className="h-3.5 w-3.5 text-zinc-400" />
+              <Eye className="context-menu-item__icon" />
               {t("workspace.contextMenu.preview")}
             </button>
           )}
           {isPromptFile && (
             <button
+              type="button"
               onClick={handleTogglePromptFile}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
-              style={CONTEXT_MENU_FONT_SIZE}
+              className="context-menu-item"
             >
               {isActivePromptFile ? (
-                <Check className="h-3.5 w-3.5 text-green-500" />
+                <Check className="context-menu-item__icon" style={{ color: "#22c55e" }} />
               ) : (
-                <Code className="h-3.5 w-3.5 text-zinc-400" />
+                <Code className="context-menu-item__icon" />
               )}
               {isActivePromptFile ? "取消注入上下文" : "注入上下文"}
             </button>
           )}
-          <div className="my-1 border-t border-zinc-200 dark:border-zinc-700" />
+          <div className="context-menu-divider" />
           <button
+            type="button"
             onClick={handleNewFile}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
-            style={CONTEXT_MENU_FONT_SIZE}
+            className="context-menu-item"
           >
-            <FilePlus className="h-3.5 w-3.5 text-zinc-400" />
+            <FilePlus className="context-menu-item__icon" />
             {t("workspace.contextMenu.newFile")}
           </button>
           <button
+            type="button"
             onClick={handleNewFolder}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
-            style={CONTEXT_MENU_FONT_SIZE}
+            className="context-menu-item"
           >
-            <FolderPlus className="h-3.5 w-3.5 text-zinc-400" />
+            <FolderPlus className="context-menu-item__icon" />
             {t("workspace.contextMenu.newFolder")}
           </button>
-          <div className="my-1 border-t border-zinc-200 dark:border-zinc-700" />
+          <div className="context-menu-divider" />
           <button
+            type="button"
             onClick={handleCopy}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
-            style={CONTEXT_MENU_FONT_SIZE}
+            className="context-menu-item"
           >
-            <Copy className="h-3.5 w-3.5 text-zinc-400" />
+            <Copy className="context-menu-item__icon" />
             {t("workspace.contextMenu.copy")}
           </button>
           <button
+            type="button"
             onClick={handlePaste}
             disabled={!useWorkspaceStore.getState().copiedEntry}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed dark:text-zinc-300 dark:hover:bg-zinc-700"
-            style={CONTEXT_MENU_FONT_SIZE}
+            className="context-menu-item"
           >
-            <ClipboardPaste className="h-3.5 w-3.5 text-zinc-400" />
+            <ClipboardPaste className="context-menu-item__icon" />
             {t("workspace.contextMenu.paste")}
           </button>
           <button
+            type="button"
             onClick={handleDelete}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
-            style={CONTEXT_MENU_FONT_SIZE}
+            className="context-menu-item context-menu-item--danger"
           >
-            <Trash2 className="h-3.5 w-3.5 text-red-500" />
+            <Trash2 className="context-menu-item__icon" />
             {t("workspace.contextMenu.delete")}
           </button>
         </div>,

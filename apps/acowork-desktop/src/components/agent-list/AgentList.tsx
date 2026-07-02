@@ -421,52 +421,58 @@ export function AgentList({ width }: AgentListProps) {
       {contextMenu && (
         <div
           ref={menuRef}
-          className="fixed z-50 min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+          className="context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           {contextAgent && !contextAgent.running && (
             <>
               <button
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                type="button"
+                className="context-menu-item"
                 onClick={() => handleStart(contextMenu.agentId)}
               >
-                <Play className="h-3.5 w-3.5" /> {t("agentList.contextStart")}
+                <Play className="context-menu-item__icon" /> {t("agentList.contextStart")}
               </button>
               <button
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-amber-600 transition-colors hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/20"
+                type="button"
+                className="context-menu-item context-menu-item--warning"
                 onClick={() => handleDebugStart(contextMenu.agentId)}
               >
-                <Bug className="h-3.5 w-3.5" /> {t("agentList.contextStartInDebug")}
+                <Bug className="context-menu-item__icon" /> {t("agentList.contextStartInDebug")}
               </button>
             </>
           )}
           {contextAgent && contextAgent.running && (
             <>
               <button
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                type="button"
+                className="context-menu-item"
                 onClick={() => handleStop(contextMenu.agentId)}
               >
-                <Square className="h-3.5 w-3.5" /> {t("agentList.contextStop")}
+                <Square className="context-menu-item__icon" /> {t("agentList.contextStop")}
               </button>
               <button
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-amber-600 transition-colors hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/20"
+                type="button"
+                className="context-menu-item context-menu-item--warning"
                 onClick={() => handleRestartDebug(contextMenu.agentId)}
               >
-                <Bug className="h-3.5 w-3.5" /> {t("agentList.contextRestartInDebug")}
+                <Bug className="context-menu-item__icon" /> {t("agentList.contextRestartInDebug")}
               </button>
             </>
           )}
           <button
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+            type="button"
+            className="context-menu-item"
             onClick={() => {
               setDetailAgentId(contextMenu.agentId);
               setContextMenu(null);
             }}
           >
-            <Info className="h-3.5 w-3.5" /> {t("agentList.contextDetails")}
+            <Info className="context-menu-item__icon" /> {t("agentList.contextDetails")}
           </button>
           <button
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+            type="button"
+            className="context-menu-item"
             onClick={() => {
               if (contextAgent) {
                 setCloneSource({
@@ -477,10 +483,11 @@ export function AgentList({ width }: AgentListProps) {
               }
             }}
           >
-            <Copy className="h-3.5 w-3.5" /> {t("agentList.contextClone")}
+            <Copy className="context-menu-item__icon" /> {t("agentList.contextClone")}
           </button>
           <button
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+            type="button"
+            className="context-menu-item"
             onClick={() => {
               if (contextAgent) {
                 setPublishTarget({
@@ -491,17 +498,18 @@ export function AgentList({ width }: AgentListProps) {
               }
             }}
           >
-            <Package className="h-3.5 w-3.5" /> {t("agentList.contextPublish")}
+            <Package className="context-menu-item__icon" /> {t("agentList.contextPublish")}
           </button>
 
           {contextAgent && contextAgent.agent_id !== "com.acowork.system" && (
             <>
-              <div className="my-1 border-t border-zinc-200 dark:border-zinc-700" />
+              <div className="context-menu-divider" />
               <button
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                type="button"
+                className="context-menu-item context-menu-item--danger"
                 onClick={() => handleUninstall(contextMenu.agentId)}
               >
-                <Trash2 className="h-3.5 w-3.5" /> {t("agentList.contextUninstall")}
+                <Trash2 className="context-menu-item__icon" /> {t("agentList.contextUninstall")}
               </button>
             </>
           )}

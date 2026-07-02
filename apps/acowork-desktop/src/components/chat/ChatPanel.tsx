@@ -17,7 +17,7 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { syncAgentUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, Wrench, AlertTriangle, X, Square, Copy, Plus, Cpu, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, Wrench, AlertTriangle, X, Square, Copy, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
@@ -144,6 +144,20 @@ let lastInitAgentId: string | null = null;
  *  Prevents redundant reload when remounting after navigation. */
 let lastLoadedSessionId: string | null = null;
 
+const CHAT_BOTTOM_THRESHOLD_PX = 120;
+const BOTTOM_RESTORE_WINDOW_MS = 1200;
+
+interface ChatScrollSnapshot {
+  scrollOffset: number;
+  pinnedToBottom: boolean;
+}
+
+const chatScrollSnapshots = new Map<string, ChatScrollSnapshot>();
+
+function getDistanceFromBottom(container: HTMLElement): number {
+  return container.scrollHeight - container.scrollTop - container.clientHeight;
+}
+
 export function ChatPanel() {
   const { t } = useTranslation();
   const { selectedAgentId, startAgent } = useAgentStore();
@@ -207,6 +221,7 @@ export function ChatPanel() {
     resolveApprovalByToolCallId,
   } = useChatStore.getState();
   const currentSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
+  const currentScrollKey = selectedAgentId && currentSessionId ? `${selectedAgentId}:${currentSessionId}` : null;
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
   const [inputValue, setInputValue] = useState("");
@@ -271,8 +286,17 @@ export function ChatPanel() {
   const thinkingWasShowingRef = useRef(false);
   /** True only during the first useEffect run of this mount. */
   const justMountedRef = useRef(true);
+  /** Session key captured on unmount so chat navigation can restore the scroll position. */
+  const scrollSnapshotKeyRef = useRef<string | null>(null);
+  /** When returning from another top-level view shortly after leaving the bottom,
+   *  force the initial virtualizer mount back to bottom.  This avoids TanStack
+   *  Virtual starting at offset 0 before measurements settle on remount. */
+  const restoreBottomUntilRef = useRef(0);
+  /** Ensures a saved scroll snapshot is applied only once per session mount. */
+  const restoredScrollKeyRef = useRef<string | null>(null);
 
   const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
+  scrollSnapshotKeyRef.current = currentScrollKey;
 
   // Group consecutive messages for display
   // - Consecutive think + tool_call + tool_result → explore_group (aggregated)
@@ -497,6 +521,45 @@ export function ChatPanel() {
     return () => window.removeEventListener('models-added', handler);
   }, [loadModels]);
 
+  // Restore the last scroll offset for this session when ChatPanel remounts after
+  // navigating to a top-level non-chat view.  If the user left while following
+  // the bottom, keep following the bottom instead of accepting the virtualizer's
+  // default offset 0.
+  useLayoutEffect(() => {
+    const key = currentScrollKey;
+    if (!key || virtualCount === 0 || restoredScrollKeyRef.current === key) return;
+
+    const snapshot = chatScrollSnapshots.get(key);
+    if (!snapshot) return;
+
+    restoredScrollKeyRef.current = key;
+    if (snapshot.pinnedToBottom) {
+      restoreBottomUntilRef.current = performance.now() + BOTTOM_RESTORE_WINDOW_MS;
+      pinnedToBottomRef.current = true;
+      virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+    } else if (snapshot.scrollOffset > 0) {
+      pinnedToBottomRef.current = false;
+      virtualizer.scrollToOffset(snapshot.scrollOffset, { align: "start" });
+    }
+  }, [currentScrollKey, virtualCount, virtualizer]);
+
+  // Persist scroll state across top-level navigation.  AppLayout unmounts the
+  // whole chat subtree for Settings/Harness/Docs/Projects, so component-local
+  // refs and the virtualizer's internal offset are lost otherwise.
+  useLayoutEffect(() => {
+    return () => {
+      const key = scrollSnapshotKeyRef.current;
+      const container = messagesContainerRef.current;
+      if (!key || !container) return;
+
+      const distFromBottom = getDistanceFromBottom(container);
+      chatScrollSnapshots.set(key, {
+        scrollOffset: virtualizer.scrollOffset ?? container.scrollTop,
+        pinnedToBottom: pinnedToBottomRef.current || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
+      });
+    };
+  }, [virtualizer]);
+
   // Connect WebSocket when agent changes + restore per-agent model + init session
   useEffect(() => {
     // Skip re-init if this agent was already initialized and is still running.
@@ -689,8 +752,12 @@ export function ChatPanel() {
     }
 
     if (virtualCount > 0) {
-      if (prevCount === 0) {
-        // Agent switch or initial load: jump to bottom instantly (before paint)
+      if (prevCount === 0 || (pinnedToBottomRef.current && restoreBottomUntilRef.current > performance.now())) {
+        // Agent switch, initial load, or nav-back remount while pinned: jump to
+        // bottom instantly (before paint).  On remount the previous display
+        // count may already be non-zero because messages are cached, so the
+        // explicit restore window prevents the virtualizer from staying at
+        // offset 0 until the user clicks the down arrow.
         virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
         pinnedToBottomRef.current = true;
       } else if (virtualCount > prevCount) {
@@ -735,8 +802,16 @@ export function ChatPanel() {
   useLayoutEffect(() => {
     const countChanged = virtualCount !== prevStickyCountRef.current;
     prevStickyCountRef.current = virtualCount;
-    if (pinnedToBottomRef.current && virtualCount > 0 && countChanged) {
+    const restoringPinnedBottom = restoreBottomUntilRef.current > performance.now();
+    if (pinnedToBottomRef.current && virtualCount > 0 && (countChanged || restoringPinnedBottom)) {
       virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+      if (restoringPinnedBottom && totalSize > 0) {
+        requestAnimationFrame(() => {
+          if (restoreBottomUntilRef.current > performance.now()) {
+            virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+          }
+        });
+      }
     }
   }, [totalSize, virtualCount, virtualizer]);
 
@@ -752,12 +827,12 @@ export function ChatPanel() {
     if (!container || !selectedAgentId) return;
 
     // ── Scroll-to-bottom button visibility ──
-    const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const distFromBottom = getDistanceFromBottom(container);
     setShowScrollToBottom(distFromBottom > container.clientHeight);
 
     // When the user manually scrolls away from the bottom, stop pinning
     // so the ResizeObserver doesn't steal their scroll position.
-    if (distFromBottom > 120) {
+    if (distFromBottom > CHAT_BOTTOM_THRESHOLD_PX) {
       pinnedToBottomRef.current = false;
     } else if (distFromBottom < 5) {
       pinnedToBottomRef.current = true;
@@ -1757,12 +1832,13 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
       {contextMenu && (
         <div
           ref={wrapperRef}
-          className="fixed z-[100] min-w-[120px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+          className="context-menu context-menu--compact"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onContextMenu={(e) => e.stopPropagation()}
         >
           <button
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            type="button"
+            className="context-menu-item"
             onClick={handleCopy}
           >
             <Copy size={14} />
@@ -2177,7 +2253,7 @@ function ModelMenu({
 
   return (
     <ToolbarDropdownTrigger
-      icon={<Cpu size={14} />}
+      icon={<Layers size={14} />}
       label={modelDisplayName}
       collapseClass="tb-model-text"
       tipClass="tb-model-tip"

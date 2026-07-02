@@ -1184,3 +1184,180 @@ input[type="radio"]:checked {
 .workbench-hover-container {
   display: none !important;
 }
+
+/* ── Context menu — unified across the app ──────────────────────────────
+   One set of styles for every right-click menu (workspace file tree,
+   file-tab strip, agent list, chat message copy, etc.). Keeping the look
+   consistent avoids visual drift when users move between panels.
+
+   Design constraints:
+   - Fixed `text-xs` (12px) font size — does NOT track the global
+     `--ui-font-size`. Right-click menus are UI controls, not content;
+     scaling them with the body text makes the menu feel chunky at large
+     font settings and is the same approach VS Code uses.
+   - `z-[100]` to win against floating editor/toolbar overlays.
+   - `min-w-[160px]` (small copy menu uses 120px — see variant below).
+   - Subtle shadow + 1px zinc border on both themes. */
+.context-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 160px;
+  border-radius: var(--radius-md);
+  border: 1px solid #e4e4e7;
+  background-color: #ffffff;
+  padding: 0.25rem 0;
+  box-shadow:
+    0 4px 6px -1px rgb(0 0 0 / 0.1),
+    0 2px 4px -2px rgb(0 0 0 / 0.1);
+  font-size: 0.75rem;
+  /* text-xs — locked; do not inherit from the surrounding `--ui-font-size` */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.dark .context-menu {
+  border-color: #3f3f46;
+  background-color: #27272a;
+  box-shadow:
+    0 4px 6px -1px rgb(0 0 0 / 0.5),
+    0 2px 4px -2px rgb(0 0 0 / 0.5);
+}
+
+/* Compact variant for single-action menus (e.g. chat-message copy). */
+.context-menu.context-menu--compact {
+  min-width: 120px;
+}
+
+/* Menu item — full-width row, icon + label, hover highlight. */
+.context-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  /* py-1.5 px-3 — matches the legacy per-component rules */
+  color: #3f3f46;
+  /* zinc-700 */
+  background-color: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font-size: inherit;
+  line-height: 1.25;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.context-menu-item:hover {
+  background-color: #f4f4f5;
+  /* zinc-100 */
+}
+
+.context-menu-item:disabled,
+.context-menu-item[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.context-menu-item:disabled:hover,
+.context-menu-item[aria-disabled="true"]:hover {
+  background-color: transparent;
+}
+
+.dark .context-menu-item {
+  color: #d4d4d8;
+  /* zinc-300 */
+}
+
+.dark .context-menu-item:hover {
+  background-color: #3f3f46;
+  /* zinc-700 */
+}
+
+.dark .context-menu-item:disabled:hover,
+.dark .context-menu-item[aria-disabled="true"]:hover {
+  background-color: transparent;
+}
+
+/* Icon hint inside a menu item — soft gray, keeps visual hierarchy. */
+.context-menu-item .context-menu-item__icon {
+  flex-shrink: 0;
+  width: 0.875rem;
+  height: 0.875rem;
+  color: #a1a1aa;
+  /* zinc-400 */
+}
+
+.dark .context-menu-item .context-menu-item__icon {
+  color: #71717a;
+  /* zinc-500 */
+}
+
+/* Destructive action (delete, uninstall) — red text + red-tinted hover. */
+.context-menu-item.context-menu-item--danger {
+  color: #dc2626;
+  /* red-600 */
+}
+
+.context-menu-item.context-menu-item--danger:hover {
+  background-color: #fef2f2;
+  /* red-50 */
+}
+
+.dark .context-menu-item.context-menu-item--danger {
+  color: #f87171;
+  /* red-400 */
+}
+
+.dark .context-menu-item.context-menu-item--danger:hover {
+  background-color: rgb(127 29 29 / 0.2);
+  /* red-900/20 */
+}
+
+.context-menu-item.context-menu-item--danger .context-menu-item__icon {
+  color: #ef4444;
+  /* red-500 */
+}
+
+/* Warning action (debug start, restart in debug) — amber text + amber-tinted hover. */
+.context-menu-item.context-menu-item--warning {
+  color: #d97706;
+  /* amber-600 */
+}
+
+.context-menu-item.context-menu-item--warning:hover {
+  background-color: #fffbeb;
+  /* amber-50 */
+}
+
+.dark .context-menu-item.context-menu-item--warning {
+  color: #fbbf24;
+  /* amber-400 */
+}
+
+.dark .context-menu-item.context-menu-item--warning:hover {
+  background-color: rgb(120 53 15 / 0.2);
+  /* amber-900/20 */
+}
+
+.context-menu-item.context-menu-item--warning .context-menu-item__icon {
+  color: #d97706;
+  /* amber-600 */
+}
+
+.dark .context-menu-item.context-menu-item--warning .context-menu-item__icon {
+  color: #fbbf24;
+  /* amber-400 */
+}
+
+/* Divider between groups of items. */
+.context-menu-divider {
+  height: 0;
+  margin: 0.25rem 0;
+  border-top: 1px solid #e4e4e7;
+  /* zinc-200 */
+}
+
+.dark .context-menu-divider {
+  border-top-color: #3f3f46;
+  /* zinc-700 */
+}

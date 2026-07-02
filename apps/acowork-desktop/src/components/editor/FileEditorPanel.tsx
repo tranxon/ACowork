@@ -10,7 +10,7 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useLspClientPool, type LspStatus } from "../../hooks/useLspClientPool";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
-import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle, Eye, Locate } from "lucide-react";
+import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle, Eye, Locate, XSquare, Files } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -1519,7 +1519,7 @@ export function FileEditorPanel({ width }: { width: number }) {
             {tabContextMenu && createPortal(
                 <div
                     ref={tabMenuRef}
-                    className="fixed z-[100] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+                    className="context-menu"
                     style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
                     onContextMenu={(e) => e.preventDefault()}
                 >
@@ -1528,33 +1528,32 @@ export function FileEditorPanel({ width }: { width: number }) {
                         if (!target) return null;
                         const canCloseOthers = openFiles.length > 1;
                         const canCloseAll = openFiles.length > 0;
-                        const baseItem =
-                            "flex w-full items-center px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700";
-                        const disabledItem =
-                            "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent";
                         return (
                             <>
                                 <button
                                     type="button"
                                     onClick={() => handleCloseTab(target)}
-                                    className={baseItem}
+                                    className="context-menu-item"
                                 >
+                                    <X className="context-menu-item__icon" />
                                     {t("fileEditor.close")}
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => canCloseOthers && handleCloseOthers(target)}
                                     disabled={!canCloseOthers}
-                                    className={cn(baseItem, disabledItem)}
+                                    className="context-menu-item"
                                 >
+                                    <XSquare className="context-menu-item__icon" />
                                     {t("fileEditor.closeOthers")}
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => canCloseAll && handleCloseAll()}
                                     disabled={!canCloseAll}
-                                    className={cn(baseItem, disabledItem)}
+                                    className="context-menu-item"
                                 >
+                                    <Files className="context-menu-item__icon" />
                                     {t("fileEditor.closeAll")}
                                 </button>
                             </>

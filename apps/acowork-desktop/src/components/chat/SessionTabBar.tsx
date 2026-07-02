@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { isSessionActive } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert } from "lucide-react";
+import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -247,6 +248,8 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
   const [listOpen, setListOpen] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
+  const [tabContextMenu, setTabContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
+  const tabMenuRef = useRef<HTMLDivElement>(null);
   const scrollableRef = useRef<ScrollableTabBarHandle>(null);
 
   // Get title for a session
@@ -311,6 +314,67 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     createSession(agentId);
   };
 
+  // ── Session tab right-click menu ──────────────────────────────────────
+  const handleTabContextMenu = (e: React.MouseEvent, sessionId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTabContextMenu({ sessionId, x: e.clientX, y: e.clientY });
+  };
+
+  // Close the right-clicked session itself. If it's currently looping,
+  // defer to the existing confirm dialog; otherwise close immediately.
+  const handleContextCloseChat = async (sessionId: string) => {
+    setTabContextMenu(null);
+    const status = getStatus(sessionId);
+    if (isSessionActive(status)) {
+      setClosingSessionId(sessionId);
+      return;
+    }
+    await closeSession(agentId, sessionId);
+    finishCloseTab(sessionId);
+  };
+
+  // Close every other open session, keeping the right-clicked one.
+  // Mirrors VS Code's "Close Others" — runs sequentially to give each
+  // session a chance to switch the active selection cleanly.
+  const handleContextCloseOthers = async (keepSessionId: string) => {
+    setTabContextMenu(null);
+    const others = openSessionIds.filter((id) => id !== keepSessionId);
+    for (const id of others) {
+      // Skip sessions currently streaming — closing them would interrupt
+      // a live response. The user can right-click them individually to
+      // get the explicit confirm dialog.
+      const status = getStatus(id);
+      if (isSessionActive(status)) continue;
+      await closeSession(agentId, id);
+    }
+  };
+
+  const handleContextOpenNewSession = () => {
+    setTabContextMenu(null);
+    createSession(agentId);
+  };
+
+  // Dismiss the right-click menu on outside click / Escape.
+  useEffect(() => {
+    if (!tabContextMenu) return;
+    const close = () => setTabContextMenu(null);
+    const handleMouseDown = (e: MouseEvent) => {
+      if (tabMenuRef.current && !tabMenuRef.current.contains(e.target as Node)) {
+        close();
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [tabContextMenu]);
+
   if (!agent) return null;
 
   return (
@@ -330,6 +394,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               data-session-id={sessionId}
               key={sessionId}
               onClick={() => handleTabClick(sessionId)}
+              onContextMenu={(e) => handleTabContextMenu(e, sessionId)}
               active={isActive}
             >
               {/* Streaming indicator dot (only when processing and not active) */}
@@ -343,18 +408,23 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               )}>
                 {getTitle(sessionId)}
               </span>
-              {/* Close button */}
-              <Tooltip content={t("sessionTabBar.closeTab")} variant="plain">
-                <button
-                  onClick={(e) => handleClose(e, sessionId)}
-                  className={cn(
-                    "shrink-0 rounded p-0.5 transition-opacity",
-                    isActive ? "opacity-60 hover:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-zinc-300 dark:hover:bg-zinc-600",
-                  )}
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </Tooltip>
+              {/* Close button — hidden when this is the only remaining tab to
+                  prevent a tab-less state. Open at least one more session to
+                  close this one, matching common AI IDE conventions
+                  (Cursor / Claude Code). */}
+              {openSessionIds.length > 1 && (
+                <Tooltip content={t("sessionTabBar.closeTab")} variant="plain">
+                  <button
+                    onClick={(e) => handleClose(e, sessionId)}
+                    className={cn(
+                      "shrink-0 rounded p-0.5 transition-opacity",
+                      isActive ? "opacity-60 hover:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-zinc-300 dark:hover:bg-zinc-600",
+                    )}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </Tooltip>
+              )}
             </TabItem>
           );
         })}
@@ -433,6 +503,48 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Session tab right-click context menu — uses global .context-menu classes */}
+      {tabContextMenu && createPortal(
+        <div
+          ref={tabMenuRef}
+          className="context-menu"
+          style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            onClick={() => handleContextCloseChat(tabContextMenu.sessionId)}
+            // Disable when only one tab remains — keep at least one open so
+            // the chat area never ends up empty.
+            disabled={openSessionIds.length <= 1}
+            className="context-menu-item"
+          >
+            <X className="context-menu-item__icon" />
+            {t("sessionTabBar.closeChat")}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleContextCloseOthers(tabContextMenu.sessionId)}
+            // Same guard: "Close others" is a no-op when there are no others.
+            disabled={openSessionIds.length <= 1}
+            className="context-menu-item"
+          >
+            <XSquare className="context-menu-item__icon" />
+            {t("sessionTabBar.closeOtherChats")}
+          </button>
+          <div className="context-menu-divider" />
+          <button
+            type="button"
+            onClick={handleContextOpenNewSession}
+            className="context-menu-item"
+          >
+            <Plus className="context-menu-item__icon" />
+            {t("sessionTabBar.openNewSession")}
+          </button>
+        </div>,
+        document.body,
       )}
     </div>
   );
