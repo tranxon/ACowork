@@ -24,6 +24,7 @@ use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::loop_session::strip_think_block;
 use crate::embedding::EmbeddingProvider;
 use crate::error::{Result, RuntimeError};
 
@@ -191,7 +192,7 @@ impl EpisodeDistiller {
             ));
         }
         let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-        compact_with_llm(&prompt, provider, model_name, distill_max_tokens, identity_context).await
+        compact_with_llm(&prompt, provider, model_name, distill_max_tokens, identity_context, crate::prompt::COMPACTION_SYSTEM_PROMPT).await
     }
 
     /// Compact a specific slice of in-memory messages (e.g. tail after last compaction).
@@ -258,6 +259,7 @@ impl EpisodeDistiller {
                 model_name,
                 distill_max_tokens,
                 identity_context,
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
             )
             .await?
         };
@@ -416,22 +418,33 @@ fn read_jsonl_content(path: &Path) -> Result<String> {
 ///
 /// Per [ADR-011], the LLM outputs natural language — no JSON parsing needed.
 ///
-/// When `identity_context` is `Some`, the standard [`COMPACTION_SYSTEM_PROMPT`]
-/// is augmented with the user's identity so the summary is written in their
-/// preferred language. See
-/// [`crate::prompt::build_compaction_system_prompt`].
-async fn compact_with_llm(
+/// Core LLM-based compaction call shared by all distillation paths.
+///
+/// Builds the ChatRequest, sends it to the provider, strips thinking blocks
+/// from the response, and returns the summary. `thinking_mode` is explicitly
+/// set to `"disabled"` so reasoning models don't silo the output into
+/// `reasoning_content`.
+///
+/// `system_prompt` is passed through to
+/// [`crate::prompt::build_compaction_system_prompt`] together with
+/// `identity_context` so the summary lands in the user's preferred language.
+pub(crate) async fn compact_with_llm(
     prompt: &str,
     provider: &dyn Provider,
     model_name: &str,
     max_tokens: u32,
     identity_context: Option<&str>,
+    system_prompt: &str,
 ) -> Result<String> {
     let system_prompt = crate::prompt::build_compaction_system_prompt(
-        crate::prompt::COMPACTION_SYSTEM_PROMPT,
+        system_prompt,
         identity_context,
     );
 
+    // Explicitly disable deep thinking for compaction/distillation.
+    // Reasoning models may otherwise put the entire summary in
+    // reasoning_content, leaving content empty and causing compaction
+    // to fail silently.
     let request = ChatRequest {
         model: model_name.to_string(),
         messages: vec![
@@ -446,7 +459,7 @@ async fn compact_with_llm(
         max_tokens: Some(max_tokens),
         tools: None,
         reasoning_effort: None,
-        thinking_mode: None,
+        thinking_mode: Some("disabled".to_string()),
     };
 
     let response = provider
@@ -454,12 +467,20 @@ async fn compact_with_llm(
         .await
         .map_err(RuntimeError::Core)?;
 
-    // Trim whitespace but keep the full response as-is.
-    let summary = response.content.trim().to_string();
+    // Strip any thinking/reasoning blocks that may have leaked into content.
+    // NEVER fall back to reasoning_content — it is the model's internal
+    // monologue, not a useful summary.
+    let raw_content = response.content.trim();
+    let summary = strip_think_block(raw_content);
     if summary.is_empty() {
-        return Err(RuntimeError::Tool(
-            "Compact model returned empty response".to_string(),
-        ));
+        let hint = if !raw_content.is_empty() {
+            " (response contained only thinking/reasoning blocks that were stripped)"
+        } else {
+            " (content was empty — model may have ignored thinking_mode=disabled)"
+        };
+        return Err(RuntimeError::Tool(format!(
+            "Compact model returned empty response{hint}"
+        )));
     }
     Ok(summary)
 }
@@ -479,6 +500,12 @@ pub async fn compact_session_title_with_llm(
     model_name: &str,
     max_tokens: u32,
 ) -> Result<String> {
+    // Explicitly disable deep thinking for title generation.
+    // Reasoning models (DeepSeek, o-series) may otherwise put the entire
+    // response in reasoning_content, leaving content empty — and
+    // reasoning_content is the model's internal monologue, not a title.
+    // If the model ignores this hint and still returns empty content,
+    // the caller falls back to truncating the user message.
     let request = ChatRequest {
         model: model_name.to_string(),
         messages: vec![ChatMessage::user(prompt)],
@@ -486,7 +513,7 @@ pub async fn compact_session_title_with_llm(
         max_tokens: Some(max_tokens),
         tools: None,
         reasoning_effort: None,
-        thinking_mode: None,
+        thinking_mode: Some("disabled".to_string()),
     };
 
     let response = provider
@@ -494,11 +521,20 @@ pub async fn compact_session_title_with_llm(
         .await
         .map_err(RuntimeError::Core)?;
 
-    let title = response.content.trim().to_string();
+    // Never fall back to reasoning_content — it is the model's internal
+    // monologue and unsuitable as a user-facing title.
+    const MAX_RAW_LEN: usize = 500;
+    let raw_content: String = response.content.chars().take(MAX_RAW_LEN).collect();
+    let title = strip_think_block(&raw_content);
     if title.is_empty() {
-        return Err(RuntimeError::Tool(
-            "Title model returned empty response".to_string(),
-        ));
+        let hint = if !raw_content.trim().is_empty() {
+            " (response contained only thinking/reasoning blocks that were stripped)"
+        } else {
+            " (content was empty — model may have ignored thinking_mode=disabled)"
+        };
+        return Err(RuntimeError::Tool(format!(
+            "Title model returned empty response{hint}"
+        )));
     }
     Ok(title)
 }

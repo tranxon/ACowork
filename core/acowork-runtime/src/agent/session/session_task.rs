@@ -758,6 +758,13 @@ impl SessionTask {
                             agent_loop.write_document_entries(docs);
                         }
 
+                    // Save the raw user message before enrichment.
+                    // This is the user's original input without any prompt assembly
+                    // (no [Attached context:] prefix, no document content, no file
+                    // hints). Used by AgentLoop for session title generation and
+                    // other metadata extraction that needs clean user input.
+                    let raw_user_message = content.clone();
+
                     // Build enriched user message: pre-extract user-uploaded document
                     // content via doc_reader tool (simulating an LLM tool call) and
                     // inject directly into context. This avoids an extra LLM round-trip
@@ -855,6 +862,10 @@ impl SessionTask {
                     // contents on demand, avoiding large file injection into the
                     // prompt context.
                     //
+                    // Also prepend a human-readable file summary so the chat
+                    // history shows what was attached (previously done by the
+                    // frontend — now moved here for single-source prompt assembly).
+                    //
                     // The frontend sends absolute paths (abs_path).
                     if let Some(ref att_ctx) = attached_context
                         && !att_ctx.is_empty() {
@@ -867,15 +878,40 @@ impl SessionTask {
                             let file_hints = build_attached_context_blocks(att_ctx, &session_id);
 
                             if !file_hints.is_empty() {
-                                let prefix = if enriched_content.trim().is_empty() {
-                                    String::new()
+                                // Build human-readable file list for chat history
+                                // (same format the frontend used to produce).
+                                let file_summary: Vec<String> = att_ctx.iter()
+                                    .filter(|ctx| ctx.context_type != "directory")
+                                    .map(|ctx| {
+                                        let line_info = match (ctx.start_line, ctx.end_line) {
+                                            (Some(s), Some(e)) if s != e => format!(" (L{}-L{})", s, e),
+                                            (Some(s), _) => format!(" (L{})", s),
+                                            _ => String::new(),
+                                        };
+                                        let type_label = if ctx.context_type == "selection" {
+                                            "file"
+                                        } else {
+                                            "file"
+                                        };
+                                        format!("- {}: `{}`{}", type_label, ctx.abs_path, line_info)
+                                    })
+                                    .collect();
+
+                                let header = format!(
+                                    "[Attached context:]\n{}\n",
+                                    file_summary.join("\n")
+                                );
+
+                                // Assemble: human-readable header + user text + LLM instructions
+                                let body = if enriched_content.trim().is_empty() {
+                                    enriched_content
                                 } else {
-                                    format!("{}\n\n", enriched_content)
+                                    format!("{}\n\n{}", header, enriched_content)
                                 };
                                 enriched_content = format!(
                                     "{}The following workspace files were attached by the user. \
                                      Use the suggested tools to read them when you need their contents.\n\n{}",
-                                    prefix,
+                                    body,
                                     file_hints.join("\n")
                                 );
                             }
@@ -966,7 +1002,7 @@ impl SessionTask {
                     agent_loop.core.debug_observer.check_pending_injection();
 
                     match agent_loop
-                        .run(&enriched_content, &mut context_builder, content_parts, Some(message_id.clone()))
+                        .run(&enriched_content, &mut context_builder, content_parts, Some(message_id.clone()), Some(raw_user_message.as_str()))
                         .await
                     {
                         Ok(response) => {

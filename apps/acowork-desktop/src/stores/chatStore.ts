@@ -833,25 +833,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       ]
       : undefined;
 
-    // Build attached context block from session state (files/selections from
+    // Build attached context payload from session state (files/selections from
     // workspace explorer right-click or editor "Add to Chat" button).
     // Passes file paths + line ranges as structured metadata in the WebSocket
-    // message so the Runtime can read the actual content from the filesystem
-    // and inject it into the LLM system prompt via ContextBuilder.
-    // A human-readable summary is also prepended to the user message so the
-    // chat history shows what was attached (LLM also sees this as fallback).
-    let attachedContextBlock = "";
+    // message so the Runtime can assemble the enriched context and inject it
+    // into the LLM prompt. The frontend no longer assembles prompt text — all
+    // context enrichment (including human-readable file summaries) is done by
+    // the backend.
     let attachedContextPayload: Array<{ absPath: string; type: string; startLine?: number; endLine?: number }> | undefined;
     if (sessionId) {
       const ss = getSessionState(get(), agentId, sessionId);
       if (ss.attachedContext.length > 0) {
-        const lines = ss.attachedContext.map((ctx) => {
-          const lineInfo = ctx.startLine != null
-            ? ` (L${ctx.startLine}${ctx.endLine && ctx.endLine !== ctx.startLine ? `-L${ctx.endLine}` : ""})`
-            : "";
-          return `- ${ctx.type === "directory" ? "folder: " : "file: "}\`${ctx.absPath}\`${lineInfo}`;
-        });
-        attachedContextBlock = `[Attached context:]\n${lines.join("\n")}\n\n`;
         attachedContextPayload = ss.attachedContext.map((ctx) => ({
           absPath: ctx.absPath,
           type: ctx.type,
@@ -861,22 +853,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     }
 
-    // Combine attached context with user message for LLM delivery.
-    // visibleContent = what the user typed (stored in UI); enrichedContent = what the LLM receives.
-    const enrichedContent = attachedContextBlock ? `${attachedContextBlock}${content}` : content;
-    const enrichedContentParts = contentParts
-      ? [{ type: "text", text: enrichedContent }, ...contentParts.filter((p) => p.type !== "text").slice(0)]
-      : undefined;
-
     const sendViaWs = (socket: WebSocket) => {
       socket.send(JSON.stringify({
         type: "message",
         message_id: userMsgId,
-        content: enrichedContent,
+        content,
         command,
         ...(sessionId ? { session_id: sessionId } : {}),
         ...(documentIds && documentIds.length > 0 ? { document_ids: documentIds } : {}),
-        ...(enrichedContentParts ? { content_parts: enrichedContentParts } : {}),
+        ...(contentParts ? { content_parts: contentParts } : {}),
         ...(attachedContextPayload ? { attached_context: attachedContextPayload } : {}),
       }));
 
@@ -930,7 +915,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const result = await invoke<{ message_id: string; status: string }>(
         "send_message",
-        { agentId, content: enrichedContent, messageId: userMsgId, command, sessionId, documentIds, attachedContext: attachedContextPayload },
+        { agentId, content, messageId: userMsgId, command, sessionId, documentIds, attachedContext: attachedContextPayload },
       );
       console.log("[ChatStore] Message sent via HTTP:", result);
       const replyMsg: ChatMessage = {

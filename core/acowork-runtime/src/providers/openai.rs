@@ -126,6 +126,18 @@ struct NativeChatRequest {
     /// Maps to `reasoning_effort` in the OpenAI-compatible API.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    /// Thinking mode control. Maps to `thinking` in the OpenAI-compatible API.
+    /// Used to disable deep thinking for title generation etc.
+    /// Serialized as `{"type": "<value>"}` (e.g. `{"type": "disabled"}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingMode>,
+}
+
+/// Thinking mode control block for OpenAI-compatible APIs.
+#[derive(Debug, Clone, Serialize)]
+struct ThinkingMode {
+    #[serde(rename = "type")]
+    mode_type: String,
 }
 
 /// OpenAI stream_options to request usage in the final chunk
@@ -504,6 +516,12 @@ impl Provider for OpenAIProvider {
             .as_ref()
             .and_then(|e| openai_reasoning_str(e))
             .map(|s| s.to_string());
+        let thinking = request
+            .thinking_mode
+            .as_ref()
+            .map(|mode| ThinkingMode {
+                mode_type: mode.clone(),
+            });
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
@@ -513,6 +531,7 @@ impl Provider for OpenAIProvider {
             stream: None,
             stream_options: None,
             reasoning_effort: reasoning,
+            thinking,
         };
 
         // Log request payload for debugging tool definitions
@@ -565,6 +584,7 @@ impl Provider for OpenAIProvider {
                     stream: None,
                     stream_options: None,
                     reasoning_effort: None,
+                    thinking: None,
                 };
                 let fallback_response = {
                     let mut fb_builder = self.http_client.post(&url);
@@ -672,6 +692,12 @@ impl Provider for OpenAIProvider {
             .as_ref()
             .and_then(|e| openai_reasoning_str(e))
             .map(|s| s.to_string());
+        let thinking = request
+            .thinking_mode
+            .as_ref()
+            .map(|mode| ThinkingMode {
+                mode_type: mode.clone(),
+            });
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
@@ -683,6 +709,7 @@ impl Provider for OpenAIProvider {
                 include_usage: true,
             }),
             reasoning_effort: reasoning,
+            thinking,
         };
 
         // Log request payload for debugging tool definitions
@@ -740,6 +767,7 @@ impl Provider for OpenAIProvider {
                     stream: Some(true),
                     stream_options: None,
                     reasoning_effort: native_request.reasoning_effort.clone(),
+                    thinking: native_request.thinking.clone(),
                 };
                 let resp1 = self.send_streaming_request(&url, &fb1).await?;
                 if resp1.status().is_success() {
@@ -761,6 +789,7 @@ impl Provider for OpenAIProvider {
                         stream: Some(true),
                         stream_options: None,
                         reasoning_effort: None,
+                        thinking: native_request.thinking.clone(),
                     };
                     let resp2 = self.send_streaming_request(&url, &fb2).await?;
                     if resp2.status().is_success() {
@@ -782,6 +811,7 @@ impl Provider for OpenAIProvider {
                     stream: Some(true),
                     stream_options: None,
                     reasoning_effort: None,
+                    thinking: native_request.thinking.clone(),
                 };
                 let resp3 = self.send_streaming_request(&url, &fb3).await?;
                 if resp3.status().is_success() {

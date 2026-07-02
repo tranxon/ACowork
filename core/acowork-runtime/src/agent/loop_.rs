@@ -430,14 +430,21 @@ impl AgentLoop {
     /// or persisted to JSONL (it is assumed to already be present, e.g.
     /// after a debug rewind + resume).  Memory retrieval is still performed
     /// in case the context builder has been modified by pending patches.
+    ///
+    /// `raw_user_message` is the user's original input before any prompt
+    /// enrichment (no [Attached context:] prefix, no document content, no
+    /// file hints). Used for session title generation and other metadata
+    /// extraction. When `None`, falls back to extracting filenames from
+    /// `<attached_document>` tags in `user_message`.
     pub async fn run(
         &mut self,
         user_message: &str,
         context_builder: &mut ContextBuilder,
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
         message_id: Option<String>,
+        raw_user_message: Option<&str>,
     ) -> Result<String> {
-        self.run_inner(user_message, context_builder, false, content_parts, message_id)
+        self.run_inner(user_message, context_builder, false, content_parts, message_id, raw_user_message)
             .await
     }
 
@@ -450,7 +457,7 @@ impl AgentLoop {
         context_builder: &mut ContextBuilder,
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
     ) -> Result<String> {
-        self.run_inner(user_message, context_builder, true, content_parts, None)
+        self.run_inner(user_message, context_builder, true, content_parts, None, None)
             .await
     }
 
@@ -462,6 +469,7 @@ impl AgentLoop {
         replay: bool,
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
         message_id: Option<String>,
+        raw_user_message: Option<&str>,
     ) -> Result<String> {
         // ADR-014: Idle → Streaming
         self.transition_status(SessionStatus::Streaming { message_id: None });
@@ -499,20 +507,15 @@ impl AgentLoop {
                     })
                     .unwrap_or_else(|| "en".to_string());
 
-                // Strip doc_reader-extracted document content before title
-                // generation. Uploaded documents can be huge (thousands of
-                // tokens) — only the user's raw text matters for generating
-                // a 4-6 word session title.
+                // Use the raw user message (before any prompt enrichment)
+                // for title generation. This is the user's original input
+                // without [Attached context:] prefix, document content,
+                // or file hints — exactly what the user typed.
                 //
-                // When the user only uploaded files (no text), `head` will
-                // be empty — the LLM receives an empty user message and
-                // produces a generic title like "File Review". This is still
-                // far better than feeding thousands of document tokens into
-                // the compact model.
-                let title_input = user_message
-                    .split_once("The following documents were uploaded by the user")
-                    .map(|(head, _)| head.trim())
-                    .unwrap_or(user_message);
+                // When `raw_user_message` is None or empty (e.g. user only
+                // uploaded files without typing text), the fallback below
+                // extracts filenames from <attached_document> tags.
+                let title_input = raw_user_message.unwrap_or("");
 
                 let prompt = crate::prompt::TITLE_PROMPT
                     .replace("{language}", &lang)
@@ -520,7 +523,23 @@ impl AgentLoop {
                 let provider = self.core.provider.clone();
                 let compact_model = self.resolve_distill_model(title_input);
                 let session_core_title = self.session_core.title.clone();
-                let fallback_msg = title_input.to_string();
+                let fallback_msg = if title_input.is_empty() {
+                    // User only uploaded files (no text). Extract filenames
+                    // from <attached_document> tags as a meaningful fallback
+                    // title, e.g. "report.pdf, slides.pptx".
+                    let filenames: Vec<&str> = user_message
+                        .split("<attached_document filename=\"")
+                        .skip(1)
+                        .filter_map(|s| s.split('"').next())
+                        .collect();
+                    if filenames.is_empty() {
+                        String::new()
+                    } else {
+                        filenames.join(", ")
+                    }
+                } else {
+                    title_input.to_string()
+                };
 
                 tokio::spawn(async move {
                     match crate::episode_distill::compact_session_title_with_llm(
@@ -557,14 +576,11 @@ impl AgentLoop {
         // resets idle timer so consolidation doesn't run during active use.
         self.core.notify_consolidation_active().await;
 
-        // Flush any pending async-generated title to the conversation JSONL.
-        // The spawned task (above) may have completed before we reached here;
-        // if not, the next run_inner or session close will flush it.
-        if let Some(title) = self.session_core.title.read().unwrap().clone() {
-            if let Some(ref conversation) = self.session.conversation {
-                conversation.update_title_force(&title);
-            }
-        }
+        // Title persistence is now handled lazily by flush_pending_title()
+        // called at the end of each execute_single_iteration(). The async
+        // title generation task (spawned above) writes to session_core.title
+        // when it completes, and the next iteration checkpoint picks it up
+        // and persists it via conversation.update_title_force().
 
         let mut iteration = 0u32;
 
@@ -719,6 +735,11 @@ impl AgentLoop {
                     }
                 }
             };
+            // Lazy-persist any async-generated title to the conversation
+            // JSONL and index.json. The title generation task writes to
+            // session_core.title asynchronously; this checkpoint picks it
+            // up at the earliest opportunity after the LLM round-trip.
+            self.flush_pending_title();
             match iteration_result {
                 IterationResult::TextResponse(content) => {
                     // Consume redundant channel-based Stop/StopLoop that
@@ -1280,7 +1301,7 @@ mod tests {
         let (mut agent_loop, _inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello from standalone!");
     }
@@ -1299,7 +1320,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Accumulated content here");
     }
@@ -1318,7 +1339,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
     }
 
@@ -1333,7 +1354,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Final response");
         // Verify usage was tracked (budget guard should have been updated)
@@ -1354,7 +1375,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_err());
         // Error from chat_stream propagates as Core(AcoworkError::Provider(...))
         // because Provider trait returns acowork_core::AcoworkError
@@ -1381,7 +1402,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "All done");
     }
@@ -1396,7 +1417,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
     }
@@ -1412,7 +1433,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let _ = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let _ = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         let messages = agent_loop.history().messages();
         // Should have: user message + assistant message
         let assistant_msgs: Vec<_> = messages
@@ -1433,7 +1454,7 @@ mod tests {
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
-        let _ = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let _ = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         // Budget guard should have been updated with usage from the stream
         // (MockProvider returns usage with total_tokens=150)
         // We can't directly check budget_guard, but we verify no error occurred
@@ -1457,7 +1478,7 @@ mod tests {
             .try_send(InboundMessage::UserMessage("Injected question".to_string()))
             .unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         // Verify the injected message appeared in history
         let messages = agent_loop.history().messages();
@@ -1489,7 +1510,7 @@ mod tests {
             })
             .unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let notif: Vec<_> = messages
@@ -1521,7 +1542,7 @@ mod tests {
             })
             .unwrap();
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let intent: Vec<_> = messages
@@ -1552,7 +1573,7 @@ mod tests {
                 .unwrap();
         }
 
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         assert!(result.is_ok());
         let messages = agent_loop.history().messages();
         let injected: Vec<_> = messages
@@ -1604,7 +1625,7 @@ mod tests {
 
         // Run without any inbound messages — drain should return immediately
         let start = std::time::Instant::now();
-        let result = agent_loop.run("Hi", &mut context_builder, None, None).await;
+        let result = agent_loop.run("Hi", &mut context_builder, None, None, None).await;
         let elapsed = start.elapsed();
         assert!(result.is_ok());
         // Drain should not block — core path is sub-100ms, but allow up to 2s
@@ -1718,7 +1739,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result = agent_loop
-            .run("Run parallel", &mut context_builder, None, None)
+            .run("Run parallel", &mut context_builder, None, None, None)
             .await;
         let elapsed = start.elapsed();
 
@@ -1845,7 +1866,7 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop
-            .run("Test failure", &mut context_builder, None, None)
+            .run("Test failure", &mut context_builder, None, None, None)
             .await;
         assert!(result.is_ok(), "Should succeed even with one tool failure");
         assert_eq!(result.unwrap(), "Mixed results");
@@ -1922,7 +1943,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result = agent_loop
-            .run("Test timeout", &mut context_builder, None, None)
+            .run("Test timeout", &mut context_builder, None, None, None)
             .await;
         let elapsed = start.elapsed();
 
@@ -1989,7 +2010,7 @@ mod tests {
         // The tool call will fail because shell is not in the tool registry
         // (empty tools vec), so it should produce "Unknown tool: shell"
         let result = agent_loop
-            .run("Run shell", &mut context_builder, None, None)
+            .run("Run shell", &mut context_builder, None, None, None)
             .await;
         // Should still succeed — error becomes tool result message
         assert!(result.is_ok());
@@ -2108,7 +2129,7 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop
-            .run("Run ordered", &mut context_builder, None, None)
+            .run("Run ordered", &mut context_builder, None, None, None)
             .await;
         assert!(result.is_ok());
 
@@ -2263,7 +2284,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result = agent_loop
-            .run("Test iteration timeout", &mut context_builder, None, None)
+            .run("Test iteration timeout", &mut context_builder, None, None, None)
             .await;
         let elapsed = start.elapsed();
 
@@ -2374,7 +2395,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result = agent_loop
-            .run("Test tool timeout", &mut context_builder, None, None)
+            .run("Test tool timeout", &mut context_builder, None, None, None)
             .await;
         let elapsed = start.elapsed();
 
@@ -2505,7 +2526,7 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         let result = agent_loop
-            .run("Test partial permission", &mut context_builder, None, None)
+            .run("Test partial permission", &mut context_builder, None, None, None)
             .await;
         assert!(
             result.is_ok(),

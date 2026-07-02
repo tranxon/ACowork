@@ -120,6 +120,24 @@ impl super::loop_::AgentLoop {
         }
     }
 
+    /// Lazy-persist any async-generated session title to the conversation
+    /// JSONL metadata and index.json.
+    ///
+    /// The title generation task (spawned in [`super::AgentLoop::run_inner`])
+    /// writes the LLM-generated title to `session_core.title` asynchronously.
+    /// This method is called at iteration checkpoints to pick up the title
+    /// at the earliest opportunity and persist it to disk.
+    ///
+    /// Idempotent: `ConversationSession::update_title_force` is a no-op if
+    /// the title hasn't changed.
+    pub(crate) fn flush_pending_title(&mut self) {
+        if let Some(title) = self.session_core.title.read().unwrap().clone() {
+            if let Some(ref conversation) = self.session.conversation {
+                conversation.update_title_force(&title);
+            }
+        }
+    }
+
     /// Close the conversation session and trigger session-level distillation.
     ///
     /// This method:
@@ -373,20 +391,36 @@ pub fn extract_think_block(content: &str) -> Option<String> {
     Some(content[start + start_tag.len()..end].trim().to_string())
 }
 
-/// Remove `<think>...</think>` block from content, returning the remaining text.
+/// Remove think blocks from content, returning the remaining text.
+///
+/// Supports two tag formats (matching `ThinkTagParser` in the provider layer):
+///   - Standard: `<think>...</think>`
+///   - MiniMax:  `<!think>...willReturn`
+///
+/// All occurrences of both formats are stripped. If no think blocks are found,
+/// the original content is returned unchanged.
 pub fn strip_think_block(content: &str) -> String {
-    let start_tag = "<think>";
-    let end_tag = "</think>";
-    if let Some(start) = content.find(start_tag)
-        && let Some(end) = content.find(end_tag)
-    {
-        let before = &content[..start];
-        let after = &content[end + end_tag.len()..];
-        return format!("{}{}", before.trim(), after.trim())
-            .trim()
-            .to_string();
+    const PAIRS: &[(&str, &str)] = &[
+        ("<think>", "</think>"),
+        ("<!think>", "willReturn"),
+    ];
+
+    let mut result = content.to_string();
+    for &(start_tag, end_tag) in PAIRS {
+        while let Some(start) = result.find(start_tag) {
+            if let Some(end) = result[start + start_tag.len()..].find(end_tag) {
+                let end_abs = start + start_tag.len() + end + end_tag.len();
+                let before = &result[..start];
+                let after = &result[end_abs..];
+                result = format!("{}{}", before, after);
+            } else {
+                // No closing tag — strip everything from the opening tag onward.
+                result = result[..start].to_string();
+                break;
+            }
+        }
     }
-    content.to_string()
+    result.trim().to_string()
 }
 
 /// Build think message metadata with timing info from ChatResponse.
@@ -417,5 +451,93 @@ pub fn persist_think_to_conversation(
         }
     } else if let Some(think_content) = extract_think_block(&response.content) {
         conversation.append_message("thought", &think_content, think_meta);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_think_no_tags() {
+        assert_eq!(strip_think_block("hello world"), "hello world");
+    }
+
+    #[test]
+    fn strip_think_standard_single() {
+        assert_eq!(
+            strip_think_block("<think>reasoning</think>answer"),
+            "answer"
+        );
+    }
+
+    #[test]
+    fn strip_think_standard_with_surrounding() {
+        assert_eq!(
+            strip_think_block("before<think>inner</think>after"),
+            "beforeafter"
+        );
+    }
+
+    #[test]
+    fn strip_think_minimax_single() {
+        assert_eq!(
+            strip_think_block("<!think>reasoningwillReturnanswer"),
+            "answer"
+        );
+    }
+
+    #[test]
+    fn strip_think_minimax_with_surrounding() {
+        assert_eq!(
+            strip_think_block("before<!think>innerwillReturnafter"),
+            "beforeafter"
+        );
+    }
+
+    #[test]
+    fn strip_think_multiple_blocks() {
+        assert_eq!(
+            strip_think_block("A<think>T1</think>B<think>T2</think>C"),
+            "ABC"
+        );
+    }
+
+    #[test]
+    fn strip_think_mixed_formats() {
+        assert_eq!(
+            strip_think_block("A<think>T1</think>B<!think>T2willReturnC"),
+            "ABC"
+        );
+    }
+
+    #[test]
+    fn strip_think_unclosed_standard() {
+        assert_eq!(
+            strip_think_block("answer<think>unclosed reasoning"),
+            "answer"
+        );
+    }
+
+    #[test]
+    fn strip_think_unclosed_minimax() {
+        assert_eq!(
+            strip_think_block("answer<!think>unclosed reasoning"),
+            "answer"
+        );
+    }
+
+    #[test]
+    fn strip_think_empty_content() {
+        assert_eq!(strip_think_block(""), "");
+    }
+
+    #[test]
+    fn strip_think_only_think_block() {
+        assert_eq!(strip_think_block("<think>just thinking</think>"), "");
     }
 }

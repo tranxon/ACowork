@@ -16,7 +16,9 @@
 use std::collections::HashSet;
 
 use acowork_core::protocol::ProtocolType;
-use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
+use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider};
+#[cfg(test)]
+use acowork_core::providers::traits::ChatRequest;
 
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
@@ -673,40 +675,15 @@ impl HistoryManager {
         }
 
         let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-        // Inject identity into the system prompt so the LLM knows the user's
-        // preferred language. No-op if identity is None / empty.
-        let full_system_prompt =
-            crate::prompt::build_compaction_system_prompt(system_prompt, identity_context);
-
-        let request = ChatRequest {
-            model: model_name.to_string(),
-            messages: vec![
-                ChatMessage {
-                    role: MessageRole::System,
-                    content: full_system_prompt,
-                    ..Default::default()
-                },
-                ChatMessage::user(prompt),
-            ],
-            temperature: Some(0.3),
-            max_tokens: Some(2048),
-            tools: None,
-            reasoning_effort: None,
-            thinking_mode: None,
-        };
-
-        let response = provider
-            .chat(request)
-            .await
-            .map_err(RuntimeError::Core)?;
-
-        let summary = response.content.trim().to_string();
-        if summary.is_empty() {
-            return Err(RuntimeError::Tool(
-                "Compact model returned empty response".to_string(),
-            ));
-        }
-        Ok(summary)
+        crate::episode_distill::compact_with_llm(
+            &prompt,
+            provider,
+            model_name,
+            2048,
+            identity_context,
+            system_prompt,
+        )
+        .await
     }
 
     /// Replace the middle section of history with a compaction summary.
