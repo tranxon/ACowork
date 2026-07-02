@@ -343,12 +343,14 @@ async fn relay_chunk_event(
             total_lines,
             streaming_line,
             interval_ms,
+            title,
         } => {
             let params = serde_json::json!({
                 "session_id": session_id,
                 "total_lines": total_lines,
                 "streaming_line": streaming_line,
                 "interval_ms": interval_ms,
+                "title": title,
             });
             relay_intent(outbound_ctrl_tx, "new_data_available", &params).await;
         }

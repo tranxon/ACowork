@@ -776,8 +776,8 @@
     "mcp_uninstall": { "running": "卸载MCP", "done": "已卸载MCP" },
     "rag_query": { "running": "检索知识库", "done": "已检索知识库" },
     "codebase": { "running": "搜索代码", "done": "已搜索代码" },
-    "bash": { "running": "执行GitBash命令", "done": "已执行命令" },
-    "powershell": { "running": "执行PowerShell命令", "done": "已执行命令" },
+    "bash": { "running": "执行命令", "done": "已执行命令" },
+    "powershell": { "running": "执行命令", "done": "已执行命令" },
     "shell": { "running": "执行命令", "done": "已执行命令" }
   },
   "askQuestionCard": {

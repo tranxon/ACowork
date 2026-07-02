@@ -161,6 +161,9 @@ pub enum ChunkEvent {
         /// Notify throttle interval in ms (from DataFlowConfig).
         /// Frontend uses this as polling interval + animation duration.
         interval_ms: u64,
+        /// Latest session title from async LLM summarization.
+        /// `None` when title has not been generated yet.
+        title: Option<String>,
     },
 }
 
@@ -479,8 +482,68 @@ impl AgentLoop {
             // so the frontend can deduplicate by ID when polling.
             if let Some(ref conversation) = self.session.conversation {
                 conversation.append_message_with_id("user", user_message, None, message_id);
-                // Set session title from first user message (first 100 chars)
-                conversation.set_title(user_message);
+            }
+
+            // Async: generate session title from first user message using
+            // the compact model. The title is pushed to the frontend via
+            // NewDataAvailable events — no blocking, no optimistic truncation.
+            // Only when a conversation exists (not in tests without sessions).
+            if self.session.conversation.is_some() {
+                let lang = self
+                    .session
+                    .identity_context()
+                    .and_then(|ctx| {
+                        ctx.lines()
+                            .find(|l| l.starts_with("- Language:"))
+                            .and_then(|l| l.split(':').nth(1).map(|s| s.trim().to_string()))
+                    })
+                    .unwrap_or_else(|| "en".to_string());
+
+                // Strip doc_reader-extracted document content before title
+                // generation. Uploaded documents can be huge (thousands of
+                // tokens) — only the user's raw text matters for generating
+                // a 4-6 word session title.
+                //
+                // When the user only uploaded files (no text), `head` will
+                // be empty — the LLM receives an empty user message and
+                // produces a generic title like "File Review". This is still
+                // far better than feeding thousands of document tokens into
+                // the compact model.
+                let title_input = user_message
+                    .split_once("The following documents were uploaded by the user")
+                    .map(|(head, _)| head.trim())
+                    .unwrap_or(user_message);
+
+                let prompt = crate::prompt::TITLE_PROMPT
+                    .replace("{language}", &lang)
+                    .replace("{user_message}", title_input);
+                let provider = self.core.provider.clone();
+                let compact_model = self.resolve_distill_model(title_input);
+                let session_core_title = self.session_core.title.clone();
+                let fallback_msg = title_input.to_string();
+
+                tokio::spawn(async move {
+                    match crate::episode_distill::compact_session_title_with_llm(
+                        &prompt,
+                        provider.as_ref(),
+                        &compact_model,
+                        64,
+                    )
+                    .await
+                    {
+                        Ok(title) => {
+                            let trimmed: String = title.chars().take(30).collect();
+                            *session_core_title.write().unwrap() = Some(trimmed);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "LLM session title generation failed (non-fatal): {e}"
+                            );
+                            let fallback: String = fallback_msg.chars().take(30).collect();
+                            *session_core_title.write().unwrap() = Some(fallback);
+                        }
+                    }
+                });
             }
         }
 
@@ -493,6 +556,15 @@ impl AgentLoop {
         // P3: Notify consolidation scheduler that agent is active —
         // resets idle timer so consolidation doesn't run during active use.
         self.core.notify_consolidation_active().await;
+
+        // Flush any pending async-generated title to the conversation JSONL.
+        // The spawned task (above) may have completed before we reached here;
+        // if not, the next run_inner or session close will flush it.
+        if let Some(title) = self.session_core.title.read().unwrap().clone() {
+            if let Some(ref conversation) = self.session.conversation {
+                conversation.update_title_force(&title);
+            }
+        }
 
         let mut iteration = 0u32;
 

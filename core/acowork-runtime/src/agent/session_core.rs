@@ -110,6 +110,11 @@ pub(crate) struct SessionCore {
     /// Approval handle for shell command risk confirmation (Gateway mode).
     /// None in CLI mode.
     pub(crate) approval_handle: Option<ApprovalHandle>,
+
+    /// Session title set by async LLM summarization.
+    /// Written by the spawned title task in `AgentLoop::run_inner`, read by
+    /// `notify_new_data_available()` to push the title to the frontend.
+    pub(crate) title: Arc<RwLock<Option<String>>>,
 }
 
 impl SessionCore {
@@ -143,6 +148,7 @@ impl SessionCore {
             workspace_id,
             current_work_dir,
             approval_handle: None,
+            title: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -383,11 +389,14 @@ impl SessionCore {
         let streaming_line = map.get(&sid).map(|sl| sl.line_number).unwrap_or(0);
         drop(map);
 
+        let title = self.title.read().unwrap().clone();
+
         let _ = self.try_send_chunk(ChunkEvent::NewDataAvailable {
             session_id: sid,
             total_lines,
             streaming_line,
             interval_ms: self.notify_interval_ms,
+            title,
         });
     }
 

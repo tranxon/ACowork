@@ -177,13 +177,6 @@ function getSessionState(state: ChatStore, agentId: string, sessionId: string): 
   return agent.sessionStates[sessionId] ?? DEFAULT_SESSION_STATE;
 }
 
-/** Get the active session's state for an agent (for backward-compatible reads) */
-function getActiveSessionState(state: ChatStore, agentId: string): SessionChatState {
-  const agent = getAgentState(state, agentId);
-  if (!agent.activeSessionId) return DEFAULT_SESSION_STATE;
-  return agent.sessionStates[agent.activeSessionId] ?? DEFAULT_SESSION_STATE;
-}
-
 /** Build initial session state, inheriting agent's preferred model (ADR-012). */
 function makeInitialSessionState(agent: AgentState): SessionChatState {
   return {
@@ -278,8 +271,6 @@ interface ChatStore {
   availableModels: ModelEntry[];
   /** Whether more messages are being loaded */
   isLoadingMore: boolean;
-  /** Tracks which session titles have already been persisted to backend */
-  persistedTitles: Set<string>;
 
   // ---- Actions ----
   connectStream: (agentId: string, gatewayUrl: string) => void;
@@ -421,7 +412,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   wsMap: {},
   availableModels: [],
   isLoadingMore: false,
-  persistedTitles: new Set(),
 
   getWs: (agentId: string) => get().wsMap[agentId],
 
@@ -831,10 +821,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }));
 
     }
-
-    // Update session title immediately when first message is sent
-    const activeState = getActiveSessionState(get(), agentId);
-    if (sessionId) updateSessionTitleFromMessages(activeState.messages, sessionId, agentId);
 
     // Build multimodal content_parts when images are attached
     const contentParts = imageParts && imageParts.length > 0
@@ -1569,57 +1555,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 }));
 
-// ── Session title persistence ─────────────────────────────────────────
-
-function makeSessionTitle(content: string): string {
-  return content.replace(/\n/g, " ").trim().substring(0, 30);
-}
-
-function updateSessionTitleFromMessages(messages: ChatMessage[], sessionId: string, agentId?: string) {
-  const firstUserMsg = messages.find((m) => m.type === "user");
-  if (!firstUserMsg || !firstUserMsg.content) return;
-
-  // Don't overwrite an existing title — historical sessions should keep
-  // their original title. Only set title for brand-new sessions.
-  if (agentId) {
-    const sessions = useAgentStore.getState().agents[agentId]?.sessions ?? [];
-    const existingSession = sessions.find(
-      (s) => s.session_id === sessionId,
-    );
-    if (existingSession?.title && existingSession.title.trim() !== "") return;
-  } else {
-    // agentId unknown — search all agents for the session
-    const allAgents = useAgentStore.getState().agents;
-    for (const storage of Object.values(allAgents)) {
-      const existing = storage.sessions.find((s) => s.session_id === sessionId);
-      if (existing?.title && existing.title.trim() !== "") return;
-    }
-  }
-
-  const title = makeSessionTitle(firstUserMsg.content);
-
-  useAgentStore.getState().updateSessionTitle(sessionId, title);
-
-  const cacheKey = `${sessionId}::${title}`;
-  const persistedTitles = useChatStore.getState().persistedTitles;
-  if (persistedTitles.has(cacheKey)) return;
-
-  // Add to persisted set
-  const newSet = new Set(persistedTitles);
-  newSet.add(cacheKey);
-  useChatStore.setState({ persistedTitles: newSet });
-
-  if (agentId) {
-    fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/title`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
-    }).catch((e) => {
-      console.warn("[ChatStore] Failed to persist title to backend:", e);
-    });
-  }
-}
-
 // ── Conversation entry conversion ─────────────────────────────────────
 
 /** Strip leading/trailing `<summary>...</summary>` tags from a compaction
@@ -1874,6 +1809,11 @@ function handleMessageEvent(
       }).catch((e) => {
         console.warn("[ChatStore] Failed to import PollingManager:", e);
       });
+      // Update session title from backend async summarization
+      const title = data.title as string | undefined;
+      if (title) {
+        useAgentStore.getState().updateSessionTitle(sid!, title);
+      }
       break;
     }
 
@@ -1912,8 +1852,6 @@ function handleMessageEvent(
                 }),
         };
       });
-      const doneSessionState = getSessionState(get(), agentId, sid);
-      updateSessionTitleFromMessages(doneSessionState.messages, sid, agentId);
       break;
     }
 

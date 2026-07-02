@@ -464,6 +464,45 @@ async fn compact_with_llm(
     Ok(summary)
 }
 
+/// Generate a session title from the first user message using the compact model.
+///
+/// Unlike [`compact_with_llm`], this is a minimal single-message call:
+/// - No system prompt
+/// - No identity block injection (language is already resolved into `{language}`)
+/// - Lower `max_tokens` (title is ≤30 chars)
+///
+/// `prompt` should be [`crate::prompt::TITLE_PROMPT`] with `{language}` and
+/// `{user_message}` already resolved by the caller.
+pub async fn compact_session_title_with_llm(
+    prompt: &str,
+    provider: &dyn Provider,
+    model_name: &str,
+    max_tokens: u32,
+) -> Result<String> {
+    let request = ChatRequest {
+        model: model_name.to_string(),
+        messages: vec![ChatMessage::user(prompt)],
+        temperature: Some(0.3),
+        max_tokens: Some(max_tokens),
+        tools: None,
+        reasoning_effort: None,
+        thinking_mode: None,
+    };
+
+    let response = provider
+        .chat(request)
+        .await
+        .map_err(RuntimeError::Core)?;
+
+    let title = response.content.trim().to_string();
+    if title.is_empty() {
+        return Err(RuntimeError::Tool(
+            "Title model returned empty response".to_string(),
+        ));
+    }
+    Ok(title)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

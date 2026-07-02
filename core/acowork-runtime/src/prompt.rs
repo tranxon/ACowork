@@ -53,6 +53,13 @@ Conversation:
 
 Output:"#;
 
+/// Prompt for generating a session title from the first user message.
+/// `{language}` and `{user_message}` are resolved at the call site.
+pub const TITLE_PROMPT: &str = r#"Generate a session title (max 30 characters) for the user_message. Write the title in the user's preferred language as {language}.
+
+{user_message}
+"#;
+
 /// Build the final system prompt for context compaction by concatenating the
 /// base [`COMPACTION_SYSTEM_PROMPT`] with the user's identity context.
 ///
