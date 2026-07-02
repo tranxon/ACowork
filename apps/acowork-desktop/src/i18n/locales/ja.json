@@ -773,6 +773,8 @@
     "mcp_uninstall": { "running": "MCP アンインストール中", "done": "MCP アンインストール済み" },
     "rag_query": { "running": "知識庫検索中", "done": "知識庫検索済み" },
     "codebase": { "running": "コード検索中", "done": "コード検索済み" },
+    "bash": { "running": "Git Bash で実行中", "done": "Git Bash で実行済み" },
+    "powershell": { "running": "PowerShell で実行中", "done": "PowerShell で実行済み" },
     "shell": { "running": "実行中", "done": "実行済み" }
   },
   "askQuestionCard": {

@@ -400,7 +400,10 @@ impl ContextBuilder {
 
         // 2. Identity context (if available)
         if let Some(ref identity) = self.identity_context {
-            system_content.push_str(&format!("\n\n## User Identity\n{identity}"));
+            system_content.push_str(&format!(
+                "\n\n## User Identity\n{identity}\n\n\
+                 Reply in the language specified by the Language field above."
+            ));
         }
 
         // 2.2 Workspace context (if available, from Gateway push)
@@ -718,6 +721,32 @@ mod tests {
 
         let request = builder.build(&manifest, &history, None, 32_768);
         assert!(request.messages[0].content.contains("Alice"));
+    }
+
+    /// Sentinel test: when identity context contains a Language field, the
+    /// built system prompt must include the language directive so the LLM
+    /// replies in the user's preferred language. Guards against accidental
+    /// removal during future refactors of `ContextBuilder::build()`.
+    #[test]
+    fn test_context_builder_injects_language_directive_when_identity_has_language() {
+        let manifest = test_manifest();
+        let history = HistoryManager::new(10000);
+
+        let identity =
+            "- Display Name: Alice\n- Language: zh-CN\n- Timezone: Asia/Shanghai".to_string();
+        let builder = ContextBuilder::new("You are a helper.".to_string())
+            .with_identity(Some(identity));
+
+        let request = builder.build(&manifest, &history, None, 32_768);
+        let system = &request.messages[0].content;
+        assert!(
+            system.contains("Language field above"),
+            "system prompt must instruct the LLM to follow the Language field; got:\n{system}"
+        );
+        assert!(
+            system.contains("zh-CN"),
+            "system prompt must contain the raw Language value so the directive is resolvable; got:\n{system}"
+        );
     }
 
     /// Helper: build a simple ModelCapabilitiesInfo for testing.

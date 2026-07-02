@@ -771,6 +771,8 @@
     "mcp_uninstall": { "running": "MCP 제거 중", "done": "MCP 제거됨" },
     "rag_query": { "running": "지식 베이스 조회 중", "done": "지식 베이스 조회 완료" },
     "codebase": { "running": "코드 검색 중", "done": "코드 검색 완료" },
+    "bash": { "running": "Git Bash에서 실행 중", "done": "Git Bash에서 실행 완료" },
+    "powershell": { "running": "PowerShell에서 실행 중", "done": "PowerShell에서 실행 완료" },
     "shell": { "running": "실행 중", "done": "실행 완료" }
   },
   "askQuestionCard": {

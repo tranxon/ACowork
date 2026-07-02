@@ -828,7 +828,9 @@
     "mcp_uninstall": { "running": "Uninstalling", "done": "Uninstalled" },
     "rag_query": { "running": "Querying", "done": "Queried" },
     "codebase": { "running": "Searching code", "done": "Searched code" },
-    "shell": { "running": "Running", "done": "Ran" }
+    "bash": { "running": "Running Git Bash command", "done": "Ran Git Bash command" },
+    "powershell": { "running": "Running PowerShell command", "done": "Ran PowerShell command" },
+    "shell": { "running": "Running shell command", "done": "Ran shell command" }
   },
   "askQuestionCard": {
     "other": "Other",

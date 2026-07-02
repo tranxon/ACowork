@@ -771,6 +771,8 @@
     "mcp_uninstall": { "running": "解除安裝MCP", "done": "已解除安裝MCP" },
     "rag_query": { "running": "檢索知識庫", "done": "已檢索知識庫" },
     "codebase": { "running": "搜尋程式碼", "done": "已搜尋程式碼" },
+    "bash": { "running": "在 Git Bash 中執行", "done": "已在 Git Bash 中執行" },
+    "powershell": { "running": "在 PowerShell 中執行", "done": "已在 PowerShell 中執行" },
     "shell": { "running": "執行命令", "done": "已執行命令" }
   },
   "askQuestionCard": {
