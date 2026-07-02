@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useMemoryStore } from "../../stores/memoryStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useLayoutStore } from "../../stores/layoutStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
 import { Info } from "lucide-react";
@@ -46,6 +47,16 @@ export function MemoryPanel() {
     if (!selectedAgentId) return;
     void fetchNodes(selectedAgentId);
   }, [filters, page, pageSize, selectedAgentId, fetchNodes]);
+
+  // Re-fetch when the memory tab becomes visible (e.g. agent was started
+  // while another tab was active, so data was never loaded for the running agent)
+  const activePanelTab = useLayoutStore((s) => s.activePanelTab);
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    if (activePanelTab !== "memory") return;
+    void fetchNodes(selectedAgentId);
+    void fetchStats(selectedAgentId);
+  }, [activePanelTab, selectedAgentId, fetchNodes, fetchStats]);
 
   // Auto-dismiss consolidate message after 6 seconds
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

@@ -502,7 +502,12 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
       )}
 
       {/* ── Memory tab content — CSS visibility preserves component state across tab switches ── */}
-      <div style={{ display: activeTab === "memory" ? "block" : "none" }}><MemoryPanel /></div>
+      <div
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        style={{ display: activeTab === "memory" ? "flex" : "none" }}
+      >
+        <MemoryPanel />
+      </div>
 
       {/* ── Setup tab content ─────────────────────────────────────── */}
       <div style={{ display: activeTab === "setup" ? "block" : "none" }}><AgentSetupTab /></div>
