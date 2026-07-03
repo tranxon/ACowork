@@ -2169,7 +2169,7 @@ function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMess
     return (
       <MessageContentWrapper>
         <div className="min-w-0 flex flex-col ml-12">
-<div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+<div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               {displayContent && (
                 <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
                   <StreamMarkdown content={displayContent} />
@@ -2192,7 +2192,7 @@ function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMess
     return (
       <MessageContentWrapper>
         <div className="min-w-0 flex flex-col ml-12">
-<div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+<div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               <ThinkBlock
                 content={displayLen != null ? message.content.slice(0, displayLen) : message.content}
                 isStreaming={isStreaming}
@@ -2210,7 +2210,7 @@ function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMess
     return (
       <MessageContentWrapper>
         <div className="min-w-0 flex flex-col ml-12">
-<div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
+<div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
               <div className="flex items-start gap-2 min-w-0">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
                 <div className="min-w-0 flex-1">

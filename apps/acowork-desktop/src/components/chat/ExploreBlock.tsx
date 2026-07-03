@@ -305,7 +305,7 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
   }, [hasPendingApproval]);
 
   return (
-    <div className="my-1 max-w-[var(--content-max-width)]">
+    <div className="max-w-[var(--content-max-width)]">
       {/* Header: clickable toggle */}
       <button
         onClick={() => {
@@ -318,7 +318,7 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
             manuallyCollapsed.current = false;
           }
         }}
-        className="flex w-fit items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
+        className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-700"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
@@ -339,7 +339,7 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
       {expanded && (
         <div
           ref={contentRef}
-          className="ml-2 mt-1 overflow-y-auto rounded-md border-l-2 border-zinc-300 bg-zinc-50 pl-3 pr-2 py-2 dark:border-zinc-600 dark:bg-zinc-800/30"
+          className="ml-2 mt-1 overflow-y-auto rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 pl-3 pr-2 py-2 dark:border-zinc-600 dark:bg-zinc-800/30"
           style={{ maxHeight: "240px" }}
         >
           <div className="flex flex-col gap-0.5">
