@@ -6,6 +6,8 @@
 #   .\dev\build_core.ps1 -Release         Build release (explicit)
 #   .\dev\build_core.ps1 -Start           Build release + stop old + start Gateway
 #   .\dev\build_core.ps1 -Debug -Start    Build debug + stop old + start Gateway
+#   .\dev\build_core.ps1 -Stop            Build release + stop old Gateway
+#   .\dev\build_core.ps1 -Debug -Stop     Build debug + stop old Gateway
 #
 # Profile selection: -Debug / -Release switch > $env:ACOWORK_BUILD_PROFILE > release
 # In debug profile, $env:ACOWORK_GATEWAY_LOG_LEVEL is auto-set to "debug" so any
@@ -15,6 +17,7 @@
 
 param(
     [switch] $Start,
+    [switch] $Stop,
     [switch] $Debug,
     [switch] $Release
 )
@@ -47,22 +50,24 @@ if ($Profile -eq "debug") {
 }
 
 $targetDir = Join-Path $WorkspaceRoot "target\$Profile"
-# Step count: Stop, Gateway, Runtime, Embed, LSP Relay, Copy resources, Start.
-# Was previously {5/3}, which undercounted by 1 in both modes — fixing here so
-# the new LSP Relay step doesn't compound the inconsistency.
-$totalSteps = if ($Start) { 7 } else { 5 }
+# Step count:
+#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Copy resources, Start (7)
+#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Copy resources      (6)
+#   else   :            Gateway, Runtime, Embed, LSP Relay, Copy resources (5)
+$totalSteps = if ($Start) { 7 } elseif ($Stop) { 6 } else { 5 }
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "ACowork Core Build Script" -ForegroundColor Cyan
 Write-Host "Profile: $Profile" -ForegroundColor Cyan
 if ($Start) { Write-Host "Mode: Build + Restart" -ForegroundColor Cyan }
+elseif ($Stop) { Write-Host "Mode: Build + Stop" -ForegroundColor Cyan }
 else       { Write-Host "Mode: Build Only" -ForegroundColor Cyan }
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 $step = 0
 
-if ($Start) {
+if ($Start -or $Stop) {
     # Step: Stop running processes
     $step++
     Write-Host "[$step/$totalSteps] Stopping running Gateway, Runtime, Embed, and LSP Relay processes..." -ForegroundColor Yellow

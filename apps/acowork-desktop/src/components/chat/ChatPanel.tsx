@@ -29,6 +29,28 @@ import { ContextUsageIcon } from "./ContextUsageIcon";
 import { CompactionCard } from "./CompactionCard";
 
 /**
+ * Merge an internal ref (used for click-outside detection) with an external
+ * ref (used by the parent for layout measurement). Both refs are kept in sync
+ * on every commit.
+ */
+function useMergedRef<T>(
+    internalRef: React.RefObject<T | null>,
+    externalRef?: React.Ref<T | null>,
+): React.RefCallback<T | null> {
+    return useCallback(
+        (el: T | null) => {
+            internalRef.current = el;
+            if (typeof externalRef === "function") {
+                externalRef(el);
+            } else if (externalRef && typeof externalRef === "object") {
+                (externalRef as React.MutableRefObject<T | null>).current = el;
+            }
+        },
+        [internalRef, externalRef],
+    );
+}
+
+/**
  * Strip common leading whitespace from multi-line strings.
  * Useful when a code block arrives indented inside a list item.
  */
@@ -176,6 +198,153 @@ export function ChatPanel() {
   const animStateRef = useRef<Map<string, { displayedLen: number }>>(new Map());
   const [animTick, setAnimTick] = useState(0);
   const rafRef = useRef<number>(0);
+
+  // ── Toolbar responsive collapse ──────────────────────────────────
+  // The bottom toolbar (model / think / workspace / skills + upload buttons)
+  // must keep all buttons non-overlapping when the panel width narrows.
+  // We measure each button's full width vs. its icon-only width and greedily
+  // fold labels — starting from the leftmost button (model) and moving
+  // rightward (effort → ws → sk) — until the row fits.
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const modelBtnRef = useRef<HTMLDivElement>(null);
+  const effortBtnRef = useRef<HTMLDivElement>(null);
+  const wsBtnRef = useRef<HTMLDivElement>(null);
+  const skBtnRef = useRef<HTMLDivElement>(null);
+  const [textHidden, setTextHidden] = useState<Record<string, boolean>>({
+    model: false,
+    effort: false,
+    ws: false,
+    sk: false,
+  });
+  // Cache full / icon widths keyed by the set of present button IDs.
+  // Measuring requires temporary DOM style writes that force a
+  // synchronous layout — we do it only when the button-set changes,
+  // NOT on every resize, to avoid layout side-effects on siblings
+  // (e.g. the agent-list subtly changing width).
+  const cachedWidthsRef = useRef<{ key: string; full: number[]; icon: number[] } | null>(null);
+  useLayoutEffect(() => {
+    const container = toolbarRef.current;
+    if (!container) return;
+
+    // Invalidate cache when the effect re-runs (agent changed).
+    cachedWidthsRef.current = null;
+
+    // Importance ranking — higher number = kept visible longer.
+    // Fold starts from leftmost (model, lowest importance) → rightmost (sk, highest).
+    const BUTTON_IMPORTANCE: Record<string, number> = {
+      model: 1,
+      effort: 2,
+      ws: 3,
+      sk: 4,
+    };
+
+    const measure = () => {
+      const present: { id: string; el: HTMLElement }[] = [];
+      const refs: Record<string, React.RefObject<HTMLDivElement | null>> = {
+        model: modelBtnRef,
+        effort: effortBtnRef,
+        ws: wsBtnRef,
+        sk: skBtnRef,
+      };
+      for (const [id, ref] of Object.entries(refs)) {
+        if (ref.current) present.push({ id, el: ref.current });
+      }
+      console.log("[toolbar]", JSON.stringify({
+        containerW: container.offsetWidth,
+        present: present.map((p) => p.id),
+      }));
+      if (present.length === 0) return;
+
+      const findText = (el: HTMLElement): HTMLElement | null =>
+        el.querySelector('[data-toolbar-text]') as HTMLElement | null;
+      const findChevron = (el: HTMLElement): HTMLElement | null =>
+        el.querySelector('[data-toolbar-chevron]') as HTMLElement | null;
+
+      const cacheKey = present.map((p) => p.id).join(",");
+
+      let fullWidths: number[];
+      let iconWidths: number[];
+
+      if (cachedWidthsRef.current?.key === cacheKey) {
+        // Use cached measurements — no DOM writes, no forced layout.
+        fullWidths = cachedWidthsRef.current.full;
+        iconWidths = cachedWidthsRef.current.icon;
+      } else {
+        // First time (or button-set changed): measure true full widths
+        // via scrollWidth with all text visible, then icon-only widths.
+        present.forEach((b) => {
+          const t = findText(b.el); if (t) t.style.display = "";
+          const c = findChevron(b.el); if (c) c.style.display = "";
+        });
+        fullWidths = present.map((b) => b.el.scrollWidth);
+
+        present.forEach((b) => {
+          const t = findText(b.el); if (t) t.style.display = "none";
+          const c = findChevron(b.el); if (c) c.style.display = "none";
+        });
+        iconWidths = present.map((b) => b.el.offsetWidth);
+
+        // Restore all text visible (default before first fold).
+        present.forEach((b) => {
+          const t = findText(b.el); if (t) t.style.display = "";
+          const c = findChevron(b.el); if (c) c.style.display = "";
+        });
+
+        cachedWidthsRef.current = { key: cacheKey, full: fullWidths, icon: iconWidths };
+      }
+
+      // Compute available width for the left group.
+      // Container has px-3 (24px total), gap-2 (8px) between left/right groups,
+      // and a right cluster (ContextUsageIcon + send button ≈ 60px).
+      // The two icon-only upload buttons (file + image) sit inside the left
+      // group but are NOT in `present[]`, so we subtract their footprint
+      // (~30 px each + their gap-1 separators) from the available width.
+      const PAD_X = 24;
+      const FLEX_GAP = 8; // gap-2 between left and right flex children
+      const RIGHT_CLUSTER = 60;
+      const UPLOAD_BUTTONS = 68; // gap + fileBtn(~30) + gap + imageBtn(~30), not in present[]
+      const GAP = 4; // gap-1 between buttons in the left group
+      const available = container.offsetWidth - PAD_X - FLEX_GAP - RIGHT_CLUSTER - UPLOAD_BUTTONS;
+
+      // Greedy fold: start with all labels visible, then fold the lowest-importance
+      // button while the row would overflow. Folded buttons free up
+      // (fullWidth - iconWidth) pixels.
+      const totalFull =
+        fullWidths.reduce((a, b) => a + b, 0) + (present.length - 1) * GAP;
+      let currentTotal = totalFull;
+      const nextHidden: Record<string, boolean> = {};
+      present.forEach((b) => (nextHidden[b.id] = false));
+
+      if (currentTotal > available) {
+        const order = present
+          .map((b, i) => ({ id: b.id, fullW: fullWidths[i], iconW: iconWidths[i] }))
+          .sort((a, b) => BUTTON_IMPORTANCE[a.id] - BUTTON_IMPORTANCE[b.id]); // asc: fold low-importance first
+        for (const item of order) {
+          if (currentTotal <= available) break;
+          nextHidden[item.id] = true;
+          currentTotal -= item.fullW - item.iconW;
+        }
+      }
+
+      console.log("[toolbar:calc]", JSON.stringify({
+        fullWidths, iconWidths, available, totalFull, nextHidden,
+      }));
+
+      // Only commit when the answer actually changes (skip the measurement-induced DOM edits).
+      setTextHidden((prev) => {
+        let changed = false;
+        for (const k of Object.keys(nextHidden)) {
+          if (prev[k] !== nextHidden[k]) { changed = true; break; }
+        }
+        return changed ? nextHidden : prev;
+      });
+    };
+
+    const ro = new ResizeObserver(measure);
+    ro.observe(container);
+    measure();
+    return () => ro.disconnect();
+  }, [selectedAgent?.running]);
 
   // Per-agent + per-session state selectors
   // Two-level mapping: agentStates[agentId].sessionStates[sessionId]
@@ -1698,12 +1867,17 @@ export function ChatPanel() {
           />
 
           {/* Bottom toolbar — @container for responsive button text collapse */}
-          <div className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]">
+          <div
+            ref={toolbarRef}
+            className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]"
+          >
             {/* Left: feature buttons */}
             <div className="flex items-center gap-1 min-w-0 overflow-visible">
               {/* Model switcher — only enabled when agent is running */}
               {availableModels.length > 1 && selectedAgent?.running && (
                 <ModelMenu
+                  wrapperRef={modelBtnRef}
+                  textHidden={textHidden.model}
                   models={availableModels}
                   currentModel={currentModel}
                   currentProvider={currentProvider}
@@ -1713,14 +1887,20 @@ export function ChatPanel() {
               {/* Reasoning effort toggle — shown when session has a non-null reasoningEffort (null = provider doesn't support reasoning) */}
               {selectedAgent?.running && currentReasoningEffort != null && (
                 <ReasoningEffortMenu
+                  wrapperRef={effortBtnRef}
+                  textHidden={textHidden.effort}
                   effort={currentReasoningEffort}
                   onChange={(e) => selectedAgentId && setReasoningEffort(e, selectedAgentId)}
                 />
               )}
               {/* Workspace button */}
-              <WorkspaceSelector />
+              <div ref={wsBtnRef} className="min-w-0">
+                <WorkspaceSelector textHidden={textHidden.ws} />
+              </div>
               {/* Skills dropdown */}
-              <SkillsPanel />
+              <div ref={skBtnRef} className="min-w-0">
+                <SkillsPanel textHidden={textHidden.sk} />
+              </div>
               {/* File upload button */}
               <Tooltip content={t("chatPanel.uploadHint")}>
                 <button
@@ -2181,16 +2361,22 @@ function ModelMenu({
   currentModel,
   currentProvider,
   onSelect,
+  textHidden,
+  wrapperRef: externalRef,
 }: {
   models: { name: string; provider: string; tool_call?: boolean; reasoning?: boolean; input_modalities?: string[] }[];
   currentModel: string | null;
   currentProvider: string | null;
   onSelect: (model: string, provider: string) => void;
+  textHidden?: boolean;
+  /** Optional external ref merged with the internal click-outside ref */
+  wrapperRef?: React.Ref<HTMLDivElement>;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const internalRef = useRef<HTMLDivElement>(null);
+  const ref = useMergedRef(internalRef, externalRef);
 
   // Calculate menu width based on longest model name + provider
   const menuWidth = useMemo(() => {
@@ -2214,7 +2400,7 @@ function ModelMenu({
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
+      if (internalRef.current && !internalRef.current.contains(e.target as Node)) {
         setOpen(false);
       }
     };
@@ -2240,6 +2426,7 @@ function ModelMenu({
       open={open}
       onToggle={() => setOpen(!open)}
       wrapperRef={ref}
+      textHidden={textHidden}
     >
       {/* Popup menu */}
       {open && (
@@ -2329,13 +2516,19 @@ function ModelMenu({
 function ReasoningEffortMenu({
   effort,
   onChange,
+  textHidden,
+  wrapperRef: externalRef,
 }: {
   effort: string | null;
   onChange: (effort: string) => void;
+  textHidden?: boolean;
+  /** Optional external ref merged with the internal click-outside ref */
+  wrapperRef?: React.Ref<HTMLDivElement>;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const internalRef = useRef<HTMLDivElement>(null);
+  const ref = useMergedRef(internalRef, externalRef);
 
   // Values are lowercase to match backend ReasoningEffort serde serialization.
   const OPTIONS: { value: string; label: string; color: string }[] = [
@@ -2353,7 +2546,7 @@ function ReasoningEffortMenu({
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
+      if (internalRef.current && !internalRef.current.contains(e.target as Node)) {
         setOpen(false);
       }
     };
@@ -2365,12 +2558,13 @@ function ReasoningEffortMenu({
     <ToolbarDropdownTrigger
       icon={<Brain size={14} style={{ color: currentColor }} />}
       label={effortLabel}
-      collapseClass="tb-model-text"
-      tipClass="tb-model-tip"
+      collapseClass="tb-effort-text"
+      tipClass="tb-effort-tip"
       tooltip={t("chatPanel.selectReasoningEffort") ?? "Reasoning effort"}
       open={open}
       onToggle={() => setOpen(!open)}
       wrapperRef={ref}
+      textHidden={textHidden}
     >
       {open && (
         <div

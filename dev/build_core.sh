@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # build_core.sh - Cross-platform rebuild (and optional start) Gateway + Runtime
 # Usage: ./dev/build_core.sh [OPTIONS]
-#   (no args)                Build release (default) + start Gateway
-#   --debug                  Build debug + start Gateway
-#   --release                Build release + start Gateway (explicit, default)
-#   --no-start               Build only, do not start Gateway
+#   (no args)                Build release (default)
+#   --debug                  Build debug
+#   --release                Build release
+#   --start                  Build release + start Gateway
+#   --stop                   Build release + stop Gateway
+#   --start --debug          Build debug + start Gateway
+#   --stop --debug           Build debug + stop Gateway
 #   --skip-embed             Skip building the embedding runtime
 #   -h, --help               Show this help
 #
@@ -42,12 +45,14 @@ esac
 # Parse arguments
 PROFILE="release"
 START_GATEWAY=true
+STOP_GATEWAY=false
 SKIP_EMBED=false
 for arg in "$@"; do
     case "$arg" in
         --debug)      PROFILE="debug" ;;
         --release)    PROFILE="release" ;;
-        --no-start)   START_GATEWAY=false ;;
+        --start)      START_GATEWAY=true ;;
+        --stop)       STOP_GATEWAY=true ;;
         --skip-embed) SKIP_EMBED=true ;;
         -h|--help)
             cat <<'EOF'
@@ -56,7 +61,10 @@ Usage: ./dev/build_core.sh [OPTIONS]
 Options:
   --debug           Build debug (auto-enables ACOWORK_GATEWAY_LOG_LEVEL=debug)
   --release         Build release (default)
-  --no-start        Build only, do not start Gateway
+  --start           Build release + start Gateway
+  --stop            Build release + stop Gateway
+  --start --debug   Build debug + start Gateway
+  --stop --debug    Build debug + stop Gateway
   --skip-embed      Skip the embedding runtime build
   -h, --help        Show this help
 
@@ -125,7 +133,7 @@ stop_process() {
 }
 
 # Step 1: Stop running processes (only when we are about to start a new one)
-if [ "$START_GATEWAY" = "true" ]; then
+if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
     echo -e "${YELLOW}[1/5] Stopping running Gateway, Runtime, Embed, and LSP Relay processes...${NC}"
     stop_process "acowork-gateway" "Gateway"
     stop_process "acowork-runtime" "Runtime"

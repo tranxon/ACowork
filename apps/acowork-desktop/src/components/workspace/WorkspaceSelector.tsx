@@ -18,7 +18,7 @@ function workspaceDisplayName(dir: WorkspaceDir) {
   return name;
 }
 
-export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "up" | "down" }) {
+export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDirection?: "up" | "down"; textHidden?: boolean }) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   const { gatewayUrl, gatewayMode } = useSettingsStore();
@@ -170,6 +170,7 @@ export function WorkspaceSelector({ dropDirection = "up" }: { dropDirection?: "u
         open={open}
         onToggle={() => setOpen(!open)}
         wrapperRef={ref}
+        textHidden={textHidden}
       >
         {/* Dropdown menu */}
         {open && (

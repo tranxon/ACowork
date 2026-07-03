@@ -11,6 +11,8 @@
 #   ./dev/build_macos.sh --debug       # Debug build (auto-enables ACOWORK_GATEWAY_LOG_LEVEL=debug)
 #   ./dev/build_macos.sh --release     # Release build (explicit, default)
 #   ./dev/build_macos.sh --cpu         # CPU only (best compatibility)
+#   ./dev/build_macos.sh --start       # Build + start Gateway in daemon mode after build
+#   ./dev/build_macos.sh --stop        # Explicit stop of existing processes before build
 #   ./dev/build_macos.sh --skip-embed  # Skip embed
 #   ./dev/build_macos.sh --help
 #
@@ -33,8 +35,13 @@ CORE_DIR="$WORKSPACE_ROOT/core"
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 ARCH="$(uname -m)"
-USE_GPU=true         # Apple Silicon auto-enable CoreML
+USE_GPU=true            # Apple Silicon auto-enable CoreML
 SKIP_EMBED=false
+START_GATEWAY=false     # --start: start Gateway in daemon mode after build
+STOP_GATEWAY=false      # --stop: explicit intent to stop existing processes
+                        # before build (mirrors build_core.sh semantics;
+                        # the actual stop step is also run by default when
+                        # --start is given)
 SHOW_HELP=false
 PROFILE="release"
 
@@ -44,6 +51,8 @@ for arg in "$@"; do
         --debug)      PROFILE="debug" ;;
         --release)    PROFILE="release" ;;
         --cpu)        USE_GPU=false ;;
+        --start)      START_GATEWAY=true ;;
+        --stop)       STOP_GATEWAY=true ;;
         --skip-embed) SKIP_EMBED=true ;;
         -h|--help)
             cat << 'EOF'
@@ -53,6 +62,9 @@ Options:
   --debug           Build debug (auto-enables ACOWORK_GATEWAY_LOG_LEVEL=debug)
   --release         Build release (default)
   --cpu             Use CPU-only ONNX Runtime (no CoreML acceleration)
+  --start           Build + start Gateway in daemon mode after build
+  --stop            Explicit stop of existing Gateway/Runtime/Embed/LSP Relay
+                    before build (mirrors build_core.sh semantics)
   --skip-embed      Skip building the embedding runtime entirely
   --help, -h        Show this help
 
@@ -62,6 +74,8 @@ Environment:
 Examples:
   ./dev/build_macos.sh               # Apple Silicon + CoreML, release (recommended)
   ./dev/build_macos.sh --debug       # Debug build
+  ./dev/build_macos.sh --start       # Build + start Gateway in daemon mode
+  ./dev/build_macos.sh --stop        # Build with explicit stop of existing processes
   ./dev/build_macos.sh --cpu         # CPU only (Intel Mac or compatibility)
   ./dev/build_macos.sh --skip-embed  # Skip embed, build only Gateway + Runtime
 EOF
@@ -88,6 +102,14 @@ fi
 
 TARGET_DIR="$WORKSPACE_ROOT/target/$PROFILE"
 
+# ── Total step count ──────────────────────────────────────────────────────────
+#   --start : 7  (Stop, Gateway, Runtime, Embed, LSP Relay, Copy, Start)
+#   else    : 6  (Stop, Gateway, Runtime, Embed, LSP Relay, Copy)
+TOTAL_STEPS=6
+if [ "$START_GATEWAY" = "true" ]; then
+    TOTAL_STEPS=7
+fi
+
 # ── Header ──────────────────────────────────────────────────────────────────
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║   ACowork.AI — macOS One-Click Build Script ║${NC}"
@@ -96,10 +118,17 @@ echo ""
 echo -e "${GRAY}  Arch: $ARCH${NC}"
 echo -e "${GRAY}  CoreML: $($USE_GPU && echo true || echo false)${NC}"
 echo -e "${GRAY}  Profile: $PROFILE${NC}"
+if [ "$START_GATEWAY" = "true" ]; then
+    echo -e "${GRAY}  Mode:    Build + Start Gateway${NC}"
+elif [ "$STOP_GATEWAY" = "true" ]; then
+    echo -e "${GRAY}  Mode:    Build + Stop (explicit)${NC}"
+else
+    echo -e "${GRAY}  Mode:    Build Only${NC}"
+fi
 echo ""
 
 # ── Step 0: Check required tools ────────────────────────────────────────────
-echo -e "${YELLOW}[0/6] Checking development tools...${NC}"
+echo -e "${YELLOW}[0/$TOTAL_STEPS] Checking development tools...${NC}"
 
 # Homebrew
 if ! command -v brew &>/dev/null; then
@@ -167,7 +196,7 @@ fi
 echo ""
 
 # ── Step 1: Stop old processes ──────────────────────────────────────────────
-echo -e "${YELLOW}[1/6] Stopping old processes...${NC}"
+echo -e "${YELLOW}[1/$TOTAL_STEPS] Stopping old processes...${NC}"
 # LSP Relay is included because it runs in its own process group (see
 # core/acowork-gateway/src/lifecycle/lsp_relay.rs: cmd.process_group(0)),
 # so a Gateway shutdown does NOT cascade termination to it — we must kill it
@@ -194,7 +223,7 @@ echo -e "${GREEN}  ✓ Process cleanup complete${NC}"
 echo ""
 
 # ── Step 2: Build Gateway ───────────────────────────────────────────────────
-echo -e "${YELLOW}[2/6] Building Gateway ($PROFILE)...${NC}"
+echo -e "${YELLOW}[2/$TOTAL_STEPS] Building Gateway ($PROFILE)...${NC}"
 cd "$CORE_DIR"
 if [ "$PROFILE" = "release" ]; then
     cargo_args=(cargo build --release -p acowork-gateway)
@@ -210,7 +239,7 @@ fi
 echo ""
 
 # ── Step 3: Build Runtime ───────────────────────────────────────────────────
-echo -e "${YELLOW}[3/6] Building Runtime ($PROFILE)...${NC}"
+echo -e "${YELLOW}[3/$TOTAL_STEPS] Building Runtime ($PROFILE)...${NC}"
 if [ "$PROFILE" = "release" ]; then
     cargo_args=(cargo build --release -p acowork-runtime)
 else
@@ -226,10 +255,10 @@ echo ""
 
 # ── Step 4: Build Embed ─────────────────────────────────────────────────────
 if [ "$SKIP_EMBED" = "true" ]; then
-    echo -e "${YELLOW}[4/6] Skipping Embed (--skip-embed)${NC}"
+    echo -e "${YELLOW}[4/$TOTAL_STEPS] Skipping Embed (--skip-embed)${NC}"
     echo ""
 else
-    echo -e "${YELLOW}[4/6] Building Embed ($PROFILE, auto-download ONNX Runtime)...${NC}"
+    echo -e "${YELLOW}[4/$TOTAL_STEPS] Building Embed ($PROFILE, auto-download ONNX Runtime)...${NC}"
 
     # Determine which feature to use
     EMBED_FEATURES="download-ort"
@@ -289,7 +318,7 @@ fi
 #
 # Unconditional: every Gateway needs an LSP Relay process to serve the
 # runtime codebase tool and the desktop Monaco client.
-echo -e "${YELLOW}[4.5/6] Building LSP Relay ($PROFILE)...${NC}"
+echo -e "${YELLOW}[4.5/$TOTAL_STEPS] Building LSP Relay ($PROFILE)...${NC}"
 if [ "$PROFILE" = "release" ]; then
     cargo_args=(cargo build --release -p acowork-lsp-relay)
 else
@@ -309,7 +338,7 @@ echo ""
 # directory matching the active profile — staging to a directory that does not
 # yet exist would either fail (`cp` here, which uses `mkdir -p` below) or, in
 # the Windows `Copy-Item` equivalent, silently create a stray file.
-echo -e "${YELLOW}[5/6] Copying resource files to $TARGET_DIR...${NC}"
+echo -e "${YELLOW}[5/$TOTAL_STEPS] Copying resource files to $TARGET_DIR...${NC}"
 mkdir -p "$TARGET_DIR"
 OFFLINE_SRC="$WORKSPACE_ROOT/assets/offline_providers.json"
 if [ -f "$OFFLINE_SRC" ]; then
@@ -325,19 +354,51 @@ if [ -f "$EMBEDDING_MODELS_SRC" ]; then
 fi
 echo ""
 
-# ── Step 6: Done ────────────────────────────────────────────────────────────
-echo -e "${YELLOW}[6/6] Done!${NC}"
+# ── Step 6: Start Gateway (only with --start) ──────────────────────────────
+#
+# Mirrors build_core.sh's `--start` step. The macOS script does NOT include the
+# runtime/embed startup here — Gateway itself owns those child processes via
+# its lifecycle manager. We only spawn the gateway binary and let it daemonize
+# (ACOWORK_GATEWAY_DAEMON=true makes it detach from the controlling tty).
+if [ "$START_GATEWAY" = "true" ]; then
+    echo -e "${YELLOW}[6/$TOTAL_STEPS] Starting Gateway in daemon mode...${NC}"
+    log_level="${ACOWORK_GATEWAY_LOG_LEVEL:-info}"
+    echo -e "${GRAY}  Log level: $log_level${NC}"
+    export ACOWORK_GATEWAY_DAEMON="true"
+
+    GATEWAY_EXE="$TARGET_DIR/acowork-gateway"
+    if [ -f "$GATEWAY_EXE" ]; then
+        "$GATEWAY_EXE" > /dev/null 2>&1 &
+        gateway_pid=$!
+        echo -e "${GREEN}  Gateway started (PID: $gateway_pid).${NC}"
+    else
+        echo -e "${RED}  Gateway executable not found at: $GATEWAY_EXE${NC}"
+        exit 1
+    fi
+    echo ""
+fi
+
+# ── Final step: Done ─────────────────────────────────────────────────────────
+echo -e "${YELLOW}[$TOTAL_STEPS/$TOTAL_STEPS] Done!${NC}"
 echo ""
 echo -e "${CYAN}Build artifacts:${NC}"
 ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 
+if [ "$START_GATEWAY" = "true" ]; then
+    echo -e "${CYAN}Gateway is running in daemon mode.${NC}"
+    echo -e "${CYAN}HTTP API: http://127.0.0.1:19876${NC}"
+    echo ""
+fi
+
 echo -e "${CYAN}Next steps:${NC}"
-echo -e "  ${GREEN}Start services:${NC}"
-echo -e "    $TARGET_DIR/acowork-gateway &"
-echo -e "    $TARGET_DIR/acowork-runtime &"
-echo -e "    $TARGET_DIR/acowork-embed &"
-echo ""
+if [ "$START_GATEWAY" = "false" ]; then
+    echo -e "  ${GREEN}Start services:${NC}"
+    echo -e "    $TARGET_DIR/acowork-gateway &"
+    echo -e "    $TARGET_DIR/acowork-runtime &"
+    echo -e "    $TARGET_DIR/acowork-embed &"
+    echo ""
+fi
 echo -e "  ${GREEN}Health check:${NC}"
 echo -e "    curl http://127.0.0.1:19876/health"
 echo ""

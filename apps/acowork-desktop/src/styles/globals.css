@@ -1148,30 +1148,12 @@ input[type="radio"]:checked {
   }
 }
 
-/* ── Chat toolbar responsive collapse (container queries) ── */
-@container tb (max-width: 420px) {
-
-  .tb-model-text,
-  .tb-model-tip {
-    display: none !important;
-  }
-}
-
-@container tb (max-width: 360px) {
-
-  .tb-ws-text,
-  .tb-ws-tip {
-    display: none !important;
-  }
-}
-
-@container tb (max-width: 300px) {
-
-  .tb-sk-text,
-  .tb-sk-tip {
-    display: none !important;
-  }
-}
+/* ── Chat toolbar responsive collapse (JS-driven) ──
+   Width adaptation is handled by ResizeObserver in ChatPanel.tsx, which
+   measures each button's full vs. icon-only width and greedily folds
+   labels by importance. This adapts to buttons that are conditionally
+   rendered (e.g. reasoning-effort appears only for providers that
+   support it). No static container-query breakpoints are used here. */
 
 /* ── Monaco find-widget: suppress hover tooltips ──────────────────────
    Monaco 0.55+ uses a custom HoverService that renders floating tooltips

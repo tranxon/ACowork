@@ -7,8 +7,11 @@ import { Tooltip } from "./Tooltip";
 /**
  * Shared toolbar dropdown trigger — icon + text + chevron + hover tooltip.
  *
- * Text and chevron carry `collapseClass` so CSS container-query rules
- * in globals.css can hide them at specific toolbar widths.
+ * Text/chevron collapse can be driven two ways:
+ *  1. CSS container queries via `collapseClass` (legacy, static breakpoints)
+ *  2. JS-driven `textHidden` prop set by a ResizeObserver in the parent
+ *     (preferred — adapts to which buttons are actually rendered)
+ *
  * The tooltip carries `tipClass` and is shown on hover only when text is hidden.
  */
 export function ToolbarDropdownTrigger({
@@ -22,13 +25,14 @@ export function ToolbarDropdownTrigger({
     buttonClassName,
     children,
     tooltip,
+    textHidden,
 }: {
     icon: ReactNode;
     label: string;
     /** CSS class that container-query rules target to hide text + chevron */
-    collapseClass: string;
+    collapseClass?: string;
     /** CSS class that container-query rules target to show tooltip */
-    tipClass: string;
+    tipClass?: string;
     open: boolean;
     onToggle: () => void;
     wrapperRef?: React.Ref<HTMLDivElement>;
@@ -36,6 +40,8 @@ export function ToolbarDropdownTrigger({
     children: ReactNode;
     /** Tooltip text (falls back to label if not provided) */
     tooltip?: string;
+    /** When true, force-hide the label text and chevron (JS-driven collapse) */
+    textHidden?: boolean;
 }) {
     return (
         <div ref={wrapperRef} className="relative inline-block min-w-0">
@@ -51,8 +57,16 @@ export function ToolbarDropdownTrigger({
                     )}
                 >
                     <span className="shrink-0">{icon}</span>
-                    <span className={cn(collapseClass, "min-w-0 max-w-[120px] truncate")} style={{ fontSize: "0.75rem" }}>{label}</span>
-                    <ChevronDown className={cn("h-3 w-3 shrink-0 text-zinc-400", collapseClass)} />
+                    <span
+                        data-toolbar-text=""
+                        className={cn(collapseClass, "min-w-0 max-w-[120px] truncate")}
+                        style={{ fontSize: "0.75rem", display: textHidden ? "none" : undefined }}
+                    >{label}</span>
+                    <ChevronDown
+                        data-toolbar-chevron=""
+                        className={cn("h-3 w-3 shrink-0 text-zinc-400", collapseClass)}
+                        style={{ display: textHidden ? "none" : undefined }}
+                    />
                 </button>
             </Tooltip>
             {children}

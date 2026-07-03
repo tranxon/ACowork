@@ -7,7 +7,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
 
-export function SkillsPanel() {
+export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   const {
@@ -125,6 +125,7 @@ export function SkillsPanel() {
         open={open}
         onToggle={() => setOpen(!open)}
         wrapperRef={ref}
+        textHidden={textHidden}
       >
         {/* Dropdown menu */}
         {open && (
