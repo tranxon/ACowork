@@ -8,7 +8,8 @@
       "args": [],
       "install_hint": "rustup component add rust-analyzer",
       "install_script": "rust",
-      "description": "Rust language server (defaults to stdio, no --stdio flag)"
+      "description": "Rust language server (defaults to stdio, no --stdio flag)",
+      "root_markers": ["Cargo.toml"]
     },
     "python": {
       "candidates": [
@@ -25,7 +26,8 @@
       },
       "install_hint": "pip install python-lsp-server",
       "install_script": "python",
-      "description": "Python language server"
+      "description": "Python language server",
+      "root_markers": ["pyproject.toml", "setup.py", "setup.cfg"]
     },
     "typescript": {
       "candidates": [
@@ -37,7 +39,8 @@
       ],
       "install_hint": "npm install -g typescript-language-server typescript",
       "install_script": "typescript",
-      "description": "TypeScript/JavaScript language server"
+      "description": "TypeScript/JavaScript language server",
+      "root_markers": ["tsconfig.json", "jsconfig.json"]
     },
     "go": {
       "candidates": [
@@ -48,7 +51,8 @@
       ],
       "install_hint": "go install golang.org/x/tools/gopls@latest",
       "install_script": "go",
-      "description": "Go language server (uses 'serve' subcommand, not --stdio)"
+      "description": "Go language server (uses 'serve' subcommand, not --stdio)",
+      "root_markers": ["go.mod"]
     },
     "c": {
       "candidates": [
@@ -57,7 +61,8 @@
       "args": [],
       "install_hint": "Install clangd: https://clangd.llvm.org/installation",
       "install_script": "clangd",
-      "description": "C/C++ language server (defaults to stdio)"
+      "description": "C/C++ language server (defaults to stdio)",
+      "root_markers": ["CMakeLists.txt", "compile_commands.json"]
     },
     "json": {
       "candidates": [
@@ -70,7 +75,8 @@
       ],
       "install_hint": "npm install -g vscode-langservers-extracted",
       "install_script": "json",
-      "description": "JSON language server (bundled in vscode-langservers-extracted)"
+      "description": "JSON language server (bundled in vscode-langservers-extracted)",
+      "root_markers": []
     },
     "yaml": {
       "candidates": [
@@ -81,7 +87,8 @@
       ],
       "install_hint": "npm install -g yaml-language-server",
       "install_script": "yaml",
-      "description": "YAML language server"
+      "description": "YAML language server",
+      "root_markers": []
     },
     "html": {
       "candidates": [
@@ -94,7 +101,8 @@
       ],
       "install_hint": "npm install -g vscode-langservers-extracted",
       "install_script": "html",
-      "description": "HTML language server (bundled in vscode-langservers-extracted)"
+      "description": "HTML language server (bundled in vscode-langservers-extracted)",
+      "root_markers": []
     },
     "css": {
       "candidates": [
@@ -107,7 +115,8 @@
       ],
       "install_hint": "npm install -g vscode-langservers-extracted",
       "install_script": "css",
-      "description": "CSS/SCSS/Less language server (bundled in vscode-langservers-extracted)"
+      "description": "CSS/SCSS/Less language server (bundled in vscode-langservers-extracted)",
+      "root_markers": []
     },
     "markdown": {
       "candidates": [
@@ -116,7 +125,8 @@
       "args": [],
       "install_hint": "Install marksman: https://github.com/artempyanykh/marksman",
       "install_script": "markdown",
-      "description": "Markdown language server (defaults to stdio)"
+      "description": "Markdown language server (defaults to stdio)",
+      "root_markers": []
     },
     "java": {
       "candidates": [
@@ -125,7 +135,8 @@
       "args": [],
       "install_hint": "Download Eclipse JDT Language Server: https://download.eclipse.org/jdtls/",
       "install_script": "java",
-      "description": "Eclipse JDT Language Server for Java"
+      "description": "Eclipse JDT Language Server for Java",
+      "root_markers": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle"]
     },
     "kotlin": {
       "candidates": [
@@ -134,7 +145,8 @@
       "args": [],
       "install_hint": "brew install kotlin-language-server (macOS) or download from https://github.com/fwcd/kotlin-language-server",
       "install_script": "kotlin",
-      "description": "Kotlin language server (defaults to stdio, no --stdio flag)"
+      "description": "Kotlin language server (defaults to stdio, no --stdio flag)",
+      "root_markers": ["build.gradle.kts", "build.gradle"]
     }
   }
 }

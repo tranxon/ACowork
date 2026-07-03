@@ -7,6 +7,7 @@ pub mod codebase;
 pub mod config;
 pub mod install;
 pub mod pool;
+pub mod project_root;
 pub mod protocol;
 pub mod relay;
 pub mod server;

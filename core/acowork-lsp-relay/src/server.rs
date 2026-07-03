@@ -10,6 +10,7 @@
 //!   (used by per-row Check button; avoids re-fetching the full config)
 //! - `GET /api/lsp/install/{language}` — get install script
 //! - `POST /api/lsp/install/{language}` — run install script
+//! - `POST /api/project-root/discover` — discover language-specific project root
 
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use axum::{
 };
 use futures_util::stream::Stream;
 use serde::Deserialize;
+use serde::Serialize;
 
 use acowork_core::event_bus::{BusEvent, EventBus};
 use acowork_core::health::HealthResponse;
@@ -48,6 +50,24 @@ pub struct LspQuery {
     /// Workspace root directory (absolute path).
     #[serde(default)]
     pub workspace_root: Option<String>,
+}
+
+/// Request body for `POST /api/project-root/discover`.
+#[derive(Debug, Deserialize)]
+pub struct ProjectRootRequest {
+    /// Absolute path of the file being opened.
+    pub file_path: String,
+    /// Language id (e.g. "typescript", "rust").
+    pub language: String,
+    /// Monorepo root (upper bound for the search).
+    pub workspace_root: String,
+}
+
+/// Response body for `POST /api/project-root/discover`.
+#[derive(Debug, Serialize)]
+pub struct ProjectRootResponse {
+    /// Discovered project root directory (absolute path).
+    pub project_root: String,
 }
 
 // ── Health check ───────────────────────────────────────────────────────
@@ -146,6 +166,26 @@ async fn lsp_status_list() -> Json<Vec<crate::config::LspServerStatusEntry>> {
     Json(compute_lsp_status().await)
 }
 
+// ── Project root discovery ────────────────────────────────────────────
+
+/// `POST /api/project-root/discover` — discover the language-specific
+/// project root for a given file.
+///
+/// Walks up from the file's directory to the workspace root, checking
+/// for language-specific marker files (tsconfig.json, Cargo.toml, etc.).
+/// The first directory containing a marker is returned as the project
+/// root. Falls back to workspace root if no marker is found.
+async fn project_root_discover(
+    Json(req): Json<ProjectRootRequest>,
+) -> Json<ProjectRootResponse> {
+    let project_root = crate::project_root::discover_project_root(
+        &req.file_path,
+        &req.language,
+        &req.workspace_root,
+    );
+    Json(ProjectRootResponse { project_root })
+}
+
 // ── WebSocket handler ──────────────────────────────────────────────────
 
 /// `GET /lsp/{language}` — WebSocket upgrade for LSP relay.
@@ -213,6 +253,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             axum::routing::post(crate::install::lsp_install_run),
         )
         .route("/api/codebase/rpc", axum::routing::post(crate::codebase::codebase_rpc))
+        .route("/api/project-root/discover", axum::routing::post(project_root_discover))
         // Local-only CORS allowlist. Same origins as Gateway — covers Vite dev
         // (localhost:3000, localhost:5173) and Tauri v2 production WebView
         // (tauri.localhost, tauri://localhost).

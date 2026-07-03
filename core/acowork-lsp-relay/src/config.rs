@@ -34,6 +34,11 @@ pub struct LspServerEntry {
     pub install_script: Option<String>,
     /// Human-readable description.
     pub description: String,
+    /// Language-specific root marker files (e.g. tsconfig.json, Cargo.toml).
+    /// Used by project root discovery to find the nearest project root.
+    /// Languages with no markers (rootless) have an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_markers: Vec<String>,
 }
 
 fn empty_candidate_args(map: &std::collections::HashMap<String, Vec<String>>) -> bool {
@@ -240,6 +245,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "rustup component add rust-analyzer".into(),
             install_script: Some("rust".into()),
             description: "Rust language server (defaults to stdio, no --stdio flag)".into(),
+            root_markers: vec!["Cargo.toml".into()],
             candidate_args: Default::default(),
         },
     );
@@ -255,6 +261,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "pip install python-lsp-server".into(),
             install_script: Some("python".into()),
             description: "Python language server".into(),
+            root_markers: vec!["pyproject.toml".into(), "setup.py".into(), "setup.cfg".into()],
             candidate_args: std::collections::HashMap::from([
                 ("pylsp".into(), vec![]),
                 ("python-lsp-server".into(), vec![]),
@@ -272,6 +279,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "npm install -g typescript-language-server typescript".into(),
             install_script: Some("typescript".into()),
             description: "TypeScript/JavaScript language server".into(),
+            root_markers: vec!["tsconfig.json".into(), "jsconfig.json".into()],
             candidate_args: Default::default(),
         },
     );
@@ -283,6 +291,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "go install golang.org/x/tools/gopls@latest".into(),
             install_script: Some("go".into()),
             description: "Go language server (uses 'serve' subcommand)".into(),
+            root_markers: vec!["go.mod".into()],
             candidate_args: Default::default(),
         },
     );
@@ -294,6 +303,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "Install clangd: https://clangd.llvm.org/installation".into(),
             install_script: Some("clangd".into()),
             description: "C/C++ language server (defaults to stdio)".into(),
+            root_markers: vec!["CMakeLists.txt".into(), "compile_commands.json".into()],
             candidate_args: Default::default(),
         },
     );
@@ -309,6 +319,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "npm install -g vscode-langservers-extracted".into(),
             install_script: Some("json".into()),
             description: "JSON language server".into(),
+            root_markers: vec![],
             candidate_args: Default::default(),
         },
     );
@@ -320,6 +331,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "npm install -g yaml-language-server".into(),
             install_script: Some("yaml".into()),
             description: "YAML language server".into(),
+            root_markers: vec![],
             candidate_args: Default::default(),
         },
     );
@@ -335,6 +347,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "npm install -g vscode-langservers-extracted".into(),
             install_script: Some("html".into()),
             description: "HTML language server".into(),
+            root_markers: vec![],
             candidate_args: Default::default(),
         },
     );
@@ -350,6 +363,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "npm install -g vscode-langservers-extracted".into(),
             install_script: Some("css".into()),
             description: "CSS/SCSS/Less language server".into(),
+            root_markers: vec![],
             candidate_args: Default::default(),
         },
     );
@@ -361,6 +375,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
             install_hint: "Install marksman: https://github.com/artempyanykh/marksman".into(),
             install_script: Some("markdown".into()),
             description: "Markdown language server (defaults to stdio)".into(),
+            root_markers: vec![],
             candidate_args: Default::default(),
         },
     );
@@ -373,6 +388,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
                 "Download Eclipse JDT Language Server: https://download.eclipse.org/jdtls/".into(),
             install_script: Some("java".into()),
             description: "Eclipse JDT Language Server for Java".into(),
+            root_markers: vec!["pom.xml".into(), "build.gradle".into(), "build.gradle.kts".into(), "settings.gradle".into()],
             candidate_args: Default::default(),
         },
     );
@@ -385,6 +401,7 @@ fn builtin_lsp_defaults() -> LspServersConfig {
                 "brew install kotlin-language-server (macOS) or download from https://github.com/fwcd/kotlin-language-server".into(),
             install_script: Some("kotlin".into()),
             description: "Kotlin language server (defaults to stdio, no --stdio flag)".into(),
+            root_markers: vec!["build.gradle.kts".into(), "build.gradle".into()],
             candidate_args: Default::default(),
         },
     );
@@ -1242,6 +1259,7 @@ mod tests {
                 install_hint: "rustup component add rust-analyzer".into(),
                 install_script: Some("rust".into()),
                 description: "Rust language server".into(),
+                root_markers: vec!["Cargo.toml".into()],
             },
         );
         let servers = LspServersConfig {

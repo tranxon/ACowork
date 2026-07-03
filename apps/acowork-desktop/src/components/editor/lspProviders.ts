@@ -12,7 +12,23 @@
 import type { editor, languages, IRange, IPosition, IDisposable } from "monaco-editor";
 import type { MonacoLanguageClient } from "monaco-languageclient";
 import { getGatewayUrl } from "../../lib/config";
-import { buildAbsoluteUri } from "../../hooks/useLspClient";
+import { buildAbsoluteUri } from "../../lib/lspUtils";
+import { toLspLanguageId } from "../../lib/lspUtils";
+
+// ── LSP → Monaco severity mapping ─────────────────────────────────────
+
+/** Map LSP DiagnosticSeverity to Monaco MarkerSeverity. */
+function lspSeverityToMonacoMarker(
+    severity: number | undefined,
+): import("monaco-editor").MarkerSeverity {
+    switch (severity) {
+        case 1: return 8 as import("monaco-editor").MarkerSeverity; // Error
+        case 2: return 4 as import("monaco-editor").MarkerSeverity; // Warning
+        case 3: return 2 as import("monaco-editor").MarkerSeverity; // Info
+        case 4: return 1 as import("monaco-editor").MarkerSeverity; // Hint
+        default: return 2 as import("monaco-editor").MarkerSeverity; // Info
+    }
+}
 
 // ── Preview Model Pool (LRU) ───────────────────────────────────────────
 
@@ -228,7 +244,7 @@ export function sendDidOpenForModel(
         client.sendNotification("textDocument/didOpen", {
             textDocument: {
                 uri: absUri,
-                languageId: model.getLanguageId(),
+                languageId: toLspLanguageId(absUri, model.getLanguageId()),
                 version: 0,
                 text: model.getValue(),
             },
@@ -559,6 +575,62 @@ export function registerLspProviders(
             },
         })
     );
+
+    // ── Diagnostics Handler (textDocument/publishDiagnostics) ───────────
+    //
+    // MonacoLanguageClient may have a built-in handler, but the URIs in
+    // diagnostics are absolute (file:///Users/.../file.ts) while Monaco
+    // models use relative URIs (file:///apps/.../file.ts).  We intercept
+    // the notification and remap URIs via lspUriToMonacoUri so markers
+    // appear on the correct editor models.
+    const diagnosticsDisposable = client.onNotification(
+        "textDocument/publishDiagnostics",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (params: any) => {
+            const lspUri: string | undefined = params?.uri;
+            if (!lspUri) return;
+
+            const monacoUri = lspUriToMonacoUri(lspUri, workspaceRoot, monaco);
+            const model = monaco.editor.getModel(monacoUri);
+            if (!model) {
+                console.log("[LSP] diagnostics dropped — no model for:", monacoUri.toString());
+                return;
+            }
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const diags: any[] = params?.diagnostics ?? [];
+
+            // Debug: log ALL diagnostics to identify what tsserver reports
+            if (diags.length > 0) {
+                const bySeverity: Record<number, number> = {};
+                for (const d of diags) {
+                    bySeverity[d.severity] = (bySeverity[d.severity] ?? 0) + 1;
+                }
+                console.log(
+                    "[LSP] diagnostics —",
+                    lspUri.split("/").pop(),
+                    "total:", diags.length,
+                    "bySeverity:", JSON.stringify(bySeverity),
+                    "first:", diags.slice(0, 4).map((d: any) => ({
+                        sev: d.severity,
+                        code: d.code,
+                        msg: d.message?.slice(0, 80),
+                    })),
+                );
+            }
+
+            const markers: editor.IMarkerData[] = diags.map((d: any) => ({
+                severity: lspSeverityToMonacoMarker(d.severity),
+                message: d.message ?? "",
+                source: d.source ?? language,
+                code: d.code?.value ?? d.code?.toString() ?? undefined,
+                ...toMonacoRange(d.range),
+            }));
+
+            monaco.editor.setModelMarkers(model, "lsp", markers);
+        }
+    );
+    disposables.push(diagnosticsDisposable);
 
     return {
         dispose() {

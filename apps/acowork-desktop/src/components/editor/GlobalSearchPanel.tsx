@@ -22,7 +22,7 @@ import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 import type { MonacoLanguageClient } from "monaco-languageclient";
-import type { LspStatus } from "../../hooks/useLspClient";
+import type { LspStatus } from "../../lib/lspUtils";
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 

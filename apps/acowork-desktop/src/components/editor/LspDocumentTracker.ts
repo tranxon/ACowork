@@ -1,6 +1,6 @@
 import type { editor } from "monaco-editor";
 import type { MonacoLanguageClient } from "monaco-languageclient";
-import { buildAbsoluteUri } from "../../hooks/useLspClient";
+import { buildAbsoluteUri } from "../../lib/lspUtils";
 
 /**
  * Manages LSP textDocument lifecycle notifications (didOpen/didChange/didClose).
