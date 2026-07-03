@@ -81,7 +81,20 @@ function resolveLocalAssetPath(workspaceRoot: string, fileRelPath: string, src: 
             result.push(part);
         }
     }
-    return result.join("/");
+    const joined = result.join("/");
+    if (!joined) return null;
+
+    // Re-attach the POSIX leading "/" if the workspace root was an
+    // absolute path (macOS/Linux: starts with "/"). Without this,
+    // split("/").filter(Boolean) above drops the empty first segment,
+    // turning "/Users/foo/..." into "Users/foo/..." — a bare relative
+    // path that Tauri's asset:// protocol cannot resolve (404).
+    // Windows drive letters ("C:") survive filter(Boolean) intact, so
+    // they don't need this treatment.
+    if (workspaceRoot.startsWith("/") && !joined.startsWith("/")) {
+        return `/${joined}`;
+    }
+    return joined;
 }
 
 interface MarkdownPreviewViewProps {
