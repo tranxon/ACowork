@@ -5,20 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ACowork</title>
     <script>
-      // Detect system dark mode before React renders — prevents flash of wrong theme
+      // Detect system dark mode before React renders — prevents flash of wrong theme.
+      // Also sets the html background color so resize transitions are smooth —
+      // the background fills immediately before React content re-layouts.
       (function() {
-        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (isDark) {
           document.documentElement.classList.add('dark');
+          document.documentElement.style.backgroundColor = '#18181b';
+        } else {
+          document.documentElement.style.backgroundColor = '#FAFAFA';
         }
       })();
     </script>
     <style>
-      /* Transparent background — lets macOS vibrancy show through.
-         globals.css also sets transparent !important after load. */
+      /* Theme-matched background — prevents jarring transparent gap during
+         window resize. WebView2 renders the background-color immediately,
+         while the React content tree re-layouts asynchronously. Without a
+         solid background the user sees raw acrylic/vibrancy in the new
+         region until the content catches up. */
       html, body {
         margin: 0;
         padding: 0;
-        background-color: transparent;
+        background-color: inherit;
       }
     </style>
   </head>

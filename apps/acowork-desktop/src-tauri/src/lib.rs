@@ -220,6 +220,10 @@ pub fn run() {
             //
             // `UnderWindowBackground` (macOS 10.14+) provides frosted-glass
             // translucency that shows desktop content behind the window.
+            //
+            // `color` provides a subtle neutral tint that blends with the
+            // vibrancy backdrop, reducing the jarring transparency gap when
+            // the window is resized and WKWebView content lags behind.
             #[cfg(target_os = "macos")]
             {
                 use tauri::utils::config::WindowEffectsConfig;
@@ -230,7 +234,7 @@ pub fn run() {
                     effects: vec![tauri::window::Effect::UnderWindowBackground],
                     state: Some(EffectState::Active),
                     radius: None,
-                    color: None,
+                    color: Some((128, 128, 128, 30).into()),
                 };
                 let _ = main_window.set_effects(effects);
             }
@@ -246,6 +250,10 @@ pub fn run() {
             // error and the window falls back to a plain transparent surface.
             // `radius` is ignored for Acrylic (system-controlled) but kept
             // for parity with the pre-c8f031a frontend `setEffects` call.
+            //
+            // `color` provides a subtle neutral tint that blends with the
+            // acrylic backdrop, reducing the jarring transparency gap when
+            // the window is resized and WebView2 content lags behind DWM.
             #[cfg(target_os = "windows")]
             {
                 use tauri::utils::config::WindowEffectsConfig;
@@ -256,7 +264,7 @@ pub fn run() {
                     effects: vec![tauri::window::Effect::Acrylic],
                     state: Some(EffectState::Active),
                     radius: Some(12.0),
-                    color: None,
+                    color: Some((128, 128, 128, 30).into()),
                 };
                 let _ = main_window.set_effects(effects);
             }
