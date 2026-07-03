@@ -496,73 +496,90 @@ impl AgentLoop {
             // the compact model. The title is pushed to the frontend via
             // NewDataAvailable events — no blocking, no optimistic truncation.
             // Only when a conversation exists (not in tests without sessions).
-            if self.session.conversation.is_some() {
-                let lang = self
+            // Title generation runs only once per session — subsequent user
+            // messages skip the LLM call entirely.
+            if self.session.conversation.is_some()
+                && self.session_core.title.read().unwrap().is_none()
+            {
+                // Check if the conversation already has a title from a
+                // previous session run (session resume case). If so,
+                // propagate it to session_core.title and skip the LLM call.
+                if let Some(existing_title) = self
                     .session
-                    .identity_context()
-                    .and_then(|ctx| {
-                        ctx.lines()
-                            .find(|l| l.starts_with("- Language:"))
-                            .and_then(|l| l.split(':').nth(1).map(|s| s.trim().to_string()))
-                    })
-                    .unwrap_or_else(|| "en".to_string());
-
-                // Use the raw user message (before any prompt enrichment)
-                // for title generation. This is the user's original input
-                // without [Attached context:] prefix, document content,
-                // or file hints — exactly what the user typed.
-                //
-                // When `raw_user_message` is None or empty (e.g. user only
-                // uploaded files without typing text), the fallback below
-                // extracts filenames from <attached_document> tags.
-                let title_input = raw_user_message.unwrap_or("");
-
-                let prompt = crate::prompt::TITLE_PROMPT
-                    .replace("{language}", &lang)
-                    .replace("{user_message}", title_input);
-                let provider = self.core.provider.clone();
-                let compact_model = self.resolve_distill_model(title_input);
-                let session_core_title = self.session_core.title.clone();
-                let fallback_msg = if title_input.is_empty() {
-                    // User only uploaded files (no text). Extract filenames
-                    // from <attached_document> tags as a meaningful fallback
-                    // title, e.g. "report.pdf, slides.pptx".
-                    let filenames: Vec<&str> = user_message
-                        .split("<attached_document filename=\"")
-                        .skip(1)
-                        .filter_map(|s| s.split('"').next())
-                        .collect();
-                    if filenames.is_empty() {
-                        String::new()
-                    } else {
-                        filenames.join(", ")
-                    }
+                    .conversation
+                    .as_ref()
+                    .and_then(|conv| conv.title())
+                {
+                    let trimmed: String = existing_title.chars().take(30).collect();
+                    *self.session_core.title.write().unwrap() = Some(trimmed);
                 } else {
-                    title_input.to_string()
-                };
-
-                tokio::spawn(async move {
-                    match crate::episode_distill::compact_session_title_with_llm(
-                        &prompt,
-                        provider.as_ref(),
-                        &compact_model,
-                        64,
-                    )
-                    .await
-                    {
-                        Ok(title) => {
-                            let trimmed: String = title.chars().take(30).collect();
-                            *session_core_title.write().unwrap() = Some(trimmed);
+                    let lang = self
+                        .session
+                        .identity_context()
+                        .and_then(|ctx| {
+                            ctx.lines()
+                                .find(|l| l.starts_with("- Language:"))
+                                .and_then(|l| l.split(':').nth(1).map(|s| s.trim().to_string()))
+                        })
+                        .unwrap_or_else(|| "en".to_string());
+            
+                    // Use the raw user message (before any prompt enrichment)
+                    // for title generation. This is the user's original input
+                    // without [Attached context:] prefix, document content,
+                    // or file hints — exactly what the user typed.
+                    //
+                    // When `raw_user_message` is None or empty (e.g. user only
+                    // uploaded files without typing text), the fallback below
+                    // extracts filenames from <attached_document> tags.
+                    let title_input = raw_user_message.unwrap_or("");
+            
+                    let prompt = crate::prompt::TITLE_PROMPT
+                        .replace("{language}", &lang)
+                        .replace("{user_message}", title_input);
+                    let provider = self.core.provider.clone();
+                    let compact_model = self.resolve_distill_model(title_input);
+                    let session_core_title = self.session_core.title.clone();
+                    let fallback_msg = if title_input.is_empty() {
+                        // User only uploaded files (no text). Extract filenames
+                        // from <attached_document> tags as a meaningful fallback
+                        // title, e.g. "report.pdf, slides.pptx".
+                        let filenames: Vec<&str> = user_message
+                            .split("<attached_document filename=\"")
+                            .skip(1)
+                            .filter_map(|s| s.split('"').next())
+                            .collect();
+                        if filenames.is_empty() {
+                            String::new()
+                        } else {
+                            filenames.join(", ")
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                "LLM session title generation failed (non-fatal): {e}"
-                            );
-                            let fallback: String = fallback_msg.chars().take(30).collect();
-                            *session_core_title.write().unwrap() = Some(fallback);
+                    } else {
+                        title_input.to_string()
+                    };
+            
+                    tokio::spawn(async move {
+                        match crate::episode_distill::compact_session_title_with_llm(
+                            &prompt,
+                            provider.as_ref(),
+                            &compact_model,
+                            64,
+                        )
+                        .await
+                        {
+                            Ok(title) => {
+                                let trimmed: String = title.chars().take(30).collect();
+                                *session_core_title.write().unwrap() = Some(trimmed);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "LLM session title generation failed (non-fatal): {e}"
+                                );
+                                let fallback: String = fallback_msg.chars().take(30).collect();
+                                *session_core_title.write().unwrap() = Some(fallback);
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
         }
 

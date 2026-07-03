@@ -606,6 +606,11 @@ impl ConversationSession {
         &self.agent_id
     }
 
+    /// Return the current persisted session title, if any.
+    pub fn title(&self) -> Option<String> {
+        self.current_title.lock().ok().and_then(|t| t.clone())
+    }
+
     /// Return the path to the JSONL session file.
     ///
     /// Used by session-level episode distillation on close.
