@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.acowork.desktop",
   "build": {
-    "beforeDevCommand": "npm run core:build:debug && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run core:build:release && npm run build",
     "frontendDist": "../dist"

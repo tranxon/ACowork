@@ -222,6 +222,11 @@ export function ChatPanel() {
   // NOT on every resize, to avoid layout side-effects on siblings
   // (e.g. the agent-list subtly changing width).
   const cachedWidthsRef = useRef<{ key: string; full: number[]; icon: number[] } | null>(null);
+  // Deferred state update: store the latest desired textHidden here and
+  // flush it in a rAF to avoid synchronous React re-renders during
+  // ResizeObserver callbacks (which can cause sibling layout shifts).
+  const pendingHiddenRef = useRef<Record<string, boolean> | null>(null);
+  const toolbarRafRef = useRef<number>(0);
   useLayoutEffect(() => {
     const container = toolbarRef.current;
     if (!container) return;
@@ -330,20 +335,37 @@ export function ChatPanel() {
         fullWidths, iconWidths, available, totalFull, nextHidden,
       }));
 
-      // Only commit when the answer actually changes (skip the measurement-induced DOM edits).
-      setTextHidden((prev) => {
-        let changed = false;
-        for (const k of Object.keys(nextHidden)) {
-          if (prev[k] !== nextHidden[k]) { changed = true; break; }
-        }
-        return changed ? nextHidden : prev;
-      });
+      // Defer state update to next animation frame so React re-renders
+      // happen *after* the current layout is painted. This prevents
+      // synchronous layout interference with sibling panels (e.g. the
+      // agent-list subtly changing width during resize).
+      pendingHiddenRef.current = nextHidden;
+      if (toolbarRafRef.current === 0) {
+        toolbarRafRef.current = requestAnimationFrame(() => {
+          toolbarRafRef.current = 0;
+          const latest = pendingHiddenRef.current;
+          if (!latest) return;
+          setTextHidden((prev) => {
+            let changed = false;
+            for (const k of Object.keys(latest)) {
+              if (prev[k] !== latest[k]) { changed = true; break; }
+            }
+            return changed ? latest : prev;
+          });
+        });
+      }
     };
 
     const ro = new ResizeObserver(measure);
     ro.observe(container);
     measure();
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (toolbarRafRef.current) {
+        cancelAnimationFrame(toolbarRafRef.current);
+        toolbarRafRef.current = 0;
+      }
+    };
   }, [selectedAgent?.running]);
 
   // Per-agent + per-session state selectors
