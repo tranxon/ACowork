@@ -1330,6 +1330,43 @@ export function ChatPanel() {
                       }}
                       className=""
                     >
+                      {/* Agent header — shown before first agent message after a user message */}
+                      {(() => {
+                        const prevItem = virtualRow.index > 0 ? displayMessages[virtualRow.index - 1] : undefined;
+                        const isPrevUser = prevItem && (prevItem as ChatMessage).type === 'user';
+                        if (!isPrevUser) return null;
+                        const isAgent = displayItem.type === 'explore_group'
+                          || (displayItem.type !== 'explore_group'
+                            && (item as ChatMessage).type !== 'user'
+                            && (item as ChatMessage).type !== 'system'
+                            && (item as ChatMessage).type !== 'compaction'
+                            && (item as ChatMessage).type !== 'document_upload');
+                        if (!isAgent) return null;
+                        return (
+                          <div className="flex items-center gap-2 mb-2 mt-1">
+                            <AgentAvatar
+                              agentId={selectedAgentId ?? ""}
+                              displayName={agentDisplayName}
+                              avatarUrl={selectedAgent?.avatar}
+                              version={selectedAgent?.version}
+                              builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
+                              size={40}
+                              className="shrink-0"
+                            />
+                            <div className="flex flex-col">
+                              <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                                {agentDisplayName}
+                              </span>
+                              {selectedAgent?.role && (
+                                <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
+                                  {selectedAgent.role}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       {/* Explore group - aggregated think + tool calls/results */}
                       {displayItem.type === 'explore_group' && (() => {
                         const nextItem = displayMessages[virtualRow.index + 1];
@@ -1339,14 +1376,16 @@ export function ChatPanel() {
                         const isLastGroup = virtualRow.index === displayMessages.length - 1;
                         const isStreamingGroup = sending && isLastGroup;
                         return (
-                          <ExploreBlock
-                            items={displayItem.items}
-                            isStreaming={isStreamingGroup}
-                            pendingApproval={pendingApproval}
-                            currentSessionId={currentSessionId}
-                            onApprove={(action, approval) => handleToolApprove(action, approval)}
-                            hasFollowUpReply={hasFollowUpReply}
-                          />
+                          <div className="ml-12">
+                            <ExploreBlock
+                              items={displayItem.items}
+                              isStreaming={isStreamingGroup}
+                              pendingApproval={pendingApproval}
+                              currentSessionId={currentSessionId}
+                              onApprove={(action, approval) => handleToolApprove(action, approval)}
+                              hasFollowUpReply={hasFollowUpReply}
+                            />
+                          </div>
                         );
                       })()}
 
@@ -1361,7 +1400,7 @@ export function ChatPanel() {
                           && virtualRow.index === displayMessages.length - 1
                           && msg.id.startsWith("msg-streaming-");
                         return (
-                           <MessageBubble message={msg} isStreaming={isStreamingMsg} agentId={selectedAgentId ?? ""} displayLen={isStreamingMsg ? animStateRef.current.get(msg.id)?.displayedLen : undefined} />
+                        <MessageBubble message={msg} isStreaming={isStreamingMsg} displayLen={isStreamingMsg ? animStateRef.current.get(msg.id)?.displayedLen : undefined} />
                         );
                       })()}
                     </div>
@@ -1851,7 +1890,7 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
 }
 
 /** Single message bubble */
-function MessageBubble({ message, isStreaming, agentId, displayLen }: { message: ChatMessage; isStreaming: boolean; agentId: string; displayLen?: number }) {
+function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMessage; isStreaming: boolean; displayLen?: number }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
@@ -1861,9 +1900,6 @@ function MessageBubble({ message, isStreaming, agentId, displayLen }: { message:
   const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
   const userAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
   const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
-  const agentProfileName = useAgentStore((s) => s.agents[agentId]?.profile?.displayName);
-  const agentInfo = useAgentStore((s) => s.agents[agentId]?.meta);
-  const liveAgentName = agentProfileName ?? agentInfo?.display_name ?? agentInfo?.name ?? message.senderDisplayName;
   const liveUserName = userDisplayName ?? message.senderDisplayName;
 
   if (message.type === "user") {
@@ -1916,26 +1952,8 @@ function MessageBubble({ message, isStreaming, agentId, displayLen }: { message:
 
     return (
       <MessageContentWrapper>
-        <div className="flex items-start gap-2">
-          <AgentAvatar
-            agentId={agentId}
-            displayName={liveAgentName}
-            avatarUrl={agentInfo?.avatar}
-            version={agentInfo?.version}
-            builtinAvatarId={agentInfo?.builtin_avatar ?? null}
-            size={40}
-            className="shrink-0 mt-1"
-          />
-          <div className="min-w-0 flex-1 flex flex-col">
-            <div className="flex items-center gap-1.5 mt-[5px]">
-              {liveAgentName && (
-                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
-              )}
-              {message.senderRole && (
-                <span className="rounded bg-chat-badge px-1 py-0 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">{message.senderRole}</span>
-              )}
-            </div>
-            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+        <div className="min-w-0 flex flex-col ml-12">
+<div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               {displayContent && (
                 <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
                   <StreamMarkdown content={displayContent} />
@@ -1950,7 +1968,6 @@ function MessageBubble({ message, isStreaming, agentId, displayLen }: { message:
               {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
             </div>
           </div>
-        </div>
       </MessageContentWrapper>
     );
   }
@@ -1958,26 +1975,8 @@ function MessageBubble({ message, isStreaming, agentId, displayLen }: { message:
   if (message.type === "thought") {
     return (
       <MessageContentWrapper>
-        <div className="flex items-start gap-2">
-          <AgentAvatar
-            agentId={agentId}
-            displayName={liveAgentName}
-            avatarUrl={agentInfo?.avatar}
-            version={agentInfo?.version}
-            builtinAvatarId={agentInfo?.builtin_avatar ?? null}
-            size={40}
-            className="shrink-0 mt-1"
-          />
-          <div className="min-w-0 flex-1 flex flex-col">
-            <div className="flex items-center gap-1.5 mt-[5px]">
-              {liveAgentName && (
-                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
-              )}
-              {message.senderRole && (
-                <span className="rounded bg-chat-badge px-1 py-0 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">{message.senderRole}</span>
-              )}
-            </div>
-            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+        <div className="min-w-0 flex flex-col ml-12">
+<div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               <ThinkBlock
                 content={displayLen != null ? message.content.slice(0, displayLen) : message.content}
                 isStreaming={isStreaming}
@@ -1987,7 +1986,6 @@ function MessageBubble({ message, isStreaming, agentId, displayLen }: { message:
               />
             </div>
           </div>
-        </div>
       </MessageContentWrapper>
     );
   }
@@ -1995,26 +1993,8 @@ function MessageBubble({ message, isStreaming, agentId, displayLen }: { message:
   if (message.type === "error") {
     return (
       <MessageContentWrapper>
-        <div className="flex items-start gap-2">
-          <AgentAvatar
-            agentId={agentId}
-            displayName={liveAgentName}
-            avatarUrl={agentInfo?.avatar}
-            version={agentInfo?.version}
-            builtinAvatarId={agentInfo?.builtin_avatar ?? null}
-            size={40}
-            className="shrink-0 mt-1"
-          />
-          <div className="min-w-0 flex-1 flex flex-col">
-            <div className="flex items-center gap-1.5 mt-[5px]">
-              {liveAgentName && (
-                <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{liveAgentName}</span>
-              )}
-              {message.senderRole && (
-                <span className="rounded bg-chat-badge px-1 py-0 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">{message.senderRole}</span>
-              )}
-            </div>
-            <div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
+        <div className="min-w-0 flex flex-col ml-12">
+<div className="mt-[6px] max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
               <div className="flex items-start gap-2 min-w-0">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
                 <div className="min-w-0 flex-1">
@@ -2033,7 +2013,6 @@ function MessageBubble({ message, isStreaming, agentId, displayLen }: { message:
               </div>
             </div>
           </div>
-        </div>
       </MessageContentWrapper>
     );
   }
