@@ -388,4 +388,7 @@ message SessionStateResult {
   float temperature = 10;
   /// Whether temperature is set (distinguishes "not set" from 0.0).
   bool has_temperature = 11;
+  /// Current todo list (JSON-serialized Vec<TodoItem>).
+  /// Empty string if the list is empty or not yet populated.
+  string todos_json = 12;
 }

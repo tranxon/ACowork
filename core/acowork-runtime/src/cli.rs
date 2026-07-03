@@ -714,6 +714,7 @@ pub(crate) async fn run_gateway_loop(
                                             reasoning_effort: snap.reasoning_effort.unwrap_or_default(),
                                             temperature: snap.temperature.unwrap_or(0.0),
                                             has_temperature: snap.temperature.is_some(),
+                                            todos_json: snap.todos_json.unwrap_or_default(),
                                         }
                                     } else {
                                         proto::SessionStateResult {

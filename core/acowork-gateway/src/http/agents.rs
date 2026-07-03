@@ -2456,6 +2456,8 @@ pub struct SessionStateResponse {
     pub ratio: Option<f64>,
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f32>,
+    /// Current todo list (parsed from JSON, None if empty or unset)
+    pub todos: Option<serde_json::Value>,
 }
 
 /// `GET /api/agents/{id}/sessions/{session_id}/state`
@@ -2561,6 +2563,27 @@ pub async fn get_session_state(
     let status_value: serde_json::Value = serde_json::from_str(&result.status_json)
         .unwrap_or_else(|_| serde_json::Value::String(result.status_json.clone()));
 
+    // Parse todos_json into a serde_json::Value for the response.
+    // A parse failure here is distinct from "runtime has no todos" — it indicates
+    // a version mismatch or corrupted payload, so we log it for diagnosis.
+    let todos_value: Option<serde_json::Value> = if result.todos_json.is_empty() {
+        None
+    } else {
+        match serde_json::from_str(&result.todos_json) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    error = %e,
+                    raw_len = result.todos_json.len(),
+                    "Failed to parse todos_json from runtime; returning None"
+                );
+                None
+            }
+        }
+    };
+
     Ok(Json(SessionStateResponse {
         session_id: result.session_id,
         status: status_value,
@@ -2570,6 +2593,7 @@ pub async fn get_session_state(
         ratio: if result.ratio == 0.0 { None } else { Some(result.ratio) },
         reasoning_effort: if result.reasoning_effort.is_empty() { None } else { Some(result.reasoning_effort) },
         temperature: if result.has_temperature { Some(result.temperature) } else { None },
+        todos: todos_value,
     }))
 }
 

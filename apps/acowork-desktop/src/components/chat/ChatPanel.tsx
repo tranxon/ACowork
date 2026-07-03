@@ -383,6 +383,8 @@ export function ChatPanel() {
   const isLoadingSession = sessionState?.isLoadingSession ?? false;
   const loadError = sessionState?.loadError ?? null;
   const todos = sessionState?.todos ?? [];
+  /** Per-session queued messages — persisted in chatStore across agent switches */
+  const queuedMessages = sessionState?.queuedMessages ?? [];
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
   // No optimistic flags — the backend pushes session_state_changed within ~50ms.
@@ -416,7 +418,6 @@ export function ChatPanel() {
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
   const [inputValue, setInputValue] = useState("");
-  const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   /** Pending file uploads: chips shown above the textarea */
   const [pendingFiles, setPendingFiles] = useState<Array<{
     tempId: string;
@@ -844,6 +845,10 @@ export function ChatPanel() {
               await useChatStore
                 .getState()
                 .loadSessionMessages(selectedAgentId, targetSession.session_id);
+              // Pull session state (todos, model, provider, etc.) from backend
+              await useChatStore
+                .getState()
+                .fetchSessionState(selectedAgentId, targetSession.session_id);
             }
             isInitialLoadRef.current = false;
           };
@@ -856,6 +861,10 @@ export function ChatPanel() {
             const sessions = useAgentStore.getState().agents[selectedAgentId]?.sessions ?? [];
             if (rememberedId && sessions.some(s => s.session_id === rememberedId)) {
               useAgentStore.getState().switchSession(rememberedId, selectedAgentId);
+              // Pull session state (todos, model, provider, etc.) from backend
+              useChatStore
+                .getState()
+                .fetchSessionState(selectedAgentId, rememberedId);
             }
           };
           void restoreSessionSelection();
@@ -1094,19 +1103,20 @@ export function ChatPanel() {
   //   input empty       → stop current loop
   const handleStop = () => {
     const content = inputValue.trim();
-    if (content && selectedAgentId) {
+    if (content && selectedAgentId && currentSessionId) {
       // Add to queue — message waits in the queue box above the input area.
-      setQueuedMessages(prev => [...prev, content]);
+      useChatStore.getState().addQueuedMessage(selectedAgentId, currentSessionId, content);
       setInputValue("");
-    } else if (queuedMessages.length > 0 && selectedAgentId) {
+    } else if (queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
       // Click with queued messages: send all queued + stop current loop.
       userJustSentRef.current = true;
-      for (const msg of queuedMessages) {
+      const msgs = [...queuedMessages];
+      useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
+      for (const msg of msgs) {
         void sendMessage(msg, selectedAgentId, activeSkill?.name).then(() => {
           clearActiveSkill();
         });
       }
-      setQueuedMessages([]);
       sendStop(selectedAgentId);
     } else if (selectedAgentId) {
       // No queued messages: just stop
@@ -1115,12 +1125,16 @@ export function ChatPanel() {
   };
 
   const handleRemoveQueued = (index: number) => {
-    setQueuedMessages(prev => prev.filter((_, i) => i !== index));
+    if (selectedAgentId && currentSessionId) {
+      useChatStore.getState().removeQueuedMessage(selectedAgentId, currentSessionId, index);
+    }
   };
 
   const handleEditQueued = (index: number) => {
     setInputValue(queuedMessages[index]);
-    setQueuedMessages(prev => prev.filter((_, i) => i !== index));
+    if (selectedAgentId && currentSessionId) {
+      useChatStore.getState().removeQueuedMessage(selectedAgentId, currentSessionId, index);
+    }
   };
 
   // File upload handler: open file dialog, then upload via Tauri command
@@ -1338,9 +1352,9 @@ export function ChatPanel() {
 
   // Auto-send queued messages when agent finishes execution
   useEffect(() => {
-    if (!sending && queuedMessages.length > 0 && selectedAgentId) {
+    if (!sending && queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
       const msgs = [...queuedMessages];
-      setQueuedMessages([]);
+      useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
       for (const msg of msgs) {
         void sendMessage(msg, selectedAgentId);
       }

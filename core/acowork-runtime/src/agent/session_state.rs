@@ -42,6 +42,10 @@ pub struct SessionStateSnapshot {
     pub reasoning_effort: Option<String>,
     /// Temperature override, if set.
     pub temperature: Option<f32>,
+    /// Current todo list managed by the `todo_write` built-in tool.
+    /// Serialized as JSON so the Gateway and frontend can consume it
+    /// without additional protobuf message definitions.
+    pub todos_json: Option<String>,
 }
 
 /// A single item in the session-level todo list.

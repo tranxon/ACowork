@@ -75,6 +75,26 @@ impl super::loop_::AgentLoop {
         // Update shared snapshot slot for Gateway pull API
         if let Some(ref slot) = self.session_core.snapshot_slot {
             let status_json = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
+            // Serialize the todo list to JSON for the snapshot. Skip the allocation
+            // entirely when the list is empty (common case — most iterations have
+            // no active todo list). Errors are logged so they can be distinguished
+            // from "no todos" on the consumer side.
+            let todos_json = if self.session.todos.is_empty() {
+                None
+            } else {
+                let sid = self.session_core.session_id.clone().unwrap_or_default();
+                match serde_json::to_string(&self.session.todos) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %sid,
+                            error = %e,
+                            "Failed to serialize todos for session state snapshot; emitting empty"
+                        );
+                        None
+                    }
+                }
+            };
             let snapshot = SessionStateSnapshot {
                 session_id: self.session_core.session_id.clone().unwrap_or_default(),
                 status_json,
@@ -84,6 +104,7 @@ impl super::loop_::AgentLoop {
                 ratio: self.session.model_ratio(),
                 reasoning_effort: self.session.reasoning_effort().map(|e| e.to_string()),
                 temperature: Some(effective_temperature),
+                todos_json,
             };
             if let Ok(mut guard) = slot.write() {
                 *guard = Some(snapshot);

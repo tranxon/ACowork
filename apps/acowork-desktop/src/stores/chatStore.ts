@@ -59,6 +59,8 @@ interface SessionChatState {
   lastAccessed: number;
   /** Per-session todo list (from todo_write tool) */
   todos: TodoItem[];
+  /** Per-session queued messages (typed during streaming, sent when agent becomes idle) */
+  queuedMessages: string[];
   /** Per-session selected model */
   model: string | null;
   /** Per-session selected provider */
@@ -108,6 +110,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   sessionStatus: null,
   lastAccessed: 0,
   todos: [],
+  queuedMessages: [],
   model: null,
   provider: null,
   ratio: null,
@@ -346,6 +349,12 @@ interface ChatStore {
   removeAttachedContext: (agentId: string, sessionId: string, id: string) => void;
   /** Clear all attached chat context for a session */
   clearAttachedContext: (agentId: string, sessionId: string) => void;
+  /** Add a message to the per-session queue (typed during streaming) */
+  addQueuedMessage: (agentId: string, sessionId: string, message: string) => void;
+  /** Remove a message from the per-session queue by index */
+  removeQueuedMessage: (agentId: string, sessionId: string, index: number) => void;
+  /** Replace the entire per-session queue (e.g. after sending all) */
+  setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => void;
   /** ADR-015 Phase 5: Pull initial session state from backend (model/provider/status/ratio/etc.) */
   fetchSessionState: (agentId: string, sessionId: string) => Promise<void>;
 }
@@ -1499,6 +1508,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => updateSessionState(state, agentId, sessionId, { attachedContext: [] }));
   },
 
+  addQueuedMessage: (agentId: string, sessionId: string, message: string) => {
+    set((state) => {
+      const ss = getSessionState(state, agentId, sessionId);
+      return updateSessionState(state, agentId, sessionId, {
+        queuedMessages: [...ss.queuedMessages, message],
+      });
+    });
+  },
+
+  removeQueuedMessage: (agentId: string, sessionId: string, index: number) => {
+    set((state) => {
+      const ss = getSessionState(state, agentId, sessionId);
+      return updateSessionState(state, agentId, sessionId, {
+        queuedMessages: ss.queuedMessages.filter((_, i) => i !== index),
+      });
+    });
+  },
+
+  setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => {
+    set((state) => updateSessionState(state, agentId, sessionId, { queuedMessages: messages }));
+  },
+
   // ADR-015 Phase 5: Pull initial session state from backend.
   // Maps the /api/agents/{id}/sessions/{sid}/state response to SessionChatState fields.
   // Errors are non-fatal — warns and returns without blocking startup.
@@ -1520,6 +1551,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ratio?: number | null;
         reasoning_effort?: string | null;
         temperature?: number | null;
+        todos?: TodoItem[] | null;
       };
       const sessionPatch: Partial<SessionChatState> = {};
       if (typeof data.model === "string" && data.model) sessionPatch.model = data.model;
@@ -1527,6 +1559,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio;
       if (typeof data.reasoning_effort === "string" && data.reasoning_effort) sessionPatch.reasoningEffort = data.reasoning_effort;
       if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature;
+      if (data.todos && Array.isArray(data.todos)) {
+        sessionPatch.todos = data.todos as TodoItem[];
+      }
       if (Object.keys(sessionPatch).length > 0) {
         set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
       }
