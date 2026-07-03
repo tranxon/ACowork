@@ -382,9 +382,26 @@ pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> R
         .spawn()
         .map_err(|e| format!("Failed to spawn Gateway process: {}", e))?;
 
-    tracing::info!("[BOOT] Gateway process spawned, pid: {:?}", child.id());
+    let pid = child.id();
+    tracing::info!("[BOOT] Gateway process spawned, pid: {:?}", pid);
 
-    // 5) Store the handle. The next concurrent caller will see this
+    // 5) On Windows, create a Job Object with KILL_ON_JOB_CLOSE and assign
+    //    the Gateway process to it. When the desktop app exits (Ctrl+C,
+    //    crash, or normal), the OS closes the job handle, automatically
+    //    terminating the entire process tree (Gateway → Runtime → Embed →
+    //    LSP). On non-Windows this is a no-op.
+    #[cfg(target_os = "windows")]
+    {
+        let job = crate::win_job::create_gateway_job()
+            .map_err(|e| format!("Failed to create Job Object: {}", e))?;
+        if let Err(e) = crate::win_job::assign_pid_to_job(&job, pid) {
+            tracing::warn!(error = %e, "Failed to assign Gateway to Job Object");
+        }
+        let mut job_guard = state.gateway_job.lock().await;
+        *job_guard = Some(job);
+    }
+
+    // 6) Store the handle. The next concurrent caller will see this
     //    inside the same lock and return early at step 1.
     *proc_guard = Some(child);
 
@@ -403,6 +420,14 @@ pub async fn stop_local_gateway(state: tauri::State<'_, AppState>) -> Result<(),
     if let Some(child) = proc.take() {
         let pid = child.id();
         tracing::info!(pid = pid, "Stopping local Gateway process tree");
+
+        // Drop the Windows Job Object handle so KILL_ON_JOB_CLOSE fires.
+        #[cfg(target_os = "windows")]
+        {
+            let mut job_guard = state.gateway_job.lock().await;
+            *job_guard = None;
+        }
+
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("taskkill")

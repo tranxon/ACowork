@@ -6,6 +6,9 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::gateway_client::GatewayClient;
 
+#[cfg(target_os = "windows")]
+use crate::win_job::JobHandle;
+
 /// Gateway deployment mode, mirrors frontend `GatewayMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayMode {
@@ -44,6 +47,11 @@ pub struct AppState {
     /// Handle to the locally spawned Gateway process (None in remote mode
     /// or before `init_local_gateway` is called).
     pub gateway_process: Arc<Mutex<Option<Child>>>,
+    /// Windows Job Object that automatically kills the Gateway process tree
+    /// when the desktop app exits (any exit path: Ctrl+C, crash, kill).
+    /// On non-Windows platforms this field does not exist.
+    #[cfg(target_os = "windows")]
+    pub gateway_job: Arc<Mutex<Option<JobHandle>>>,
 }
 
 impl AppState {
@@ -57,6 +65,8 @@ impl AppState {
             gateway: Arc::new(RwLock::new(GatewayClient::new())),
             gateway_mode: Arc::new(RwLock::new(GatewayMode::Local)),
             gateway_process: Arc::new(Mutex::new(None)),
+            #[cfg(target_os = "windows")]
+            gateway_job: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -90,6 +100,15 @@ impl Drop for AppState {
                         .output();
                 }
                 let _ = child.wait();
+            }
+        }
+        // On Windows, drop the Job Object handle so KILL_ON_JOB_CLOSE fires.
+        // On abrupt exit (Ctrl+C) this Drop may not run, but the OS closes
+        // all handles anyway, triggering the same cleanup.
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(mut job) = self.gateway_job.try_lock() {
+                *job = None;
             }
         }
     }

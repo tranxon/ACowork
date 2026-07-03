@@ -30,6 +30,163 @@ mod tray;
 use state::AppState;
 use tauri::Manager;
 
+// ── Windows Job Object for Gateway process tree cleanup ────────────────────
+//
+// On Windows, Ctrl+C in dev mode (npm run tauri dev) sends CTRL_C_EVENT.
+// The default handler calls ExitProcess without unwinding Rust destructors,
+// so RunEvent::Exit and Drop may not fire, leaving orphaned processes.
+//
+// This module creates a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+// When the desktop app exits (Ctrl+C, crash, task-kill — *any* reason), the OS
+// closes all handles, which closes the job handle, which automatically
+// terminates EVERY process in the job (Gateway → Runtime → Embed → LSP).
+//
+// Child processes automatically inherit job membership, so assigning only the
+// Gateway process is sufficient to cover the entire process tree.
+//
+// On non-Windows platforms SIGINT is sent to the entire foreground process
+// group automatically, so no special handling is needed.
+#[cfg(target_os = "windows")]
+pub mod win_job {
+    #![allow(non_upper_case_globals)]
+    use std::ffi::c_void;
+
+    type HANDLE = *mut c_void;
+    type BOOL = i32;
+    type DWORD = u32;
+
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x2000;
+    const JobObjectExtendedLimitInformation: u32 = 9;
+    const PROCESS_SET_QUOTA: DWORD = 0x0100;
+    const PROCESS_TERMINATE: DWORD = 0x0001;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        PerProcessUserTimeLimit: i64,
+        PerJobUserTimeLimit: i64,
+        LimitFlags: DWORD,
+        MinimumWorkingSetSize: usize,
+        MaximumWorkingSetSize: usize,
+        ActiveProcessLimit: DWORD,
+        Affinity: usize,
+        PriorityClass: DWORD,
+        SchedulingClass: DWORD,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+        IoInfo: [u8; 48],
+        ProcessMemoryLimit: usize,
+        JobMemoryLimit: usize,
+        PeakProcessMemoryUsed: usize,
+        PeakJobMemoryUsed: usize,
+    }
+
+    unsafe extern "system" {
+        fn CreateJobObjectW(
+            lpJobAttributes: *const c_void,
+            lpName: *const u16,
+        ) -> HANDLE;
+        fn SetInformationJobObject(
+            hJob: HANDLE,
+            JobObjectInfoClass: u32,
+            lpJobObjectInfo: *const c_void,
+            cbJobObjectInfoLength: DWORD,
+        ) -> BOOL;
+        fn AssignProcessToJobObject(
+            hJob: HANDLE,
+            hProcess: HANDLE,
+        ) -> BOOL;
+        fn OpenProcess(
+            dwDesiredAccess: DWORD,
+            bInheritHandle: BOOL,
+            dwProcessId: DWORD,
+        ) -> HANDLE;
+        fn CloseHandle(
+            hObject: HANDLE,
+        ) -> BOOL;
+    }
+
+    /// Owned Windows Job Object handle.
+    ///
+    /// Dropping this handle (including via OS handle-table cleanup on process
+    /// exit) triggers JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, terminating all
+    /// processes associated with the job.
+    pub struct JobHandle(HANDLE);
+
+    // JobHandle is a kernel handle — the underlying HANDLE can be used from
+    // any thread.
+    unsafe impl Send for JobHandle {}
+    unsafe impl Sync for JobHandle {}
+
+    impl Drop for JobHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { CloseHandle(self.0); }
+            }
+        }
+    }
+
+    /// Create a new Job Object configured to kill all processes when the last
+    /// handle is closed.
+    pub fn create_gateway_job() -> Result<JobHandle, String> {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err("Failed to create Windows Job Object".into());
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            let result = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info) as *const _ as *const c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
+            );
+            if result == 0 {
+                CloseHandle(job);
+                return Err("Failed to set Job Object KILL_ON_CLOSE limit".into());
+            }
+
+            tracing::info!("Created Windows Job Object with KILL_ON_JOB_CLOSE");
+            Ok(JobHandle(job))
+        }
+    }
+
+    /// Assign the process identified by `pid` to the given job.
+    /// After assignment, the process and all its future children are in the job
+    /// and will be terminated when the job handle is closed.
+    pub fn assign_pid_to_job(job: &JobHandle, pid: u32) -> Result<(), String> {
+        unsafe {
+            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if process.is_null() {
+                return Err(format!(
+                    "Failed to open process PID {} for job assignment",
+                    pid
+                ));
+            }
+
+            let result = AssignProcessToJobObject(job.0, process);
+            CloseHandle(process);
+
+            if result == 0 {
+                return Err(format!(
+                    "Failed to assign PID {} to Job Object (process may already be in a job)",
+                    pid
+                ));
+            }
+
+            tracing::info!(pid = pid, "Assigned Gateway process to Job Object");
+            Ok(())
+        }
+    }
+}
+
 // ── System-sleep detection (Windows / macOS / Linux) ────────────────────────
 //
 // The frontend's old time-gap heuristic (heartbeat + visibilitychange) could
