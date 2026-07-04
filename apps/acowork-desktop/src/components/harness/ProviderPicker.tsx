@@ -84,7 +84,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
           {/* Add Custom Provider button */}
           <button
             onClick={onAddCustom}
-            className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-600 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
+            className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-600 transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-[var(--color-accent)] dark:hover:text-[var(--color-accent)]"
           >
             <Plus className="h-4 w-4" />
             {t("harness.addCustomProvider")}

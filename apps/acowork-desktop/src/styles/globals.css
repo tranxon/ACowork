@@ -27,9 +27,9 @@
   /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
   --color-chat-badge: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — sender-role label pill */
-  --color-chat-user: color-mix(in srgb, var(--color-accent) 50%, transparent);
+  --color-chat-user: color-mix(in srgb, var(--color-accent) 100%, transparent);
   /* = accent 50% — user message bubble */
-  --color-chat-user-text: hsl(240 10% 3.9%);
+  --color-chat-user-text: hsl(240 100% 100%);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
 
   /* Border radius — 4-tier unified scale
@@ -170,9 +170,9 @@
   /* = zinc-700, #3f3f46 — container border */
   --color-chat-badge: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — sender-role label pill */
-  --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
+  --color-chat-user: color-mix(in srgb, var(--color-accent) 100%, transparent);
   /* = accent 50% — user message bubble */
-  --color-chat-user-text: hsl(240 10% 3.9%);
+  --color-chat-user-text: hsl(240 10% 4%);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
 
   /* Shimmer gradient stops (dark) */

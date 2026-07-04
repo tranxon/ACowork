@@ -108,8 +108,8 @@ export const ScrollableTabBar = forwardRef<ScrollableTabBarHandle, ScrollableTab
                 )}
                 <div
                     ref={scrollRef}
-                    className="flex flex-1 min-w-0 items-center overflow-x-auto gap-0.5 cursor-grab active:cursor-grabbing [&::-webkit-scrollbar]:hidden"
-                    style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+                    className="flex flex-1 min-w-0 overflow-visible gap-0.5 cursor-grab active:cursor-grabbing [&::-webkit-scrollbar]:hidden"
+                    style={{ scrollbarWidth: "none", msOverflowStyle: "none", clipPath: "inset(0 0 -1px 0)" }}
                     onMouseDown={handleDragStart}
                 >
                     {children}

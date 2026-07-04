@@ -4,9 +4,14 @@ import { cn } from "../../lib/utils";
 // ── TabUnderline — animated center-expanding accent line ──────────────
 
 function TabUnderline({ active }: { active: boolean }) {
+    // 2px tall + shifted down 1px so the accent line fully overlaps the
+    // 1px `border-b` divider drawn by the tab container. Because this span
+    // is absolutely positioned inside the tab (which sits inside the
+    // container that owns the border), it naturally paints on top of the
+    // border — no z-index needed.
     return (
         <span
-            className={`absolute bottom-0 left-0 right-0 h-[1px] bg-[var(--color-accent)] transition-transform duration-200 ease-out origin-center ${active ? "scale-x-100" : "scale-x-0"}`}
+            className={`absolute -bottom-px left-0 right-0 h-[2px] bg-[var(--color-accent)] transition-transform duration-200 ease-out origin-center ${active ? "scale-x-100" : "scale-x-0"}`}
         />
     );
 }

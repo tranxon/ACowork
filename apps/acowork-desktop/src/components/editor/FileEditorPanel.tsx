@@ -1250,7 +1250,7 @@ export function FileEditorPanel({ width }: { width: number }) {
             style={{ width }}
         >
             {/* Tab bar */}
-            <div className="flex items-center bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
+            <div className="flex bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
                 <ScrollableTabBar
                     activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
                     activeItemId={activeFileId ?? undefined}
@@ -1302,53 +1302,63 @@ export function FileEditorPanel({ width }: { width: number }) {
                     })}
                 </ScrollableTabBar>
 
-                {/* Locate-in-tree button — only for workspace files (not URL previews).
-                    Disabled (greyed out) when the file belongs to a different agent
-                    or a different workspace than the currently active session. */}
-                {activeFile && (
-                    <Tooltip
-                        content={locateDisabledReason
-                            ? t(`fileEditor.locateDisabled.${locateDisabledReason}`)
-                            : t("fileEditor.locateInTree")}
-                        variant="plain"
-                    >
-                        <button
-                            aria-label={t("fileEditor.locateInTree")}
-                            onClick={handleLocateInTree}
-                            disabled={locateDisabled}
-                            className={cn(
-                                "flex items-center justify-center rounded p-1 transition-colors shrink-0",
+                {/* Right-side action group: Locate-in-tree + Save.
+                    Wrapped in a single flex container so the two buttons can sit
+                    flush next to each other with their own gap, while the whole
+                    group keeps a right-edge margin (pr-2) away from the panel edge.
+                    Each button is locked to a fixed 20×20 square (h-5 w-5 + inline-flex)
+                    — without that, the parent flex container's intrinsic height
+                    (~28px from py-[--tab-py] + line-height) would stretch the buttons
+                    vertically, producing a tall-and-narrow hit area. */}
+                <div className="flex items-center gap-1 pr-2 shrink-0">
+                    {/* Locate-in-tree button — only for workspace files (not URL previews).
+                        Disabled (greyed out) when the file belongs to a different agent
+                        or a different workspace than the currently active session. */}
+                    {activeFile && (
+                        <Tooltip
+                            content={locateDisabledReason
+                                ? t(`fileEditor.locateDisabled.${locateDisabledReason}`)
+                                : t("fileEditor.locateInTree")}
+                            variant="plain"
+                        >
+                            <button
+                                aria-label={t("fileEditor.locateInTree")}
+                                onClick={handleLocateInTree}
+                                disabled={locateDisabled}
+                                className={cn(
+                                "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                                 locateDisabled
                                     ? "text-zinc-300 dark:text-zinc-600 cursor-not-allowed"
                                     : "text-zinc-500 hover:bg-zinc-200 hover:text-[var(--color-accent)] dark:hover:bg-zinc-700",
                             )}
-                        >
-                            <Locate className="h-3.5 w-3.5" />
-                        </button>
-                    </Tooltip>
-                )}
+                            >
+                                <Locate className="h-3.5 w-3.5" />
+                            </button>
+                        </Tooltip>
+                    )}
 
-                {/* Save button — only for editable files in edit mode */}
-                {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
-                    <Tooltip content={t("fileEditor.save")} variant="plain">
-                        <button
-                            onClick={() => activeFile.dirty && void saveFile(activeFile.id)}
-                            disabled={!activeFile.dirty || activeFile.saving}
-                            className={cn(
-                                "flex items-center justify-center rounded p-1 transition-colors shrink-0",
-                                activeFile.dirty
-                                    ? "text-[var(--color-accent)] hover:bg-zinc-200 dark:hover:bg-zinc-700"
-                                    : "text-zinc-300 dark:text-zinc-600 cursor-default",
-                            )}
-                        >
-                            {activeFile.saving ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                                <Save className="h-3.5 w-3.5" />
-                            )}
-                        </button>
-                    </Tooltip>
-                )}
+                    {/* Save button — only for editable files in edit mode */}
+                    {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
+                        <Tooltip content={t("fileEditor.save")} variant="plain">
+                            <button
+                                onClick={() => activeFile.dirty && void saveFile(activeFile.id)}
+                                disabled={!activeFile.dirty || activeFile.saving}
+                                className={cn(
+                                    "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
+                                    activeFile.dirty
+                                        ? "text-[var(--color-accent)] hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                        : "text-zinc-300 dark:text-zinc-600 cursor-default",
+                                )}
+                            >
+                                {activeFile.saving ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                    <Save className="h-3.5 w-3.5" />
+                                )}
+                            </button>
+                        </Tooltip>
+                    )}
+                </div>
             </div>
 
             {/* Editor area — Editor is mounted whenever there is at least one

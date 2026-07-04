@@ -566,6 +566,19 @@ export function ChatPanel() {
   });
   const showWorkingItem = sending && !hasStreamingPlaceholder;
 
+  // The agent header (avatar + name) above the working status should ONLY
+  // appear when the working indicator immediately follows a user message —
+  // i.e., the agent is about to respond to a NEW user turn.  For intermediate
+  // streaming gaps (e.g., a fresh thinking turn after a tool result), the
+  // last item in the chat is an agent-side message (thought/explore), not a
+  // user message, and repeating the avatar+name would feel noisy.
+  // This mirrors the existing "Agent header" rule inside the virtual list,
+  // which only renders when the previous item is a user message.
+  const lastDisplayItem = displayMessages[displayMessages.length - 1];
+  const isLastMessageUser =
+    !!lastDisplayItem && (lastDisplayItem as ChatMessage).type === "user";
+  const showWorkingItemHeader = showWorkingItem && isLastMessageUser;
+
   // Virtual scrolling: only render visible items (messages + optional compacting indicator).
   // Working indicator is rendered OUTSIDE the virtual list (below it) to avoid messing up
   // virtualCount and causing other messages to disappear when working is shown.
@@ -958,6 +971,19 @@ export function ChatPanel() {
         // count may already be non-zero because messages are cached, so the
         // explicit restore window prevents the virtualizer from staying at
         // offset 0 until the user clicks the down arrow.
+        //
+        // FIX: Reset scrollTop to 0 synchronously before scrollToIndex to
+        // prevent the virtualizer from using a stale scrollTop from the
+        // previous session.  When switching from a long session to a short
+        // one, the old scrollTop (e.g. 5000px) can exceed the new totalSize,
+        // causing the virtualizer to render zero items — a white screen.
+        // This is reproducible on macOS WKWebView where scrollToIndex uses
+        // Element.scrollTo() which is async and may not take effect before
+        // the virtualizer reads scrollTop for visibility calculation.
+        const container = messagesContainerRef.current;
+        if (container) {
+          container.scrollTop = 0;
+        }
         virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
         pinnedToBottomRef.current = true;
       } else if (virtualCount > prevCount) {
@@ -1509,7 +1535,7 @@ export function ChatPanel() {
                           transform: `translateY(${virtualRow.start}px)`,
                         }}
                       >
-                        <div className="flex items-center gap-1.5 px-4 py-1.5 select-none">
+                        <div className="flex items-center gap-1.5 ml-12 px-4 py-1.5 select-none">
                           <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
                           <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.compacting")}</span>
                         </div>
@@ -1617,11 +1643,44 @@ export function ChatPanel() {
                 affect virtualCount and cause other messages to disappear.
                 Shows while the session is "streaming" but no streaming placeholder
                 message exists yet (gap between session_status→streaming and the
-                first new_data_available poll response, ~500-2000ms). */}
+                first new_data_available poll response, ~500-2000ms).
+                Includes the agent header (avatar + name + role) above the status
+                line so the user sees WHO is preparing to respond before the
+                streaming content arrives; otherwise the working status appears
+                alone and the agent header suddenly pops in when the first
+                streaming event arrives, which feels jarring.
+                Header markup is identical to the one rendered before
+                explore_group (see "Agent header" comment above), so the
+                transition working → streaming explore_block is seamless. */}
             {showWorkingItem && (
-              <div className="flex items-center gap-1.5 px-4 py-1.5 select-none">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
+              <div className="select-none">
+                {showWorkingItemHeader && (
+                  <div className="flex items-center gap-2 mb-2 mt-1">
+                    <AgentAvatar
+                      agentId={selectedAgentId ?? ""}
+                      displayName={agentDisplayName}
+                      avatarUrl={selectedAgent?.avatar}
+                      version={selectedAgent?.version}
+                      builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
+                      size={40}
+                      className="shrink-0"
+                    />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                        {agentDisplayName}
+                      </span>
+                      {selectedAgent?.role && (
+                        <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
+                          {selectedAgent.role}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <div className="flex items-center gap-1.5 ml-12 px-4 py-1.5">
+                  <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                  <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
+                </div>
               </div>
             )}
             {/* Debug paused banner — shown when the agent is in dev_mode and
