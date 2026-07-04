@@ -308,6 +308,7 @@ export interface ChatMessage {
   errorDetail?: string;
   /** For type=error: error type string for conditional rendering */
   errorType?: string;
+
 }
 
 /** Compaction event metadata (mirrors backend `CompactionEventMeta`).

@@ -750,7 +750,8 @@
   },
   "thinkBlock": {
     "thinking": "正在思考",
-    "thought": "深度思考"
+    "thought": "深度思考",
+    "showingLatest": "僅顯示最新內容"
   },
   "tools": {
     "memory_recall": { "running": "回憶中", "done": "已回憶" },

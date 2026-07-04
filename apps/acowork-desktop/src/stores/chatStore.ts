@@ -166,6 +166,16 @@ const DEFAULT_AGENT_STATE: AgentState = {
 const MAX_CACHED_SESSIONS = 32;
 const MAX_OPEN_TABS = 32;
 
+/**
+ * Maximum content length (chars) retained for streaming placeholders in
+ * background (non-active) sessions.  When a session is not the active tab,
+ * its accumulated streaming content is truncated to this tail length to
+ * prevent unbounded memory growth from concurrent deep-thinking sessions.
+ * The full content is re-fetched from the backend when the user switches
+ * back to the session.
+ */
+const MAX_BACKGROUND_STREAMING_CONTENT = 10_000;
+
 // ---------------------------------------------------------------------------
 // Helper functions for state access
 // ---------------------------------------------------------------------------
@@ -1276,10 +1286,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           //     complete JSONL line (or when streaming ends entirely).
           const placeholderPrefix = `msg-streaming-${sessionId}-`;
 
-          // 1) Append new complete lines from JSONL first (authoritative order).
-          if (newMessages.length > 0) {
-            messages = [...messages, ...newMessages];
-          }
+          // 1) Append new JSONL messages. Simple dedup by ID — messages
+          //    already in the list (e.g. optimistic user message) are skipped.
+          //    JSONL order is preserved because new messages are always
+          //    appended after existing ones. The only case where a new message
+          //    should appear before the last user message is a compaction
+          //    record — but that is handled by a one-shot poll in the
+          //    compacting_ended handler, so the compaction record is already
+          //    in the list before the user sends their next message.
+          messages = [...messages, ...newMessages];
 
           // 2) Reconcile placeholders. Drop every streaming placeholder that
           //    does not match the current streaming line — those lines have
@@ -1309,18 +1324,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           //    When streaming.content is empty (no new delta), the existing
           //    placeholder is preserved by the filter above — we skip the
           //    append to avoid adding an empty string.
+          //
+          //    For background (non-active) sessions, content is truncated to
+          //    MAX_BACKGROUND_STREAMING_CONTENT to prevent unbounded memory
+          //    growth from concurrent deep-thinking sessions.
           if (streaming && streaming.content && currentPlaceholderId) {
+            const isActiveSession = state.agentStates[agentId]?.activeSessionId === sessionId;
             const idx = messages.findIndex((m) => m.id === currentPlaceholderId);
             if (idx >= 0) {
+              const newContent = messages[idx].content + streaming.content;
+              const cappedContent = isActiveSession
+                ? newContent
+                : newContent.slice(-MAX_BACKGROUND_STREAMING_CONTENT);
               messages[idx] = {
                 ...messages[idx],
-                content: messages[idx].content + streaming.content,
+                content: cappedContent,
               };
             } else {
+              const cappedContent = isActiveSession
+                ? streaming.content
+                : streaming.content.slice(-MAX_BACKGROUND_STREAMING_CONTENT);
               const streamingMsg: ChatMessage = {
                 id: currentPlaceholderId,
                 type: streaming.role === "thought" ? "thought" : "assistant",
-                content: streaming.content,
+                content: cappedContent,
                 timestamp: Date.now(),
                 startTime: Date.now(),
                 ...getAgentSenderInfo(agentId),
@@ -2012,6 +2039,18 @@ function handleMessageEvent(
     case "compacting_ended":
       if (sid) {
         set((state) => updateSessionState(state, agentId, sid, { isCompacting: false }));
+        // ADR-021: Do a one-shot poll to fetch the compaction record just
+        // written to JSONL.  The PollingManager is stopped when the session
+        // is idle, so without this explicit poll the compaction record won't
+        // appear until the user sends their next message — which would cause
+        // the compaction record to display AFTER the optimistic user message.
+        const sessionState = getSessionState(get(), agentId, sid);
+        if (sessionState) {
+          get().loadSessionMessages(
+            agentId, sid, undefined, 50, "backward",
+            sessionState.pollLineNumber, sessionState.pollCharOffset,
+          );
+        }
       }
       break;
 

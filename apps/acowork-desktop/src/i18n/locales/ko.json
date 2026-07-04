@@ -750,7 +750,8 @@
   },
   "thinkBlock": {
     "thinking": "생각 중",
-    "thought": "심층 사고"
+    "thought": "심층 사고",
+    "showingLatest": "최신만 표시"
   },
   "tools": {
     "memory_recall": { "running": "기억 회상 중", "done": "기억 회상 완료" },

@@ -755,7 +755,8 @@
   },
   "thinkBlock": {
     "thinking": "正在思考",
-    "thought": "深度思考"
+    "thought": "深度思考",
+    "showingLatest": "仅显示最新内容"
   },
   "tools": {
     "memory_recall": { "running": "回忆中", "done": "已回忆" },

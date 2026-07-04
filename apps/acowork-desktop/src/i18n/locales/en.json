@@ -807,7 +807,8 @@
   },
   "thinkBlock": {
     "thinking": "Thinking",
-    "thought": "Thought"
+    "thought": "Thought",
+    "showingLatest": "Showing latest"
   },
   "tools": {
     "memory_recall": { "running": "Recalling", "done": "Recalled" },

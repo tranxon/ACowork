@@ -752,7 +752,8 @@
   },
   "thinkBlock": {
     "thinking": "思考中",
-    "thought": "深い思考"
+    "thought": "深い思考",
+    "showingLatest": "最新のみ表示"
   },
   "tools": {
     "memory_recall": { "running": "記憶を思い出し中", "done": "記憶を思い出した" },

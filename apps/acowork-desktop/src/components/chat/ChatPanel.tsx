@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, Children, isValidElement } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, Children, isValidElement } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
@@ -27,6 +27,7 @@ import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { CompactionCard } from "./CompactionCard";
+import { useSessionScope } from "./useSessionScope";
 
 /**
  * Merge an internal ref (used for click-outside detection) with an external
@@ -74,7 +75,7 @@ function dedent(code: string): string {
  * Text segments → ReactMarkdown
  * Mermaid blocks → MermaidBlock (no fence, no indentation confusion)
  */
-function StreamMarkdown({ content }: { content: string }) {
+const StreamMarkdown = React.memo(function StreamMarkdown({ content }: { content: string }) {
   // Split on ```mermaid ... ``` (non-greedy, handles indented closing fences)
   const segments = content.split(/(```mermaid\n[\s\S]*?\n[ \t]*```)/g).filter(Boolean);
 
@@ -99,7 +100,7 @@ function StreamMarkdown({ content }: { content: string }) {
       })}
     </>
   );
-}
+}, (prev, next) => prev.content === next.content);
 
 /** ReactMarkdown component overrides — code blocks with title bar */
 const markdownComponents = {
@@ -169,6 +170,15 @@ let lastLoadedSessionId: string | null = null;
 const CHAT_BOTTOM_THRESHOLD_PX = 120;
 const BOTTOM_RESTORE_WINDOW_MS = 1200;
 
+// Stable empty array reference for the `messages` Zustand selector.
+// Returning `[]` literals from a selector creates a new reference on every
+// `getSnapshot` call, which trips useSyncExternalStore's "The result of
+// getSnapshot should be cached" check and produces a "Maximum update depth
+// exceeded" infinite re-render loop during transient states (mount, agent
+// switch, session switch) where the agent's session entry does not yet
+// exist. The same pattern is already used in ResultsPanel.tsx.
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
 interface ChatScrollSnapshot {
   scrollOffset: number;
   pinnedToBottom: boolean;
@@ -190,14 +200,12 @@ export function ChatPanel() {
   // characters progressively over that window so the text appears to
   // type out rather than flash into existence all at once.
   //
-  // animStateRef:  Map<msgId, { displayedLen }>  — persists across renders
-  // animTick:      number  — tick counter, incremented each RAF frame to
-  //                trigger re-render.  A state (not ref) is needed because
-  //                React must re-render to show the next set of characters.
-  // rafRef:        RAF handle for cleanup on unmount / streaming-end.
-  const animStateRef = useRef<Map<string, { displayedLen: number }>>(new Map());
-  const [animTick, setAnimTick] = useState(0);
-  const rafRef = useRef<number>(0);
+  // animState (scope.animState): Map<msgId, { displayedLen }> — persists across renders
+  // session.animTick: number — tick counter, incremented each RAF frame to
+  //           trigger re-render.  A state (not ref) is needed because
+  //           React must re-render to show the next set of characters.
+  // rafId (scope.rafId): RAF handle for cleanup on unmount / streaming-end.
+  // All three are managed by useSessionScope and reset on session change.
 
   // ── Toolbar responsive collapse ──────────────────────────────────
   // The bottom toolbar (model / think / workspace / skills + upload buttons)
@@ -368,15 +376,32 @@ export function ChatPanel() {
     };
   }, [selectedAgent?.running]);
 
-  // Per-agent + per-session state selectors
-  // Two-level mapping: agentStates[agentId].sessionStates[sessionId]
+  // Per-agent + per-session state selectors.
+  // messages and sessionStatus are split into granular selectors because
+  // they change at different frequencies: messages updates every ~500ms
+  // poll cycle during streaming, while sessionStatus only changes on
+  // state transitions (idle→streaming→idle).  Keeping them separate
+  // prevents sessionStatus-derived values (sending, etc.) from
+  // re-evaluating on every poll tick.
+  const messages = useChatStore((s) => {
+    if (!selectedAgentId) return EMPTY_MESSAGES;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return EMPTY_MESSAGES;
+    return agent.sessionStates[agent.activeSessionId]?.messages ?? EMPTY_MESSAGES;
+  });
+  const sessionStatus = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.sessionStatus ?? null;
+  });
+  // Remaining session fields — change infrequently, single selector is fine.
   const sessionState = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId] ?? null;
   });
-  const messages = sessionState?.messages ?? [];
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
   const pendingApproval = sessionState?.pendingApproval ?? {};
   const pendingQuestion = sessionState?.pendingQuestion ?? null;
@@ -388,14 +413,21 @@ export function ChatPanel() {
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
   // No optimistic flags — the backend pushes session_state_changed within ~50ms.
-  const sending = sessionState
-    ? (sessionState.sessionStatus?.status === "streaming"
-      || sessionState.sessionStatus?.status === "waiting_approval"
-      || sessionState.sessionStatus?.status === "paused")
+  const sending = sessionStatus
+    ? (sessionStatus.status === "streaming"
+      || sessionStatus.status === "waiting_approval"
+      || sessionStatus.status === "paused")
     : false;
   const currentModel = sessionState?.model ?? null;
   const currentProvider = sessionState?.provider ?? null;
   const currentReasoningEffort = sessionState?.reasoningEffort ?? null;
+
+  // User profile fields — subscribed at ChatPanel level and passed as props
+  // to MessageBubble so React.memo can detect profile changes (name/avatar
+  // edits should update all rendered message bubbles instantly).
+  const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
+  const userAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
+  const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
 
   // Global state and actions — selectors to avoid full-store re-render
   const wsMap = useChatStore((s) => s.wsMap);
@@ -417,75 +449,39 @@ export function ChatPanel() {
   const currentScrollKey = selectedAgentId && currentSessionId ? `${selectedAgentId}:${currentSessionId}` : null;
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
-  const [inputValue, setInputValue] = useState("");
-  /** Pending file uploads: chips shown above the textarea */
-  const [pendingFiles, setPendingFiles] = useState<Array<{
-    tempId: string;
-    filename: string;
-    format: string;
-    size: number;
-    status: "uploading" | "success" | "error";
-    documentId?: string;
-    errorMessage?: string;
-  }>>([]);
-  /** Pending image selections: thumbnails shown above the textarea */
-  const [pendingImages, setPendingImages] = useState<Array<{
-    tempId: string;
-    filename: string;
-    base64Url: string;
-    width: number;
-    height: number;
-  }>>([]);
-  const [showImageUnsupportedDialog, setShowImageUnsupportedDialog] = useState(false);
-  const [imageCapableModels, setImageCapableModels] = useState<ModelEntry[]>([]);
+
+  // ── Per-session scope ──────────────────────────────────────────────
+  // All mutable state that is scoped to a single session lives in this
+  // hook.  On session change the entire scope is atomically reset to
+  // defaults, eliminating the class of bugs where per-session refs/state
+  // leak across session switches.
+  const session = useSessionScope(currentSessionId);
+
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
-  const [todosCollapsed, setTodosCollapsed] = useState(false);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   // Auto-collapse todo list when all tasks are completed
   useEffect(() => {
     if (todos.length === 0) return;
     if (todos.every(t => t.status === "completed")) {
-      setTodosCollapsed(true);
+      session.setTodosCollapsed(true);
     }
-  }, [todos]);
+  }, [todos, session.setTodosCollapsed]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const prevScrollHeightRef = useRef<number>(0);
-  const isLoadingMoreRef = useRef<boolean>(false);
-  const isInitialLoadRef = useRef<boolean>(false);
   const initAbortedRef = useRef(false);
   /** Tracks previous running state to detect genuine agent stop vs transient remount. */
   const wasRunningRef = useRef(false);
-  /** True immediately after the user sends a message — used to force-scroll to
-   *  bottom (jump, not smooth) in the next useLayoutEffect, even when the user
-   *  had scrolled far up into history. */
-  const userJustSentRef = useRef(false);
-  /** True while the user is at / near the bottom and hasn't manually scrolled
-   *  away.  Used by the ResizeObserver to keep content pinned when virtual
-   *  items grow (e.g. thinking block streams in). */
-  const pinnedToBottomRef = useRef(false);
   /** Timestamp of the last compositionEnd event. On macOS WKWebView, compositionEnd
    *  fires BEFORE the keydown(Enter) that confirmed the IME selection, so
    *  isComposing is already false when keydown runs. We use a time-window
    *  check instead: if compositionEnd happened within the last 300ms, the
    *  Enter was almost certainly an IME confirmation, not a send intent. */
   const lastCompositionEndRef = useRef(0);
-  /** Tracks whether the thinking indicator was visible in the previous render.
-   *  When it transitions from false → true (first appearance in a turn),
-   *  we force-scroll to bottom so the expanded thinking content is visible. */
-  const thinkingWasShowingRef = useRef(false);
   /** True only during the first useEffect run of this mount. */
   const justMountedRef = useRef(true);
   /** Session key captured on unmount so chat navigation can restore the scroll position. */
   const scrollSnapshotKeyRef = useRef<string | null>(null);
-  /** When returning from another top-level view shortly after leaving the bottom,
-   *  force the initial virtualizer mount back to bottom.  This avoids TanStack
-   *  Virtual starting at offset 0 before measurements settle on remount. */
-  const restoreBottomUntilRef = useRef(0);
-  /** Ensures a saved scroll snapshot is applied only once per session mount. */
-  const restoredScrollKeyRef = useRef<string | null>(null);
 
   const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
   scrollSnapshotKeyRef.current = currentScrollKey;
@@ -567,17 +563,35 @@ export function ChatPanel() {
   const showWorkingItem = sending && !hasStreamingPlaceholder;
 
   // The agent header (avatar + name) above the working status should ONLY
-  // appear when the working indicator immediately follows a user message —
-  // i.e., the agent is about to respond to a NEW user turn.  For intermediate
-  // streaming gaps (e.g., a fresh thinking turn after a tool result), the
-  // last item in the chat is an agent-side message (thought/explore), not a
-  // user message, and repeating the avatar+name would feel noisy.
-  // This mirrors the existing "Agent header" rule inside the virtual list,
-  // which only renders when the previous item is a user message.
-  const lastDisplayItem = displayMessages[displayMessages.length - 1];
-  const isLastMessageUser =
-    !!lastDisplayItem && (lastDisplayItem as ChatMessage).type === "user";
-  const showWorkingItemHeader = showWorkingItem && isLastMessageUser;
+  // appear when the working indicator follows a user message — i.e., the
+  // agent is about to respond to a NEW user turn.  For intermediate streaming
+  // gaps (e.g., a fresh thinking turn after a tool result), the last item in
+  // the chat is an agent-side message (thought/explore), not a user message,
+  // and repeating the avatar+name would feel noisy.
+  //
+  // Scan backwards past compaction/system/document_upload messages that may
+  // be interleaved between the user message and the working indicator (e.g.,
+  // when a compaction event is loaded via poll after the user message was
+  // optimistically added).
+  const showWorkingItemHeader = (() => {
+    if (!showWorkingItem) return false;
+    for (let i = displayMessages.length - 1; i >= 0; i--) {
+      const item = displayMessages[i];
+      const itemType = 'type' in item
+        ? (item as ChatMessage).type
+        : 'explore_group';
+      if (itemType === 'user') return true;
+      if (
+        itemType === 'compaction' ||
+        itemType === 'system' ||
+        itemType === 'document_upload'
+      ) {
+        continue;
+      }
+      return false;
+    }
+    return false;
+  })();
 
   // Virtual scrolling: only render visible items (messages + optional compacting indicator).
   // Working indicator is rendered OUTSIDE the virtual list (below it) to avoid messing up
@@ -591,6 +605,34 @@ export function ChatPanel() {
     estimateSize: () => 80,
     overscan: 5,
     gap: 4,
+    // Override scrollToFn to use synchronous scrollTop assignment instead of
+    // element.scrollTo().  On WKWebView (macOS Safari), element.scrollTo() can
+    // be asynchronous even with behavior:"auto" — the scroll event fires after
+    // a delay, so the virtualizer's internal scrollOffset stays stale during
+    // the current render.  getVirtualItems() then calculates visibility with
+    // the old offset, producing zero or too few items → white screen.
+    //
+    // Direct scrollTop assignment triggers a synchronous scroll event in all
+    // browsers, so the virtualizer's scrollOffset is always up-to-date before
+    // React paints.  Smooth scrolling still uses element.scrollTo() since it
+    // is inherently async and the virtualizer handles it correctly.
+    scrollToFn: (offset, options, instance) => {
+      const element = instance.scrollElement;
+      if (!element) return;
+      const target = offset + (options.adjustments ?? 0);
+      if (options.behavior === "smooth") {
+        element.scrollTo({
+          [instance.options.horizontal ? "left" : "top"]: target,
+          behavior: "smooth",
+        });
+      } else {
+        if (instance.options.horizontal) {
+          element.scrollLeft = target;
+        } else {
+          element.scrollTop = target;
+        }
+      }
+    },
   });
 
   // Load available models: configured providers (from vault) + capabilities (from models API)
@@ -657,23 +699,23 @@ export function ChatPanel() {
   // Drives animStateRef (map of msgId → { displayedLen }) via RAF,
   // advancing by enough characters per frame to finish in ~intervalMs.
   //
-  // NOTE: animTick is in the dependency array so each RAF-triggered
+  // NOTE: session.animTick is in the dependency array so each RAF-triggered
   // state update re-runs this effect, which advances displayedLen and
   // schedules the next frame.  Without it the animation stalls after
   // the first frame because the useEffect never re-fires.
   useEffect(() => {
     if (!sending) {
-      animStateRef.current.clear();
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = 0;
+      session.scope.current.animState.clear();
+      cancelAnimationFrame(session.scope.current.rafId);
+      session.scope.current.rafId = 0;
       return;
     }
 
     // Find the last streaming placeholder (the one being typed).
     const lastMsg = displayMessages[displayMessages.length - 1];
     if (!lastMsg || 'items' in lastMsg || !lastMsg.id.startsWith('msg-streaming-')) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = 0;
+      cancelAnimationFrame(session.scope.current.rafId);
+      session.scope.current.rafId = 0;
       return;
     }
 
@@ -683,21 +725,21 @@ export function ChatPanel() {
     // survive to the frontend (e.g. non-ADR-022 providers), causing raw
     // tag text to flash before the full tag arrives.
     if (lastMsg.type === "thought") {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = 0;
+      cancelAnimationFrame(session.scope.current.rafId);
+      session.scope.current.rafId = 0;
       return;
     }
 
     const fullLen = lastMsg.content.length;
-    let state = animStateRef.current.get(lastMsg.id);
+    let state = session.scope.current.animState.get(lastMsg.id);
     if (!state) {
       state = { displayedLen: 0 };
-      animStateRef.current.set(lastMsg.id, state);
+      session.scope.current.animState.set(lastMsg.id, state);
     }
 
     if (state.displayedLen >= fullLen) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = 0;
+      cancelAnimationFrame(session.scope.current.rafId);
+      session.scope.current.rafId = 0;
       return;
     }
 
@@ -714,10 +756,10 @@ export function ChatPanel() {
     const charsPerFrame = Math.max(1, Math.ceil(remaining / framesNeeded));
     state.displayedLen = Math.min(fullLen, state.displayedLen + charsPerFrame);
 
-    rafRef.current = requestAnimationFrame(() => {
-      setAnimTick((t) => t + 1);
+    session.scope.current.rafId = requestAnimationFrame(() => {
+      session.setAnimTick((t) => t + 1);
     });
-  }, [displayMessages, sending, animTick, selectedAgentId, currentSessionId]);
+  }, [displayMessages, sending, session.animTick, selectedAgentId, currentSessionId]);
 
   // Listen for models-added event from AddProviderFlow
   useEffect(() => {
@@ -732,18 +774,18 @@ export function ChatPanel() {
   // default offset 0.
   useLayoutEffect(() => {
     const key = currentScrollKey;
-    if (!key || virtualCount === 0 || restoredScrollKeyRef.current === key) return;
+    if (!key || virtualCount === 0 || session.scope.current.restoredScrollKey === key) return;
 
     const snapshot = chatScrollSnapshots.get(key);
     if (!snapshot) return;
 
-    restoredScrollKeyRef.current = key;
+    session.scope.current.restoredScrollKey = key;
     if (snapshot.pinnedToBottom) {
-      restoreBottomUntilRef.current = performance.now() + BOTTOM_RESTORE_WINDOW_MS;
-      pinnedToBottomRef.current = true;
+      session.scope.current.restoreBottomUntil = performance.now() + BOTTOM_RESTORE_WINDOW_MS;
+      session.scope.current.pinnedToBottom = true;
       virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
     } else if (snapshot.scrollOffset > 0) {
-      pinnedToBottomRef.current = false;
+      session.scope.current.pinnedToBottom = false;
       virtualizer.scrollToOffset(snapshot.scrollOffset, { align: "start" });
     }
   }, [currentScrollKey, virtualCount, virtualizer]);
@@ -760,7 +802,7 @@ export function ChatPanel() {
       const distFromBottom = getDistanceFromBottom(container);
       chatScrollSnapshots.set(key, {
         scrollOffset: virtualizer.scrollOffset ?? container.scrollTop,
-        pinnedToBottom: pinnedToBottomRef.current || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
+        pinnedToBottom: session.scope.current.pinnedToBottom || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
       });
     };
   }, [virtualizer]);
@@ -822,7 +864,7 @@ export function ChatPanel() {
         if (!agentMessages || agentMessages.length === 0) {
           // 3. Fetch sessions and 4. restore previously selected session (or latest)
           const initSession = async () => {
-            isInitialLoadRef.current = true;
+            session.scope.current.isInitialLoad = "__init__";
             initAbortedRef.current = false;
 
             // Retry fetching sessions until Agent is ready (max 10 attempts, 1s interval)
@@ -842,7 +884,7 @@ export function ChatPanel() {
             if (initAbortedRef.current) return;
 
             if (sessions.length === 0) {
-              isInitialLoadRef.current = false;
+              session.scope.current.isInitialLoad = null;
               return;
             }
 
@@ -863,7 +905,7 @@ export function ChatPanel() {
                 .getState()
                 .fetchSessionState(selectedAgentId, targetSession.session_id);
             }
-            isInitialLoadRef.current = false;
+            session.scope.current.isInitialLoad = null;
           };
           void initSession();
         } else {
@@ -905,14 +947,15 @@ export function ChatPanel() {
   useEffect(() => {
     if (!currentSessionId || !selectedAgentId) return;
 
-    // Skip if agent initialization is in progress — initSession already calls loadSessionMessages
-    if (isInitialLoadRef.current) return;
+    // Skip if agent initialization is in progress — initSession already calls loadSessionMessages.
+    // Also skip if this specific session is already being loaded (prevents duplicate requests).
+    if (session.scope.current.isInitialLoad === "__init__" || session.scope.current.isInitialLoad === currentSessionId) return;
 
     // Guard: only proceed if this session belongs to the current agent's session list.
-    const session = useAgentStore
+    const agentSession = useAgentStore
       .getState()
       .agents[selectedAgentId]?.sessions.find((s) => s.session_id === currentSessionId);
-    if (!session) return;
+    if (!agentSession) return;
 
     // If this session was already loaded, skip reload
     if (currentSessionId === lastLoadedSessionId) return;
@@ -926,78 +969,74 @@ export function ChatPanel() {
     const startLine = sessionState?.pollLineNumber;
     lastLoadedSessionId = currentSessionId;
 
-    // Mark as initial load to trigger scroll-to-bottom after messages are loaded
-    isInitialLoadRef.current = true;
+    // Mark as initial load to trigger scroll-to-bottom after messages are loaded.
+    // Track the specific session ID so concurrent loads for different sessions
+    // are not blocked (unlike the old boolean which blocked all loads).
+    session.scope.current.isInitialLoad = currentSessionId;
     void chatStore
       .loadSessionMessages(selectedAgentId, currentSessionId, undefined, 50, "backward", startLine)
       .finally(() => {
-        isInitialLoadRef.current = false;
+        session.scope.current.isInitialLoad = null;
       });
   }, [currentSessionId, selectedAgentId]);
 
-  // Initial load / agent switch / session switch: scroll to bottom synchronously before paint
-  const prevDisplayCountRef = useRef(0);
-  const prevScrollAgentRef = useRef<string | null>(null);
-  const prevScrollSessionRef = useRef<string | null>(null);
+  // Initial load / agent switch / session switch: scroll to bottom synchronously before paint.
+  // useSessionScope resets prevDisplayCount to 0 on session change, so prevCount === 0
+  // reliably detects a fresh session mount.
   useLayoutEffect(() => {
-    // Reset count tracking when agent OR session changes, so we jump to bottom
-    // (instead of smooth-scrolling, or failing to scroll when new count <= old count)
-    if (
-      prevScrollAgentRef.current !== selectedAgentId ||
-      prevScrollSessionRef.current !== currentSessionId
-    ) {
-      prevDisplayCountRef.current = 0;
-      prevScrollAgentRef.current = selectedAgentId ?? null;
-      prevScrollSessionRef.current = currentSessionId ?? null;
-    }
-    const prevCount = prevDisplayCountRef.current;
+    const prevCount = session.scope.current.prevDisplayCount;
 
-    if (isLoadingMoreRef.current) {
+    // On fresh session mount (prevCount === 0 after hook reset), clear the
+    // virtualizer's measurement cache so stale item sizes from the previous
+    // session don't cause incorrect visibility calculations.
+    if (prevCount === 0) {
+      virtualizer.measure();
+    }
+
+    if (session.scope.current.isLoadingMore) {
       // Loading more: restore scroll position to keep view stable
-      if (prevScrollHeightRef.current > 0 && displayMessages.length > 0) {
-        const prevOffset = prevScrollHeightRef.current;
-        prevScrollHeightRef.current = 0;
-        isLoadingMoreRef.current = false;
+      if (session.scope.current.prevScrollHeight > 0 && displayMessages.length > 0) {
+        const prevOffset = session.scope.current.prevScrollHeight;
+        session.scope.current.prevScrollHeight = 0;
+        session.scope.current.isLoadingMore = false;
         virtualizer.scrollToOffset(prevOffset, { align: "start" });
       }
-      prevDisplayCountRef.current = virtualCount;
+      session.scope.current.prevDisplayCount = virtualCount;
       return;
     }
 
     if (virtualCount > 0) {
-      if (prevCount === 0 || (pinnedToBottomRef.current && restoreBottomUntilRef.current > performance.now())) {
+      if (prevCount === 0 || (session.scope.current.pinnedToBottom && session.scope.current.restoreBottomUntil > performance.now())) {
         // Agent switch, initial load, or nav-back remount while pinned: jump to
         // bottom instantly (before paint).  On remount the previous display
         // count may already be non-zero because messages are cached, so the
         // explicit restore window prevents the virtualizer from staying at
         // offset 0 until the user clicks the down arrow.
         //
-        // FIX: Reset scrollTop to 0 synchronously before scrollToIndex to
-        // prevent the virtualizer from using a stale scrollTop from the
-        // previous session.  When switching from a long session to a short
-        // one, the old scrollTop (e.g. 5000px) can exceed the new totalSize,
-        // causing the virtualizer to render zero items — a white screen.
-        // This is reproducible on macOS WKWebView where scrollToIndex uses
-        // Element.scrollTo() which is async and may not take effect before
-        // the virtualizer reads scrollTop for visibility calculation.
+        // NOTE: The primary fix for the WKWebView white screen is the custom
+        // scrollToFn (see useVirtualizer config above) which uses synchronous
+        // scrollTop assignment.  This scrollTop=0 reset is defense-in-depth:
+        // it guarantees the container starts from a clean baseline before
+        // scrollToIndex, preventing any edge case where a stale scrollTop
+        // from the previous session could affect visibility calculation.
         const container = messagesContainerRef.current;
         if (container) {
           container.scrollTop = 0;
         }
         virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-        pinnedToBottomRef.current = true;
+        session.scope.current.pinnedToBottom = true;
       } else if (virtualCount > prevCount) {
         // New message arrived or thinking indicator appeared
-        if (userJustSentRef.current) {
+        if (session.scope.current.userJustSent) {
           // User just sent — jump to bottom so they see the response immediately,
           // even if they had scrolled far up into history.
-          userJustSentRef.current = false;
+          session.scope.current.userJustSent = false;
           virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-          pinnedToBottomRef.current = true;
+          session.scope.current.pinnedToBottom = true;
         } else if (false) {
           // Working indicator scroll — disabled to avoid double-scroll with userJustSent
           virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-          pinnedToBottomRef.current = true;
+          session.scope.current.pinnedToBottom = true;
         } else {
           // Auto-generated (streaming chunk, thinking toggle, etc.) — smooth scroll
           virtualizer.scrollToIndex(virtualCount - 1, { align: "end", behavior: "smooth" });
@@ -1005,8 +1044,8 @@ export function ChatPanel() {
       }
     }
 
-    prevDisplayCountRef.current = virtualCount;
-    thinkingWasShowingRef.current = false;
+    session.scope.current.prevDisplayCount = virtualCount;
+    session.scope.current.thinkingWasShowing = false;
   }, [messages, virtualCount, virtualizer, selectedAgentId, currentSessionId]);
 
   // Sticky-bottom: when the virtualizer re-measures a bottom item (e.g.
@@ -1023,17 +1062,16 @@ export function ChatPanel() {
   // rendering), the height change can push content down — forcing a scroll
   // in that case creates visible jank.  The virtualizer's automatic
   // re-measurement handles size changes of existing items just fine.
-  const prevStickyCountRef = useRef(0);
   const totalSize = virtualizer.getTotalSize();
   useLayoutEffect(() => {
-    const countChanged = virtualCount !== prevStickyCountRef.current;
-    prevStickyCountRef.current = virtualCount;
-    const restoringPinnedBottom = restoreBottomUntilRef.current > performance.now();
-    if (pinnedToBottomRef.current && virtualCount > 0 && (countChanged || restoringPinnedBottom)) {
+    const countChanged = virtualCount !== session.scope.current.prevStickyCount;
+    session.scope.current.prevStickyCount = virtualCount;
+    const restoringPinnedBottom = session.scope.current.restoreBottomUntil > performance.now();
+    if (session.scope.current.pinnedToBottom && virtualCount > 0 && (countChanged || restoringPinnedBottom)) {
       virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
       if (restoringPinnedBottom && totalSize > 0) {
         requestAnimationFrame(() => {
-          if (restoreBottomUntilRef.current > performance.now()) {
+          if (session.scope.current.restoreBottomUntil > performance.now()) {
             virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
           }
         });
@@ -1042,7 +1080,7 @@ export function ChatPanel() {
   }, [totalSize, virtualCount, virtualizer]);
 
   const scrollToBottom = useCallback(() => {
-    pinnedToBottomRef.current = true;
+    session.scope.current.pinnedToBottom = true;
     virtualizer.scrollToIndex(virtualCount - 1, { align: "end", behavior: "smooth" });
   }, [virtualizer, virtualCount]);
 
@@ -1054,14 +1092,14 @@ export function ChatPanel() {
 
     // ── Scroll-to-bottom button visibility ──
     const distFromBottom = getDistanceFromBottom(container);
-    setShowScrollToBottom(distFromBottom > container.clientHeight);
+    session.setShowScrollToBottom(distFromBottom > container.clientHeight);
 
     // When the user manually scrolls away from the bottom, stop pinning
     // so the ResizeObserver doesn't steal their scroll position.
     if (distFromBottom > CHAT_BOTTOM_THRESHOLD_PX) {
-      pinnedToBottomRef.current = false;
+      session.scope.current.pinnedToBottom = false;
     } else if (distFromBottom < 5) {
-      pinnedToBottomRef.current = true;
+      session.scope.current.pinnedToBottom = true;
     }
 
     const { isLoadingMore } = useChatStore.getState();
@@ -1075,8 +1113,8 @@ export function ChatPanel() {
     // Trigger when within 50px of the top
     if (container.scrollTop < 50) {
       // Store current scroll offset for position restoration after prepending messages
-      prevScrollHeightRef.current = virtualizer.scrollOffset ?? 0;
-      isLoadingMoreRef.current = true;
+      session.scope.current.prevScrollHeight = virtualizer.scrollOffset ?? 0;
+      session.scope.current.isLoadingMore = true;
       void useChatStore
         .getState()
         .loadMoreMessages(selectedAgentId, currentSessionId);
@@ -1084,19 +1122,19 @@ export function ChatPanel() {
   }, [selectedAgentId, virtualizer]);
 
   const handleSend = () => {
-    const content = inputValue.trim();
-    const hasSuccessfulFiles = pendingFiles.some((f) => f.status === "success");
-    const hasUploadingFiles = pendingFiles.some((f) => f.status === "uploading");
-    const hasImages = pendingImages.length > 0;
+    const content = session.inputValue.trim();
+    const hasSuccessfulFiles = session.pendingFiles.some((f) => f.status === "success");
+    const hasUploadingFiles = session.pendingFiles.some((f) => f.status === "uploading");
+    const hasImages = session.pendingImages.length > 0;
 
     // Block send: no content AND no files AND no images, or files still uploading
     if ((!content && !hasSuccessfulFiles && !hasImages) || sending || !selectedAgentId || hasUploadingFiles) return;
 
     // Collect successfully uploaded document IDs and metadata for optimistic bubbles
-    const documentIds = pendingFiles
+    const documentIds = session.pendingFiles
       .filter((f) => f.status === "success" && f.documentId)
       .map((f) => f.documentId!);
-    const documents = pendingFiles
+    const documents = session.pendingFiles
       .filter((f) => f.status === "success" && f.documentId)
       .map((f) => ({
         id: f.documentId!,
@@ -1106,7 +1144,7 @@ export function ChatPanel() {
       }));
 
     // Build image parts from pending images (for multimodal content_parts)
-    const imageParts = pendingImages.map((img) => ({
+    const imageParts = session.pendingImages.map((img) => ({
       url: img.base64Url,
       width: img.width,
       height: img.height,
@@ -1114,28 +1152,28 @@ export function ChatPanel() {
 
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
-    userJustSentRef.current = true;
+    session.scope.current.userJustSent = true;
     void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined, documents.length > 0 ? documents : undefined, imageParts.length > 0 ? imageParts : undefined).then(() => {
       clearActiveSkill();
     });
-    setInputValue("");
+    session.setInputValue("");
     // Clear pending files and images after send
-    setPendingFiles([]);
-    setPendingImages([]);
+    session.setPendingFiles([]);
+    session.setPendingImages([]);
   };
 
   // Stop button dual-action:
   //   input has content → send to queue (no stop, message waits for next loop)
   //   input empty       → stop current loop
   const handleStop = () => {
-    const content = inputValue.trim();
+    const content = session.inputValue.trim();
     if (content && selectedAgentId && currentSessionId) {
       // Add to queue — message waits in the queue box above the input area.
       useChatStore.getState().addQueuedMessage(selectedAgentId, currentSessionId, content);
-      setInputValue("");
+      session.setInputValue("");
     } else if (queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
       // Click with queued messages: send all queued + stop current loop.
-      userJustSentRef.current = true;
+      session.scope.current.userJustSent = true;
       const msgs = [...queuedMessages];
       useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
       for (const msg of msgs) {
@@ -1157,7 +1195,7 @@ export function ChatPanel() {
   };
 
   const handleEditQueued = (index: number) => {
-    setInputValue(queuedMessages[index]);
+    session.setInputValue(queuedMessages[index]);
     if (selectedAgentId && currentSessionId) {
       useChatStore.getState().removeQueuedMessage(selectedAgentId, currentSessionId, index);
     }
@@ -1189,7 +1227,7 @@ export function ChatPanel() {
 
     // Check prerequisites before adding chip
     if (!currentSessionId) {
-      setPendingFiles(prev => [...prev, {
+      session.setPendingFiles(prev => [...prev, {
         tempId,
         filename,
         format: ext,
@@ -1200,7 +1238,7 @@ export function ChatPanel() {
       return;
     }
     if (!selectedAgentId) {
-      setPendingFiles(prev => [...prev, {
+      session.setPendingFiles(prev => [...prev, {
         tempId,
         filename,
         format: ext,
@@ -1212,7 +1250,7 @@ export function ChatPanel() {
     }
 
     // Add pending chip with uploading status
-    setPendingFiles(prev => [...prev, {
+    session.setPendingFiles(prev => [...prev, {
       tempId,
       filename,
       format: ext,
@@ -1232,7 +1270,7 @@ export function ChatPanel() {
       });
 
       // Update chip to success
-      setPendingFiles(prev => prev.map((f) =>
+      session.setPendingFiles(prev => prev.map((f) =>
         f.tempId === tempId
           ? { ...f, status: "success", documentId: result.document_id, size: result.size_bytes }
           : f
@@ -1241,7 +1279,7 @@ export function ChatPanel() {
       const msg = err instanceof Error ? err.message : typeof err === "string" ? err : "Upload failed";
       console.error("[ChatPanel] Document upload failed:", err);
       // Update chip to error
-      setPendingFiles(prev => prev.map((f) =>
+      session.setPendingFiles(prev => prev.map((f) =>
         f.tempId === tempId ? { ...f, status: "error", errorMessage: msg } : f
       ));
     }
@@ -1249,7 +1287,7 @@ export function ChatPanel() {
 
   // Remove a pending file chip
   const handleRemoveFile = (tempId: string) => {
-    setPendingFiles(prev => prev.filter((f) => f.tempId !== tempId));
+    session.setPendingFiles(prev => prev.filter((f) => f.tempId !== tempId));
   };
 
   // Select image file via Tauri dialog, read as base64, and get dimensions
@@ -1268,8 +1306,8 @@ export function ChatPanel() {
         console.warn("[ChatPanel] No image-capable models available — skipping dialog");
         return;
       }
-      setImageCapableModels(imageModels);
-      setShowImageUnsupportedDialog(true);
+      session.setImageCapableModels(imageModels);
+      session.setShowImageUnsupportedDialog(true);
       return;
     }
 
@@ -1313,7 +1351,7 @@ export function ChatPanel() {
       });
 
       const tempId = `img-${Date.now()}`;
-      setPendingImages(prev => [...prev, {
+      session.setPendingImages(prev => [...prev, {
         tempId,
         filename,
         base64Url: dataUrl,
@@ -1327,7 +1365,7 @@ export function ChatPanel() {
 
   // Remove a pending image thumbnail
   const handleRemoveImage = (tempId: string) => {
-    setPendingImages(prev => prev.filter((img) => img.tempId !== tempId));
+    session.setPendingImages(prev => prev.filter((img) => img.tempId !== tempId));
   };
 
   // Tool approval: send decision to Gateway API directly, then clear inline state
@@ -1507,9 +1545,16 @@ export function ChatPanel() {
                 Start a conversation with {selectedAgent.name}
               </div>
             )}
-            {/* Virtualized message list — only renders visible items */}
+            {/* Virtualized message list — only renders visible items.
+                key={currentScrollKey} forces React to destroy the entire fiber
+                subtree on session/agent switch, releasing all ReactMarkdown VDOM
+                trees, Mermaid SVGs, highlight.js HTML, and DOM nodes from the
+                previous session.  Without this, React reuses fibers across
+                sessions (because virtualRow.key is index-based), causing
+                unbounded memory growth (4GB+ after several sessions). */}
             {displayMessages.length > 0 && (
               <div
+                key={currentScrollKey ?? "__no_session__"}
                 style={{
                   height: virtualizer.getTotalSize(),
                   width: '100%',
@@ -1535,7 +1580,7 @@ export function ChatPanel() {
                           transform: `translateY(${virtualRow.start}px)`,
                         }}
                       >
-                        <div className="flex items-center gap-1.5 ml-12 px-4 py-1.5 select-none">
+                        <div className="flex items-center gap-1.5 ml-12 py-1.5 select-none">
                           <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
                           <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.compacting")}</span>
                         </div>
@@ -1561,10 +1606,36 @@ export function ChatPanel() {
                       }}
                       className=""
                     >
-                      {/* Agent header — shown before first agent message after a user message */}
+                      {/* Agent header — shown before first agent message after a user message.
+                           Scans backwards past compaction/system/document_upload messages
+                           that may be interleaved between the user message and the agent
+                           response (e.g., when a compaction event is loaded via poll after
+                           the user message was optimistically added). */}
                       {(() => {
-                        const prevItem = virtualRow.index > 0 ? displayMessages[virtualRow.index - 1] : undefined;
-                        const isPrevUser = prevItem && (prevItem as ChatMessage).type === 'user';
+                        // Scan backwards to find the most recent user message,
+                        // skipping over compaction/system/document_upload items.
+                        let isPrevUser = false;
+                        for (let i = virtualRow.index - 1; i >= 0; i--) {
+                          const prev = displayMessages[i];
+                          const prevType = 'type' in prev
+                            ? (prev as ChatMessage).type
+                            : 'explore_group';
+                          if (prevType === 'user') {
+                            isPrevUser = true;
+                            break;
+                          }
+                          // Skip non-user, non-agent items that can appear
+                          // between a user message and the agent response.
+                          if (
+                            prevType === 'compaction' ||
+                            prevType === 'system' ||
+                            prevType === 'document_upload'
+                          ) {
+                            continue;
+                          }
+                          // Hit an agent-side message — stop scanning.
+                          break;
+                        }
                         if (!isPrevUser) return null;
                         const isAgent = displayItem.type === 'explore_group'
                           || (displayItem.type !== 'explore_group'
@@ -1631,7 +1702,14 @@ export function ChatPanel() {
                           && virtualRow.index === displayMessages.length - 1
                           && msg.id.startsWith("msg-streaming-");
                         return (
-                        <MessageBubble message={msg} isStreaming={isStreamingMsg} displayLen={isStreamingMsg ? animStateRef.current.get(msg.id)?.displayedLen : undefined} />
+                        <MessageBubble
+                          message={msg}
+                          isStreaming={isStreamingMsg}
+                          displayLen={isStreamingMsg ? session.scope.current.animState.get(msg.id)?.displayedLen : undefined}
+                          liveUserName={userDisplayName}
+                          liveUserAvatarUrl={userAvatarUrl}
+                          liveUserBuiltinAvatarId={userBuiltinAvatarId}
+                        />
                         );
                       })()}
                     </div>
@@ -1677,7 +1755,7 @@ export function ChatPanel() {
                     </div>
                   </div>
                 )}
-                <div className="flex items-center gap-1.5 ml-12 px-4 py-1.5">
+                <div className="flex items-center gap-1.5 ml-12 py-1.5">
                   <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
                   <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
                 </div>
@@ -1702,7 +1780,7 @@ export function ChatPanel() {
                 <button
                   onClick={() => {
                     if (selectedAgentId) {
-                      userJustSentRef.current = true;
+                      session.scope.current.userJustSent = true;
                       continueExecution(selectedAgentId);
                     }
                   }}
@@ -1728,7 +1806,7 @@ export function ChatPanel() {
             <div ref={messagesEndRef} />
           </div>
           {/* Scroll-to-bottom button — visible when scrolled up > 1 screen */}
-          {showScrollToBottom && (
+          {session.showScrollToBottom && (
             <button
               onClick={scrollToBottom}
               className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
@@ -1745,9 +1823,9 @@ export function ChatPanel() {
           <div className="mx-5 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
             <button
               className="flex items-center w-full px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
-              onClick={() => setTodosCollapsed(!todosCollapsed)}
+              onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
             >
-              {todosCollapsed ? (
+              {session.todosCollapsed ? (
                 <ChevronRight className="h-3 w-3 mr-1 text-zinc-400 dark:text-zinc-500 shrink-0" />
               ) : (
                 <ChevronDown className="h-3 w-3 mr-1 text-zinc-400 dark:text-zinc-500 shrink-0" />
@@ -1774,7 +1852,7 @@ export function ChatPanel() {
                 })()}
               </span>
             </button>
-            {!todosCollapsed && (
+            {!session.todosCollapsed && (
               <div className="max-h-[7.5rem] overflow-y-auto">
                 {todos.map((item) => {
                   const isCompleted = item.status === "completed";
@@ -1884,9 +1962,9 @@ export function ChatPanel() {
           )}
 
           {/* Pending file chips */}
-          {pendingFiles.length > 0 && (
+          {session.pendingFiles.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
-              {pendingFiles.map((file) => (
+              {session.pendingFiles.map((file) => (
                 <DocumentChip
                   key={file.tempId}
                   filename={file.filename}
@@ -1900,9 +1978,9 @@ export function ChatPanel() {
             </div>
           )}
           {/* Pending image thumbnails */}
-          {pendingImages.length > 0 && (
+          {session.pendingImages.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
-              {pendingImages.map((img) => (
+              {session.pendingImages.map((img) => (
                 <div
                   key={img.tempId}
                   className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700"
@@ -1928,8 +2006,8 @@ export function ChatPanel() {
           <AttachedContextChips />
           {/* Textarea area — borderless, transparent background */}
           <textarea
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
+            value={session.inputValue}
+            onChange={(e) => session.setInputValue(e.target.value)}
             placeholder={
               gatewayStatus !== "connected"
                 ? t("chatPanel.inputGatewayDisconnected")
@@ -2028,7 +2106,7 @@ export function ChatPanel() {
 
               {/* Send/Stop button with tooltip above */}
               <Tooltip content={sending
-                ? (inputValue.trim()
+                ? (session.inputValue.trim()
                   ? t("chatPanel.addToQueue")
                   : queuedMessages.length > 0
                     ? t("chatPanel.sendQueuedAndStop")
@@ -2044,10 +2122,10 @@ export function ChatPanel() {
                     sending
                       ? false
                       : (inputDisabled
-                        || (!inputValue.trim() && !pendingFiles.some(f => f.status === "success") && pendingImages.length === 0)
-                        || pendingFiles.some(f => f.status === "uploading"))
+                        || (!session.inputValue.trim() && !session.pendingFiles.some(f => f.status === "success") && session.pendingImages.length === 0)
+                        || session.pendingFiles.some(f => f.status === "uploading"))
                   }
-                  aria-label={sending ? (inputValue.trim() ? t("chatPanel.addToQueue") : queuedMessages.length > 0 ? t("chatPanel.sendQueuedAndStop") : t("chatPanel.stop")) : t("chatPanel.sendMessage")}
+                  aria-label={sending ? (session.inputValue.trim() ? t("chatPanel.addToQueue") : queuedMessages.length > 0 ? t("chatPanel.sendQueuedAndStop") : t("chatPanel.stop")) : t("chatPanel.sendMessage")}
                 >
                   {sending ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
                 </button>
@@ -2059,15 +2137,15 @@ export function ChatPanel() {
 
       {/* Image unsupported dialog */}
       <UnsupportedImageDialog
-        open={showImageUnsupportedDialog}
-        models={imageCapableModels}
+        open={session.showImageUnsupportedDialog}
+        models={session.imageCapableModels}
         onSelect={(model: string, provider: string) => {
           if (selectedAgentId) {
             setCurrentModel(model, provider, selectedAgentId);
-            setShowImageUnsupportedDialog(false);
+            session.setShowImageUnsupportedDialog(false);
           }
         }}
-        onClose={() => setShowImageUnsupportedDialog(false)}
+        onClose={() => session.setShowImageUnsupportedDialog(false)}
       />
     </>
   );
@@ -2165,17 +2243,28 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
 }
 
 /** Single message bubble */
-function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMessage; isStreaming: boolean; displayLen?: number }) {
+const MessageBubble = React.memo(function MessageBubble({
+  message,
+  isStreaming,
+  displayLen,
+  liveUserName: liveUserNameProp,
+  liveUserAvatarUrl,
+  liveUserBuiltinAvatarId,
+}: {
+  message: ChatMessage;
+  isStreaming: boolean;
+  displayLen?: number;
+  liveUserName?: string;
+  liveUserAvatarUrl?: string | null;
+  liveUserBuiltinAvatarId?: string | null;
+}) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
-  // Live names — subscribe to profile stores so name edits update all messages instantly
-  // (instead of relying on the senderDisplayName snapshot captured at message creation time)
-  const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
-  const userAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
-  const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
-  const liveUserName = userDisplayName ?? message.senderDisplayName;
+  // Live names — received as props from ChatPanel so React.memo can detect
+  // profile changes (name/avatar edits update all rendered bubbles instantly).
+  const liveUserName = liveUserNameProp ?? message.senderDisplayName;
 
   if (message.type === "user") {
     return (
@@ -2207,8 +2296,8 @@ function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMess
           </div>
           <UserAvatar
             displayName={liveUserName}
-            avatarUrl={userAvatarUrl ?? null}
-            builtinAvatarId={userBuiltinAvatarId ?? null}
+            avatarUrl={liveUserAvatarUrl ?? null}
+            builtinAvatarId={liveUserBuiltinAvatarId ?? null}
             size={40}
             className="shrink-0 mt-1"
           />
@@ -2307,11 +2396,14 @@ function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMess
   if (message.type === "compaction") {
     return (
       <MessageContentWrapper>
-        <CompactionCard
-          summary={message.content}
-          meta={message.compactionMeta}
-          timestampMs={message.timestamp}
-        />
+        {/* ml-12 mirrors assistant/thought/error: content starts to the right of the avatar. */}
+        <div className="ml-12">
+          <CompactionCard
+            summary={message.content}
+            meta={message.compactionMeta}
+            timestampMs={message.timestamp}
+          />
+        </div>
       </MessageContentWrapper>
     );
   }
@@ -2374,7 +2466,17 @@ function MessageBubble({ message, isStreaming, displayLen }: { message: ChatMess
   }
 
   return null;
-}
+}, (prev, next) => {
+  // chatStore keeps message object references stable for unchanged
+  // messages, so reference equality correctly skips non-streaming items.
+  // Profile fields are included so name/avatar edits propagate instantly.
+  return prev.message === next.message
+    && prev.isStreaming === next.isStreaming
+    && prev.displayLen === next.displayLen
+    && prev.liveUserName === next.liveUserName
+    && prev.liveUserAvatarUrl === next.liveUserAvatarUrl
+    && prev.liveUserBuiltinAvatarId === next.liveUserBuiltinAvatarId;
+});
 
 /** Dialog shown when user tries to upload an image but the current model doesn't support it */
 function UnsupportedImageDialog({

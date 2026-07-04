@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, Children, isValidElement } from "react";
+import React, { useState, useRef, useEffect, useMemo, useDeferredValue, Children, isValidElement } from "react";
 import { ChevronRight, ChevronDown, Atom } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -61,6 +61,38 @@ const THINK_HEADER_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.9)";
 const THINK_DURATION_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
 
 /**
+ * Number of trailing paragraphs to render during streaming.
+ *
+ * The content area is capped at 5 visible lines with overflow-y:auto and
+ * auto-scrolls to bottom, so the user can only see the last ~5 lines.
+ * Rendering only the tail paragraphs avoids O(n²) ReactMarkdown re-parses
+ * as the accumulated content grows during long thinking phases.
+ *
+ * Splitting on \n\n+ (paragraph boundaries) is safe for markdown — it
+ * never cuts through inline syntax (bold, code, links) or fenced blocks.
+ */
+const TAIL_PARAGRAPHS = 5;
+
+/**
+ * Return only the last `maxParagraphs` paragraphs of `content`, split on
+ * blank-line boundaries.  When the input has fewer paragraphs than the
+ * limit the full content is returned with `truncated = false`.
+ */
+function tailContent(content: string, maxParagraphs: number): {
+  display: string;
+  truncated: boolean;
+} {
+  const paragraphs = content.split(/\n\n+/);
+  if (paragraphs.length <= maxParagraphs) {
+    return { display: content, truncated: false };
+  }
+  return {
+    display: paragraphs.slice(-maxParagraphs).join("\n\n"),
+    truncated: true,
+  };
+}
+
+/**
  * Collapsible think block with timer and auto-expand/collapse.
  *
  * - "Thinking" phase (streaming, no endTime): auto-expanded so the user
@@ -71,7 +103,7 @@ const THINK_DURATION_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
  * - Content is capped at 5 visible lines with auto-scroll to bottom,
  *   so only the latest output is visible during long thinking phases.
  */
-export function ThinkBlock({ content, isStreaming, startTime, endTime, defaultExpanded }: ThinkBlockProps) {
+export const ThinkBlock = React.memo(function ThinkBlock({ content, isStreaming, startTime, endTime, defaultExpanded }: ThinkBlockProps) {
   const { t } = useTranslation();
   const isThinking = !!(isStreaming && endTime == null);
   const [expanded, setExpanded] = useState(defaultExpanded ?? isThinking);
@@ -105,6 +137,22 @@ export function ThinkBlock({ content, isStreaming, startTime, endTime, defaultEx
     ? Math.round(((endTime ?? Date.now()) - startTime) / 1000)
     : null;
 
+  // During streaming (thinking phase), render only the tail paragraphs so
+  // ReactMarkdown doesn't re-parse the entire accumulated content on every
+  // ~500ms poll cycle.  When thinking completes, render the full content.
+  const { display: renderContent, truncated } = useMemo(
+    () =>
+      isThinking
+        ? tailContent(content, TAIL_PARAGRAPHS)
+        : { display: content, truncated: false },
+    [content, isThinking],
+  );
+
+  // Defer the ReactMarkdown input so rapid poll-cycle updates (every ~500ms)
+  // don't pile up parse tasks.  React 18's useDeferredValue lets the browser
+  // skip intermediate values when under pressure, keeping the UI responsive.
+  const deferredContent = useDeferredValue(renderContent);
+
   return (
     <div className="my-1">
       <button
@@ -134,10 +182,22 @@ export function ThinkBlock({ content, isStreaming, startTime, endTime, defaultEx
           style={{ maxHeight: `${MAX_VISIBLE_LINES * LINE_HEIGHT_REM}rem` }}
         >
           <div className="prose prose-sm prose-zinc max-w-none [&_*]:!text-zinc-500 dark:[&_*]:!text-zinc-400 [&_table]:bg-zinc-200/20 [&_tbody_tr]:!bg-transparent dark:[&_table]:bg-zinc-900/30" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={thinkMarkdownComponents}>{content.trim() || "..."}</ReactMarkdown>
+            {truncated && (
+              <div className="text-xs text-zinc-400 dark:text-zinc-500 italic mb-1 select-none">
+                … ({t("thinkBlock.showingLatest")})
+              </div>
+            )}
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={thinkMarkdownComponents}>{deferredContent.trim() || "..."}</ReactMarkdown>
           </div>
         </div>
       )}
     </div>
   );
-}
+}, (prev, next) => {
+  // Only re-render when observable output changes, not on every poll tick.
+  // startTime is excluded — it's set once at creation and never changes.
+  return prev.content === next.content
+    && prev.isStreaming === next.isStreaming
+    && prev.endTime === next.endTime
+    && prev.defaultExpanded === next.defaultExpanded;
+});

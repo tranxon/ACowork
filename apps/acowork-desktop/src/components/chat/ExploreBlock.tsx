@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X } from "lucide-react";
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
@@ -234,7 +234,7 @@ function approvalMatchesSession(
  *   message appears after this explore block in display order.
  * - Collapse (manual): user can collapse at any time.
  */
-export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply }: ExploreBlockProps) {
+export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply }: ExploreBlockProps) {
   const { t } = useTranslation();
   // Start collapsed only if this block already has a follow-up reply (historical/loaded).
   // For new active blocks, always start expanded — collapses ONLY when
@@ -351,7 +351,14 @@ export function ExploreBlock({ items, isStreaming, pendingApproval, currentSessi
       )}
     </div>
   );
-}
+}, (prev, next) => {
+  // items reference changes only when new explore items arrive.
+  // onApprove is excluded — it's an inline callback that changes every render.
+  return prev.items === next.items
+    && prev.isStreaming === next.isStreaming
+    && prev.pendingApproval === next.pendingApproval
+    && prev.hasFollowUpReply === next.hasFollowUpReply;
+});
 
 /** Pair tool_call with its corresponding tool_result by toolName */
 type PairedItem =
