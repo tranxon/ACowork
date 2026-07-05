@@ -141,9 +141,23 @@ export function AppLayout() {
   // it operates within the CSS stacking context and would blur whatever
   // sits behind this div (i.e. the html placeholder color), not the
   // native layer below the WKWebView.
+  //
+  // NOTE: macOS NSVisualEffectView with UnderWindowBackground material
+  // has an inherently dark tint in both Light and Dark modes (Apple's
+  // design decision for readability over blurred desktop content).  When
+  // the user slides opacity to 0 in Light mode, the CSS layer becomes
+  // transparent and exposes this dark native tint — making Light mode
+  // look indistinguishable from Dark mode.  To compensate, we enforce a
+  // minimum opacity floor (LIGHT_OPACITY_FLOOR = 0.18) in Light mode so
+  // there is always enough white CSS tint to lift the overall appearance.
+  // Dark mode is unaffected because the native dark tint is already
+  // appropriate there.
+  const LIGHT_OPACITY_FLOOR = 0.18;
   const { opacity, theme, osTheme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
-  const glassBg = isDark ? `rgba(41,42,44,${opacity})` : `rgba(226,227,233,${opacity})`;
+  const glassBg = isDark
+    ? `rgba(41,42,44,${opacity})`
+    : `rgba(226,227,233,${Math.max(opacity, LIGHT_OPACITY_FLOOR)})`;
 
   // ── Switch to debug tab when entering debug mode ─────────────────
   const prevIsDebugMode = useRef(isDebugMode);
