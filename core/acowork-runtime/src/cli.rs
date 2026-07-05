@@ -822,7 +822,7 @@ async fn process_gateway_recv(
     skill_registry: &crate::skills::parser::SkillRegistry,
     budget_provider: &str,
     log_reload_handle: &Option<LogReloadHandle>,
-    max_sessions: usize,
+    _max_sessions: usize,
     timeouts: &acowork_core::Timeouts,
     mcp_runtime_tx: &tokio::sync::mpsc::Sender<crate::tools::mcp_manager::McpConnectResult>,
 ) -> LoopAction {
@@ -866,53 +866,18 @@ async fn process_gateway_recv(
                         let initial_workspace = params.get("workspace_id").and_then(|v| v.as_str());
                         let initial_model = params.get("model").and_then(|v| v.as_str());
                         let initial_provider = params.get("provider").and_then(|v| v.as_str());
-                        let new_session_id = crate::conversation::generate_session_id();
-                        // Each session gets its own committed_lines counter.
-                        let committed_lines = SessionManager::new_committed_lines();
-                        match crate::conversation::ConversationSession::new(
-                            std::path::Path::new(work_dir),
-                            &new_session_id,
-                            crate::conversation::SessionConfig {
-                                agent_id: agent_id_for_reconnect.to_string(),
-                                workspace_id: initial_workspace.map(|s| s.to_string()),
-                                model: initial_model.map(|s| s.to_string()),
-                                provider: initial_provider.map(|s| s.to_string()),
-                            },
-                            max_sessions,
-                            committed_lines.clone(),
-                        ) {
-                            Ok(new_session) => {
-                                if let Err(e) = session_manager
-                                    .create_session_with_id_and_conversation(
-                                        new_session_id.clone(),
-                                        Some(new_session),
-                                        Some(committed_lines),
-                                    )
-                                    .await
-                                {
-                                    tracing::error!("Failed to create session: {}", e);
-                                    let data = serde_json::json!({ "error": format!("Failed to create session: {}", e) });
-                                    send_session_response(grpc_client, &request_id, data).await;
-                                } else {
-                                    tracing::info!(new_session_id = %new_session_id, "Created new session via Gateway request");
 
-                                    // P1 (ADR-020): Auto-enable push on create.
-                                    // New sessions start in the foreground; the frontend
-                                    // will switch to them immediately.  EnableNotify here
-                                    // removes the race between create and the first
-                                    // chat_message.
-                                    let _ = session_manager.send_to_session(
-                                        &new_session_id,
-                                        SessionMessage::EnableNotify,
-                                    );
-
-                                    let data = serde_json::json!({ "session_id": new_session_id });
-                                    send_session_response(grpc_client, &request_id, data).await;
-                                }
+                        match session_manager
+                            .create_frontend_session(initial_workspace, initial_model, initial_provider)
+                            .await
+                        {
+                            Ok(new_session_id) => {
+                                tracing::info!(new_session_id = %new_session_id, "Created new session via Gateway request");
+                                let data = serde_json::json!({ "session_id": new_session_id });
+                                send_session_response(grpc_client, &request_id, data).await;
                             }
-
                             Err(e) => {
-                                tracing::error!("Failed to create new session: {}", e);
+                                tracing::error!("Failed to create session: {}", e);
                                 let data = serde_json::json!({ "error": format!("Failed to create session: {}", e) });
                                 send_session_response(grpc_client, &request_id, data).await;
                             }
@@ -1013,14 +978,8 @@ async fn process_gateway_recv(
                             }
                         };
 
-                        // P1 (ADR-020): Auto-disable notify before close.
-                        // The session is being closed; stop NewDataAvailable notifications.
-                        let _ = session_manager.send_to_session(
-                            &session_id,
-                            SessionMessage::DisableNotify,
-                        );
-
-                        // Close the session: trigger distillation and free resources (JSONL preserved)
+                        // Close the session: disable notifications, trigger distillation,
+                        // and free in-memory resources (JSONL preserved).
                         if let Err(e) = session_manager.close_session(&session_id).await {
                             tracing::warn!("Failed to close session {}: {}", session_id, e);
                         }
@@ -1049,33 +1008,7 @@ async fn process_gateway_recv(
                             }
                         };
 
-                        // P1 (ADR-020): Auto-disable notify before delete.
-                        // Same rationale as close_session — stop notifications before
-                        // tearing down the session.
-                        let _ = session_manager.send_to_session(
-                            &session_id,
-                            SessionMessage::DisableNotify,
-                        );
-
-                        // Close first: trigger distillation and free resources
-                        if let Err(e) = session_manager.close_session(&session_id).await {
-                            tracing::warn!("Failed to close session {}: {}", session_id, e);
-                        }
-
-                        // Then delete the JSONL file
-                        let conversations_dir =
-                            std::path::Path::new(work_dir).join("conversations");
-                        let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
-                        if file_path.exists() {
-                            if let Err(e) = std::fs::remove_file(&file_path) {
-                                tracing::error!(session_id = %session_id, error = %e, "Failed to delete session file");
-                                let data = serde_json::json!({ "error": format!("Failed to delete session: {}", e) });
-                                send_session_response(grpc_client, &request_id, data).await;
-                                return LoopAction::Continue;
-                            }
-
-                            tracing::info!(session_id = %session_id, "Deleted session JSONL file");
-                        }
+                        session_manager.delete_session(&session_id).await;
 
                         let data = serde_json::json!({
                             "deleted": true,

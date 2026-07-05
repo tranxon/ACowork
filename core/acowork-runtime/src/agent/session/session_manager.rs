@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use acowork_core::Budget;
 use acowork_core::protocol::ProtocolType;
@@ -466,6 +467,53 @@ impl SessionManager {
         Ok(session_id)
     }
 
+    /// Create a new session from frontend request, handling everything in one call.
+    ///
+    /// Generates a session ID, creates the JSONL file with initial metadata,
+    /// writes the index entry, spawns the session task, and enables
+    /// notifications — all in a single atomic operation.
+    ///
+    /// Returns the new session ID on success.
+    pub async fn create_frontend_session(
+        &mut self,
+        workspace_id: Option<&str>,
+        model: Option<&str>,
+        provider: Option<&str>,
+    ) -> Result<String> {
+        let session_id = crate::conversation::generate_session_id();
+        let committed_lines = Self::new_committed_lines();
+
+        // Create the JSONL file and index entry
+        let conv = crate::conversation::ConversationSession::new(
+            std::path::Path::new(&self.core.config.work_dir),
+            &session_id,
+            crate::conversation::SessionConfig {
+                agent_id: self.core.config.agent_id.clone(),
+                workspace_id: workspace_id.map(|s| s.to_string()),
+                model: model.map(|s| s.to_string()),
+                provider: provider.map(|s| s.to_string()),
+            },
+            self.core.config.max_sessions,
+            committed_lines.clone(),
+        )?;
+
+        // Spawn the session task
+        self.create_session_with_id_and_conversation(
+            session_id.clone(),
+            Some(conv),
+            Some(committed_lines),
+        )
+        .await?;
+
+        // ADR-020: Enable notifications for the newly created session
+        // (it starts in the foreground, frontend will switch to it immediately).
+        if let Some(handle) = self.sessions.get(&session_id) {
+            let _ = handle.inbound_tx.try_send(SessionMessage::EnableNotify);
+        }
+
+        Ok(session_id)
+    }
+
     /// Build a fully-initialized SessionState for a new or resumed session.
     /// All per-session fields are set synchronously before this returns.
     /// Caller must hold an Arc<AgentCore> with global_provider_list populated.
@@ -633,7 +681,7 @@ impl SessionManager {
         session_state
     }
 
-    /// Close a session by ID, sending a Close message and removing it.
+    /// Close a session by ID, disabling notifications then sending Close.
     ///
     /// Triggers distillation but preserves the JSONL history file.
     /// Returns an error if the session does not exist.
@@ -642,6 +690,9 @@ impl SessionManager {
             .sessions
             .remove(session_id)
             .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
+
+        // ADR-020: Disable notifications before Close to avoid stale events
+        let _ = handle.inbound_tx.try_send(SessionMessage::DisableNotify);
 
         // Send Close signal; ignore errors (session may have already stopped)
         let _ = handle.inbound_tx.send(SessionMessage::Close).await;
@@ -653,6 +704,94 @@ impl SessionManager {
 
         tracing::info!(session_id = %session_id, "SessionManager: closed session");
         Ok(())
+    }
+
+    /// Delete a session: close the task, remove index entry, and delete JSONL file.
+    ///
+    /// This is an atomic operation from the caller's perspective — after this
+    /// returns, the session no longer exists in memory or on disk (unless the
+    /// join times out, in which case the task continues but its index entry and
+    /// JSONL file are still cleaned up).
+    ///
+    /// Works for sessions both in memory and already evicted from memory
+    /// (e.g., idle eviction, reaped handles, or previous Runtime restarts).
+    /// When the session is not in `self.sessions`, the Close/join steps are
+    /// skipped and only the on-disk resources are cleaned up.
+    ///
+    /// A 30-second timeout is applied to the session task join.  If the task
+    /// does not finish within this window (e.g. distillation hangs), resources
+    /// are still cleaned up and the method returns successfully — the background
+    /// task's eventual `Drop` may briefly re-write the index entry, but the end
+    /// result is a tombstone-free index after the next call to
+    /// [`remove_session_from_index`] on a subsequent delete or prune.
+    pub async fn delete_session(&mut self, session_id: &str) {
+        // 1. If in memory, close the task cleanly (with timeout)
+        if let Some(handle) = self.sessions.remove(session_id) {
+            // ADR-020: Disable notifications before Close
+            let _ = handle.inbound_tx.try_send(SessionMessage::DisableNotify);
+            let _ = handle.inbound_tx.send(SessionMessage::Close).await;
+
+            // Clean up in-memory mappings
+            self.pending_workspaces.remove(session_id);
+            self.urgent_stops.remove(session_id);
+            self.session_committed_lines.remove(session_id);
+
+            // Wait for the task to finish so that Drop runs before we
+            // finalize on-disk state.
+            const TIMEOUT: Duration = Duration::from_secs(30);
+            match tokio::time::timeout(TIMEOUT, handle.join_handle).await {
+                Ok(Ok(())) => {
+                    tracing::info!(session_id = %session_id, "Session task shut down cleanly");
+                }
+                Ok(Err(join_err)) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %join_err,
+                        "Session task panicked during close"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        timeout = ?TIMEOUT,
+                        "Session task did not finish within timeout, proceeding with resource cleanup"
+                    );
+                }
+            }
+        } else {
+            // Session already evicted — just clean up remaining mappings
+            self.pending_workspaces.remove(session_id);
+            self.urgent_stops.remove(session_id);
+            self.session_committed_lines.remove(session_id);
+            tracing::info!(session_id = %session_id, "Session already evicted, skipping task close");
+        }
+
+        // 2. Remove from index — the final word, overriding any stale index
+        //    write from Drop (even if the task already finished its Drop).
+        let conversations_dir =
+            std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        crate::conversation::remove_session_from_index(&conversations_dir, session_id);
+
+        // 3. Delete the JSONL file.
+        let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
+        match std::fs::remove_file(&file_path) {
+            Ok(()) => {
+                tracing::info!(session_id = %session_id, "Deleted session JSONL file");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(session_id = %session_id, "Session JSONL file already deleted");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    path = %file_path.display(),
+                    error = %e,
+                    "Failed to delete session JSONL file"
+                );
+            }
+        }
+
+        tracing::info!(session_id = %session_id, "SessionManager: deleted session");
     }
 
     /// Send a message to a specific session.

@@ -1219,6 +1219,28 @@ fn ensure_index(conversations_dir: &Path) -> (SessionIndex, bool) {
     }
 }
 
+/// Remove a session entry from the index file.
+///
+/// Idempotent: returns `Ok(())` even if the session doesn't exist in the index
+/// or if the index file itself doesn't exist.
+///
+/// Called by `SessionManager::delete_session` as the final step to ensure the
+/// deleted session does not reappear in the session list after refresh.
+pub(crate) fn remove_session_from_index(conversations_dir: &Path, session_id: &str) {
+    let mut index = match load_index(conversations_dir) {
+        Some(idx) => idx,
+        None => return,
+    };
+    index.sessions.remove(session_id);
+    if let Err(e) = write_index_atomic(conversations_dir, &index) {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %e,
+            "Failed to write index after removing session entry"
+        );
+    }
+}
+
 /// Prune excess sessions when the index exceeds `max_sessions`.
 ///
 /// Sessions are ordered by `last_active_at` (oldest first) and removed
