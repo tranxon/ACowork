@@ -34,20 +34,11 @@ export interface SessionScope {
   userJustSent: boolean;
   pinnedToBottom: boolean;
   thinkingWasShowing: boolean;
-  /** Timestamp (performance.now) until which bottom-restore is forced. */
-  restoreBottomUntil: number;
-  /** Last session key whose scroll snapshot was restored. */
-  restoredScrollKey: string | null;
   /** Previous display count for scroll-on-new-message logic. */
   prevDisplayCount: number;
   /** Previous virtualCount for sticky-bottom logic. */
   prevStickyCount: number;
 
-  // ── Animation ──
-  /** Streaming typewriter animation state: msgId → displayedLen */
-  animState: Map<string, { displayedLen: number }>;
-  /** RAF handle for the animation loop. */
-  rafId: number;
 }
 
 /** Factory: returns a fresh default SessionScope. */
@@ -59,12 +50,8 @@ export function createDefaultSessionScope(): SessionScope {
     userJustSent: false,
     pinnedToBottom: false,
     thinkingWasShowing: false,
-    restoreBottomUntil: 0,
-    restoredScrollKey: null,
     prevDisplayCount: 0,
     prevStickyCount: 0,
-    animState: new Map(),
-    rafId: 0,
   };
 }
 
@@ -75,9 +62,6 @@ export interface SessionScopeAPI {
   scope: React.MutableRefObject<SessionScope>;
 
   // ── State (triggers re-render on change) ──
-  animTick: number;
-  setAnimTick: React.Dispatch<React.SetStateAction<number>>;
-
   inputValue: string;
   setInputValue: (v: string) => void;
 
@@ -120,7 +104,6 @@ export function useSessionScope(
   const prevSessionRef = useRef<string | null>(null);
 
   // ── State values (trigger re-render) ──
-  const [animTick, setAnimTick] = useState(0);
   const [inputValue, setInputValue] = useState("");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
@@ -138,7 +121,6 @@ export function useSessionScope(
       scopeRef.current = createDefaultSessionScope();
 
       // Reset all state-based values
-      setAnimTick(0);
       setInputValue("");
       setPendingFiles([]);
       setPendingImages([]);
@@ -154,8 +136,6 @@ export function useSessionScope(
 
   return {
     scope: scopeRef,
-    animTick,
-    setAnimTick,
     inputValue,
     setInputValue,
     pendingFiles,

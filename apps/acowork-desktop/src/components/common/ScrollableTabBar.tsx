@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, forwardRef, type ReactNode, useImperativeHandle } from "react";
+import { useState, useRef, useEffect, useCallback, forwardRef, type ReactNode, useImperativeHandle, Children } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 export interface ScrollableTabBarHandle {
@@ -40,6 +40,11 @@ export const ScrollableTabBar = forwardRef<ScrollableTabBarHandle, ScrollableTab
             setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
         }, []);
 
+        // Trigger re-check after children (tabs) are committed to the DOM.
+        // ResizeObserver only fires when the element's own box changes, not when
+        // scrollWidth changes due to children being added/removed — we need a
+        // side-effect that runs after every render to catch those transitions.
+        const childCount = Children.count(children);
         useEffect(() => {
             updateScrollState();
             const el = scrollRef.current;
@@ -51,9 +56,8 @@ export const ScrollableTabBar = forwardRef<ScrollableTabBarHandle, ScrollableTab
                 el.removeEventListener("scroll", updateScrollState);
                 ro.disconnect();
             };
-            // Re-check when children change (tabs added/removed)
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [updateScrollState]);
+        }, [updateScrollState, childCount]);
 
         const scrollBy = (dir: "left" | "right") => {
             scrollRef.current?.scrollBy({ left: dir === "left" ? -160 : 160, behavior: "smooth" });
@@ -108,8 +112,8 @@ export const ScrollableTabBar = forwardRef<ScrollableTabBarHandle, ScrollableTab
                 )}
                 <div
                     ref={scrollRef}
-                    className="flex flex-1 min-w-0 overflow-visible gap-0.5 cursor-grab active:cursor-grabbing [&::-webkit-scrollbar]:hidden"
-                    style={{ scrollbarWidth: "none", msOverflowStyle: "none", clipPath: "inset(0 0 -1px 0)" }}
+                    className="flex flex-1 min-w-0 overflow-x-auto gap-0.5 cursor-grab active:cursor-grabbing [&::-webkit-scrollbar]:hidden pb-[1px]"
+                    style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
                     onMouseDown={handleDragStart}
                 >
                     {children}
