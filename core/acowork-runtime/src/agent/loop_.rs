@@ -141,25 +141,23 @@ pub enum ChunkEvent {
     TodoListUpdated {
         todos: Vec<crate::agent::session_state::TodoItem>,
     },
-    /// ADR-021: New data is available for polling.
+    /// ADR-021/025: New data is available for polling.
     ///
     /// Sent via control channel to notify the frontend that the StreamingStateMap
-    /// or JSONL has new content. The frontend should trigger an HTTP poll to
-    /// `GET /messages?line_number=N&line_char_offset=M`.
+    /// or JSONL has new content. The frontend should trigger an HTTP poll with
+    /// `incremental=true` — the backend uses its own delivery cursor to
+    /// determine what to return.
+    ///
+    /// This is a **pure signal** — it carries no state data (no `total_lines`,
+    /// no `streaming_line`).  The backend maintains all delivery state.
     ///
     /// `interval_ms` is the configured notify throttle interval (from
-    /// `DataFlowConfig.notify_interval_ms`).  The frontend uses it as both
-    /// its polling interval and typewriter animation duration, ensuring
-    /// the animation completes before the next poll arrives.
+    /// `DataFlowConfig.notify_interval_ms`).  The frontend uses it as its
+    /// polling interval base.
     NewDataAvailable {
         session_id: String,
-        /// Total lines in the JSONL file (including metadata line 0).
-        total_lines: usize,
-        /// The line number of the current streaming line (same as total_lines
-        /// when a streaming line exists, since it will become the next line).
-        streaming_line: usize,
         /// Notify throttle interval in ms (from DataFlowConfig).
-        /// Frontend uses this as polling interval + animation duration.
+        /// Frontend uses this as polling interval base.
         interval_ms: u64,
         /// Latest session title from async LLM summarization.
         /// `None` when title has not been generated yet.

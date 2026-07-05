@@ -85,10 +85,8 @@ interface SessionChatState {
     startLine?: number;
     endLine?: number;
   }>;
-  /** ADR-021: Polling line coordinate — last known JSONL line number */
-  pollLineNumber: number;
-  /** ADR-021: Polling char offset within the current streaming line */
-  pollCharOffset: number;
+  /** ADR-025: Whether more undelivered data exists (batch catch-up signal) */
+  hasMoreIncremental: boolean;
   /** ADR-021: Per-session AbortController for cancelling in-flight loadSessionMessages */
   abortController: AbortController | null;
   /** ADR-021: Per-session load sequence number to prevent race conditions */
@@ -119,8 +117,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   isCompacting: false,
   treeExpandedPaths: [],
   attachedContext: [],
-  pollLineNumber: 0,
-  pollCharOffset: 0,
+  hasMoreIncremental: false,
   abortController: null,
   loadSequence: 0,
 };
@@ -315,11 +312,9 @@ interface ChatStore {
     cursor?: string,
     limit?: number,
     direction?: string,
-    /** ADR-021: line number for incremental poll (replaces cursor for polling) */
-    lineNumber?: number,
-    /** ADR-021: char offset within the streaming line */
-    charOffset?: number,
-  ) => Promise<void>;
+    /** ADR-025: when true, uses backend-managed delivery cursor */
+    incremental?: boolean,
+  ) => Promise<{ hasMore: boolean; noNewData: boolean } | undefined>;
   abortSessionLoad: (agentId: string, sessionId: string) => void;
   loadMoreMessages: (agentId: string, sessionId: string) => Promise<void>;
   /** Activate a session — sets activeSessionId and triggers cleanup */
@@ -642,8 +637,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         iterationLimitPaused: null,
         pendingApproval: {},
               loadError: null,
-        pollLineNumber: 0,
-        pollCharOffset: 0,
+        hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
       }),
@@ -661,8 +655,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         iterationLimitPaused: null,
         pendingApproval: {},
               loadError: null,
-        pollLineNumber: 0,
-        pollCharOffset: 0,
+        hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
       }),
@@ -1195,9 +1188,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     cursor?: string,
     limit: number = 50,
     direction: string = "backward",
-    lineNumber?: number,
-    charOffset?: number,
-  ) => {
+    incremental?: boolean,
+  ): Promise<{ hasMore: boolean; noNewData: boolean } | undefined> => {
     // ADR-021: Per-session abortController + loadSequence (no cross-session interference).
     const sessionState = getSessionState(get(), agentId, sessionId);
     const seq = sessionState.loadSequence + 1;
@@ -1214,8 +1206,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }),
     }));
 
-    // Only show loading indicator for initial loads (no cursor, no line_number)
-    const isIncremental = !!(cursor || lineNumber != null);
+    // Only show loading indicator for initial loads (no cursor, not incremental)
+    const isIncremental = !!(cursor || incremental);
     if (!isIncremental) {
       set((state) => ({
         ...updateSessionState(state, agentId, sessionId, { isLoadingSession: true, loadError: null }),
@@ -1227,10 +1219,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       params.set("limit", String(limit));
       params.set("direction", direction);
       if (cursor) params.set("cursor", cursor);
-      // ADR-021: line_number + line_char_offset for incremental polling
-      // Use != null (not truthy) — 0 is a valid coordinate value.
-      if (lineNumber != null) params.set("line_number", String(lineNumber));
-      if (charOffset != null) params.set("line_char_offset", String(charOffset));
+      // ADR-025: incremental flag for backend-managed delivery cursor
+      if (incremental) params.set("incremental", "true");
 
       const resp = await fetch(
         `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
@@ -1251,9 +1241,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return;
       }
 
-      console.log(`[ChatStore] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}${lineNumber != null ? ` (incremental from line ${lineNumber})` : ""}`);
+      console.log(`[ChatStore] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}${incremental ? " (incremental)" : ""}`);
 
       const converted = mergeDocumentUploads(data.messages ?? [], agentId);
+
+      // ADR-025: Compute poll result for PollingManager before set().
+      const pollResult = incremental
+        ? {
+            hasMore: data.has_more ?? false,
+            noNewData: converted.length === 0 && (!data.streaming || !data.streaming.content),
+          }
+        : undefined;
 
       set((state) => {
         const ss = getSessionState(state, agentId, sessionId);
@@ -1262,14 +1260,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {};
         }
 
-        // ADR-021/022: Incremental poll — append new complete JSONL lines,
+        // ADR-021/022/025: Incremental poll — append new complete JSONL lines,
         // then reconcile the in-progress streaming placeholder.
-        if (lineNumber != null) {
+        if (incremental) {
           const ss = getSessionState(state, agentId, sessionId);
-          const existingIds = new Set(ss.messages.map((m) => m.id));
-          const newMessages = converted.filter((m) => !existingIds.has(m.id));
 
-          let messages = [...ss.messages];
+          // ADR-025: No dedup needed — the backend delivery cursor
+          // guarantees no duplicate messages.  Append directly.
+          let messages = [...ss.messages, ...converted];
           const streaming = data.streaming;
 
           // ADR-022 §6.1: JSONL line order is the ONLY display order. The
@@ -1286,15 +1284,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           //     complete JSONL line (or when streaming ends entirely).
           const placeholderPrefix = `msg-streaming-${sessionId}-`;
 
-          // 1) Append new JSONL messages. Simple dedup by ID — messages
-          //    already in the list (e.g. optimistic user message) are skipped.
-          //    JSONL order is preserved because new messages are always
-          //    appended after existing ones. The only case where a new message
-          //    should appear before the last user message is a compaction
-          //    record — but that is handled by a one-shot poll in the
-          //    compacting_ended handler, so the compaction record is already
-          //    in the list before the user sends their next message.
-          messages = [...messages, ...newMessages];
+          // 1) Append new JSONL messages (already done above — no dedup).
 
           // 2) Reconcile placeholders. Drop every streaming placeholder that
           //    does not match the current streaming line — those lines have
@@ -1356,30 +1346,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
           }
 
-          // No new data and no streaming content — just update coordinates.
-          // Placeholder cleanup already ran above, so a vanished streaming
-          // line always removes its stale placeholder even here.
-          if (newMessages.length === 0 && (!streaming || !streaming.content)) {
-            return {
-              ...updateSessionState(state, agentId, sessionId, {
-                messages,
-                isLoadingSession: false,
-                loadError: null,
-                pollLineNumber: data.total_lines ?? ss.pollLineNumber,
-                pollCharOffset: streaming?.char_offset ?? ss.pollCharOffset,
-              }),
-            };
-          }
-
           return {
             ...updateSessionState(state, agentId, sessionId, {
               messages,
-              hasMoreMessages: data.has_more,
-              messageCursor: data.cursor,
+              hasMoreIncremental: data.has_more ?? false,
               isLoadingSession: false,
               loadError: null,
-              pollLineNumber: data.total_lines ?? ss.pollLineNumber,
-              pollCharOffset: streaming?.char_offset ?? 0,
             }),
             isLoadingMore: false,
           };
@@ -1409,12 +1381,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messageCursor: data.cursor,
             isLoadingSession: false,
             loadError: null,
-            pollLineNumber: data.total_lines ?? 0,
-            pollCharOffset: 0,
           }),
           isLoadingMore: false,
         };
       });
+
+      return pollResult;
     } catch (e: unknown) {
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
         console.log(`[ChatStore] Discarding stale error response (seq ${seq})`);
@@ -1845,14 +1817,14 @@ function handleMessageEvent(
     // ADR-021: new_data_available — triggers HTTP poll for incremental message data.
     case "new_data_available": {
       if (!sid) break;
-      const totalLines = (data.total_lines as number) ?? 0;
       const intervalMs = (data.interval_ms as number) ?? undefined;
       console.log(
-        `[ChatStore] new_data_available for ${agentId}/${sid}: total_lines=${totalLines}, interval_ms=${intervalMs}`,
+        `[ChatStore] new_data_available for ${agentId}/${sid}: interval_ms=${intervalMs}`,
       );
+      // ADR-025: Pure signal — no totalLines. Backend maintains delivery cursor.
       // Import PollingManager dynamically to avoid circular dependency
       import("../lib/polling").then(({ notifyNewData }) => {
-        notifyNewData(agentId, sid!, totalLines, intervalMs);
+        notifyNewData(agentId, sid!, intervalMs);
       }).catch((e) => {
         console.warn("[ChatStore] Failed to import PollingManager:", e);
       });
@@ -1867,29 +1839,21 @@ function handleMessageEvent(
     case "done": {
       if (!sid) break;
       const usage = data.usage as TokenUsage | undefined;
-      // ADR-021: Do a final poll to fetch the last flushed messages,
-      // then stop polling. The Done event may arrive before the last
-      // poll response — doing one final poll ensures nothing is missed.
-      const sessionState = getSessionState(get(), agentId, sid!);
-      if (sessionState) {
-        get().loadSessionMessages(
-          agentId,
-          sid!,
-          undefined,
-          50,
-          "backward",
-          sessionState.pollLineNumber,
-          sessionState.pollCharOffset,
-        ).finally(() => {
-          import("../lib/polling").then(({ stopPolling }) => {
-            stopPolling(agentId, sid!);
-          }).catch(() => {});
-        });
-      } else {
+      // ADR-025: Final poll to drain remaining data. No coordinates —
+      // the backend delivery cursor knows what's left. This is NOT
+      // "compensation" — it's the natural "fetch remaining data" step.
+      get().loadSessionMessages(
+        agentId,
+        sid!,
+        undefined,
+        50,
+        "backward",
+        true, // incremental = true (ADR-025)
+      ).finally(() => {
         import("../lib/polling").then(({ stopPolling }) => {
           stopPolling(agentId, sid!);
         }).catch(() => {});
-      }
+      });
       set((state) => {
         const ss = getSessionState(state, agentId, sid!);
         return {
@@ -2039,18 +2003,12 @@ function handleMessageEvent(
     case "compacting_ended":
       if (sid) {
         set((state) => updateSessionState(state, agentId, sid, { isCompacting: false }));
-        // ADR-021: Do a one-shot poll to fetch the compaction record just
-        // written to JSONL.  The PollingManager is stopped when the session
-        // is idle, so without this explicit poll the compaction record won't
-        // appear until the user sends their next message — which would cause
-        // the compaction record to display AFTER the optimistic user message.
-        const sessionState = getSessionState(get(), agentId, sid);
-        if (sessionState) {
-          get().loadSessionMessages(
-            agentId, sid, undefined, 50, "backward",
-            sessionState.pollLineNumber, sessionState.pollCharOffset,
-          );
-        }
+        // ADR-025: One-shot poll to fetch the compaction record. No
+        // coordinates — backend delivery cursor handles it.
+        get().loadSessionMessages(
+          agentId, sid, undefined, 50, "backward",
+          true, // incremental = true (ADR-025)
+        );
       }
       break;
 

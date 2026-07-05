@@ -726,8 +726,6 @@ export function ChatPanel() {
     // where the user has already sent an optimistically-rendered message
     // before the HTTP response returns — a full replacement would wipe it.
     const chatStore = useChatStore.getState();
-    const sessionState = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessionId];
-    const startLine = sessionState?.pollLineNumber;
     lastLoadedSessionId = currentSessionId;
 
     /* ── DIAG: memory snapshot before session load ── [disabled per C2 review]
@@ -758,7 +756,7 @@ export function ChatPanel() {
     // are not blocked (unlike the old boolean which blocked all loads).
     session.scope.current.isInitialLoad = currentSessionId;
     void chatStore
-      .loadSessionMessages(selectedAgentId, currentSessionId, undefined, 50, "backward", startLine)
+      .loadSessionMessages(selectedAgentId, currentSessionId)
       .finally(() => {
         session.scope.current.isInitialLoad = null;
 

@@ -356,7 +356,11 @@ impl SessionCore {
 
     // ── Notification ─────────────────────────────────────────────────
 
-    /// Send a `NewDataAvailable` notification via the control channel.
+    /// ADR-021/025: Send a `NewDataAvailable` notification via the control channel.
+    ///
+    /// This is a **pure signal** — no state data is carried. The frontend
+    /// triggers an incremental poll and the backend uses its own delivery
+    /// cursor to determine what to return.
     ///
     /// Only sends if `notify_enabled` is true and at least `notify_interval_ms`
     /// have elapsed since the last notification (ADR-021 §难点 1).
@@ -383,18 +387,10 @@ impl SessionCore {
             None => return,
         };
 
-        let total_lines = self.get_committed_lines(&sid);
-
-        let map = self.streaming_lines.read().unwrap();
-        let streaming_line = map.get(&sid).map(|sl| sl.line_number).unwrap_or(0);
-        drop(map);
-
         let title = self.title.read().unwrap().clone();
 
         let _ = self.try_send_chunk(ChunkEvent::NewDataAvailable {
             session_id: sid,
-            total_lines,
-            streaming_line,
             interval_ms: self.notify_interval_ms,
             title,
         });

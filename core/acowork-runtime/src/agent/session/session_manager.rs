@@ -208,6 +208,11 @@ pub struct SessionManager {
     /// own independent counter; `committed_lines_for(session_id)` returns the
     /// count for the correct JSONL file.
     session_committed_lines: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+    /// ADR-025: Per-session delivery cursor — the backend tracks how much
+    /// data has been delivered to the frontend.  The frontend never sends
+    /// coordinates; it polls with `incremental=true` and the backend uses
+    /// this cursor to determine what to return.
+    session_delivery_cursors: std::sync::RwLock<HashMap<String, crate::conversation::DeliveryCursor>>,
     /// Shared streaming lines map (keyed by session_id), cloned into each
     /// SessionCore and used by the HTTP handler for `read_messages_since`.
     streaming_lines: crate::conversation::StreamingStateMap,
@@ -233,6 +238,7 @@ impl SessionManager {
             debug_controllers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             urgent_stops: HashMap::new(),
             session_committed_lines: HashMap::new(),
+            session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_embed_config: None,
         }
@@ -720,6 +726,7 @@ impl SessionManager {
         self.pending_workspaces.remove(session_id);
         self.urgent_stops.remove(session_id);
         self.session_committed_lines.remove(session_id);
+        self.session_delivery_cursors.write().unwrap().remove(session_id);
 
         tracing::info!(session_id = %session_id, "SessionManager: closed session");
         Ok(())
@@ -754,6 +761,7 @@ impl SessionManager {
             self.pending_workspaces.remove(session_id);
             self.urgent_stops.remove(session_id);
             self.session_committed_lines.remove(session_id);
+            self.session_delivery_cursors.write().unwrap().remove(session_id);
 
             // Wait for the task to finish so that Drop runs before we
             // finalize on-disk state.
@@ -782,6 +790,7 @@ impl SessionManager {
             self.pending_workspaces.remove(session_id);
             self.urgent_stops.remove(session_id);
             self.session_committed_lines.remove(session_id);
+            self.session_delivery_cursors.write().unwrap().remove(session_id);
             tracing::info!(session_id = %session_id, "Session already evicted, skipping task close");
         }
 
@@ -864,6 +873,7 @@ impl SessionManager {
                     self.sessions.remove(session_id);
                     self.urgent_stops.remove(session_id);
                     self.session_committed_lines.remove(session_id);
+                    self.session_delivery_cursors.write().unwrap().remove(session_id);
                     tracing::warn!(
                         session_id = %session_id,
                         task_finished = was_finished,
@@ -1443,6 +1453,60 @@ After installation, ask the user to re-enable the MCP server.",
             .unwrap_or(0)
     }
 
+    /// ADR-025: Get the per-session delivery cursor.
+    ///
+    /// If no cursor exists for this session (first incremental poll after
+    /// session creation/resume), returns a cursor initialized to
+    /// `{committed_lines, 0}` — meaning all existing complete lines are
+    /// considered "already delivered" (they were fetched via the initial
+    /// full-load request, not via incremental polling).
+    pub fn get_delivery_cursor(&self, session_id: &str) -> crate::conversation::DeliveryCursor {
+        {
+            let cursors = self.session_delivery_cursors.read().unwrap();
+            if let Some(&c) = cursors.get(session_id) {
+                return c;
+            }
+        }
+        // Initialize: all existing committed lines are "delivered".
+        let initial = crate::conversation::DeliveryCursor {
+            line_number: self.committed_lines_for(session_id),
+            char_offset: 0,
+        };
+        let mut cursors = self.session_delivery_cursors.write().unwrap();
+        cursors.entry(session_id.to_string()).or_insert(initial);
+        initial
+    }
+
+    /// ADR-025: Advance the delivery cursor after a successful incremental poll.
+    pub fn advance_delivery_cursor(
+        &self,
+        session_id: &str,
+        line_number: usize,
+        char_offset: usize,
+    ) {
+        let mut cursors = self.session_delivery_cursors.write().unwrap();
+        cursors.insert(
+            session_id.to_string(),
+            crate::conversation::DeliveryCursor { line_number, char_offset },
+        );
+    }
+
+    /// ADR-025: Reset the delivery cursor to `total_lines`.
+    ///
+    /// Called after a non-incremental (full-load) request — all existing
+    /// lines have been delivered via pagination, so the cursor jumps to
+    /// the current end of the file.
+    pub fn reset_delivery_cursor(&self, session_id: &str, total_lines: usize) {
+        let mut cursors = self.session_delivery_cursors.write().unwrap();
+        cursors.insert(
+            session_id.to_string(),
+            crate::conversation::DeliveryCursor {
+                line_number: total_lines,
+                char_offset: 0,
+            },
+        );
+    }
+
     /// ADR-022: Create a fresh `committed_lines` Arc for a new session's
     /// writer thread. The Arc is cloned and stored in
     /// `session_committed_lines` by `create_session_with_id_and_conversation`.
@@ -1549,6 +1613,7 @@ After installation, ask the user to re-enable the MCP server.",
             tracing::debug!(session_id = %id, "Reaping finished session handle");
             self.sessions.remove(&id);
             self.session_committed_lines.remove(&id);
+            self.session_delivery_cursors.write().unwrap().remove(&id);
         }
     }
 
@@ -1603,6 +1668,7 @@ After installation, ask the user to re-enable the MCP server.",
                 let _ = handle.inbound_tx.send(SessionMessage::Close).await;
                 self.urgent_stops.remove(session_id);
                 self.session_committed_lines.remove(session_id);
+                self.session_delivery_cursors.write().unwrap().remove(session_id);
                 tracing::info!(session_id = %session_id, "Evicted idle session from memory (idle > {:?})", idle_timeout);
             }
         }
@@ -2073,5 +2139,251 @@ mod tests {
     fn test_require_session_id_empty() {
         let params = serde_json::json!({ "session_id": "" });
         assert!(SessionManager::require_session_id(&params).is_err());
+    }
+
+    // ── DeliveryCursor storage tests (ADR-025) ──────────────────────
+    //
+    // These tests verify the cursor storage logic that SessionManager
+    // uses internally (RwLock<HashMap<String, DeliveryCursor>>).  The
+    // methods get/advance/reset are thin wrappers around HashMap ops,
+    // but testing the lifecycle ensures correctness of the integration
+    // with read_messages_since_cursor.
+
+    use crate::conversation::DeliveryCursor;
+
+    /// Simulates SessionManager's delivery cursor storage for testing.
+    struct CursorStore {
+        cursors: std::sync::RwLock<HashMap<String, DeliveryCursor>>,
+        committed_lines: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+    }
+
+    impl CursorStore {
+        fn new() -> Self {
+            Self {
+                cursors: std::sync::RwLock::new(HashMap::new()),
+                committed_lines: HashMap::new(),
+            }
+        }
+
+        /// Mirrors SessionManager::get_delivery_cursor
+        fn get(&self, sid: &str) -> DeliveryCursor {
+            {
+                let c = self.cursors.read().unwrap();
+                if let Some(&v) = c.get(sid) {
+                    return v;
+                }
+            }
+            let cl = self.committed_lines.get(sid)
+                .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            let initial = DeliveryCursor { line_number: cl, char_offset: 0 };
+            self.cursors.write().unwrap().entry(sid.to_string()).or_insert(initial);
+            initial
+        }
+
+        /// Mirrors SessionManager::advance_delivery_cursor
+        fn advance(&self, sid: &str, line_number: usize, char_offset: usize) {
+            self.cursors.write().unwrap().insert(
+                sid.to_string(),
+                DeliveryCursor { line_number, char_offset },
+            );
+        }
+
+        /// Mirrors SessionManager::reset_delivery_cursor
+        fn reset(&self, sid: &str, total_lines: usize) {
+            self.cursors.write().unwrap().insert(
+                sid.to_string(),
+                DeliveryCursor { line_number: total_lines, char_offset: 0 },
+            );
+        }
+
+        /// Mirrors session cleanup (close/delete/evict)
+        fn remove(&self, sid: &str) {
+            self.cursors.write().unwrap().remove(sid);
+        }
+
+        fn set_committed_lines(&mut self, sid: &str, count: usize) {
+            self.committed_lines.insert(
+                sid.to_string(),
+                Arc::new(std::sync::atomic::AtomicUsize::new(count)),
+            );
+        }
+
+        /// Mirrors SessionManager::committed_lines_for
+        fn committed_lines_for(&self, sid: &str) -> usize {
+            self.committed_lines.get(sid)
+                .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn test_cursor_get_initializes_to_committed_lines() {
+        let mut store = CursorStore::new();
+        store.set_committed_lines("s1", 42);
+
+        // First get — should initialize to {42, 0}
+        let c = store.get("s1");
+        assert_eq!(c.line_number, 42);
+        assert_eq!(c.char_offset, 0);
+
+        // Second get — should return the stored value (not re-initialize)
+        store.advance("s1", 50, 10);
+        let c = store.get("s1");
+        assert_eq!(c.line_number, 50);
+        assert_eq!(c.char_offset, 10);
+    }
+
+    #[test]
+    fn test_cursor_get_no_committed_lines_defaults_to_zero() {
+        let store = CursorStore::new();
+        // No committed_lines entry for "s2"
+        let c = store.get("s2");
+        assert_eq!(c.line_number, 0);
+        assert_eq!(c.char_offset, 0);
+    }
+
+    #[test]
+    fn test_cursor_advance_updates_value() {
+        let store = CursorStore::new();
+
+        store.advance("s1", 10, 5);
+        let c = store.get("s1");
+        assert_eq!(c.line_number, 10);
+        assert_eq!(c.char_offset, 5);
+
+        // Advance again — overwrites
+        store.advance("s1", 15, 20);
+        let c = store.get("s1");
+        assert_eq!(c.line_number, 15);
+        assert_eq!(c.char_offset, 20);
+    }
+
+    #[test]
+    fn test_cursor_reset_sets_to_total_lines() {
+        let store = CursorStore::new();
+
+        // Advance to some position
+        store.advance("s1", 5, 10);
+        assert_eq!(store.get("s1").line_number, 5);
+
+        // Full load resets to total_lines
+        store.reset("s1", 100);
+        let c = store.get("s1");
+        assert_eq!(c.line_number, 100);
+        assert_eq!(c.char_offset, 0);
+    }
+
+    #[test]
+    fn test_cursor_remove_clears_entry() {
+        let store = CursorStore::new();
+        store.advance("s1", 10, 5);
+        assert!(store.cursors.read().unwrap().contains_key("s1"));
+
+        store.remove("s1");
+        assert!(!store.cursors.read().unwrap().contains_key("s1"));
+
+        // After removal, get re-initializes from committed_lines
+        let c = store.get("s1");
+        assert_eq!(c.line_number, 0); // no committed_lines → 0
+    }
+
+    #[test]
+    fn test_cursor_isolation_between_sessions() {
+        let store = CursorStore::new();
+
+        store.advance("s1", 10, 5);
+        store.advance("s2", 20, 15);
+
+        assert_eq!(store.get("s1").line_number, 10);
+        assert_eq!(store.get("s2").line_number, 20);
+
+        // Advancing s1 doesn't affect s2
+        store.advance("s1", 15, 0);
+        assert_eq!(store.get("s2").line_number, 20);
+
+        // Removing s1 doesn't affect s2
+        store.remove("s1");
+        assert_eq!(store.get("s2").line_number, 20);
+    }
+
+    /// E2E: Full delivery flow using CursorStore + read_messages_since_cursor.
+    /// This is the closest to the real SessionManager + cli.rs path without
+    /// requiring a full AgentCore.
+    #[test]
+    fn test_e2e_cursor_store_with_read_messages() {
+        use crate::conversation::{read_messages_since_cursor, ConversationEntry};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            ConversationEntry {
+                id: "1".to_string(),
+                ts: chrono::Utc::now().to_rfc3339(),
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                metadata: None,
+                kind: None,
+            },
+        ];
+        let path = dir.path().join("conversations").join("e2e.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&path).unwrap();
+            for e in &entries {
+                serde_json::to_writer(&mut f, e).unwrap();
+                writeln!(f).unwrap();
+            }
+        }
+
+        let mut store = CursorStore::new();
+        store.set_committed_lines("e2e", 1);
+        let sid = "e2e";
+        let map: crate::conversation::StreamingStateMap =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+
+        // Step 1: Full load — reset cursor to total_lines
+        store.reset(sid, 1);
+        let cursor = store.get(sid);
+        assert_eq!(cursor.line_number, 1);
+
+        // Step 2: Incremental poll — nothing new
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, store.committed_lines_for(sid)).unwrap();
+        assert_eq!(r.messages.len(), 0);
+        assert!(!r.has_more);
+        store.advance(sid, r.new_cursor.line_number, r.new_cursor.char_offset);
+
+        // Step 3: Write new line (simulates flush + writer incrementing committed_lines)
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let e = ConversationEntry {
+                id: "2".to_string(),
+                ts: chrono::Utc::now().to_rfc3339(),
+                role: "assistant".to_string(),
+                content: "world".to_string(),
+                metadata: None,
+                kind: None,
+            };
+            serde_json::to_writer(&mut f, &e).unwrap();
+            writeln!(f).unwrap();
+        }
+        // Simulate writer thread incrementing committed_lines
+        store.committed_lines.get(sid).unwrap()
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+
+        // Step 4: Incremental poll — delivers new line
+        let cursor = store.get(sid);
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, store.committed_lines_for(sid)).unwrap();
+        assert_eq!(r.messages.len(), 1);
+        assert_eq!(r.messages[0].content, "world");
+        store.advance(sid, r.new_cursor.line_number, r.new_cursor.char_offset);
+
+        // Step 5: Incremental poll — nothing new
+        let cursor = store.get(sid);
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, store.committed_lines_for(sid)).unwrap();
+        assert_eq!(r.messages.len(), 0);
+        assert!(!r.has_more);
     }
 }

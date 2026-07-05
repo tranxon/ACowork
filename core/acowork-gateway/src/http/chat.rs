@@ -1130,12 +1130,19 @@ pub struct SessionMessagesQuery {
     /// Pagination direction: "forward" or "backward" (default: "backward")
     #[serde(default = "default_direction")]
     pub direction: String,
-    /// ADR-021: JSONL line coordinate for incremental polling
+    /// ADR-021: JSONL line coordinate for incremental polling (deprecated,
+    /// use `incremental` instead — ADR-025)
     #[serde(default)]
     pub line_number: Option<usize>,
-    /// ADR-021: Character offset within streaming line for delta computation
+    /// ADR-021: Character offset within streaming line (deprecated, use
+    /// `incremental` instead — ADR-025)
     #[serde(default)]
     pub line_char_offset: Option<usize>,
+    /// ADR-025: Backend-managed incremental polling. When true, the backend
+    /// uses its own per-session delivery cursor instead of receiving
+    /// coordinates from the frontend.
+    #[serde(default)]
+    pub incremental: Option<bool>,
 }
 
 fn default_limit() -> u32 {
@@ -1344,12 +1351,17 @@ pub async fn get_session_messages(
         "direction": query.direction,
     });
 
-    // ADR-021: Forward line coordinate params for incremental polling
+    // ADR-021: Forward line coordinate params for incremental polling (deprecated)
     if let Some(ln) = query.line_number {
         params["line_number"] = serde_json::json!(ln);
     }
     if let Some(co) = query.line_char_offset {
         params["line_char_offset"] = serde_json::json!(co);
+    }
+
+    // ADR-025: Forward incremental flag for backend-managed delivery cursor
+    if let Some(inc) = query.incremental {
+        params["incremental"] = serde_json::json!(inc);
     }
 
     let data = forward_session_query(&state, &agent_id, "get_session_messages", params).await?;

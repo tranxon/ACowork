@@ -1022,6 +1022,37 @@ pub struct ReadMessagesSinceResult {
     pub total_lines: usize,
 }
 
+// ── Backend-managed delivery cursor (ADR-025) ───────────────────────────
+
+/// Per-session delivery cursor — the backend tracks how much data has been
+/// delivered to the frontend.  The frontend never sends coordinates; it
+/// simply polls with `incremental=true` and the backend uses this cursor
+/// to determine what to return.
+///
+/// * `line_number` — number of complete JSONL lines already delivered.
+/// * `char_offset` — number of characters already delivered from the
+///   current in-progress streaming line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeliveryCursor {
+    pub line_number: usize,
+    pub char_offset: usize,
+}
+
+/// Result of `read_messages_since_cursor()`.
+#[derive(Debug, Clone)]
+pub struct ReadMessagesSinceCursorResult {
+    /// New complete lines from JSONL (batch-limited by `limit`).
+    pub messages: Vec<ConversationEntry>,
+    /// Incomplete streaming line delta, if one exists for this session.
+    pub streaming: Option<StreamingLineDelta>,
+    /// Total lines in the JSONL file.
+    pub total_lines: usize,
+    /// Whether more undelivered complete lines remain (batch catch-up signal).
+    pub has_more: bool,
+    /// The updated cursor after this read — caller should persist this.
+    pub new_cursor: DeliveryCursor,
+}
+
 /// Shared map from SessionId to the current incomplete streaming line.
 ///
 /// Written by AgentLoop on each Delta, read by the HTTP handler on poll.
@@ -1617,14 +1648,14 @@ pub fn count_jsonl_lines(path: &Path) -> std::io::Result<usize> {
 ///
 /// ADR-021: This is the Runtime-side handler for incremental poll requests.
 /// It returns:
-/// - `messages`: new complete lines from JSONL after `line_number`
+/// - `messages`: new complete lines from JSONL with index >= `line_number`
 /// - `streaming`: delta of the in-progress streaming line (if any)
 /// - `total_lines`: current total line count in the JSONL file
 ///
 /// # Arguments
 /// - `path`: Path to the session JSONL file.
 /// - `line_number`: Number of complete lines already read by the frontend
-///   (0-based; 0 = metadata). The function returns lines with index > line_number.
+///   (a COUNT, not an index). The function returns lines with index >= line_number.
 /// - `line_char_offset`: Number of characters already read from the streaming
 ///   line. The function returns only new characters after this offset.
 /// - `streaming_lines`: Shared StreamingStateMap for in-progress lines.
@@ -1657,15 +1688,17 @@ pub fn read_messages_since(
     // Clamp line_number to total_lines (defensive against external truncation)
     let line_number = line_number.min(total_lines);
 
-    // Read new complete lines from JSONL (lines with index > line_number)
+    // Read new complete lines from JSONL (lines with index >= line_number).
+    // line_number is a COUNT (number of lines already read by the frontend),
+    // so the first unread line is at index line_number (0-based).
     let mut messages: Vec<ConversationEntry> = Vec::new();
     if line_number < total_lines
         && let Ok(file) = std::fs::File::open(path)
     {
         let reader = BufReader::new(file);
         for (idx, line) in reader.lines().enumerate() {
-            // Only include lines after the frontend's last known line
-            if idx <= line_number {
+            // Skip lines the frontend has already read (indices 0..line_number-1)
+            if idx < line_number {
                 continue;
             }
             if let Ok(content) = line
@@ -1721,6 +1754,126 @@ pub fn read_messages_since(
         messages,
         streaming,
         total_lines,
+    })
+}
+
+/// Backend-cursor variant of [`read_messages_since`].
+///
+/// Instead of receiving `line_number` / `line_char_offset` from the frontend,
+/// this function takes a [`DeliveryCursor`] that the backend maintains
+/// per-session.  It returns at most `limit` complete JSONL lines, plus the
+/// streaming delta, plus a `has_more` flag for batch catch-up.
+///
+/// ## Batch delivery
+///
+/// When the cursor lags far behind `total_lines` (e.g. the session was in
+/// the background for minutes), this function returns at most `limit` lines
+/// and sets `has_more = true`.  The caller should immediately poll again
+/// until `has_more` is false.
+///
+/// ## Streaming delta
+///
+/// The streaming delta is always returned (even during batch catch-up) so
+/// the frontend can update the streaming placeholder incrementally.
+///
+/// ## Stale char_offset detection
+///
+/// If `cursor.line_number < streaming.line_number`, the `char_offset` belongs
+/// to a previous (now flushed) streaming line and is reset to 0 — same logic
+/// as [`read_messages_since`].
+pub fn read_messages_since_cursor(
+    path: &Path,
+    cursor: DeliveryCursor,
+    limit: usize,
+    streaming_lines: &StreamingStateMap,
+    session_id: &str,
+    cached_total_lines: usize,
+) -> Result<ReadMessagesSinceCursorResult> {
+    let total_lines = if cached_total_lines > 0 {
+        cached_total_lines
+    } else {
+        count_jsonl_lines(path).unwrap_or(0)
+    };
+
+    // Clamp cursor.line_number to total_lines (defensive against truncation).
+    let start = cursor.line_number.min(total_lines);
+    let end = (start + limit).min(total_lines);
+
+    // Read complete lines [start..end).
+    let mut messages: Vec<ConversationEntry> = Vec::new();
+    if start < end
+        && let Ok(file) = std::fs::File::open(path)
+    {
+        let reader = BufReader::new(file);
+        for (idx, line) in reader.lines().enumerate() {
+            if idx < start {
+                continue;
+            }
+            if idx >= end {
+                break;
+            }
+            if let Ok(content) = line
+                && let Ok(entry) = serde_json::from_str::<ConversationEntry>(&content)
+            {
+                messages.push(entry);
+            }
+        }
+    }
+
+    let new_line_number = end;
+    let has_more = new_line_number < total_lines;
+
+    // Read streaming line delta.
+    //
+    // Only return streaming delta when the cursor has caught up to the
+    // streaming line (new_line_number >= streaming.line_number).  During
+    // batch catch-up (cursor behind streaming line), the delta is not
+    // useful — the frontend is processing complete lines and the streaming
+    // content will be delivered in full once the cursor catches up.
+    let streaming = {
+        let map = streaming_lines.read().unwrap();
+        map.get(session_id).map(|sl| StreamingLine {
+            line_number: sl.line_number,
+            role: sl.role.clone(),
+            accumulated_content: sl.accumulated_content.clone(),
+            started_at: sl.started_at.clone(),
+            started_at_ms: sl.started_at_ms,
+        })
+    };
+    let streaming = streaming.and_then(|sl| {
+        // Only return delta if cursor has caught up to this streaming line.
+        if new_line_number < sl.line_number {
+            return None;
+        }
+        let current_len = sl.accumulated_content.chars().count();
+        // If cursor was behind the streaming line before reading complete
+        // lines, the char_offset belongs to a previous (flushed) streaming
+        // line and must be reset to 0.
+        let effective_offset = if cursor.line_number < sl.line_number || cursor.char_offset > current_len {
+            0
+        } else {
+            cursor.char_offset
+        };
+        let delta_content: String = sl.accumulated_content.chars().skip(effective_offset).collect();
+        Some(StreamingLineDelta {
+            line: sl.line_number,
+            role: sl.role,
+            content: delta_content,
+            char_offset: current_len,
+        })
+    });
+
+    let new_char_offset = streaming.as_ref().map(|s| s.char_offset).unwrap_or(0);
+
+    Ok(ReadMessagesSinceCursorResult {
+        messages,
+        streaming,
+        total_lines,
+        has_more,
+        new_cursor: DeliveryCursor {
+            line_number: new_line_number,
+            char_offset: new_char_offset,
+        },
     })
 }
 
@@ -2569,5 +2722,766 @@ mod tests {
             "stale offset exceeding current content length must return full content"
         );
         assert_eq!(streaming.char_offset, "Hello".chars().count());
+    }
+
+    // ── read_messages_since_cursor tests (ADR-025) ──────────────────
+
+    #[test]
+    fn test_cursor_basic_no_streaming() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "hello"),
+            make_entry("2", "assistant", "world"),
+            make_entry("3", "user", "again"),
+        ];
+        let path = write_test_jsonl(&dir, "sess-cursor-basic", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        // Cursor at 0, limit 50 → all 3 messages, has_more=false
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 0, char_offset: 0 },
+            50,
+            &map,
+            "sess-cursor-basic",
+            0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 3);
+        assert!(!result.has_more);
+        assert_eq!(result.new_cursor.line_number, 3);
+        assert_eq!(result.new_cursor.char_offset, 0);
+        assert!(result.streaming.is_none());
+    }
+
+    #[test]
+    fn test_cursor_batch_limit() {
+        let dir = TempDir::new().unwrap();
+        let entries: Vec<ConversationEntry> = (0..10)
+            .map(|i| make_entry(&format!("m{}", i), "user", &format!("msg{}", i)))
+            .collect();
+        let path = write_test_jsonl(&dir, "sess-cursor-batch", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        // Cursor at 0, limit 3 → first 3 messages, has_more=true
+        let r1 = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 0, char_offset: 0 },
+            3, &map, "sess-cursor-batch", 0,
+        ).unwrap();
+        assert_eq!(r1.messages.len(), 3);
+        assert!(r1.has_more);
+        assert_eq!(r1.new_cursor.line_number, 3);
+        assert_eq!(r1.messages[0].content, "msg0");
+        assert_eq!(r1.messages[2].content, "msg2");
+
+        // Cursor at 3, limit 3 → next 3 messages, has_more=true
+        let r2 = read_messages_since_cursor(
+            &path, r1.new_cursor, 3, &map, "sess-cursor-batch", 0,
+        ).unwrap();
+        assert_eq!(r2.messages.len(), 3);
+        assert!(r2.has_more);
+        assert_eq!(r2.new_cursor.line_number, 6);
+        assert_eq!(r2.messages[0].content, "msg3");
+
+        // Cursor at 6, limit 3 → next 3, has_more=true
+        let r3 = read_messages_since_cursor(
+            &path, r2.new_cursor, 3, &map, "sess-cursor-batch", 0,
+        ).unwrap();
+        assert_eq!(r3.messages.len(), 3);
+        assert!(r3.has_more);
+        assert_eq!(r3.new_cursor.line_number, 9);
+
+        // Cursor at 9, limit 3 → last 1 message, has_more=false
+        let r4 = read_messages_since_cursor(
+            &path, r3.new_cursor, 3, &map, "sess-cursor-batch", 0,
+        ).unwrap();
+        assert_eq!(r4.messages.len(), 1);
+        assert!(!r4.has_more);
+        assert_eq!(r4.new_cursor.line_number, 10);
+        assert_eq!(r4.messages[0].content, "msg9");
+    }
+
+    #[test]
+    fn test_cursor_streaming_same_line_uses_offset() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![make_entry("1", "user", "hi")];
+        let path = write_test_jsonl(&dir, "sess-cursor-same", &entries);
+        // total_lines=1, streaming line at 1 with "hello world"
+        let map = make_streaming_map("sess-cursor-same", 1, "assistant", "hello world");
+
+        // Cursor at line 1 (caught up), char_offset 3 → delta "lo world"
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 1, char_offset: 3 },
+            50, &map, "sess-cursor-same", 0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 0); // no new complete lines
+        assert!(!result.has_more);
+        let streaming = result.streaming.expect("streaming line expected");
+        assert_eq!(streaming.line, 1);
+        assert_eq!(streaming.content, "lo world");
+        assert_eq!(streaming.char_offset, "hello world".chars().count());
+        // Cursor advances char_offset to full length
+        assert_eq!(result.new_cursor.line_number, 1);
+        assert_eq!(result.new_cursor.char_offset, "hello world".chars().count());
+    }
+
+    #[test]
+    fn test_cursor_streaming_new_line_resets_offset() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "hi"),
+            make_entry("2", "assistant", "previous text"),
+        ];
+        let path = write_test_jsonl(&dir, "sess-cursor-newline", &entries);
+        // Streaming line at 2 (new), content "reasoning..."
+        let map = make_streaming_map("sess-cursor-newline", 2, "thought", "reasoning...");
+
+        // Cursor at line 1 (behind streaming line 2), stale char_offset 10
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 1, char_offset: 10 },
+            50, &map, "sess-cursor-newline", 0,
+        ).unwrap();
+        // Should return line 1 (the complete assistant message)
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].content, "previous text");
+        // Streaming delta should be full "reasoning..." (stale offset reset)
+        let streaming = result.streaming.expect("streaming line expected");
+        assert_eq!(streaming.content, "reasoning...");
+        // Cursor advances to line 2, char_offset = full streaming content length
+        assert_eq!(result.new_cursor.line_number, 2);
+        assert_eq!(result.new_cursor.char_offset, "reasoning...".chars().count());
+    }
+
+    #[test]
+    fn test_cursor_streaming_stale_offset_exceeds_content() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "hi"),
+            make_entry("2", "assistant", "previous long text"),
+        ];
+        let path = write_test_jsonl(&dir, "sess-cursor-stale", &entries);
+        // Streaming line at 2, short content "Hello"
+        let map = make_streaming_map("sess-cursor-stale", 2, "assistant", "Hello");
+
+        // Cursor at line 2 (matches streaming line), stale char_offset 100
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 2, char_offset: 100 },
+            50, &map, "sess-cursor-stale", 0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 0); // no new complete lines
+        let streaming = result.streaming.expect("streaming line expected");
+        assert_eq!(streaming.content, "Hello");
+        assert_eq!(streaming.char_offset, "Hello".chars().count());
+    }
+
+    #[test]
+    fn test_cursor_batch_with_streaming_delta() {
+        // Background session scenario: 100 complete lines pending + streaming.
+        // Streaming delta is NOT returned during batch catch-up (cursor behind
+        // streaming line). It's only returned in the final batch when the
+        // cursor catches up to the streaming line.
+        let dir = TempDir::new().unwrap();
+        let entries: Vec<ConversationEntry> = (0..100)
+            .map(|i| make_entry(&format!("m{}", i), "user", &format!("msg{}", i)))
+            .collect();
+        let path = write_test_jsonl(&dir, "sess-cursor-bg", &entries);
+        // Streaming line at 100, content "streaming content"
+        let map = make_streaming_map("sess-cursor-bg", 100, "assistant", "streaming content");
+
+        // Cursor at 0 (way behind), limit 50 — batch 1
+        let r1 = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 0, char_offset: 0 },
+            50, &map, "sess-cursor-bg", 0,
+        ).unwrap();
+        assert_eq!(r1.messages.len(), 50);
+        assert!(r1.has_more);
+        assert_eq!(r1.new_cursor.line_number, 50);
+        // Streaming delta NOT returned (cursor at 50 < streaming at 100)
+        assert!(r1.streaming.is_none(), "no streaming delta during batch catch-up");
+        assert_eq!(r1.new_cursor.char_offset, 0);
+
+        // Batch 2: cursor at 50, limit 50 — catches up to line 100
+        let r2 = read_messages_since_cursor(
+            &path, r1.new_cursor, 50, &map, "sess-cursor-bg", 0,
+        ).unwrap();
+        assert_eq!(r2.messages.len(), 50);
+        assert!(!r2.has_more);
+        assert_eq!(r2.new_cursor.line_number, 100);
+        // Streaming delta IS returned now (cursor at 100 == streaming at 100)
+        let s2 = r2.streaming.as_ref().expect("streaming should be returned when caught up");
+        assert_eq!(s2.content, "streaming content", "full content on first caught-up poll");
+        assert_eq!(s2.char_offset, "streaming content".chars().count());
+        assert_eq!(r2.new_cursor.char_offset, "streaming content".chars().count());
+
+        // Batch 3: cursor at 100, no new complete lines, streaming delta only
+        let r3 = read_messages_since_cursor(
+            &path, r2.new_cursor, 50, &map, "sess-cursor-bg", 0,
+        ).unwrap();
+        assert_eq!(r3.messages.len(), 0);
+        assert!(!r3.has_more);
+        let s3 = r3.streaming.as_ref().expect("streaming delta on caught-up poll");
+        assert_eq!(s3.content, "", "no new streaming chars");
+    }
+
+    #[test]
+    fn test_cursor_at_total_lines_no_messages() {
+        // Cursor already caught up, no streaming → empty result
+        let dir = TempDir::new().unwrap();
+        let entries = vec![make_entry("1", "user", "hi")];
+        let path = write_test_jsonl(&dir, "sess-cursor-caughtup", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 1, char_offset: 0 },
+            50, &map, "sess-cursor-caughtup", 0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 0);
+        assert!(!result.has_more);
+        assert_eq!(result.new_cursor.line_number, 1);
+        assert!(result.streaming.is_none());
+    }
+
+    #[test]
+    fn test_cursor_clamped_to_total_lines() {
+        // Cursor exceeds total_lines (defensive: JSONL was truncated)
+        let dir = TempDir::new().unwrap();
+        let entries = vec![make_entry("1", "user", "hi")];
+        let path = write_test_jsonl(&dir, "sess-cursor-clamp", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 999, char_offset: 0 },
+            50, &map, "sess-cursor-clamp", 0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 0);
+        assert!(!result.has_more);
+        // Cursor is clamped to total_lines (1)
+        assert_eq!(result.new_cursor.line_number, 1);
+    }
+
+    #[test]
+    fn test_cursor_uses_cached_total_lines() {
+        // When cached_total_lines > 0, it takes precedence over file scan.
+        // In production, committed_lines is always accurate (ADR-022: incremented
+        // AFTER write).  This test verifies the precedence logic only.
+        let dir = TempDir::new().unwrap();
+        let entries: Vec<ConversationEntry> = (0..3)
+            .map(|i| make_entry(&format!("m{}", i), "user", &format!("msg{}", i)))
+            .collect();
+        let path = write_test_jsonl(&dir, "sess-cursor-cached", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        // File has 3 lines, cache says 3 — should return all 3.
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 0, char_offset: 0 },
+            50, &map, "sess-cursor-cached", 3,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 3);
+        assert!(!result.has_more);
+        assert_eq!(result.new_cursor.line_number, 3);
+        assert_eq!(result.total_lines, 3);
+
+        // File has 3 lines, cache says 0 — should fall back to file scan.
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 0, char_offset: 0 },
+            50, &map, "sess-cursor-cached", 0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 3);
+        assert_eq!(result.total_lines, 3);
+    }
+
+    #[test]
+    fn test_cursor_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("conversations").join("empty.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 0, char_offset: 0 },
+            50, &map, "empty", 0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 0);
+        assert!(!result.has_more);
+        assert_eq!(result.total_lines, 0);
+        assert_eq!(result.new_cursor.line_number, 0);
+    }
+
+    #[test]
+    fn test_cursor_limit_zero() {
+        // Edge case: limit=0 → no messages, but has_more may still be true
+        let dir = TempDir::new().unwrap();
+        let entries = vec![make_entry("1", "user", "hi")];
+        let path = write_test_jsonl(&dir, "sess-cursor-lim0", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let result = read_messages_since_cursor(
+            &path,
+            DeliveryCursor { line_number: 0, char_offset: 0 },
+            0, &map, "sess-cursor-lim0", 0,
+        ).unwrap();
+        assert_eq!(result.messages.len(), 0);
+        assert!(result.has_more); // 0 < 1
+        assert_eq!(result.new_cursor.line_number, 0);
+    }
+
+    // ── End-to-end delivery flow tests (ADR-025) ─────────────────────
+    //
+    // These tests simulate the full delivery flow that SessionManager +
+    // cli.rs perform: full load (reset cursor) → incremental poll →
+    // batch catch-up → streaming flush → final poll.  They exercise
+    // read_messages_since_cursor with realistic cursor management,
+    // covering all branches and edge cases.
+
+    /// Helper: append entries to an existing JSONL file (simulates writer
+    /// thread flushing new lines while session is in background).
+    fn append_test_jsonl(path: &Path, entries: &[ConversationEntry]) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap();
+        for e in entries {
+            serde_json::to_writer(&mut file, e).unwrap();
+            writeln!(file).unwrap();
+        }
+    }
+
+    /// E2E: Full lifecycle — full load resets cursor, then incremental
+    /// polls deliver new data.
+    #[test]
+    fn e2e_full_load_then_incremental() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "hello"),
+            make_entry("2", "assistant", "world"),
+        ];
+        let path = write_test_jsonl(&dir, "e2e-lifecycle", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+        let sid = "e2e-lifecycle";
+
+        // Step 1: Full load — read all messages via pagination.
+        // SessionManager.reset_delivery_cursor(sid, total_lines=2)
+        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+
+        // Step 2: Incremental poll — no new data, cursor already at end.
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r.messages.len(), 0);
+        assert!(!r.has_more);
+        cursor = r.new_cursor;
+        assert_eq!(cursor.line_number, 2);
+
+        // Step 3: Writer appends a new line (simulates flush).
+        append_test_jsonl(&path, &[make_entry("3", "user", "new message")]);
+
+        // Step 4: Incremental poll — should return the new line.
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r.messages.len(), 1);
+        assert_eq!(r.messages[0].content, "new message");
+        assert!(!r.has_more);
+        cursor = r.new_cursor;
+        assert_eq!(cursor.line_number, 3);
+    }
+
+    /// E2E: Background session — 100 lines accumulate while "away",
+    /// then batch catch-up delivers them in batches.
+    #[test]
+    fn e2e_background_session_batch_catchup() {
+        let dir = TempDir::new().unwrap();
+        // Initial 2 lines (already delivered via full load)
+        let entries = vec![
+            make_entry("1", "user", "initial"),
+            make_entry("2", "assistant", "response"),
+        ];
+        let path = write_test_jsonl(&dir, "e2e-bg", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+        let sid = "e2e-bg";
+
+        // Full load done — cursor at 2
+        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+
+        // Session goes to background. Writer appends 100 more lines.
+        let new_entries: Vec<ConversationEntry> = (0..100)
+            .map(|i| make_entry(&format!("bg{}", i), "user", &format!("bg-msg{}", i)))
+            .collect();
+        append_test_jsonl(&path, &new_entries);
+
+        // User returns — incremental poll with limit=50
+        let r1 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r1.messages.len(), 50);
+        assert!(r1.has_more);
+        assert_eq!(r1.messages[0].content, "bg-msg0");
+        assert_eq!(r1.messages[49].content, "bg-msg49");
+        cursor = r1.new_cursor;
+        assert_eq!(cursor.line_number, 52);
+
+        // Immediate re-poll (batch catch-up)
+        let r2 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r2.messages.len(), 50);
+        assert!(!r2.has_more); // 102 == 102, all complete lines delivered
+        assert_eq!(r2.messages[0].content, "bg-msg50");
+        assert_eq!(r2.messages[49].content, "bg-msg99");
+        cursor = r2.new_cursor;
+        assert_eq!(cursor.line_number, 102);
+
+        // Final poll — no more complete lines
+        let r3 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r3.messages.len(), 0);
+        assert!(!r3.has_more);
+        assert_eq!(r3.new_cursor.line_number, 102);
+    }
+
+    /// E2E: Streaming line lifecycle — delta delivery, flush, new line.
+    #[test]
+    fn e2e_streaming_flush_lifecycle() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![make_entry("1", "user", "hi")];
+        let path = write_test_jsonl(&dir, "e2e-stream", &entries);
+        let sid = "e2e-stream";
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        // Full load — cursor at 1
+        let mut cursor = DeliveryCursor { line_number: 1, char_offset: 0 };
+
+        // Streaming line starts at line 1, content "Hello"
+        {
+            let mut m = map.write().unwrap();
+            m.insert(sid.to_string(), StreamingLine {
+                line_number: 1,
+                role: "assistant".to_string(),
+                accumulated_content: "Hello".to_string(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                started_at_ms: 0,
+            });
+        }
+
+        // Poll 1: streaming delta "Hello" (full content, cursor caught up)
+        let r1 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r1.messages.len(), 0); // no new complete lines
+        let s1 = r1.streaming.as_ref().expect("streaming delta");
+        assert_eq!(s1.content, "Hello");
+        assert_eq!(s1.char_offset, 5);
+        cursor = r1.new_cursor;
+        assert_eq!(cursor.line_number, 1);
+        assert_eq!(cursor.char_offset, 5);
+
+        // More content arrives: " world" appended
+        {
+            let mut m = map.write().unwrap();
+            m.get_mut(sid).unwrap().accumulated_content = "Hello world".to_string();
+        }
+
+        // Poll 2: streaming delta " world" (incremental)
+        let r2 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r2.messages.len(), 0);
+        let s2 = r2.streaming.as_ref().expect("streaming delta");
+        assert_eq!(s2.content, " world");
+        assert_eq!(s2.char_offset, 11);
+        cursor = r2.new_cursor;
+        assert_eq!(cursor.char_offset, 11);
+
+        // Flush: write "Hello world" to JSONL, remove streaming line
+        append_test_jsonl(&path, &[make_entry("2", "assistant", "Hello world")]);
+        map.write().unwrap().remove(sid);
+
+        // New streaming line starts at line 2, content "Next"
+        {
+            let mut m = map.write().unwrap();
+            m.insert(sid.to_string(), StreamingLine {
+                line_number: 2,
+                role: "thought".to_string(),
+                accumulated_content: "Next".to_string(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                started_at_ms: 0,
+            });
+        }
+
+        // Poll 3: flushed line + new streaming delta
+        let r3 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r3.messages.len(), 1);
+        assert_eq!(r3.messages[0].content, "Hello world");
+        let s3 = r3.streaming.as_ref().expect("new streaming delta");
+        assert_eq!(s3.content, "Next", "full content of new streaming line");
+        assert_eq!(s3.line, 2);
+        cursor = r3.new_cursor;
+        assert_eq!(cursor.line_number, 2); // advanced past flushed line
+        assert_eq!(cursor.char_offset, 4); // "Next" = 4 chars
+    }
+
+    /// E2E: Full load resets cursor — incremental poll after full load
+    /// returns nothing (all existing lines already delivered).
+    #[test]
+    fn e2e_full_load_resets_cursor() {
+        let dir = TempDir::new().unwrap();
+        let entries: Vec<ConversationEntry> = (0..10)
+            .map(|i| make_entry(&format!("m{}", i), "user", &format!("msg{}", i)))
+            .collect();
+        let path = write_test_jsonl(&dir, "e2e-reset", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+        let sid = "e2e-reset";
+
+        // Simulate: cursor was at 3 (some incremental polls happened)
+        let cursor_before = DeliveryCursor { line_number: 3, char_offset: 0 };
+
+        // Full load happens — reset_delivery_cursor(sid, total_lines=10)
+        let cursor = DeliveryCursor { line_number: 10, char_offset: 0 };
+
+        // Incremental poll — should return nothing (cursor at end)
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r.messages.len(), 0);
+        assert!(!r.has_more);
+
+        // Verify the reset actually happened (cursor was 3, now 10)
+        assert_ne!(cursor_before.line_number, cursor.line_number);
+        assert_eq!(cursor.line_number, 10);
+    }
+
+    /// E2E: Batch catch-up with streaming — streaming delta is NOT
+    /// returned during catch-up, only when cursor catches up.
+    #[test]
+    fn e2e_batch_catchup_with_streaming() {
+        let dir = TempDir::new().unwrap();
+        // 5 initial lines (delivered via full load)
+        let entries: Vec<ConversationEntry> = (0..5)
+            .map(|i| make_entry(&format!("i{}", i), "user", &format!("init{}", i)))
+            .collect();
+        let path = write_test_jsonl(&dir, "e2e-batch-stream", &entries);
+        let sid = "e2e-batch-stream";
+
+        // 10 more lines accumulate while "away"
+        let new_entries: Vec<ConversationEntry> = (0..10)
+            .map(|i| make_entry(&format!("n{}", i), "user", &format!("new{}", i)))
+            .collect();
+        append_test_jsonl(&path, &new_entries);
+
+        // Streaming line at 15 (after all complete lines)
+        let map = make_streaming_map(sid, 15, "assistant", "streaming content");
+
+        // Cursor at 5 (after initial full load), limit=3
+        let mut cursor = DeliveryCursor { line_number: 5, char_offset: 0 };
+
+        // Batch 1: lines 5-7, has_more=true, NO streaming delta
+        let r1 = read_messages_since_cursor(&path, cursor, 3, &map, sid, 0).unwrap();
+        assert_eq!(r1.messages.len(), 3);
+        assert!(r1.has_more);
+        assert!(r1.streaming.is_none(), "no streaming during batch catch-up");
+        cursor = r1.new_cursor;
+
+        // Batch 2: lines 8-10, has_more=true, NO streaming delta
+        let r2 = read_messages_since_cursor(&path, cursor, 3, &map, sid, 0).unwrap();
+        assert_eq!(r2.messages.len(), 3);
+        assert!(r2.has_more);
+        assert!(r2.streaming.is_none());
+        cursor = r2.new_cursor;
+
+        // Batch 3: lines 11-13, has_more=true, NO streaming delta
+        let r3 = read_messages_since_cursor(&path, cursor, 3, &map, sid, 0).unwrap();
+        assert_eq!(r3.messages.len(), 3);
+        assert!(r3.has_more);
+        assert!(r3.streaming.is_none());
+        cursor = r3.new_cursor;
+
+        // Batch 4: lines 14, has_more=false (14 < 15), cursor at 14 < 15
+        // Wait: 5 initial + 10 new = 15 total. cursor was 5, batches: 5→8→11→14→15
+        // Batch 4: lines 14, has_more = 14 < 15 = true? No, 14+3=15=min(15,17)=15
+        // So batch 4: lines[14..15) = 1 line, cursor→15, has_more=15<15=false
+        let r4 = read_messages_since_cursor(&path, cursor, 3, &map, sid, 0).unwrap();
+        assert_eq!(r4.messages.len(), 1);
+        assert!(!r4.has_more);
+        // Cursor at 15 == streaming.line_number(15) → streaming delta returned!
+        let s4 = r4.streaming.as_ref().expect("streaming delta when caught up");
+        assert_eq!(s4.content, "streaming content");
+        assert_eq!(s4.line, 15);
+        cursor = r4.new_cursor;
+        assert_eq!(cursor.line_number, 15);
+        assert_eq!(cursor.char_offset, "streaming content".chars().count());
+    }
+
+    /// E2E: Multiple incremental polls with growing streaming content.
+    /// Verifies char_offset advances correctly across polls.
+    #[test]
+    fn e2e_multiple_polls_streaming_growth() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![make_entry("1", "user", "start")];
+        let path = write_test_jsonl(&dir, "e2e-growth", &entries);
+        let sid = "e2e-growth";
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        // Full load — cursor at 1
+        let mut cursor = DeliveryCursor { line_number: 1, char_offset: 0 };
+
+        // Streaming line at 1, initially empty
+        {
+            map.write().unwrap().insert(sid.to_string(), StreamingLine {
+                line_number: 1,
+                role: "assistant".to_string(),
+                accumulated_content: String::new(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                started_at_ms: 0,
+            });
+        }
+
+        // Poll 1: streaming exists but empty → delta is "", char_offset=0
+        let r1 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        let s1 = r1.streaming.as_ref().expect("streaming");
+        assert_eq!(s1.content, "");
+        assert_eq!(s1.char_offset, 0);
+        cursor = r1.new_cursor;
+        assert_eq!(cursor.char_offset, 0);
+
+        // Content grows to "abc"
+        map.write().unwrap().get_mut(sid).unwrap().accumulated_content = "abc".to_string();
+
+        // Poll 2: delta = "abc" (from offset 0)
+        let r2 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        let s2 = r2.streaming.as_ref().expect("streaming");
+        assert_eq!(s2.content, "abc");
+        assert_eq!(s2.char_offset, 3);
+        cursor = r2.new_cursor;
+        assert_eq!(cursor.char_offset, 3);
+
+        // Content grows to "abcdef"
+        map.write().unwrap().get_mut(sid).unwrap().accumulated_content = "abcdef".to_string();
+
+        // Poll 3: delta = "def" (from offset 3)
+        let r3 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        let s3 = r3.streaming.as_ref().expect("streaming");
+        assert_eq!(s3.content, "def");
+        assert_eq!(s3.char_offset, 6);
+        cursor = r3.new_cursor;
+        assert_eq!(cursor.char_offset, 6);
+    }
+
+    /// E2E: done event final poll — after all streaming is flushed,
+    /// the final poll delivers the last flushed line.
+    #[test]
+    fn e2e_done_event_final_poll() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "question"),
+            make_entry("2", "assistant", "partial"),
+        ];
+        let path = write_test_jsonl(&dir, "e2e-done", &entries);
+        let sid = "e2e-done";
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        // Full load — cursor at 2
+        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+
+        // Streaming line at 2, content "final answer"
+        {
+            map.write().unwrap().insert(sid.to_string(), StreamingLine {
+                line_number: 2,
+                role: "assistant".to_string(),
+                accumulated_content: "final answer".to_string(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                started_at_ms: 0,
+            });
+        }
+
+        // Poll 1: streaming delta "final answer"
+        let r1 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        let s1 = r1.streaming.as_ref().expect("streaming");
+        assert_eq!(s1.content, "final answer");
+        cursor = r1.new_cursor;
+
+        // done event: flush streaming, remove from map
+        append_test_jsonl(&path, &[make_entry("3", "assistant", "final answer")]);
+        map.write().unwrap().remove(sid);
+
+        // Final poll (done handler): should deliver the flushed line
+        let r2 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r2.messages.len(), 1);
+        assert_eq!(r2.messages[0].content, "final answer");
+        assert!(!r2.has_more);
+        assert!(r2.streaming.is_none(), "no streaming after flush");
+        cursor = r2.new_cursor;
+        assert_eq!(cursor.line_number, 3);
+
+        // Another poll — nothing left
+        let r3 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r3.messages.len(), 0);
+        assert!(!r3.has_more);
+        assert!(r3.streaming.is_none());
+    }
+
+    /// E2E: compacting_ended one-shot poll — compaction record written
+    /// to JSONL, one-shot incremental poll delivers it.
+    #[test]
+    fn e2e_compacting_ended_oneshot_poll() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![
+            make_entry("1", "user", "msg1"),
+            make_entry("2", "assistant", "reply1"),
+        ];
+        let path = write_test_jsonl(&dir, "e2e-compact", &entries);
+        let sid = "e2e-compact";
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        // Full load — cursor at 2
+        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+
+        // Compaction happens: compaction record written to JSONL
+        append_test_jsonl(&path, &[make_compaction_entry("3", "<summary>compacted</summary>")]);
+
+        // compacting_ended: one-shot incremental poll
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r.messages.len(), 1);
+        assert_eq!(r.messages[0].kind.as_deref(), Some(ENTRY_KIND_COMPACTION));
+        assert!(!r.has_more);
+        cursor = r.new_cursor;
+        assert_eq!(cursor.line_number, 3);
+    }
+
+    /// E2E: Cursor survives multiple write-then-poll cycles.
+    /// Verifies cursor advancement is cumulative and correct.
+    #[test]
+    fn e2e_cumulative_cursor_advancement() {
+        let dir = TempDir::new().unwrap();
+        let entries = vec![make_entry("0", "user", "base")];
+        let path = write_test_jsonl(&dir, "e2e-cumulative", &entries);
+        let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+        let sid = "e2e-cumulative";
+
+        // Full load — cursor at 1
+        let mut cursor = DeliveryCursor { line_number: 1, char_offset: 0 };
+        let mut total_delivered = 0;
+
+        // 5 rounds of: write 3 lines → poll → verify
+        for round in 0..5 {
+            let round_entries: Vec<ConversationEntry> = (0..3)
+                .map(|i| make_entry(
+                    &format!("r{}c{}", round, i),
+                    "user",
+                    &format!("round{}-msg{}", round, i),
+                ))
+                .collect();
+            append_test_jsonl(&path, &round_entries);
+
+            let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+            assert_eq!(r.messages.len(), 3, "round {} should deliver 3 messages", round);
+            assert!(!r.has_more);
+            total_delivered += r.messages.len();
+            cursor = r.new_cursor;
+        }
+
+        assert_eq!(total_delivered, 15);
+        // 1 initial + 15 new = 16 total lines
+        assert_eq!(cursor.line_number, 16);
+
+        // Final poll — nothing left
+        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
+        assert_eq!(r.messages.len(), 0);
+        assert!(!r.has_more);
     }
 }

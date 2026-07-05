@@ -1,19 +1,21 @@
-//! PollingManager — ADR-021 Phase 3
+//! PollingManager — ADR-021 Phase 3 / ADR-025 refactor
 //!
 //! Manages HTTP polling for session message data. Replaces the old WebSocket
 //! streaming data channel (Delta/ReasoningDelta/ToolCall/ToolResult) with
 //! incremental HTTP pulls triggered by `new_data_available` notifications
 //! and a fallback interval with exponential backoff.
 //!
-//! ## Architecture
+//! ## Architecture (ADR-025)
 //!
 //! ```
 //! WebSocket "new_data_available" ──→ notify() ──→ immediate poll
 //! Fallback timer (500ms→…→5s)     ──→ scheduled poll
+//! has_more=true (batch catch-up)  ──→ immediate re-poll
 //!                                                  │
 //!                                                  ▼
 //!                              chatStore.loadSessionMessages()
-//!                              ?line_number=N&line_char_offset=M
+//!                              ?incremental=true
+//!                              (no coordinates — backend tracks cursor)
 //! ```
 //!
 //! ## Backoff strategy (ADR-021 §难点 2)
@@ -25,11 +27,18 @@
 //!   last 10-30 seconds with no data; auto-stopping on empty polls would
 //!   kill the poller before the first token arrives.
 //!
+//! ## Batch catch-up (ADR-025)
+//!
+//! When a session was in the background for a long time, the backend's
+//! delivery cursor may lag far behind the actual data. The backend returns
+//! a batch of messages with `has_more=true`. The PollingManager immediately
+//! re-polls (no delay) until `has_more=false`, then resumes normal polling.
+//!
 //! ## Lifecycle
 //!
 //! - `start()` — begin polling (called when session becomes active/streaming)
 //! - `stop()`  — stop polling (called on done/error/stopped or session switch)
-//! - `notify(totalLines)` — trigger immediate poll
+//! - `notify(intervalMs)` — trigger immediate poll (pure signal, no coordinates)
 
 import { useChatStore } from "../stores/chatStore";
 
@@ -45,6 +54,10 @@ const POLL_BACKOFF_MULTIPLIER = 2.0;
  *
  * Each active streaming session gets its own PollingManager instance.
  * The manager is stored in a module-level Map keyed by `agentId:sessionId`.
+ *
+ * ADR-025: The manager no longer maintains any delivery coordinates.
+ * The backend tracks the delivery cursor per-session. The frontend simply
+ * polls with `incremental=true` and appends whatever the backend returns.
  */
 export class PollingManager {
   private agentId: string;
@@ -52,25 +65,16 @@ export class PollingManager {
   private baseIntervalMs: number;
   private currentIntervalMs: number;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private lineNumber: number = 0;
-  private charOffset: number = 0;
   private running: boolean = false;
+  /** Prevents overlapping polls (AbortController in store also guards, but
+   *  this flag avoids unnecessary fetch attempts). */
+  private polling: boolean = false;
 
-  constructor(
-    agentId: string,
-    sessionId: string,
-    initialLineNumber?: number,
-    initialCharOffset?: number,
-  ) {
+  constructor(agentId: string, sessionId: string) {
     this.agentId = agentId;
     this.sessionId = sessionId;
     this.baseIntervalMs = POLL_FALLBACK_MS;
     this.currentIntervalMs = POLL_FALLBACK_MS;
-    // ADR-021 Phase 4: Initialize from store's last-known coordinates so
-    // the first scheduled poll doesn't start from line 0 and accidentally
-    // overwrite optimistically rendered messages.
-    if (initialLineNumber != null) this.lineNumber = initialLineNumber;
-    if (initialCharOffset != null) this.charOffset = initialCharOffset;
   }
 
   /** Start the polling loop. Idempotent — safe to call multiple times. */
@@ -96,7 +100,7 @@ export class PollingManager {
 
   /**
    * Called when a `new_data_available` WebSocket event arrives.
-   * Updates the line coordinate and triggers an immediate poll.
+   * Triggers an immediate poll — no coordinates, pure signal.
    *
    * The Runtime already throttles these notifications to the configured
    * `interval_ms` (from DataFlowConfig), so this method always fires an
@@ -105,12 +109,11 @@ export class PollingManager {
    * If the poller was stopped (e.g., by a previous done/error event but
    * the session was re-activated), it is restarted automatically.
    *
-   * @param totalLines - Total JSONL line count from the backend notification.
    * @param intervalMs - Notify throttle interval from backend (DataFlowConfig).
    *                     Used as the base polling interval.  When omitted,
    *                     POLL_FALLBACK_MS is used.
    */
-  notify(totalLines: number, intervalMs?: number): void {
+  notify(intervalMs?: number): void {
     if (!this.running) {
       this.start();
     }
@@ -122,21 +125,8 @@ export class PollingManager {
       this.currentIntervalMs = intervalMs;
     }
 
-    // Update line number from the notification.
-    // When totalLines increases, the previous streaming line has been flushed
-    // to JSONL (e.g., role transition from thought→assistant) and a new
-    // streaming line has started. The old charOffset belongs to the flushed
-    // line and must be reset to 0 — otherwise the new line's first poll skips
-    // its opening characters, causing the "first line truncated" bug.
-    if (totalLines > this.lineNumber) {
-      this.charOffset = 0;
-    }
-    if (totalLines > 0) {
-      this.lineNumber = totalLines;
-    }
-
     console.log(
-      `[PollingManager] notify: totalLines=${totalLines}, intervalMs=${intervalMs ?? "not set"}`,
+      `[PollingManager] notify: intervalMs=${intervalMs ?? "not set"}`,
     );
 
     // Trigger immediate poll (cancel any pending timer first)
@@ -148,6 +138,7 @@ export class PollingManager {
   getIntervalMs(): number {
     return this.baseIntervalMs;
   }
+
   private scheduleNext(): void {
     if (!this.running) return;
     this.timer = setTimeout(() => {
@@ -167,14 +158,19 @@ export class PollingManager {
    * Execute a single poll cycle.
    *
    * Delegates the actual HTTP fetch to `chatStore.loadSessionMessages()`
-   * to avoid double-fetching. After the store updates, reads back the
-   * updated poll coordinates for the next cycle.
+   * with `incremental=true`. The backend uses its own delivery cursor to
+   * determine what to return — no coordinates are sent from the frontend.
+   *
+   * If the response has `has_more=true` (batch catch-up), immediately
+   * re-polls without waiting for the timer.
    */
   private async doPoll(): Promise<void> {
-    if (!this.running) return;
-    const store = useChatStore.getState();
+    if (!this.running || this.polling) return;
+    this.polling = true;
 
     try {
+      const store = useChatStore.getState();
+
       const agent = store.agentStates[this.agentId];
       if (!agent) { this.stop(); return; }
 
@@ -193,39 +189,35 @@ export class PollingManager {
       }
 
       // Delegate fetch to loadSessionMessages — single source of truth
-      // for HTTP request + store update + coordinate tracking.
-      await store.loadSessionMessages(
+      // for HTTP request + store update. ADR-025: no coordinates.
+      const result = await store.loadSessionMessages(
         this.agentId,
         this.sessionId,
-        undefined, // cursor — not used with line_number
+        undefined, // cursor — not used with incremental
         50,
         "backward",
-        this.lineNumber,
-        this.charOffset,
+        true,      // incremental = true (ADR-025)
       );
 
-      // Read back updated coordinates from the store
-      const updated = useChatStore.getState()
-        .agentStates[this.agentId]
-        ?.sessionStates[this.sessionId];
-      if (updated) {
-        const prevLineNumber = this.lineNumber;
-        this.lineNumber = updated.pollLineNumber;
-        this.charOffset = updated.pollCharOffset;
+      // Batch catch-up: has_more=true → immediately re-poll
+      if (result?.hasMore) {
+        this.clearTimer();
+        this.doPoll();
+        return;
+      }
 
-        // Backoff: if no new data this cycle, double interval (max 5s).
-        // Do NOT auto-stop — LLM thinking phases can last 10-30 seconds
-        // with no data. The poller is stopped only by explicit stop()
-        // calls (done/error/stopped/session_state_changed to idle).
-        if (this.lineNumber === prevLineNumber && this.charOffset === 0) {
-          this.currentIntervalMs = Math.min(
-            this.currentIntervalMs * POLL_BACKOFF_MULTIPLIER,
-            POLL_MAX_MS,
-          );
-        } else {
-          // New data — reset backoff
-          this.currentIntervalMs = this.baseIntervalMs;
-        }
+      // Backoff: if no new data this cycle, double interval (max 5s).
+      // Do NOT auto-stop — LLM thinking phases can last 10-30 seconds
+      // with no data. The poller is stopped only by explicit stop()
+      // calls (done/error/stopped/session_state_changed to idle).
+      if (result?.noNewData) {
+        this.currentIntervalMs = Math.min(
+          this.currentIntervalMs * POLL_BACKOFF_MULTIPLIER,
+          POLL_MAX_MS,
+        );
+      } else {
+        // New data — reset backoff
+        this.currentIntervalMs = this.baseIntervalMs;
       }
 
       this.scheduleNext();
@@ -235,6 +227,8 @@ export class PollingManager {
         e,
       );
       this.scheduleNext();
+    } finally {
+      this.polling = false;
     }
   }
 }
@@ -259,14 +253,8 @@ export function startPolling(
   const key = managerKey(agentId, sessionId);
   let mgr = managers.get(key);
   if (!mgr) {
-    // ADR-021 Phase 4: Read current poll coordinates from store so the first
-    // scheduled poll uses the correct lineNumber (not 0 by default), preventing
-    // accidental full-range fetches that could overwrite optimistic messages.
-    const store = useChatStore.getState();
-    const session = store.agentStates[agentId]?.sessionStates[sessionId];
-    const lineNumber = session?.pollLineNumber;
-    const charOffset = session?.pollCharOffset;
-    mgr = new PollingManager(agentId, sessionId, lineNumber, charOffset);
+    // ADR-025: No initial coordinates — backend manages the cursor.
+    mgr = new PollingManager(agentId, sessionId);
     managers.set(key, mgr);
   }
   mgr.start();
@@ -289,23 +277,25 @@ export function stopPolling(agentId: string, sessionId: string): void {
  * Notify a session's PollingManager of new data available.
  * Creates a manager if one doesn't exist yet.
  *
- * @param totalLines - Total JSONL line count from backend.
+ * ADR-025: This is a pure signal — no `totalLines` parameter.
+ * The backend maintains all delivery state.
+ *
  * @param intervalMs - Notify throttle interval from backend (DataFlowConfig).
  *                     Used as the polling interval base.
  */
 export function notifyNewData(
   agentId: string,
   sessionId: string,
-  totalLines: number,
   intervalMs?: number,
 ): void {
   const key = managerKey(agentId, sessionId);
   let mgr = managers.get(key);
   if (!mgr) {
+    // ADR-025: No initial coordinates — backend manages the cursor.
     mgr = new PollingManager(agentId, sessionId);
     managers.set(key, mgr);
   }
-  mgr.notify(totalLines, intervalMs);
+  mgr.notify(intervalMs);
 }
 
 /**

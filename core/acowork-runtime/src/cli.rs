@@ -2840,6 +2840,14 @@ async fn handle_get_session_messages(
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
 
+    // ADR-025: incremental polling via backend-managed delivery cursor.
+    // When `incremental=true`, the backend uses its own per-session cursor
+    // instead of receiving coordinates from the frontend.
+    let incremental: bool = params
+        .get("incremental")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     if session_id.is_empty() {
         let data = serde_json::json!({
             "error": "session_id is required",
@@ -2859,9 +2867,61 @@ async fn handle_get_session_messages(
         return;
     }
 
-    // ADR-021: When line_number is provided, use incremental read_messages_since.
-    // Otherwise fall back to the existing cursor-based pagination.
-    // line_char_offset defaults to 0 when omitted (first poll after session start).
+    // ADR-025: Backend-managed delivery cursor path.
+    // The frontend sends `incremental=true` (no coordinates). The backend
+    // reads its own cursor, returns a batch, and advances the cursor.
+    if incremental {
+        let cursor = session_manager.get_delivery_cursor(&session_id);
+        let batch_limit = limit as usize;
+        match crate::conversation::read_messages_since_cursor(
+            &file_path,
+            cursor,
+            batch_limit,
+            &session_manager.streaming_lines(),
+            &session_id,
+            session_manager.committed_lines_for(&session_id),
+        ) {
+            Ok(result) => {
+                // Advance the delivery cursor.
+                session_manager.advance_delivery_cursor(
+                    &session_id,
+                    result.new_cursor.line_number,
+                    result.new_cursor.char_offset,
+                );
+
+                let message_dtos: Vec<acowork_core::protocol::ConversationEntryDto> = result
+                    .messages
+                    .into_iter()
+                    .map(|m| acowork_core::protocol::ConversationEntryDto {
+                        id: m.id,
+                        ts: m.ts,
+                        role: m.role,
+                        content: m.content,
+                        metadata: m.metadata,
+                        kind: m.kind,
+                    })
+                    .collect();
+                let data = serde_json::json!({
+                    "messages": message_dtos,
+                    "streaming": result.streaming,
+                    "total_lines": result.total_lines,
+                    "has_more": result.has_more,
+                });
+                send_session_response(grpc_client, &request_id, data).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to read session messages (incremental cursor): {}", e);
+                let data = serde_json::json!({
+                    "error": format!("Failed to read messages: {}", e),
+                });
+                send_session_response(grpc_client, &request_id, data).await;
+            }
+        }
+        return;
+    }
+
+    // ADR-021 legacy: line_number coordinate path (deprecated, kept for
+    // backward compatibility during the transition period).
     if let Some(ln) = line_number {
         let co = line_char_offset.unwrap_or(0);
         match crate::conversation::read_messages_since(
@@ -2922,6 +2982,9 @@ async fn handle_get_session_messages(
             // pollLineNumber stays at 0 and the backoff logic kills the poller
             // after 3 "empty" cycles (lineNumber === prevLineNumber === 0).
             let total_lines = session_manager.committed_lines_for(&session_id);
+            // ADR-025: Reset delivery cursor on non-incremental full load —
+            // all existing lines are now "delivered" via pagination.
+            session_manager.reset_delivery_cursor(&session_id, total_lines);
             let data = serde_json::json!({
                 "messages": message_dtos,
                 "cursor": paginated.cursor,
