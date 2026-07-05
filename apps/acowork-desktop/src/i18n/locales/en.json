@@ -454,6 +454,8 @@
     "leaveEmptyDefault": "Leave empty to use runtime default",
     "maxIterations": "Max Iterations (per run)",
     "defaultIterations": "200 (default)",
+    "maxSessions": "Max Sessions",
+    "maxSessionsDesc": "Maximum number of conversation sessions kept per agent. Older sessions are archived when exceeded. Default: 2000.",
     "shellCommandApproval": "Shell Command Approval",
     "approvalMedium": "Medium (default) — e.g. curl, wget, python, node",
     "approvalLow": "Low — e.g. ls, cat, echo, pwd, grep (most cautious)",

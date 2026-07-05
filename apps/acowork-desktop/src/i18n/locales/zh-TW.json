@@ -349,6 +349,8 @@
     "leaveEmptyDefault": "留空使用執行階段預設值",
     "maxIterations": "最大迭代次數（每次執行）",
     "defaultIterations": "200（預設）",
+    "maxSessions": "最大工作階段數",
+    "maxSessionsDesc": "每個 Agent 保留的最大工作階段數量，超出時舊工作階段會被自動封存。預設：2000。",
     "shellCommandApproval": "Shell 命令審批",
     "approvalMedium": "中（預設）— 例如 curl、wget、python、node",
     "approvalLow": "低 — 例如 ls、cat、echo、pwd、grep（最謹慎）",

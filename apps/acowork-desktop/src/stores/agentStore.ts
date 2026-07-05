@@ -24,6 +24,7 @@ export interface AgentProfileSettings {
   providerId?: string;
   maxTokens?: number;
   maxIterations?: number;
+  maxSessions?: number;
   systemPrompt?: string;
   shellApprovalThreshold?: string;
   approvalTimeoutSecs?: number;
@@ -39,6 +40,7 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   providerId: undefined,
   maxTokens: 0,
   maxIterations: 0,
+  maxSessions: 0,
   systemPrompt: undefined,
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
@@ -85,6 +87,7 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
           (s as { toolsLimit?: number }).toolsLimit! > 0
           ? (s as { toolsLimit?: number }).toolsLimit!
           : 0,
+    maxSessions: typeof s.maxSessions === "number" && s.maxSessions > 0 ? s.maxSessions : 0,
     systemPrompt: s.systemPrompt,
     shellApprovalThreshold: s.shellApprovalThreshold,
     approvalTimeoutSecs:

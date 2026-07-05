@@ -37,6 +37,11 @@ pub(crate) async fn phase_b_init_session(
     // ADR-022: Shared counter updated by writer thread after each disk write.
     let committed_lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
+    // ADR-024: load agent_config.json early so max_sessions override is available.
+    let agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
+        .unwrap_or_default()
+        .unwrap_or_default();
+
     let conversation_session =
         if let Some(latest_id) = crate::conversation::find_latest_session(&conversations_dir) {
             tracing::info!(session_id = %latest_id, "Resuming latest conversation session");
@@ -57,7 +62,7 @@ pub(crate) async fn phase_b_init_session(
                     model: None,
                     provider: None,
                 },
-                config.max_sessions,
+                agent_cfg.max_sessions.unwrap_or(config.max_sessions),
                 committed_lines.clone(),
             )?)
         };
@@ -213,9 +218,7 @@ pub(crate) async fn phase_b_init_session(
     // the shared WorkspaceResolver). No follow-up step required here.
 
     if ctx.hello_config.is_some() {
-        let agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
-            .unwrap_or_default()
-            .unwrap_or_default();
+        // agent_cfg loaded earlier for max_sessions override.
 
         // Seed avatar fields from manifest.toml on first start so the
         // effective avatar resolves to the package author's default.

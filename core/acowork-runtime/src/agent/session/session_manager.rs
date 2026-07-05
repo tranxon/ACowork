@@ -484,6 +484,16 @@ impl SessionManager {
         let committed_lines = Self::new_committed_lines();
 
         // Create the JSONL file and index entry
+        // ADR-024: read agent_config.json for max_sessions override;
+        // fall back to RuntimeConfig default if absent.
+        let max_sessions = crate::agent_config::load_agent_config(
+            std::path::Path::new(&self.core.config.work_dir),
+        )
+        .unwrap_or_default()
+        .unwrap_or_default()
+        .max_sessions
+        .unwrap_or(self.core.config.max_sessions);
+
         let conv = crate::conversation::ConversationSession::new(
             std::path::Path::new(&self.core.config.work_dir),
             &session_id,
@@ -493,7 +503,7 @@ impl SessionManager {
                 model: model.map(|s| s.to_string()),
                 provider: provider.map(|s| s.to_string()),
             },
-            self.core.config.max_sessions,
+            max_sessions,
             committed_lines.clone(),
         )?;
 
@@ -557,7 +567,15 @@ impl SessionManager {
         } else {
             conversation.as_ref().and_then(|conv| {
                 let path = conv.session_path();
-                match crate::agent::session::restorer::restore_history_from_jsonl(path) {
+                // ADR-024: read compaction offset from per-session meta file.
+                let compaction_abs = path
+                    .parent()
+                    .and_then(|conversations_dir| {
+                        crate::conversation::read_session_meta(conversations_dir, conv.session_id())
+                            .ok()
+                            .and_then(|m| m.last_compaction_offset)
+                    });
+                match crate::agent::session::restorer::restore_history_from_jsonl(path, compaction_abs) {
                     Ok(outcome) if !outcome.messages.is_empty() => {
                         tracing::info!(
                             session_id = %conv.session_id(),
@@ -766,11 +784,21 @@ impl SessionManager {
             tracing::info!(session_id = %session_id, "Session already evicted, skipping task close");
         }
 
-        // 2. Remove from index — the final word, overriding any stale index
-        //    write from Drop (even if the task already finished its Drop).
+        // 2. ADR-024: remove the per-session meta file (replaces index.json update).
         let conversations_dir =
             std::path::Path::new(&self.core.config.work_dir).join("conversations");
-        crate::conversation::remove_session_from_index(&conversations_dir, session_id);
+        let meta_path = conversations_dir
+            .join("meta")
+            .join(format!("{}.json", session_id));
+        if let Err(e) = std::fs::remove_file(&meta_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to delete session meta file"
+                );
+            }
+        }
 
         // 3. Delete the JSONL file.
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));

@@ -173,7 +173,7 @@ fn default_shell_approval_threshold() -> String {
 }
 
 fn default_max_sessions() -> usize {
-    1000
+    2000
 }
 
 fn default_min_distill_chars() -> usize {

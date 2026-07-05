@@ -546,7 +546,6 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         content
             .lines()
-            .skip(1) // skip metadata header
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }

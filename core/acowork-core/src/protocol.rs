@@ -682,6 +682,9 @@ pub enum GatewayRequest {
         avatar: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_avatar: Option<String>,
+        /// ADR-024: max sessions limit (from agent_config.json)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_sessions: Option<usize>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1037,6 +1040,10 @@ pub enum GatewayResponse {
         /// Some("icon-05") = set, Some("") = clear, None = don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_avatar: Option<String>,
+        /// ADR-024: max sessions limit per-agent.
+        /// Some(n) = set to n, None = don't change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_sessions: Option<usize>,
     },
     /// Query config request (Gateway → Runtime)
     ///

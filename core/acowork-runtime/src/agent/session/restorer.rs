@@ -40,7 +40,7 @@ use std::path::Path;
 
 use acowork_core::providers::traits::{ChatMessage, FunctionCall, MessageRole, ToolCall};
 
-use crate::conversation::{ConversationEntry, SessionMetadata, ENTRY_KIND_COMPACTION};
+use crate::conversation::{ConversationEntry, ENTRY_KIND_COMPACTION};
 
 /// Outcome of a successful restore call.
 #[derive(Debug, Clone)]
@@ -83,24 +83,20 @@ impl From<std::io::Error> for RestoreError {
 
 /// Parse a JSONL conversation file into a replay-ready message sequence.
 ///
+/// ADR-024: the file has no metadata header — parsing starts at line 0.
+/// The caller provides `compaction_abs` (absolute byte offset of the last
+/// compaction entry, read from `meta/{session_id}.json`) so we can skip
+/// pre-compaction entries without an O(N) rposition scan.
+///
 /// See module docs for the full set of replay rules.
-pub fn restore_history_from_jsonl(path: &Path) -> Result<RestoreOutcome, RestoreError> {
+pub fn restore_history_from_jsonl(
+    path: &Path,
+    compaction_abs: Option<u64>,
+) -> Result<RestoreOutcome, RestoreError> {
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-
-    // Read the first line (SessionMetadata) separately so we can extract
-    // `last_compaction_offset` — the O(1) hint that tells us exactly where
-    // the most recent compaction marker sits in the file.
-    let mut first_line = String::new();
-    reader.read_line(&mut first_line)?;
-    let meta_end = first_line.len() as u64;
-    let compaction_abs: Option<u64> =
-        serde_json::from_str::<SessionMetadata>(first_line.trim())
-            .ok()
-            .and_then(|m| m.last_compaction_offset)
-            .map(|relative| meta_end + relative);
+    let reader = BufReader::new(file);
 
     // Pass 1: parse data lines.
     //
@@ -434,7 +430,7 @@ mod tests {
         flush();
 
         let path = work.join("conversations").join(format!("{}.jsonl", session_id));
-        let outcome = restore_history_from_jsonl(&path).unwrap();
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert!(!outcome.had_compaction);
         assert_eq!(outcome.messages.len(), 2);
         assert!(matches!(outcome.messages[0].role, MessageRole::User));
@@ -465,7 +461,7 @@ mod tests {
         flush();
 
         let path = work.join("conversations").join(format!("{}.jsonl", session_id));
-        let outcome = restore_history_from_jsonl(&path).unwrap();
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert_eq!(outcome.messages.len(), 2, "thought should not enter context");
         assert!(outcome.messages.iter().all(|m| !matches!(m.role, MessageRole::System)));
         assert!(outcome.skipped_entry_count >= 1);
@@ -513,7 +509,7 @@ mod tests {
         flush();
 
         let path = work.join("conversations").join(format!("{}.jsonl", session_id));
-        let outcome = restore_history_from_jsonl(&path).unwrap();
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
 
         // Expected: User, Assistant{tool_calls:[tc_1,tc_2]}, Tool(tc_1), Tool(tc_2)
         assert_eq!(outcome.messages.len(), 4);
@@ -556,7 +552,7 @@ mod tests {
         flush();
 
         let path = work.join("conversations").join(format!("{}.jsonl", session_id));
-        let outcome = restore_history_from_jsonl(&path).unwrap();
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
         // user + assistant, orphan tool_result dropped
         assert_eq!(outcome.messages.len(), 2);
         assert!(outcome.skipped_entry_count >= 1);
@@ -601,7 +597,7 @@ mod tests {
         flush();
 
         let path = work.join("conversations").join(format!("{}.jsonl", session_id));
-        let outcome = restore_history_from_jsonl(&path).unwrap();
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert!(outcome.had_compaction);
         // Expected: [compaction_summary marker, u3, a3]
         assert_eq!(outcome.messages.len(), 3);
@@ -648,7 +644,7 @@ mod tests {
         session.append_message("user", "ok2", None);
         flush();
 
-        let outcome = restore_history_from_jsonl(&path).unwrap();
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert_eq!(outcome.messages.len(), 2);
         assert!(outcome.skipped_entry_count >= 1);
     }

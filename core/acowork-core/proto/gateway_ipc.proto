@@ -224,6 +224,8 @@ message ConfigSnapshot {
   // ADR-017: Avatar config (from agent_config.json, queried via gRPC)
   optional string avatar = 13;
   optional string builtin_avatar = 14;
+  // ADR-024: max sessions limit (from agent_config.json)
+  optional uint64 max_sessions = 28;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
@@ -268,6 +270,9 @@ message RuntimeConfigUpdate      {
     optional string builtin_avatar = 16;
     bool avatar_set = 17;
     bool builtin_avatar_set = 18;
+    // ADR-024: max sessions limit per-agent (None = don't change, Some(0) = use default)
+    optional uint64 max_sessions = 19;
+    bool max_sessions_set = 20;
 }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }

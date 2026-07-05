@@ -772,6 +772,7 @@ pub async fn update_avatar_config(
                         embed_config_json: None,
                         avatar: avatar_val,
                         builtin_avatar: builtin_val,
+                        max_sessions: None,
                     })
                     .await;
 
@@ -1038,6 +1039,7 @@ pub async fn delete_avatar_file(
                             embed_config_json: None,
                             avatar: Some(String::new()), // empty = clear
                             builtin_avatar: None,
+                            max_sessions: None,
                         })
                         .await;
                 }
@@ -1888,6 +1890,7 @@ pub async fn get_agent_config(
         shell_approval_threshold,
         mcp_servers,
         search_config_json,
+        max_sessions,
     ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
         let query = acowork_core::proto::server_message::Payload::QueryConfig(
             acowork_core::proto::QueryConfig {
@@ -1909,15 +1912,16 @@ pub async fn get_agent_config(
                         snap.shell_approval_threshold,
                         snap.mcp_servers_json,
                         snap.search_config_json,
+                        snap.max_sessions.map(|v| v as usize),
                     )
                 } else {
-                    (None, None, None, None, None, None, None, vec![], None)
+                    (None, None, None, None, None, None, None, vec![], None, None)
                 }
             }
-            None => (None, None, None, None, None, None, None, vec![], None),
+            None => (None, None, None, None, None, None, None, vec![], None, None),
         }
     } else {
-        (None, None, None, None, None, None, None, vec![], None)
+        (None, None, None, None, None, None, None, vec![], None, None)
     };
 
     // Build the effective config from ConfigSnapshot data
@@ -1944,6 +1948,7 @@ pub async fn get_agent_config(
         active_mcp_servers,
         search_config,
         global_max_output_tokens,
+        max_sessions,
     };
 
     Ok(Json(effective))
@@ -2015,6 +2020,7 @@ pub async fn update_agent_config(
                     embed_config_json: build_embed_config_json(&state).await,
                     avatar: None,
                     builtin_avatar: None,
+                    max_sessions: req.max_sessions,
                 })
                 .await;
             if !push_result {
@@ -2060,6 +2066,7 @@ pub async fn update_agent_config(
         active_mcp_servers: vec![],
         search_config: None,
         global_max_output_tokens,
+        max_sessions: req.max_sessions,
     };
 
     Ok(Json(effective))
@@ -2227,6 +2234,7 @@ pub async fn update_agent_mcp_servers(
                     embed_config_json: build_embed_config_json(&state).await,
                     avatar: None,
                     builtin_avatar: None,
+                    max_sessions: None,
                 })
                 .await;
             if !push_result {
@@ -2426,6 +2434,7 @@ pub async fn update_agent_search_config(
                     embed_config_json: build_embed_config_json(&state).await,
                     avatar: None,
                     builtin_avatar: None,
+                    max_sessions: None,
                 })
                 .await;
             if !push_result {

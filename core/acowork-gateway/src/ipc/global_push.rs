@@ -262,6 +262,7 @@ impl GlobalResourcePusher {
                         },
                         avatar: None,
                         builtin_avatar: None,
+                        max_sessions: None,
                     })
                     .await;
                 if ok {
@@ -405,6 +406,7 @@ impl GlobalResourcePusher {
                         embed_config_json: Some(embed_config_json.clone()),
                         avatar: None,
                         builtin_avatar: None,
+                        max_sessions: None,
                     })
                     .await;
 

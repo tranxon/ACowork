@@ -351,6 +351,8 @@
     "leaveEmptyDefault": "空欄の場合はランタイムのデフォルト値を使用",
     "maxIterations": "最大反復回数（実行ごと）",
     "defaultIterations": "200（デフォルト）",
+    "maxSessions": "最大セッション数",
+    "maxSessionsDesc": "エージェントごとに保持する最大セッション数。超過時は古いセッションが自動的にアーカイブされます。デフォルト：2000。",
     "shellCommandApproval": "シェルコマンド承認",
     "approvalMedium": "中（デフォルト）— 例：curl、wget、python、node",
     "approvalLow": "低 — 例：ls、cat、echo、pwd、grep（最も慎重）",

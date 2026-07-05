@@ -88,6 +88,7 @@ export function AgentSetupTab() {
         setProfile(selectedAgentId, {
           maxTokens: data.max_output_tokens,
           maxIterations: data.max_iterations,
+          maxSessions: data.max_sessions,
           shellApprovalThreshold: data.shell_approval_threshold,
           approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
           globalMaxTokens: data.global_max_output_tokens,
@@ -115,6 +116,7 @@ export function AgentSetupTab() {
             setProfile(selectedAgentId, {
               maxTokens: data.max_output_tokens,
               maxIterations: data.max_iterations,
+              maxSessions: data.max_sessions,
               shellApprovalThreshold: data.shell_approval_threshold,
               approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
               globalMaxTokens: data.global_max_output_tokens,
@@ -138,6 +140,7 @@ export function AgentSetupTab() {
       const body: Record<string, unknown> = {};
       if (profile.maxTokens && profile.maxTokens > 0) body.max_output_tokens = profile.maxTokens;
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
+      if (profile.maxSessions && profile.maxSessions > 0) body.max_sessions = profile.maxSessions;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
       if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
       const res = await fetch(
@@ -451,6 +454,30 @@ export function AgentSetupTab() {
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.leaveEmptyDefault")}
+        </p>
+      </div>
+
+      {/* Max Sessions (ADR-024) */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.maxSessions")}
+        </label>
+        <StyledInput
+          type="number"
+          min={0}
+          max={10000}
+          value={profile.maxSessions && profile.maxSessions > 0 ? profile.maxSessions : ""}
+          onChange={(e) => {
+            const v = e.target.value;
+            setProfile(selectedAgentId, {
+              maxSessions: v === "" ? 0 : Math.max(0, parseInt(v, 10) || 0),
+            });
+          }}
+          placeholder="2000 (default)"
+          className="rounded-md bg-white dark:bg-zinc-800"
+        />
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.maxSessionsDesc")}
         </p>
       </div>
 

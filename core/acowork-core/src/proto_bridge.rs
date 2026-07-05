@@ -371,6 +371,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 search_config_json,
                 avatar,
                 builtin_avatar,
+                max_sessions,
             } => {
                 let mcp_json: Vec<String> = mcp_servers
                     .iter()
@@ -390,6 +391,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         search_config_json: search_config_json.clone(),
                         avatar: avatar.clone(),
                         builtin_avatar: builtin_avatar.clone(),
+                        max_sessions: max_sessions.map(|v| v as u64),
                     },
                 ))
             }
@@ -659,6 +661,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 embed_config_json,
                 avatar,
                 builtin_avatar,
+                max_sessions,
             } => {
                 let mcp_servers_set = mcp_servers.is_some();
                 let system_prompt_set = system_prompt_override.is_some();
@@ -693,6 +696,8 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         builtin_avatar: builtin_avatar.clone(),
                         avatar_set,
                         builtin_avatar_set,
+                        max_sessions: max_sessions.map(|v| v as u64),
+                        max_sessions_set: max_sessions.is_some(),
                     },
                 ))
             }

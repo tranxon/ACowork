@@ -678,6 +678,7 @@ pub(crate) async fn run_gateway_loop(
                                         .and_then(|cfg| serde_json::to_string(&cfg).ok()),
                                         avatar: agent_cfg.avatar.clone(),
                                         builtin_avatar: agent_cfg.builtin_avatar.clone(),
+                                        max_sessions: agent_cfg.max_sessions.map(|v| v as u64),
                                     },
                                 );
                                 let response = proto::ClientMessage {
@@ -928,8 +929,9 @@ async fn process_gateway_recv(
                         let (session_model, session_provider, session_workspace_id) = {
                             let conversations_dir =
                                 std::path::Path::new(work_dir).join("conversations");
-                            let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
-                            match crate::conversation::read_session_metadata(&file_path) {
+                            // ADR-024: read from per-session meta file.
+                            match crate::conversation::read_session_meta(&conversations_dir, &session_id)
+                            {
                                 Ok(meta) => (meta.model, meta.provider, meta.workspace_id),
                                 Err(_) => (None, None, None),
                             }
@@ -1778,6 +1780,7 @@ async fn process_gateway_recv(
                     embed_config_json,
                     avatar,
                     builtin_avatar,
+                    max_sessions,
                 } => {
                     tracing::info!(
 
@@ -1954,6 +1957,10 @@ async fn process_gateway_recv(
                         }
                         if let Some(ref ba) = builtin_avatar {
                             agent_cfg.builtin_avatar = if ba.is_empty() { None } else { Some(ba.clone()) };
+                        }
+                        // ADR-024: Apply max_sessions from RuntimeConfigUpdate.
+                        if let Some(ms) = max_sessions {
+                            agent_cfg.max_sessions = Some(ms);
                         }
                         let _ = crate::agent_config::save_agent_config(
                             std::path::Path::new(&work_dir),

@@ -53,6 +53,9 @@ pub struct AgentConfigResponse {
     /// Per-agent search provider config (from workspace agent_search.json)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_config: Option<AgentSearchConfig>,
+    /// ADR-024: max sessions limit per-agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<usize>,
 }
 
 /// PUT request body for updating agent config.
@@ -70,6 +73,9 @@ pub struct UpdateAgentConfigRequest {
     pub shell_approval_threshold: Option<ShellApprovalThreshold>,
     #[serde(default)]
     pub mcp_servers: Option<Vec<McpServerConfigDef>>,
+    /// ADR-024: max sessions limit per-agent (0 = use default).
+    #[serde(default)]
+    pub max_sessions: Option<usize>,
 }
 
 /// Default global values used as fallback when no override exists.

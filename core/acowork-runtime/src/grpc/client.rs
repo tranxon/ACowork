@@ -1118,6 +1118,12 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 } else {
                     None
                 },
+                // ADR-024: max_sessions
+                max_sessions: if rcu.max_sessions_set {
+                    Some(rcu.max_sessions.unwrap_or(0) as usize)
+                } else {
+                    None
+                },
             }
         }
         // Response messages (request_id > 0) — included for robustness

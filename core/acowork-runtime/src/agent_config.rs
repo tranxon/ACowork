@@ -89,6 +89,12 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_approval_threshold: Option<String>,
 
+    /// Maximum number of conversation sessions to keep on disk.
+    /// When exceeded at session creation, the oldest sessions are archived.
+    /// None = use system default (1000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<usize>,
+
     /// Custom avatar path (relative to install dir, e.g. "assets/avatar-02.jpg").
     /// When set, takes priority over `builtin_avatar`. Managed via gRPC
     /// (RuntimeConfigUpdate) from the Gateway — the Runtime persists it

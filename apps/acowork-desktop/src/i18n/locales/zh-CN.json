@@ -352,6 +352,8 @@
     "leaveEmptyDefault": "留空使用运行时默认值",
     "maxIterations": "最大迭代次数（每次运行）",
     "defaultIterations": "200（默认）",
+    "maxSessions": "最大会话数",
+    "maxSessionsDesc": "每个 Agent 保留的最大会话数量，超出时旧会话会被自动归档。默认：2000。",
     "shellCommandApproval": "Shell 命令审批",
     "approvalMedium": "中（默认）— 例如 curl、wget、python、node",
     "approvalLow": "低 — 例如 ls、cat、echo、pwd、grep（最谨慎）",

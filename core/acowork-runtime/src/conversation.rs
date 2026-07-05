@@ -77,110 +77,71 @@ pub struct CompactionEventMeta {
     pub after_tokens: u64,
 }
 
-/// Session metadata written as the first line of each JSONL file.
+/// Per-session metadata stored in `conversations/meta/{session_id}.json`.
+///
+/// ADR-024: each session writes only its own meta file — no cross-session
+/// contention, no index.json, no JSONL header line.
+///
+/// Field `last_compaction_offset` is an absolute byte offset (there is no
+/// header in the JSONL, so the offset is always absolute).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMetadata {
-    /// Format version, currently 1
+pub struct SessionMeta {
+    // ── Immutable fields ──
     pub version: u32,
-    /// Session identifier
     pub session_id: String,
-    /// ISO 8601 creation timestamp
-    pub created_at: String,
-    /// Agent identifier
     pub agent_id: String,
-    /// Optional session title
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: String,
+
+    // ── User/API mutable fields ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Optional last update timestamp
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
-    /// Optional message count
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_count: Option<u32>,
-    /// Whether the metadata was recovered from a corrupted first line.
-    /// When true, other fields may contain degraded/default values.
-    #[serde(default)]
-    pub corrupted: bool,
-    /// Per-session workspace selection.
-    /// `None` or `"__agent_home__"` means the agent's home directory.
-    /// Persisted so sessions restore their workspace on cold start.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    /// Per-session model selection (ADR-012).
-    /// Persisted so sessions restore their model on cold start.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Per-session provider selection (ADR-012).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Per-session reasoning effort override.
-    /// Persisted so sessions restore the user's thinking-level preference on resume.
-    /// `None` means not set (use provider capability default on resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Per-session temperature override.
-    /// Persisted so sessions restore the temperature preference on resume.
-    /// `None` means not set (use agent config or global default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// Last reported `prompt_tokens` from an LLM API response.
-    ///
-    /// Persisted so the frontend can render the context-usage indicator
-    /// immediately on session resume, before any new LLM call has provided
-    /// fresh `usage`. `None` for sessions that have not yet completed an
-    /// LLM round, or for sessions written before this field was added.
-    ///
-    /// Only the raw value is stored; `usable_context`, `usage_percent`, and
-    /// `context_window` are *not* persisted because they are model-derived
-    /// and become stale on model switch.
+
+    // ── Runtime statistics (updated by AgentLoop) ──
+    pub message_count: u64,
+    pub last_active_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_input_tokens: Option<u64>,
-    /// Last reported `completion_tokens` from an LLM API response.
-    ///
-    /// Persisted alongside `last_input_tokens` purely for UI continuity on
-    /// resume (so the "output tokens" stat does not visually reset to 0).
-    /// Not used in any window-budget decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_tokens: Option<u64>,
-    /// Byte offset of the most recent compaction marker relative to the
-    /// **start of the data section** (i.e. `absolute_offset - meta_end`,
-    /// where `meta_end` = metadata line byte length + 1).
-    ///
-    /// This is a relative offset so that metadata rewrites (which shift
-    /// every data line by the same Δ when the first line changes length)
-    /// do not invalidate it.  Callers recover the absolute offset via
-    /// `meta_end + last_compaction_offset`.
-    ///
-    /// `None` if no compaction has occurred (legacy session, or session
-    /// written before this field was added).
+
+    // ── Compaction ──
+    /// Absolute byte offset of the most recent compaction marker.
+    /// `None` if no compaction has occurred.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compaction_offset: Option<u64>,
+
+    // ── Recovery flag ──
+    #[serde(default)]
+    pub corrupted: bool,
 }
 
 /// Commands sent to the background writer thread.
 pub enum WriterCommand {
     /// Append a conversation entry to the JSONL file.
     AppendEntry(ConversationEntry),
-    /// Update the session metadata (rewrites first line).
-    UpdateMetadata(SessionMetadata),
     /// Flush and shut down the writer.
     Shutdown(oneshot::Sender<()>),
 }
 
 /// Background writer that exclusively owns the JSONL file handle.
+///
+/// ADR-024: the writer no longer manages a metadata header line.
+/// Metadata is stored in a separate per-session file (`meta/{session_id}.json`).
 pub struct ConversationWriter {
     file: std::fs::File,
-    /// Path to the JSONL file (needed for atomic rename in rewrite_metadata)
-    path: PathBuf,
     receiver: mpsc::UnboundedReceiver<WriterCommand>,
-    /// Byte offset where the data section starts (= metadata line length + 1
-    /// for the newline).  Updated after every `rewrite_metadata` call so the
-    /// writer can compute compaction offsets relative to the data start.
-    meta_end: u64,
-    /// Byte offset of the most recent compaction marker, relative to
-    /// `meta_end` (i.e. `absolute_offset - meta_end`).  Persisted into
-    /// metadata on the next `UpdateMetadata` command.  `None` if no
-    /// compaction has been written during this writer's lifetime.
+    /// Absolute byte offset of the most recent compaction marker.
+    /// `None` if no compaction has been written during this writer's lifetime.
     last_compaction_offset: Option<u64>,
     /// ADR-022: Committed line count — incremented after each successful
     /// disk write so `read_messages_since` never sees a count ahead of
@@ -192,16 +153,12 @@ impl ConversationWriter {
     /// Create a new writer.
     fn new(
         file: std::fs::File,
-        path: PathBuf,
         receiver: mpsc::UnboundedReceiver<WriterCommand>,
-        meta_end: u64,
         committed_lines: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             file,
-            path,
             receiver,
-            meta_end,
             last_compaction_offset: None,
             committed_lines,
         }
@@ -236,23 +193,13 @@ impl ConversationWriter {
                         // ahead of the actual file contents.
                         self.committed_lines.fetch_add(1, Ordering::Relaxed);
                         if let Some(abs) = abs_offset {
-                            // Entry successfully written — record the relative offset.
-                            self.last_compaction_offset = Some(abs - self.meta_end);
+                            // ADR-024: absolute offset (no header to subtract from).
+                            self.last_compaction_offset = Some(abs);
                             tracing::debug!(
                                 abs_offset = abs,
-                                meta_end = self.meta_end,
-                                relative = abs - self.meta_end,
                                 "Recorded compaction offset"
                             );
                         }
-                    }
-                }
-                WriterCommand::UpdateMetadata(mut meta) => {
-                    // Inject the current compaction offset so it gets persisted
-                    // alongside whatever triggered this update.
-                    meta.last_compaction_offset = self.last_compaction_offset;
-                    if let Err(e) = self.rewrite_metadata(&meta) {
-                        tracing::error!("Failed to rewrite session metadata: {}", e);
                     }
                 }
                 WriterCommand::Shutdown(tx) => {
@@ -292,50 +239,6 @@ impl ConversationWriter {
         self.file.sync_data()?;
         Ok(())
     }
-
-    /// Rewrite the first line with updated metadata.
-    ///
-    /// Uses write-to-temp + atomic rename to prevent data loss on crash.
-    /// If the process dies during rewrite, the original file remains intact
-    /// (the temp file is simply discarded).
-    fn rewrite_metadata(&mut self, meta: &SessionMetadata) -> std::io::Result<()> {
-        let original_path = self.path.clone();
-        let temp_path = original_path.with_extension("jsonl.tmp");
-
-        // Read existing content from current file
-        let content = std::fs::read_to_string(&original_path)?;
-        let mut lines: Vec<&str> = content.lines().collect();
-
-        // Replace first line with new metadata
-        let new_meta = serde_json::to_string(meta)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if lines.is_empty() {
-            lines.push(&new_meta);
-        } else {
-            lines[0] = &new_meta;
-        }
-
-        // Write complete content to temp file
-        let mut output = lines.join("\n");
-        output.push('\n');
-        std::fs::write(&temp_path, &output)?;
-
-        // Atomic rename — on same filesystem, this is atomic on both Unix and Windows
-        std::fs::rename(&temp_path, &original_path)?;
-
-        // Reopen the file handle since the old handle points to a replaced file
-        self.file = std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(&original_path)?;
-
-        // Update meta_end — the new metadata line may have a different byte
-        // length, which shifts every data line by Δ (keeping stored relative
-        // compaction offsets valid without recomputation).
-        self.meta_end = new_meta.len() as u64 + 1;
-
-        Ok(())
-    }
 }
 
 /// Initial configuration for creating a new `ConversationSession`.
@@ -359,9 +262,10 @@ pub struct ConversationSession {
     created_at: String,
     /// Whether the session title has been set (first user message).
     title_set: AtomicBool,
-    /// Currently persisted title, for deduplicating force-update calls.
+    /// Currently persisted title, for deduplicating force-update calls
+    /// and serving the `title()` getter without disk I/O.
     current_title: std::sync::Mutex<Option<String>>,
-    /// Per-session workspace selection, persisted in JSONL metadata.
+    /// Per-session workspace selection, persisted in meta file.
     /// `None` or `"__agent_home__"` means the agent's home directory.
     /// Wrapped in Mutex for interior mutability so that both file persistence
     /// and in-memory state are updated atomically on the API side.
@@ -370,47 +274,91 @@ pub struct ConversationSession {
     model: std::sync::Mutex<Option<String>>,
     /// Per-session provider selection (ADR-012).
     provider: std::sync::Mutex<Option<String>>,
-    /// Per-session reasoning effort override, persisted in JSONL metadata.
+    /// Per-session reasoning effort override, persisted in meta file.
     reasoning_effort: std::sync::Mutex<Option<String>>,
-    /// Per-session temperature override, persisted in JSONL metadata.
+    /// Per-session temperature override, persisted in meta file.
     temperature: std::sync::Mutex<Option<f32>>,
     /// Last observed (input_tokens, output_tokens) from an LLM response.
-    /// Persisted into JSONL metadata so the UI can restore the
+    /// Persisted into meta file so the UI can restore the
     /// "context usage" indicator after a session resume.
     /// `None` means no LLM call has been made (or persisted) yet.
     last_tokens: std::sync::Mutex<Option<(u64, u64)>>,
     /// Running message count, incremented on every `append_message`.
-    /// Used by the session index for fast UI display without reading JSONL.
     message_count: AtomicU64,
-    /// Last time `update_index_entry` was written to disk.
+    /// Last time the meta file was written from `append_message`.
     /// Guards against excessive I/O from rapid `append_message` calls.
-    last_index_update: std::sync::Mutex<Instant>,
+    last_meta_write: std::sync::Mutex<Instant>,
     sender: mpsc::UnboundedSender<WriterCommand>,
     /// Path to the JSONL file (for session-level distillation on close).
     session_file_path: PathBuf,
-    /// Path to the conversations directory (for index.json updates).
+    /// Path to the conversations directory (for meta file writes).
     conversations_dir: PathBuf,
 }
 
-/// Minimum interval between index.json writes triggered by `append_message`.
+/// Minimum interval between meta file writes triggered by `append_message`.
 ///
 /// Metadata-only mutations (title, model, provider, workspace) always write
 /// immediately.  Only the high-frequency `append_message` path respects this
-/// cooldown, capping index write I/O regardless of conversation speed.
-const INDEX_COOLDOWN_MS: u64 = 3000; // 3 seconds
+/// cooldown, capping meta write I/O regardless of conversation speed.
+const META_WRITE_COOLDOWN_MS: u64 = 3000;
 
 impl ConversationSession {
+    /// Build a complete `SessionMeta` from the current in-memory state.
+    fn build_meta(&self) -> SessionMeta {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let (input_tokens, output_tokens) = self
+            .last_tokens
+            .lock()
+            .ok()
+            .and_then(|t| *t)
+            .unwrap_or((0, 0));
+        SessionMeta {
+            version: CONVERSATION_FORMAT_VERSION,
+            session_id: self.session_id.clone(),
+            agent_id: self.agent_id.clone(),
+            created_at: self.created_at.clone(),
+            title: self.current_title.lock().ok().and_then(|t| t.clone()),
+            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
+            model: self.model.lock().ok().and_then(|m| m.clone()),
+            provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
+            message_count: self.message_count.load(Ordering::Relaxed),
+            last_active_at: now,
+            last_input_tokens: if input_tokens > 0 { Some(input_tokens) } else { None },
+            last_output_tokens: if output_tokens > 0 { Some(output_tokens) } else { None },
+            last_compaction_offset: None,
+            corrupted: false,
+        }
+    }
+
+    /// Write the current in-memory state to the per-session meta file.
+    ///
+    /// Also updates `last_meta_write` timestamp for cooldown tracking.
+    fn write_meta(&self) {
+        let meta = self.build_meta();
+        if let Err(e) = write_session_meta(&self.conversations_dir, &meta) {
+            tracing::warn!(
+                session_id = %self.session_id,
+                error = %e,
+                "Failed to write session meta file"
+            );
+        }
+        if let Ok(mut last) = self.last_meta_write.lock() {
+            *last = Instant::now();
+        }
+    }
+
     /// Create a new session with optional initial metadata.
     ///
-    /// Creates `{work_dir}/conversations/{session_id}.jsonl`, writes the
-    /// `SessionMetadata` header (including initial model/provider/workspace_id),
-    /// and starts the background writer thread.
+    /// Creates a pure JSONL file (no metadata header — see ADR-024) and
+    /// writes session metadata to `conversations/meta/{session_id}.json`.
     pub fn new(work_dir: &Path, session_id: &str, config: SessionConfig, max_sessions: usize, committed_lines: Arc<AtomicUsize>) -> Result<Self> {
         let conversations_dir = work_dir.join("conversations");
         std::fs::create_dir_all(&conversations_dir)?;
 
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -418,42 +366,16 @@ impl ConversationSession {
             .open(&file_path)?;
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let now_for_self = now.clone();
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: session_id.to_string(),
-            created_at: now.clone(),
-            agent_id: config.agent_id.clone(),
-            title: None,
-            updated_at: Some(now),
-            message_count: Some(0),
-            corrupted: false,
-            workspace_id: config.workspace_id.clone(),
-            model: config.model.clone(),
-            provider: config.provider.clone(),
-            reasoning_effort: None,
-            temperature: None,
-            last_input_tokens: None,
-            last_output_tokens: None,
-            last_compaction_offset: None,
-        };
 
-        // Write metadata as the first line — build complete line then single write
-        let mut line = serde_json::to_string(&metadata)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        line.push('\n');
-        file.write_all(line.as_bytes())?;
-        file.sync_data()?;
-
-        let meta_end = line.len() as u64;
+        // ADR-024: no JSONL header — file starts at line 0.
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(file, file_path.clone(), rx, meta_end, committed_lines);
+        let writer = ConversationWriter::new(file, rx, committed_lines);
         std::thread::spawn(move || writer.run());
 
         let session = Self {
             session_id: session_id.to_string(),
             agent_id: config.agent_id,
-            created_at: now_for_self,
+            created_at: now.clone(),
             title_set: AtomicBool::new(false),
             current_title: std::sync::Mutex::new(None),
             workspace_id: std::sync::Mutex::new(config.workspace_id),
@@ -463,18 +385,17 @@ impl ConversationSession {
             temperature: std::sync::Mutex::new(None),
             last_tokens: std::sync::Mutex::new(None),
             message_count: AtomicU64::new(0),
-            last_index_update: std::sync::Mutex::new(Instant::now()),
+            last_meta_write: std::sync::Mutex::new(Instant::now()),
             sender: tx,
             session_file_path: file_path,
             conversations_dir: conversations_dir.clone(),
         };
 
-        // Persist the new session to index.json immediately so it appears
-        // in session lists without waiting for a directory scan.
-        session.update_index_entry(true); // force: new session must appear immediately
+        // ADR-024: write per-session meta file (replaces index.json update).
+        session.write_meta();
 
         // Enforce max-sessions limit: prune the oldest sessions if the
-        // index now exceeds the configured threshold.
+        // limit now exceeds the configured threshold.
         if max_sessions > 0 {
             prune_excess_sessions(&conversations_dir, max_sessions);
         }
@@ -484,27 +405,27 @@ impl ConversationSession {
 
     /// Resume an existing session.
     ///
-    /// Opens the existing JSONL file in append mode and starts the
-    /// background writer thread.
+    /// Opens the existing JSONL file in append mode, reads metadata from
+    /// `conversations/meta/{session_id}.json`, and starts the background
+    /// writer thread.
     pub fn resume(work_dir: &Path, session_id: &str, committed_lines: Arc<AtomicUsize>) -> Result<Self> {
         let conversations_dir = work_dir.join("conversations");
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
 
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&file_path)?;
 
-        // Read existing metadata to get agent_id
-        let meta = read_session_metadata(&file_path)?;
+        // ADR-024: read metadata from per-session meta file.
+        let meta = read_session_meta(&conversations_dir, session_id)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to read session meta: {}", e)))?;
 
-        let meta_end = metadata_end_offset(&mut file)?;
+        // ADR-024: no JSONL header, meta_end is always 0.
 
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(file, file_path.clone(), rx, meta_end, committed_lines);
+        let writer = ConversationWriter::new(file, rx, committed_lines);
         std::thread::spawn(move || writer.run());
-
-        let msg_count = meta.message_count.unwrap_or(0) as u64;
 
         Ok(Self {
             session_id: session_id.to_string(),
@@ -512,10 +433,10 @@ impl ConversationSession {
             created_at: meta.created_at,
             title_set: AtomicBool::new(meta.title.is_some()),
             current_title: std::sync::Mutex::new(meta.title.clone()),
-            workspace_id: std::sync::Mutex::new(meta.workspace_id.clone()),
-            model: std::sync::Mutex::new(meta.model.clone()),
-            provider: std::sync::Mutex::new(meta.provider.clone()),
-            reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort.clone()),
+            workspace_id: std::sync::Mutex::new(meta.workspace_id),
+            model: std::sync::Mutex::new(meta.model),
+            provider: std::sync::Mutex::new(meta.provider),
+            reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
             temperature: std::sync::Mutex::new(meta.temperature),
             last_tokens: std::sync::Mutex::new(
                 match (meta.last_input_tokens, meta.last_output_tokens) {
@@ -525,8 +446,8 @@ impl ConversationSession {
                     (None, None) => None,
                 },
             ),
-            message_count: AtomicU64::new(msg_count),
-            last_index_update: std::sync::Mutex::new(Instant::now()),
+            message_count: AtomicU64::new(meta.message_count),
+            last_meta_write: std::sync::Mutex::new(Instant::now()),
             sender: tx,
             session_file_path: file_path,
             conversations_dir,
@@ -566,10 +487,16 @@ impl ConversationSession {
         if let Err(e) = self.sender.send(WriterCommand::AppendEntry(entry)) {
             tracing::error!("Failed to send message to conversation writer: {}", e);
         }
-        // Update message count and index so the frontend sees the latest
+        // Update message count and write meta so the frontend sees the latest
         // active-at timestamp without a directory scan.
         self.message_count.fetch_add(1, Ordering::Relaxed);
-        self.update_index_entry(false); // throttled: high-frequency message path
+        // ADR-024: throttle meta writes on the high-frequency append path.
+        if let Ok(last) = self.last_meta_write.lock()
+            && last.elapsed().as_millis() < META_WRITE_COOLDOWN_MS as u128
+        {
+            return; // skip — in-memory counters are already up to date
+        }
+        self.write_meta();
     }
 
     /// Append a compaction event to the JSONL.
@@ -634,18 +561,6 @@ impl ConversationSession {
         Ok(())
     }
 
-    /// Update the session metadata (e.g. message_count).
-    ///
-    /// Non-blocking: sent via channel to the writer thread.
-    pub fn update_metadata(&self, metadata: SessionMetadata) {
-        if let Err(e) = self.sender.send(WriterCommand::UpdateMetadata(metadata)) {
-            tracing::error!(
-                "Failed to send metadata update to conversation writer: {}",
-                e
-            );
-        }
-    }
-
     /// Set the session title from the first user message.
     ///
     /// Truncates to 30 characters. Only sets title once —
@@ -674,32 +589,12 @@ impl ConversationSession {
                 }
             }
         };
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
-            created_at: self.created_at.clone(),
-            agent_id: self.agent_id.clone(),
-            title: Some(title.clone()),
-            updated_at: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
-            message_count: None,
-            corrupted: false,
-            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
-            model: self.model.lock().ok().and_then(|m| m.clone()),
-            provider: self.provider.lock().ok().and_then(|p| p.clone()),
-            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
-            temperature: self.temperature.lock().ok().and_then(|t| *t),
-            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
-            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
-            last_compaction_offset: None,
-        };
-        self.update_metadata(metadata);
         // Track current title for dedup
         if let Ok(mut current) = self.current_title.lock() {
             *current = Some(title);
         }
-        self.update_index_entry(true); // force: title is a user-visible metadata change
+        // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
+        self.write_meta();
         tracing::info!(session_id = %self.session_id, "Session title set");
     }
 
@@ -724,73 +619,31 @@ impl ConversationSession {
             }
         };
         self.title_set.store(true, Ordering::Relaxed);
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
-            created_at: self.created_at.clone(),
-            agent_id: self.agent_id.clone(),
-            title: Some(truncated.clone()),
-            updated_at: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
-            message_count: None,
-            corrupted: false,
-            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
-            model: self.model.lock().ok().and_then(|m| m.clone()),
-            provider: self.provider.lock().ok().and_then(|p| p.clone()),
-            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
-            temperature: self.temperature.lock().ok().and_then(|t| *t),
-            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
-            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
-            last_compaction_offset: None,
-        };
-        self.update_metadata(metadata);
         // Track current title for dedup
         if let Ok(mut current) = self.current_title.lock() {
             *current = Some(truncated.clone());
         }
-        self.update_index_entry(true);
+        // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
+        self.write_meta();
         tracing::info!(session_id = %self.session_id, title = %truncated, "Session title force-updated via API");
         true
     }
 
-    /// Persist the per-session workspace selection to the JSONL metadata.
+    /// Persist the per-session workspace selection to the meta file.
     ///
-    /// Rewrites the first line of the JSONL file so the workspace binding
-    /// survives cold restarts. The authoritative workspace_id is stored in
-    /// [`SessionCore`]; this method only persists to disk.
+    /// The authoritative workspace_id is stored in [`SessionCore`];
+    /// this method only persists to disk.
     pub fn update_workspace_id(&self, workspace_id: &str) {
         // Update in-memory state FIRST so that subsequent metadata updates
         // (e.g. set_title via first user message) don't lose workspace_id.
         if let Ok(mut w) = self.workspace_id.lock() {
             *w = Some(workspace_id.to_string());
         }
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
-            created_at: self.created_at.clone(),
-            agent_id: self.agent_id.clone(),
-            title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            updated_at: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
-            message_count: None,
-            corrupted: false,
-            workspace_id: Some(workspace_id.to_string()),
-            model: self.model.lock().ok().and_then(|m| m.clone()),
-            provider: self.provider.lock().ok().and_then(|p| p.clone()),
-            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
-            temperature: self.temperature.lock().ok().and_then(|t| *t),
-            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
-            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
-            last_compaction_offset: None,
-        };
-        self.update_metadata(metadata);
-        self.update_index_entry(true);
+        self.write_meta();
         tracing::info!(
             session_id = %self.session_id,
             workspace_id = %workspace_id,
-            "Session workspace_id persisted to JSONL"
+            "Session workspace_id persisted to meta file"
         );
     }
 
@@ -809,11 +662,10 @@ impl ConversationSession {
         self.provider.lock().ok().and_then(|p| p.clone())
     }
 
-    /// Persist the per-session model and provider selection to JSONL metadata (ADR-012).
+    /// Persist the per-session model and provider selection to meta file (ADR-012).
     ///
-    /// Rewrites the first line of the JSONL file so the model binding
-    /// survives cold restarts. Does NOT mutate the in-memory
-    /// `SessionState` — the caller is responsible for keeping the two in sync.
+    /// Does NOT mutate the in-memory `SessionState` — the caller is
+    /// responsible for keeping the two in sync.
     pub fn update_model_provider(&self, model: &str, provider: Option<&str>) {
         // Update in-memory state FIRST so that subsequent metadata updates
         // (e.g. set_title via first user message) don't lose model/provider.
@@ -823,33 +675,12 @@ impl ConversationSession {
         if let Ok(mut p) = self.provider.lock() {
             *p = provider.map(|s| s.to_string());
         }
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
-            created_at: self.created_at.clone(),
-            agent_id: self.agent_id.clone(),
-            title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            updated_at: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
-            message_count: None,
-            corrupted: false,
-            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
-            model: Some(model.to_string()),
-            provider: provider.map(|s| s.to_string()),
-            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
-            temperature: self.temperature.lock().ok().and_then(|t| *t),
-            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
-            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
-            last_compaction_offset: None,
-        };
-        self.update_metadata(metadata);
-        self.update_index_entry(true);
+        self.write_meta();
         tracing::info!(
             session_id = %self.session_id,
             model = %model,
             provider = ?provider,
-            "Session model/provider persisted to JSONL"
+            "Session model/provider persisted to meta file"
         );
     }
 
@@ -858,37 +689,17 @@ impl ConversationSession {
         self.reasoning_effort.lock().ok().and_then(|r| r.clone())
     }
 
-    /// Persist the per-session reasoning_effort override to JSONL metadata.
+    /// Persist the per-session reasoning_effort override to meta file.
     ///
-    /// Updates in-memory state and rewrites the JSONL first line.
+    /// Updates in-memory state and writes the meta file.
     pub fn update_reasoning_effort(&self, effort: Option<String>) {
         if let Ok(mut r) = self.reasoning_effort.lock() {
-            *r = effort.clone();
+            *r = effort;
         }
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
-            created_at: self.created_at.clone(),
-            agent_id: self.agent_id.clone(),
-            title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            updated_at: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
-            message_count: None,
-            corrupted: false,
-            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
-            model: self.model.lock().ok().and_then(|m| m.clone()),
-            provider: self.provider.lock().ok().and_then(|p| p.clone()),
-            reasoning_effort: effort,
-            temperature: self.temperature.lock().ok().and_then(|t| *t),
-            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
-            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
-            last_compaction_offset: None,
-        };
-        self.update_metadata(metadata);
+        self.write_meta();
         tracing::info!(
             session_id = %self.session_id,
-            "Session reasoning_effort persisted to JSONL"
+            "Session reasoning_effort persisted to meta file"
         );
     }
 
@@ -897,35 +708,15 @@ impl ConversationSession {
         self.temperature.lock().ok().and_then(|t| *t)
     }
 
-    /// Persist the per-session temperature override to JSONL metadata.
+    /// Persist the per-session temperature override to meta file.
     pub fn update_temperature(&self, temperature: Option<f32>) {
         if let Ok(mut t) = self.temperature.lock() {
             *t = temperature;
         }
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
-            created_at: self.created_at.clone(),
-            agent_id: self.agent_id.clone(),
-            title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            updated_at: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
-            message_count: None,
-            corrupted: false,
-            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
-            model: self.model.lock().ok().and_then(|m| m.clone()),
-            provider: self.provider.lock().ok().and_then(|p| p.clone()),
-            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
-            temperature,
-            last_input_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(i, _)| i)),
-            last_output_tokens: self.last_tokens.lock().ok().and_then(|t| t.map(|(_, o)| o)),
-            last_compaction_offset: None,
-        };
-        self.update_metadata(metadata);
+        self.write_meta();
         tracing::info!(
             session_id = %self.session_id,
-            "Session temperature persisted to JSONL"
+            "Session temperature persisted to meta file"
         );
     }
 
@@ -941,86 +732,16 @@ impl ConversationSession {
         self.last_tokens.lock().ok().and_then(|t| *t)
     }
 
-    /// Persist the most recent LLM `usage` (input/output tokens) to JSONL
-    /// metadata so the context-usage indicator survives a session resume.
+    /// Persist the most recent LLM `usage` (input/output tokens) to meta
+    /// file so the context-usage indicator survives a session resume.
     ///
     /// Called from the agent loop right after a `ContextUsage` chunk is
-    /// emitted. Cheap (single metadata rewrite, debounced by the writer
-    /// thread) but still optional — failure is non-fatal.
+    /// emitted.
     pub fn update_last_tokens(&self, input_tokens: u64, output_tokens: u64) {
         if let Ok(mut t) = self.last_tokens.lock() {
             *t = Some((input_tokens, output_tokens));
         }
-        let metadata = SessionMetadata {
-            version: CONVERSATION_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
-            created_at: self.created_at.clone(),
-            agent_id: self.agent_id.clone(),
-            title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            updated_at: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
-            message_count: None,
-            corrupted: false,
-            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
-            model: self.model.lock().ok().and_then(|m| m.clone()),
-            provider: self.provider.lock().ok().and_then(|p| p.clone()),
-            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
-            temperature: self.temperature.lock().ok().and_then(|t| *t),
-            last_input_tokens: Some(input_tokens),
-            last_output_tokens: Some(output_tokens),
-            last_compaction_offset: None,
-        };
-        self.update_metadata(metadata);
-    }
-
-    // ── Session index helpers ───────────────────────────────────────────
-
-    /// Update this session's entry in `conversations/index.json`.
-    ///
-    /// Performs a load-modify-write cycle.  Concurrent writes from
-    /// different sessions can race (last writer wins), which is
-    /// acceptable because the affected fields (`last_active_at`,
-    /// `message_count`) are eventually consistent — the next write
-    /// from this session will correct any stale values.
-    ///
-    /// When `force` is `true` the write always happens immediately.
-    /// When `force` is `false` (used by `append_message`), writes are
-    /// throttled to at most one per `INDEX_COOLDOWN_MS` per session.
-    fn update_index_entry(&self, force: bool) {
-        if !force
-            && let Ok(last) = self.last_index_update.lock()
-            && last.elapsed().as_millis() < INDEX_COOLDOWN_MS as u128
-        {
-            return; // skip — in-memory counters are already up to date
-        }
-
-        let (mut index, _rebuilt) = ensure_index(&self.conversations_dir);
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let entry = SessionIndexEntry {
-            title: self.current_title.lock().ok().and_then(|t| t.clone()),
-            created_at: self.created_at.clone(),
-            last_active_at: now,
-            message_count: self.message_count.load(Ordering::Relaxed),
-            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
-            model: self.model.lock().ok().and_then(|m| m.clone()),
-            provider: self.provider.lock().ok().and_then(|p| p.clone()),
-            corrupted: false,
-        };
-        index
-            .sessions
-            .insert(self.session_id.clone(), entry);
-        if let Err(e) = write_index_atomic(&self.conversations_dir, &index) {
-            tracing::warn!(
-                session_id = %self.session_id,
-                error = %e,
-                "Failed to update session index"
-            );
-        }
-
-        if let Ok(mut last) = self.last_index_update.lock() {
-            *last = Instant::now();
-        }
+        self.write_meta();
     }
 }
 
@@ -1031,10 +752,10 @@ unsafe impl Sync for ConversationSession {}
 
 impl Drop for ConversationSession {
     fn drop(&mut self) {
-        // Force-flush the final state to index.json so the frontend sees
+        // Force-flush the final state to the meta file so the frontend sees
         // the correct message_count and last_active_at even if the last
         // `append_message` fell within the cooldown window.
-        self.update_index_entry(true);
+        self.write_meta();
     }
 }
 
@@ -1071,174 +792,77 @@ pub struct SessionInfo {
     pub workspace_id: Option<String>,
 }
 
-// ── Session Index (fast O(1) lookup, avoids per-file metadata reads) ───────
+// ── Session Index (fast O(1) lookup) ───────────────────────────────────────
+//
+// ADR-024: the index.json + SessionIndexEntry + SessionIndex system has
+// been superseded by per-session meta files (`conversations/meta/*.json`).
+// Use `scan_sessions_from_meta()` for listing and `read_session_meta()` for
+// single-session lookup.
 
-/// Per-session entry in the conversations index file.
-///
-/// Stored in `conversations/index.json` as a fast lookup source,
-/// eliminating the need for directory scans and per-file metadata reads
-/// when listing sessions or finding the most recently active session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionIndexEntry {
-    /// Optional session title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-    /// ISO 8601 creation timestamp.
-    created_at: String,
-    /// ISO 8601 timestamp of the most recent message append.
-    /// Updated on every `append_message` call; used by `find_latest_session`
-    /// to select the session the user was most recently active in.
-    last_active_at: String,
-    /// Number of messages appended to this session.
-    message_count: u64,
-    /// Per-session workspace selection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
-    /// Per-session model name (ADR-012).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    /// Per-session provider name (ADR-012).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    /// Whether this session's JSONL metadata was recovered from a corrupted
-    /// first line.  Only ever `true` for entries produced by
-    /// `rebuild_index_from_disk`; live sessions never set this.
-    #[serde(default)]
-    corrupted: bool,
+// ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
+
+// ── Per-session meta file I/O (ADR-024) ───────────────────────────────────
+
+/// Subdirectory where per-session meta files live.
+const META_DIR: &str = "meta";
+
+/// Build the path to `conversations/meta/{session_id}.json`.
+fn meta_path(conversations_dir: &Path, session_id: &str) -> PathBuf {
+    conversations_dir
+        .join(META_DIR)
+        .join(format!("{}.json", session_id))
 }
 
-/// In-memory representation of `conversations/index.json`.
-///
-/// A flat map from `session_id` → `SessionIndexEntry`, designed for
-/// fast lookups without touching individual JSONL files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionIndex {
-    sessions: HashMap<String, SessionIndexEntry>,
-}
-
-impl SessionIndex {
-    fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-        }
-    }
-}
-
-/// Atomically write the session index to `{conversations_dir}/index.json`.
+/// Atomically write session metadata to `conversations/meta/{session_id}.json`.
 ///
 /// Uses write-to-temp + rename to prevent corruption on crash.
-/// Returns the number of sessions written on success.
-fn write_index_atomic(conversations_dir: &Path, index: &SessionIndex) -> std::io::Result<usize> {
-    let index_path = conversations_dir.join("index.json");
-    let temp_path = conversations_dir.join("index.json.tmp");
-    let json = serde_json::to_string_pretty(index)
+pub fn write_session_meta(conversations_dir: &Path, meta: &SessionMeta) -> std::io::Result<()> {
+    let meta_dir = conversations_dir.join(META_DIR);
+    std::fs::create_dir_all(&meta_dir)?;
+
+    let target = meta_path(conversations_dir, &meta.session_id);
+    let temp = meta_dir.join(format!("{}.json.tmp", meta.session_id));
+
+    let json = serde_json::to_string_pretty(meta)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let count = index.sessions.len();
-    std::fs::write(&temp_path, json)?;
-    std::fs::rename(&temp_path, &index_path)?;
-    Ok(count)
+    std::fs::write(&temp, json)?;
+    std::fs::rename(&temp, &target)?;
+    Ok(())
 }
 
-/// Load the session index from disk.
-///
-/// Returns `None` if the index file does not exist or is corrupted.
-fn load_index(conversations_dir: &Path) -> Option<SessionIndex> {
-    let index_path = conversations_dir.join("index.json");
-    let data = std::fs::read_to_string(&index_path).ok()?;
-    match serde_json::from_str::<SessionIndex>(&data) {
-        Ok(index) => Some(index),
-        Err(e) => {
-            tracing::warn!(
-                path = %index_path.display(),
-                error = %e,
-                "Session index is corrupted, will rebuild from disk"
-            );
-            None
-        }
-    }
+/// Read session metadata from `conversations/meta/{session_id}.json`.
+pub fn read_session_meta(
+    conversations_dir: &Path,
+    session_id: &str,
+) -> std::io::Result<SessionMeta> {
+    let path = meta_path(conversations_dir, session_id);
+    let data = std::fs::read_to_string(&path)?;
+    serde_json::from_str(&data)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-/// Rebuild the index from scratch by scanning all JSONL files.
+/// Scan all session meta files and return them sorted by `last_active_at` descending.
 ///
-/// Used as a fallback when `index.json` is missing or corrupted.
-/// Reads the metadata line from every `.jsonl` file in the directory.
-/// The rebuilt index is persisted to disk so subsequent calls use the fast path.
-fn rebuild_index_from_disk(conversations_dir: &Path) -> SessionIndex {
-    let mut index = SessionIndex::new();
-    let Ok(rd) = std::fs::read_dir(conversations_dir) else {
-        return index;
+/// Reads every `.json` file in `conversations/meta/`.  Files that fail to parse
+/// are silently skipped (the caller can detect missing sessions via the returned
+/// `Vec` length vs. the `.jsonl` file count).
+pub fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, SessionMeta)> {
+    let meta_dir = conversations_dir.join(META_DIR);
+    let Ok(rd) = std::fs::read_dir(&meta_dir) else {
+        return Vec::new();
     };
-    for entry in rd.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-            && let Some(sid) = path.file_stem().and_then(|s| s.to_str())
-            && let Ok(meta) = read_session_metadata(&path)
-        {
-            // Reconstructed sessions use `updated_at` (set on metadata rewrites)
-            // as a best-effort `last_active_at`.  Once the session is loaded
-            // in memory and `append_message` is called, it will be corrected.
-            let entry = SessionIndexEntry {
-                title: meta.title,
-                created_at: meta.created_at.clone(),
-                last_active_at: meta.updated_at.unwrap_or(meta.created_at),
-                message_count: meta.message_count.unwrap_or(0) as u64,
-                workspace_id: meta.workspace_id,
-                model: meta.model,
-                provider: meta.provider,
-                corrupted: meta.corrupted,
-            };
-            index.sessions.insert(sid.to_string(), entry);
-        }
-    }
-    if let Err(e) = write_index_atomic(conversations_dir, &index) {
-        tracing::warn!(
-            "Failed to persist rebuilt session index ({} entries): {}",
-            index.sessions.len(),
-            e
-        );
-    } else {
-        tracing::info!(
-            count = index.sessions.len(),
-            "Rebuilt and persisted session index from disk"
-        );
-    }
-    index
-}
-
-/// Ensure the session index exists, loading or rebuilding as needed.
-///
-/// Returns the index and a boolean indicating whether it was freshly rebuilt
-/// (useful for callers that want to log or react to a rebuild).
-fn ensure_index(conversations_dir: &Path) -> (SessionIndex, bool) {
-    if let Some(index) = load_index(conversations_dir) {
-        (index, false)
-    } else {
-        (rebuild_index_from_disk(conversations_dir), true)
-    }
-}
-
-/// Remove a session entry from the index file.
-///
-/// Idempotent: returns `Ok(())` even if the session doesn't exist in the index
-/// or if the index file itself doesn't exist.
-///
-/// Called by `SessionManager::delete_session` as the final step to ensure the
-/// deleted session does not reappear in the session list after refresh.
-pub(crate) fn remove_session_from_index(conversations_dir: &Path, session_id: &str) {
-    let mut index = match load_index(conversations_dir) {
-        Some(idx) => idx,
-        None => return,
-    };
-    index.sessions.remove(session_id);
-    if let Err(e) = write_index_atomic(conversations_dir, &index) {
-        tracing::warn!(
-            session_id = %session_id,
-            error = %e,
-            "Failed to write index after removing session entry"
-        );
-    }
+    let mut sessions: Vec<(String, SessionMeta)> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|e| {
+            let data = std::fs::read_to_string(e.path()).ok()?;
+            let meta: SessionMeta = serde_json::from_str(&data).ok()?;
+            Some((meta.session_id.clone(), meta))
+        })
+        .collect();
+    // Sort descending by last_active_at (newest first).
+    sessions.sort_by(|(_, a), (_, b)| b.last_active_at.cmp(&a.last_active_at));
+    sessions
 }
 
 /// Prune excess sessions when the index exceeds `max_sessions`.
@@ -1263,64 +887,75 @@ pub(crate) fn prune_excess_sessions(
         return 0;
     }
 
-    let mut index = match load_index(conversations_dir) {
-        Some(idx) => idx,
-        None => return 0, // index missing — nothing to prune
-    };
+    // ADR-024: scan per-session meta files instead of index.json.
+    let sessions = scan_sessions_from_meta(conversations_dir);
 
-    if index.sessions.len() <= max_sessions {
+    if sessions.len() <= max_sessions {
         return 0;
     }
 
     // Sort by last_active_at ascending (oldest first).
-    let mut sorted: Vec<(String, String)> = index
-        .sessions
+    // `scan_sessions_from_meta` returns (session_id, meta) tuples sorted
+    // newest-first; we need oldest-first for pruning.
+    let mut sorted: Vec<_> = sessions
         .iter()
-        .map(|(sid, e)| (sid.clone(), e.last_active_at.clone()))
+        .map(|(sid, meta)| (sid.as_str(), meta.last_active_at.as_str()))
         .collect();
-    sorted.sort_by(|a, b| a.1.cmp(&b.1));
+    sorted.sort_by(|a, b| a.1.cmp(b.1));
 
-    let to_remove = index.sessions.len() - max_sessions;
+    let to_remove = sessions.len() - max_sessions;
     let mut pruned = 0usize;
 
     for (session_id, _) in sorted.iter().take(to_remove) {
-        // Delete the JSONL file.
-        let path = conversations_dir.join(format!("{}.jsonl", session_id));
-        match std::fs::remove_file(&path) {
+        let jsonl_path = conversations_dir.join(format!("{}.jsonl", session_id));
+        let archive_path = conversations_dir.join(format!("{}.jsonl.archive", session_id));
+        let meta_path = conversations_dir
+            .join("meta")
+            .join(format!("{}.json", session_id));
+
+        // ADR-024: archive the JSONL file (rename) instead of deleting.
+        match std::fs::rename(&jsonl_path, &archive_path) {
             Ok(()) => {
-                index.sessions.remove(session_id);
+                tracing::debug!(
+                    session_id = %session_id,
+                    archive = %archive_path.display(),
+                    "Archived excess session JSONL"
+                );
                 pruned += 1;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // File already gone — still remove from index.
-                index.sessions.remove(session_id);
+                // JSONL already gone — still count as pruned.
                 pruned += 1;
             }
             Err(e) => {
                 tracing::warn!(
                     session_id = %session_id,
-                    path = %path.display(),
+                    path = %jsonl_path.display(),
                     error = %e,
-                    "Failed to delete JSONL file during session pruning"
+                    "Failed to archive JSONL file during session pruning"
+                );
+                continue;
+            }
+        }
+
+        // Delete the per-session meta file.
+        if let Err(e) = std::fs::remove_file(&meta_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to delete meta file during session pruning"
                 );
             }
         }
     }
 
     if pruned > 0 {
-        if let Err(e) = write_index_atomic(conversations_dir, &index) {
-            tracing::warn!(
-                pruned,
-                error = %e,
-                "Failed to write pruned session index"
-            );
-        } else {
-            tracing::info!(
-                pruned,
-                remaining = index.sessions.len(),
-                "Pruned excess sessions"
-            );
-        }
+        tracing::info!(
+            pruned,
+            remaining = sessions.len() - pruned,
+            "Archived excess sessions"
+        );
     }
 
     pruned
@@ -1692,34 +1327,13 @@ fn parse_offset_cursor(cursor: &str) -> Option<u64> {
         .and_then(|s| s.parse::<u64>().ok())
 }
 
-/// Get the byte offset where message data begins (after metadata line).
-fn metadata_end_offset(file: &mut std::fs::File) -> std::io::Result<u64> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut reader = BufReader::new(file.try_clone()?);
-    let mut first_line = String::new();
-    reader.read_line(&mut first_line)?;
-    // read_line includes all bytes through the newline in the returned string;
-    // first_line.len() is therefore the exact byte count of the first line,
-    // which equals the file offset where the second line begins.
-    Ok(first_line.len() as u64)
-}
-
-/// Find the latest session in the conversations directory.
-///
-/// Scans for `*.jsonl` files, sorts by filename descending (timestamp
-/// prefix guarantees chronological order), and returns the session ID
-/// without the `.jsonl` extension.
 /// Find the most recently active session.
 ///
-/// Reads `conversations/index.json` and returns the session with the
-/// highest `last_active_at` value.  Falls back to a directory scan +
-/// index rebuild if `index.json` is missing or corrupted.
+/// ADR-024: scans per-session meta files instead of index.json.
 pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
-    let (index, _rebuilt) = ensure_index(conversations_dir);
-    index
-        .sessions
-        .iter()
-        .max_by(|(_, a), (_, b)| a.last_active_at.cmp(&b.last_active_at))
+    // ADR-024: scan per-session meta files.
+    scan_sessions_from_meta(conversations_dir)
+        .first()
         .map(|(sid, _)| sid.clone())
 }
 
@@ -1735,85 +1349,31 @@ pub fn scan_sessions_async(
     size: Option<u32>,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize)> {
     tokio::task::spawn_blocking(move || {
-        let (index, rebuilt) = ensure_index(&conversations_dir);
-        if rebuilt {
-            tracing::info!("Session index was rebuilt from disk during scan");
-        }
+        // ADR-024: scan per-session meta files instead of index.json.
+        let sessions = scan_sessions_from_meta(&conversations_dir);
 
-        let mut entries: Vec<(String, SessionIndexEntry)> = index.sessions.into_iter().collect();
-
-        // Sort descending by last_active_at (newest first).
-        entries.sort_by(|(_, a), (_, b)| b.last_active_at.cmp(&a.last_active_at));
-
-        let total = entries.len();
+        let total = sessions.len();
         let page = page.unwrap_or(1).max(1) as usize;
         let size = size.unwrap_or(20).max(1) as usize;
         let start = (page - 1) * size;
         let end = (start + size).min(total);
 
-        let sessions = entries[start..end]
+        let infos = sessions[start..end]
             .iter()
-            .map(|(sid, e)| SessionInfo {
+            .map(|(sid, meta)| SessionInfo {
                 session_id: sid.clone(),
-                created_at: e.created_at.clone(),
-                message_count: e.message_count as u32,
-                title: e.title.clone(),
-                corrupted: e.corrupted,
-                model: e.model.clone(),
-                provider: e.provider.clone(),
-                workspace_id: e.workspace_id.clone(),
+                created_at: meta.created_at.clone(),
+                message_count: meta.message_count as u32,
+                title: meta.title.clone(),
+                corrupted: meta.corrupted,
+                model: meta.model.clone(),
+                provider: meta.provider.clone(),
+                workspace_id: meta.workspace_id.clone(),
             })
             .collect();
 
-        (sessions, total)
+        (infos, total)
     })
-}
-
-/// Read session metadata from the first line of a JSONL file.
-///
-/// If the first line is corrupted (invalid JSON), attempts recovery by
-/// inferring `session_id` from the filename and filling remaining fields
-/// with safe defaults. The returned `SessionMetadata` will have
-/// `corrupted: true` to signal degraded data.
-pub fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut first_line = String::new();
-    reader.read_line(&mut first_line)?;
-
-    match serde_json::from_str::<SessionMetadata>(first_line.trim()) {
-        Ok(meta) => Ok(meta),
-        Err(e) => {
-            tracing::warn!(
-                "Corrupted session metadata in {}: {}. Attempting recovery from filename.",
-                path.display(),
-                e
-            );
-            // Recover session_id from filename (e.g. "session_abc123.jsonl" -> "session_abc123")
-            let filename = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-            Ok(SessionMetadata {
-                version: CONVERSATION_FORMAT_VERSION,
-                session_id: filename.to_string(),
-                created_at: String::new(),
-                agent_id: String::new(),
-                title: Some("(corrupted session)".to_string()),
-                updated_at: None,
-                message_count: None,
-                corrupted: true,
-                workspace_id: None,
-                model: None,
-                provider: None,
-                reasoning_effort: None,
-                temperature: None,
-                last_input_tokens: None,
-                last_output_tokens: None,
-                last_compaction_offset: None,
-            })
-        }
-    }
 }
 
 /// Read messages from a JSONL file with pagination using byte-offset cursors.
@@ -1835,9 +1395,10 @@ pub fn read_messages_paginated(
 ) -> Result<PaginatedMessages> {
     let mut file = std::fs::File::open(path)?;
     let file_len = file.metadata()?.len();
-    let meta_end = metadata_end_offset(&mut file)?;
+    // ADR-024: no metadata header line — data starts at byte 0.
+    let meta_end = 0u64;
 
-    if file_len <= meta_end {
+    if file_len == 0 {
         // No messages beyond metadata
         return Ok(PaginatedMessages {
             messages: Vec::new(),
@@ -2103,10 +1664,6 @@ pub fn read_messages_since(
     {
         let reader = BufReader::new(file);
         for (idx, line) in reader.lines().enumerate() {
-            // Line 0 is metadata, skip it
-            if idx == 0 {
-                continue;
-            }
             // Only include lines after the frontend's last known line
             if idx <= line_number {
                 continue;
@@ -2238,22 +1795,16 @@ mod tests {
             .join(format!("{}.jsonl", session_id));
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 4, "Should have 4 lines: metadata + 3 messages");
+        assert_eq!(lines.len(), 3, "ADR-024: 3 data lines, no metadata header");
 
-        // First line is metadata
-        let meta: SessionMetadata = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(meta.version, 2);
-        assert_eq!(meta.session_id, session_id);
-        assert_eq!(meta.agent_id, agent_id);
-
-        // Second line is user message
-        let entry: ConversationEntry = serde_json::from_str(lines[1]).unwrap();
+        // First line is user message
+        let entry: ConversationEntry = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(entry.role, "user");
         assert_eq!(entry.content, "Hello");
         assert!(entry.metadata.is_none());
 
-        // Third line is assistant message
-        let entry: ConversationEntry = serde_json::from_str(lines[2]).unwrap();
+        // Second line is assistant message
+        let entry: ConversationEntry = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(entry.role, "assistant");
         assert_eq!(entry.content, "Hi there!");
         assert_eq!(
@@ -2261,10 +1812,21 @@ mod tests {
             Some(serde_json::json!({"model": "test-model"}))
         );
 
-        // Fourth line is tool_call
-        let entry: ConversationEntry = serde_json::from_str(lines[3]).unwrap();
+        // Third line is tool_call
+        let entry: ConversationEntry = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(entry.role, "tool_call");
         assert_eq!(entry.content, r#"{"path": "test.txt"}"#);
+
+        // Verify meta file exists
+        let meta_path = work_dir
+            .join("conversations")
+            .join("meta")
+            .join(format!("{}.json", session_id));
+        assert!(meta_path.exists(), "Per-session meta file must exist");
+        let meta: SessionMeta = serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta.version, CONVERSATION_FORMAT_VERSION);
+        assert_eq!(meta.session_id, session_id);
+        assert_eq!(meta.agent_id, agent_id);
     }
 
     #[test]
@@ -2273,50 +1835,46 @@ mod tests {
         let conv_dir = temp_dir.path().join("conversations");
         std::fs::create_dir_all(&conv_dir).unwrap();
 
-        // Create a few session files with different names and timestamps.
-        // `find_latest_session` now reads from index.json (auto-rebuilt if
-        // missing) and sorts by `last_active_at` (= updated_at from JSONL
-        // metadata during rebuild).  Give each session a distinct
-        // `updated_at` so ordering is deterministic regardless of rebuild
-        // sort stability.
+        // ADR-024: find_latest_session scans per-session meta files.
+        let meta_dir = conv_dir.join("meta");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+
         let base = chrono::Utc::now();
         let ids = vec![
             (
                 "20260503_100000_aaaaaa",
-                (base - chrono::Duration::hours(3)).to_rfc3339(),
+                (base - chrono::Duration::hours(3)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
             (
                 "20260503_120000_bbbbbb",
-                base.to_rfc3339(), // newest
+                base.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), // newest
             ),
             (
                 "20260503_110000_cccccc",
-                (base - chrono::Duration::hours(1)).to_rfc3339(),
+                (base - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
         ];
-        for (id, updated) in &ids {
-            let path = conv_dir.join(format!("{}.jsonl", id));
-            let meta = SessionMetadata {
+        for (id, ts) in &ids {
+            let meta = SessionMeta {
                 version: CONVERSATION_FORMAT_VERSION,
                 session_id: id.to_string(),
-                created_at: updated.clone(),
                 agent_id: "com.test".to_string(),
+                created_at: ts.clone(),
                 title: None,
-                updated_at: Some(updated.clone()),
-                message_count: Some(0),
-                corrupted: false,
                 workspace_id: None,
                 model: None,
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                message_count: 0,
+                last_active_at: ts.clone(),
                 last_input_tokens: None,
                 last_output_tokens: None,
                 last_compaction_offset: None,
+                corrupted: false,
             };
-            let mut file = std::fs::File::create(&path).unwrap();
-            serde_json::to_writer(&mut file, &meta).unwrap();
-            writeln!(file).unwrap();
+            let meta_path = meta_dir.join(format!("{}.json", id));
+            std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
         }
 
         let latest = find_latest_session(&conv_dir);
@@ -2332,29 +1890,9 @@ mod tests {
         let session_id = "20260503_100000_test01";
         let file_path = conv_dir.join(format!("{}.jsonl", session_id));
 
-        // Write metadata + 5 messages
+        // ADR-024: write 5 messages directly (no metadata header).
         {
             let mut file = std::fs::File::create(&file_path).unwrap();
-            let meta = SessionMetadata {
-                version: 1,
-                session_id: session_id.to_string(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                agent_id: "com.test".to_string(),
-                title: None,
-                updated_at: None,
-                message_count: Some(5),
-                corrupted: false,
-                workspace_id: None,
-                model: None,
-                provider: None,
-                reasoning_effort: None,
-                temperature: None,
-                last_input_tokens: None,
-                last_output_tokens: None,
-                last_compaction_offset: None,
-            };
-            serde_json::to_writer(&mut file, &meta).unwrap();
-            writeln!(file).unwrap();
 
             for i in 0..5 {
                 let entry = ConversationEntry {
@@ -2466,110 +2004,19 @@ mod tests {
             resumed.close().await.unwrap();
         });
 
-        // Verify file has both messages
+        // Verify file has both messages (ADR-024: no metadata header)
         let file_path = work_dir
             .join("conversations")
             .join(format!("{}.jsonl", session_id));
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 3, "Should have metadata + 2 messages");
+        assert_eq!(lines.len(), 2, "ADR-024: 2 data lines, no metadata header");
 
-        let entry1: ConversationEntry = serde_json::from_str(lines[1]).unwrap();
+        let entry1: ConversationEntry = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(entry1.content, "First message");
 
-        let entry2: ConversationEntry = serde_json::from_str(lines[2]).unwrap();
+        let entry2: ConversationEntry = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(entry2.content, "Resumed response");
-    }
-
-    #[test]
-    fn test_read_session_metadata_corrupted_recovery() {
-        let temp_dir = TempDir::new().unwrap();
-        let conv_dir = temp_dir.path().join("conversations");
-        std::fs::create_dir_all(&conv_dir).unwrap();
-
-        let session_id = "20260503_100000_corrupt1";
-        let file_path = conv_dir.join(format!("{}.jsonl", session_id));
-
-        // Write a file with corrupted first line (not valid JSON)
-        {
-            let mut file = std::fs::File::create(&file_path).unwrap();
-            writeln!(file, "THIS IS NOT VALID JSON!!!").unwrap();
-            // Write valid message entries after corrupted header
-            let entry = ConversationEntry {
-                id: "msg-1".to_string(),
-                ts: chrono::Utc::now().to_rfc3339(),
-                role: "user".to_string(),
-                content: "Hello".to_string(),
-                metadata: None,
-                kind: None,
-            };
-            serde_json::to_writer(&mut file, &entry).unwrap();
-            writeln!(file).unwrap();
-        }
-
-        // read_session_metadata should return degraded metadata instead of Err
-        let meta = read_session_metadata(&file_path).unwrap();
-        assert!(
-            meta.corrupted,
-            "corrupted flag should be true for degraded metadata"
-        );
-        assert_eq!(
-            meta.session_id, session_id,
-            "session_id should be recovered from filename"
-        );
-        assert_eq!(meta.title, Some("(corrupted session)".to_string()));
-        assert!(meta.created_at.is_empty());
-        assert!(meta.agent_id.is_empty());
-
-        // read_messages_paginated should still work, skipping the corrupted header
-        let page = read_messages_paginated(&file_path, None, 10, "backward").unwrap();
-        assert_eq!(
-            page.messages.len(),
-            1,
-            "Should recover the valid message entry"
-        );
-        assert_eq!(page.messages[0].content, "Hello");
-    }
-
-    #[test]
-    fn test_read_session_metadata_valid_not_corrupted() {
-        let temp_dir = TempDir::new().unwrap();
-        let conv_dir = temp_dir.path().join("conversations");
-        std::fs::create_dir_all(&conv_dir).unwrap();
-
-        let session_id = "20260503_100000_valid01";
-        let file_path = conv_dir.join(format!("{}.jsonl", session_id));
-
-        // Write a valid metadata header
-        let meta = SessionMetadata {
-            version: 1,
-            session_id: session_id.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            agent_id: "com.test".to_string(),
-            title: Some("Valid session".to_string()),
-            updated_at: None,
-            message_count: Some(3),
-            corrupted: false,
-            workspace_id: None,
-            model: None,
-            provider: None,
-            reasoning_effort: None,
-            temperature: None,
-            last_input_tokens: None,
-            last_output_tokens: None,
-            last_compaction_offset: None,
-        };
-        let mut file = std::fs::File::create(&file_path).unwrap();
-        serde_json::to_writer(&mut file, &meta).unwrap();
-        writeln!(file).unwrap();
-
-        let read_meta = read_session_metadata(&file_path).unwrap();
-        assert!(
-            !read_meta.corrupted,
-            "valid metadata should not be marked as corrupted"
-        );
-        assert_eq!(read_meta.session_id, session_id);
-        assert_eq!(read_meta.title, Some("Valid session".to_string()));
     }
 
     #[test]
@@ -2578,36 +2025,42 @@ mod tests {
         let conv_dir = temp_dir.path().join("conversations");
         std::fs::create_dir_all(&conv_dir).unwrap();
 
-        // Create a valid session
+        // ADR-024: create per-session meta files instead of JSONL headers.
+        // Create a valid session with meta file.
         let valid_id = "20260503_100000_valid";
-        let valid_path = conv_dir.join(format!("{}.jsonl", valid_id));
-        let valid_meta = SessionMetadata {
-            version: 1,
+        let meta_dir = conv_dir.join("meta");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let meta_path = meta_dir.join(format!("{}.json", valid_id));
+        let valid_meta = SessionMeta {
+            version: CONVERSATION_FORMAT_VERSION,
             session_id: valid_id.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
             agent_id: "com.test".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             title: Some("Valid".to_string()),
-            updated_at: None,
-            message_count: Some(0),
-            corrupted: false,
             workspace_id: None,
             model: None,
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            message_count: 0,
+            last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             last_input_tokens: None,
             last_output_tokens: None,
             last_compaction_offset: None,
+            corrupted: false,
         };
-        let mut file = std::fs::File::create(&valid_path).unwrap();
-        serde_json::to_writer(&mut file, &valid_meta).unwrap();
-        writeln!(file).unwrap();
+        std::fs::write(&meta_path, serde_json::to_string(&valid_meta).unwrap()).unwrap();
 
-        // Create a corrupted session
+        // Create a corrupted session with meta file (corrupted flag set).
         let corrupt_id = "20260503_110000_corrupt";
-        let corrupt_path = conv_dir.join(format!("{}.jsonl", corrupt_id));
-        let mut file = std::fs::File::create(&corrupt_path).unwrap();
-        writeln!(file, "BROKEN METADATA LINE").unwrap();
+        let meta_path2 = meta_dir.join(format!("{}.json", corrupt_id));
+        let corrupt_meta = SessionMeta {
+            session_id: corrupt_id.to_string(),
+            corrupted: true,
+            title: None,
+            ..valid_meta.clone()
+        };
+        std::fs::write(&meta_path2, serde_json::to_string(&corrupt_meta).unwrap()).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (sessions, _total) =
@@ -2627,92 +2080,72 @@ mod tests {
             .find(|s| s.session_id == corrupt_id)
             .unwrap();
         assert!(corrupt_session.corrupted);
-        assert_eq!(
-            corrupt_session.title,
-            Some("(corrupted session)".to_string())
-        );
+        // ADR-024: corrupted sessions report whatever the meta file says;
+        // title may be None (no recovery inference from JSONL header).
+        assert_eq!(corrupt_session.title, None);
     }
 
     #[test]
-    fn test_session_metadata_serde_backward_compatible() {
-        // Ensure old JSON without "corrupted" field deserializes with corrupted=false
-        let old_json = r#"{"version":1,"session_id":"test","created_at":"2026-01-01T00:00:00Z","agent_id":"com.test","title":null,"updated_at":null,"message_count":0}"#;
-        let meta: SessionMetadata = serde_json::from_str(old_json).unwrap();
-        assert!(
-            !meta.corrupted,
-            "Missing 'corrupted' field should default to false"
-        );
+    fn test_session_meta_serde_backward_compatible() {
+        // ADR-024: SessionMeta uses `last_active_at` (new field) instead of
+        // `updated_at`.  Old fields like `message_count` use `u64` with
+        // `#[serde(default)]`.  Verify missing fields deserialize correctly.
+        let old_json = r#"{"version":2,"session_id":"test","agent_id":"com.test","created_at":"2026-01-01T00:00:00Z","last_active_at":"2026-01-01T00:00:00Z","message_count":0,"corrupted":false}"#;
+        let meta: SessionMeta = serde_json::from_str(old_json).unwrap();
+        assert!(!meta.corrupted);
         assert_eq!(meta.session_id, "test");
     }
 
     #[test]
-    fn test_session_metadata_last_tokens_roundtrip() {
-        // Full round-trip: serialize with last tokens, deserialize, verify
-        let meta = SessionMetadata {
-            version: 2,
+    fn test_session_meta_serde_roundtrip() {
+        // ADR-024: full round-trip with SessionMeta fields.
+        let meta = SessionMeta {
+            version: CONVERSATION_FORMAT_VERSION,
             session_id: "roundtrip_test".to_string(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
             agent_id: "com.test".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
             title: Some("Test session".to_string()),
-            updated_at: None,
-            message_count: Some(5),
-            corrupted: false,
             workspace_id: None,
             model: Some("gpt-4".to_string()),
             provider: Some("openai".to_string()),
             reasoning_effort: None,
             temperature: Some(0.7),
+            message_count: 5,
+            last_active_at: "2026-01-01T00:00:00Z".to_string(),
             last_input_tokens: Some(45_000),
             last_output_tokens: Some(1_200),
             last_compaction_offset: None,
+            corrupted: false,
         };
         let json = serde_json::to_string(&meta).unwrap();
-        let parsed: SessionMetadata = serde_json::from_str(&json).unwrap();
+        let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.last_input_tokens, Some(45_000));
         assert_eq!(parsed.last_output_tokens, Some(1_200));
-        assert_eq!(parsed.last_compaction_offset, None, "field should default to None");
-        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.last_compaction_offset, None);
+        assert_eq!(parsed.version, CONVERSATION_FORMAT_VERSION);
         assert_eq!(parsed.model.as_deref(), Some("gpt-4"));
     }
 
     #[test]
-    fn test_session_metadata_last_tokens_missing_defaults_to_none() {
-        // Old JSON without last_input_tokens / last_output_tokens.
-        // These fields have serde(default), so they must deserialize to None.
-        let old_json = r#"{"version":1,"session_id":"old","created_at":"2026-01-01T00:00:00Z","agent_id":"com.test","title":null,"updated_at":null,"message_count":0}"#;
-        let meta: SessionMetadata = serde_json::from_str(old_json).unwrap();
+    fn test_session_meta_fields_default_to_none() {
+        // ADR-024: old JSON without optional fields defaults correctly.
+        let old_json = r#"{"version":2,"session_id":"old","agent_id":"com.test","created_at":"2026-01-01T00:00:00Z","last_active_at":"2026-01-01T00:00:00Z","message_count":0,"corrupted":false}"#;
+        let meta: SessionMeta = serde_json::from_str(old_json).unwrap();
         assert_eq!(meta.last_input_tokens, None, "should default to None");
         assert_eq!(meta.last_output_tokens, None, "should default to None");
+        assert_eq!(meta.model, None);
+        assert_eq!(meta.provider, None);
     }
 
     // ── display group pagination tests ────────────────────────────
 
-    /// Helper: write a JSONL file with metadata + given entries, return the path.
+    /// Helper: write a JSONL file with entries (ADR-024: no metadata header).
     fn write_test_jsonl(dir: &TempDir, session_id: &str, entries: &[ConversationEntry]) -> PathBuf {
         let conv_dir = dir.path().join("conversations");
         std::fs::create_dir_all(&conv_dir).unwrap();
         let file_path = conv_dir.join(format!("{}.jsonl", session_id));
         let mut file = std::fs::File::create(&file_path).unwrap();
-        let meta = SessionMetadata {
-            version: 2,
-            session_id: session_id.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            agent_id: "com.test".to_string(),
-            title: None,
-            updated_at: None,
-            message_count: Some(entries.len() as u32),
-            corrupted: false,
-            workspace_id: None,
-            model: None,
-            provider: None,
-            reasoning_effort: None,
-            temperature: None,
-            last_input_tokens: None,
-            last_output_tokens: None,
-            last_compaction_offset: None,
-        };
-        serde_json::to_writer(&mut file, &meta).unwrap();
-        writeln!(file).unwrap();
+        // ADR-024: no metadata header — entries start at line 0.
         for e in entries {
             serde_json::to_writer(&mut file, e).unwrap();
             writeln!(file).unwrap();
@@ -3067,14 +2500,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let entries = vec![make_entry("1", "user", "hi")];
         let path = write_test_jsonl(&dir, "sess-same-line", &entries);
-        // JSONL now has: line 0 = metadata, line 1 = user. total_lines = 2.
-        // Streaming line will become line 2. Frontend already saw line 2 chars 0..3.
-        let map = make_streaming_map("sess-same-line", 2, "assistant", "hello world");
+        // ADR-024: no metadata header — line 0 = user. total_lines = 1.
+        // Streaming line will become line 1. Frontend already saw line 1 chars 0..3.
+        let map = make_streaming_map("sess-same-line", 1, "assistant", "hello world");
 
-        // Frontend line_number=2 (caught up), offset=3 → expect "lo world".
-        let result = read_messages_since(&path, 2, 3, &map, "sess-same-line", 0).unwrap();
+        // Frontend line_number=1 (caught up), offset=3 → expect "lo world".
+        let result = read_messages_since(&path, 1, 3, &map, "sess-same-line", 0).unwrap();
         let streaming = result.streaming.expect("streaming line expected");
-        assert_eq!(streaming.line, 2);
+        assert_eq!(streaming.line, 1);
         assert_eq!(streaming.content, "lo world");
         assert_eq!(streaming.char_offset, "hello world".chars().count());
     }
@@ -3087,21 +2520,21 @@ mod tests {
     #[test]
     fn test_read_since_streaming_new_line_ignores_stale_offset() {
         let dir = TempDir::new().unwrap();
-        // Frontend last saw up to line 2 (an assistant line just flushed).
+        // ADR-024: line 0 = user, line 1 = assistant. Frontend last saw up to line 1.
         let entries = vec![
             make_entry("1", "user", "hi"),
             make_entry("2", "assistant", "previous assistant text"),
         ];
         let path = write_test_jsonl(&dir, "sess-new-line", &entries);
-        // New streaming line is a thought that will become line 3.
-        let map = make_streaming_map("sess-new-line", 3, "thought", "reasoning...");
+        // New streaming line is a thought that will become line 2.
+        let map = make_streaming_map("sess-new-line", 2, "thought", "reasoning...");
 
-        // Frontend sends line_number=2 (has NOT yet seen line 3) with a stale
+        // Frontend sends line_number=1 (has NOT yet seen line 2) with a stale
         // offset of 10 that belonged to the old assistant line. The new thought
         // line must be returned in full, not skipped by 10 chars.
-        let result = read_messages_since(&path, 2, 10, &map, "sess-new-line", 0).unwrap();
+        let result = read_messages_since(&path, 1, 10, &map, "sess-new-line", 0).unwrap();
         let streaming = result.streaming.expect("streaming line expected");
-        assert_eq!(streaming.line, 3);
+        assert_eq!(streaming.line, 2);
         assert_eq!(
             streaming.content, "reasoning...",
             "stale offset from a flushed line must not truncate the new streaming line"
@@ -3122,16 +2555,15 @@ mod tests {
             make_entry("2", "assistant", "previous long assistant text"),
         ];
         let path = write_test_jsonl(&dir, "sess-stale-exceeds", &entries);
-        // New streaming line is short (only 5 chars).
-        let map = make_streaming_map("sess-stale-exceeds", 3, "assistant", "Hello");
+        // ADR-024: line 0 = user, line 1 = assistant. Streaming line = 2.
+        let map = make_streaming_map("sess-stale-exceeds", 2, "assistant", "Hello");
 
-        // Frontend sends line_number=3 (matches streaming line) with a stale
+        // Frontend sends line_number=2 (matches streaming line) with a stale
         // offset of 100 that belonged to the previous (longer) assistant line.
-        // The new line only has 5 chars, so offset 100 is clearly stale.
         let result =
-            read_messages_since(&path, 3, 100, &map, "sess-stale-exceeds", 0).unwrap();
+            read_messages_since(&path, 2, 100, &map, "sess-stale-exceeds", 0).unwrap();
         let streaming = result.streaming.expect("streaming line expected");
-        assert_eq!(streaming.line, 3);
+        assert_eq!(streaming.line, 2);
         assert_eq!(
             streaming.content, "Hello",
             "stale offset exceeding current content length must return full content"
