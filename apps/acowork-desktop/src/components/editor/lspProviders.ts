@@ -150,6 +150,9 @@ function lspUriToMonacoUri(
         return monacoInst.Uri.parse(lspUri);
     }
 
+    // URL-decode the LSP URI (see extractRelPath for rationale)
+    try { lspUri = decodeURIComponent(lspUri); } catch { /* keep original */ }
+
     // For file:// URIs, always extract the path manually using regex.
     // Never use Uri.parse() for Windows file URIs because:
     // - Uppercase drive (file:///F:/...) → UriError crash
@@ -357,6 +360,14 @@ async function ensureModelsForUris(
 /** Extract relative path from an absolute LSP file URI, given workspace root. */
 function extractRelPath(lspUri: string, workspaceRoot: string): string | null {
     if (!lspUri.startsWith("file://")) return null;
+
+    // URL-decode the LSP URI.  LSP servers (especially tsserver) may
+    // percent-encode characters in file paths (e.g. @ → %40 in scoped
+    // package names like "@monaco-editor/loader").  Without decoding,
+    // the relative path will contain literal %40 which gets double-
+    // encoded when passed through URLSearchParams, causing Gateway API
+    // to return 400 for node_modules/@scope/... files.
+    try { lspUri = decodeURIComponent(lspUri); } catch { /* keep original */ }
 
     // Extract path from URI — handle Windows file URIs that Uri.parse can't handle
     let absPath: string;
