@@ -77,7 +77,16 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_iterations: Option<u32>,
 
-    /// LLM temperature (None = use global default 0.7).
+    /// LLM sampling temperature (0.0 = deterministic, 2.0 = max creative).
+    ///
+    /// Resolution chain at runtime (Layer 1 = highest priority):
+    /// 1. **this field** — user's agent-level setting (set via Agent Setup panel)
+    /// 2. `manifest.llm.temperature` — package author default (shipped with agent)
+    /// 3. `crate::config::DEFAULT_TEMPERATURE` — hardcoded final fallback (0.3)
+    ///
+    /// `None` means "I don't have an opinion" — fall through to the next level.
+    /// The user can clear this value in the UI to revert to the manifest default
+    /// (analogous to how `avatar` reverts when cleared).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 

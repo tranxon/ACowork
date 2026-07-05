@@ -38,13 +38,15 @@ impl super::loop_::AgentLoop {
     /// the frontend always sees the latest model, provider, status and ratio.
     pub(crate) fn emit_session_state(&mut self) {
         let status = self.session.status.clone();
-        // Effective temperature with fallback chain: session → agent → DEFAULT_TEMPERATURE.
+        // Effective temperature via the per-agent chain:
+        //   agent_config.json (Layer 1) → manifest default (Layer 2) → DEFAULT_TEMPERATURE (Layer 3).
         // Always emit a concrete value so the frontend can display the actual setting
         // in use, not the absence of an override.
         let effective_temperature = self
             .session
             .temperature()
             .or(self.core.temperature_override)
+            .or(self.core.manifest_temperature)
             .unwrap_or(DEFAULT_TEMPERATURE);
         // Emit chunk event to Gateway → frontend
         let workspace_id_str = {

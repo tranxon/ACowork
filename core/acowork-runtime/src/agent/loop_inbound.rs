@@ -133,6 +133,10 @@ impl AgentLoop {
                     system_prompt_override.clone(),
                     shell_approval_threshold.clone(),
                 );
+                // Push updated state to frontend immediately so the
+                // ResultsPanel temperature display reflects the new value
+                // without waiting for the next LLM iteration.
+                self.emit_session_state();
                 false
             }
         }

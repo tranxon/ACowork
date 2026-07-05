@@ -1178,6 +1178,10 @@ impl SessionTask {
                         system_prompt_override,
                         shell_approval_threshold,
                     );
+                    // Push updated state to frontend immediately so the
+                    // ResultsPanel temperature display reflects the new value
+                    // without waiting for the next LLM iteration.
+                    agent_loop.emit_session_state();
                 }
                 Some(SessionMessage::UpdateWorkspaceContext { context_text }) => {
                     tracing::info!(

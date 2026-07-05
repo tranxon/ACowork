@@ -663,14 +663,15 @@ impl SessionManager {
             session_state.set_provider(p.clone());
         }
 
-        // Propagate temperature override to the session with fallback chain:
-        // runtime_overrides → core.temperature_override → DEFAULT_TEMPERATURE.
+        // Propagate temperature override to the session via the per-agent chain:
+        //   runtime_overrides → agent_config.json (Layer 1) → manifest (Layer 2) → DEFAULT_TEMPERATURE (Layer 3).
         // Always set a concrete value so the model actually receives the configured
         // temperature and the status panel can display it accurately.
         let temperature = self
             .runtime_overrides
             .temperature
             .or(self.core.temperature_override)
+            .or(self.core.manifest_temperature)
             .or(Some(DEFAULT_TEMPERATURE));
         session_state.set_temperature(temperature);
 
@@ -994,6 +995,26 @@ impl SessionManager {
                     error = %e,
                     "Failed to deliver UpdateRuntimeConfig via send_inbound (session channel may be full or closed)"
                 );
+            }
+        }
+
+        // ── 3. Directly patch snapshot_slot so the HTTP pull API returns
+        //    the new temperature immediately, even when the AgentLoop is
+        //    mid-streaming (the fast-path UserOp won't be consumed until
+        //    the next drain_inbound_queue checkpoint).
+        if let Some(temp) = temperature {
+            for (session_id, handle) in &self.sessions {
+                if let Ok(mut guard) = handle.snapshot_slot.write() {
+                    if let Some(ref mut snapshot) = *guard {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            old = ?snapshot.temperature,
+                            new = temp,
+                            "apply_runtime_config_override: patching snapshot_slot temperature"
+                        );
+                        snapshot.temperature = Some(temp);
+                    }
+                }
             }
         }
 

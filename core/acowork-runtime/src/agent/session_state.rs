@@ -177,8 +177,10 @@ pub struct SessionState {
     /// When None, falls back to model capabilities default_reasoning_effort.
     /// Reset to None on model switch (so new model's default applies).
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
-    /// Per-session temperature override (set by frontend or agent config).
-    /// When None, falls back to agent-level config or global default (0.7).
+    /// Resolved temperature for this session (always Some after session init,
+    /// set by SessionManager::create_or_resume_session).
+    /// NOT a user-setting — this is the final value after applying the chain:
+    /// agent_config.json (Layer 1) → manifest (Layer 2) → DEFAULT_TEMPERATURE (Layer 3).
     pub(crate) temperature: Option<f32>,
     /// Per-session user identity context (formatted `UserProfile` text).
     ///
@@ -361,14 +363,15 @@ impl SessionState {
         self.reasoning_effort = effort;
     }
 
-    /// Get the per-session temperature override.
-    /// Returns None if no override has been set (use agent config or global default).
+    /// Get the resolved temperature for this session.
+    /// Returns None only before the session has been fully initialized.
     pub fn temperature(&self) -> Option<f32> {
         self.temperature
     }
 
-    /// Set the per-session temperature override.
-    /// Set to None to clear the override and fall back to agent config or global default.
+    /// Set the resolved temperature for this session.
+    /// Called by SessionManager at session creation/resume with the value
+    /// from the full resolution chain (agent_config.json → manifest → default).
     pub fn set_temperature(&mut self, temperature: Option<f32>) {
         self.temperature = temperature;
     }

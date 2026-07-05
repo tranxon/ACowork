@@ -477,7 +477,10 @@
     "applying": "Applying...",
     "resetToDefaults": "Reset",
     "resetAgentSetup": "Reset Agent Setup",
-    "reset": "Reset"
+    "reset": "Reset",
+    "temperature": "Temperature",
+    "temperatureDesc": "Controls LLM output randomness. Lower = more deterministic, higher = more creative. Range 0.0–2.0. Leave empty to use package default.",
+    "resetTemperature": "Clear temperature override, revert to package default"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",

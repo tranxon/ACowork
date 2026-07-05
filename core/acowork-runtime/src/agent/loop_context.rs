@@ -53,6 +53,14 @@ impl AgentLoop {
             system_prompt_override,
             shell_approval_threshold,
         );
+        // Sync the session's cached temperature so emit_session_state()
+        // reflects the new override immediately.  Without this,
+        // session.temperature() returns the old resolved value (always
+        // Some), blocking the fallback chain from reaching the new
+        // temperature_override.
+        if temperature.is_some() {
+            self.session.set_temperature(temperature);
+        }
     }
 
     /// Get the context window budget for history trimming.
@@ -434,14 +442,16 @@ impl AgentLoop {
         context_builder.set_thinking_mode(thinking_mode.clone());
         self.last_thinking_mode = thinking_mode;
 
-        // Resolve temperature: session override → core (agent/runtime) override →
-        // DEFAULT_TEMPERATURE. Always set a concrete value on the builder so the
-        // ChatRequest reflects what the model will actually receive, and so the
-        // value shown in the status panel matches the request payload.
+        // Resolve temperature via the per-agent chain:
+        //   agent_config.json (Layer 1) → manifest default (Layer 2) → DEFAULT_TEMPERATURE (Layer 3).
+        // Always set a concrete value on the builder so the ChatRequest reflects what
+        // the model will actually receive, and so the value shown in the status panel
+        // matches the request payload.
         let temperature = self
             .session
             .temperature()
             .or(self.core.temperature_override)
+            .or(self.core.manifest_temperature)
             .unwrap_or(crate::config::DEFAULT_TEMPERATURE);
         context_builder.set_temperature(Some(temperature));
 

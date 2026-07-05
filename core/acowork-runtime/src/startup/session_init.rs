@@ -230,6 +230,7 @@ pub(crate) async fn phase_b_init_session(
             let mut seeded = agent_cfg.clone();
             seeded.avatar = ctx.loaded.manifest.avatar.clone();
             seeded.builtin_avatar = ctx.loaded.manifest.builtin_avatar.clone();
+            seeded.temperature = ctx.loaded.manifest.llm.temperature;
             let _ = crate::agent_config::save_agent_config(work_dir_path, &seeded);
         }
 

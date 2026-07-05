@@ -217,6 +217,13 @@ pub struct LlmConfig {
     /// Maximum tokens in response
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// LLM sampling temperature (0.0 = deterministic, 2.0 = max creative).
+    /// Per-agent package-level default. Resolution chain at runtime:
+    /// per-session override → agent_config.json override → this manifest value
+    /// → hardcoded `DEFAULT_TEMPERATURE` (0.3).
+    /// When `None`, falls through to the next level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     /// Fallback providers in priority order
     #[serde(default)]
     pub fallback_providers: Vec<String>,

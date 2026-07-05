@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAgentStore } from "../../stores/agentStore";
+import { useChatStore } from "../../stores/chatStore";
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { getGatewayUrl } from "../../lib/config";
@@ -89,6 +90,7 @@ export function AgentSetupTab() {
           maxTokens: data.max_output_tokens,
           maxIterations: data.max_iterations,
           maxSessions: data.max_sessions,
+          temperature: data.temperature ?? undefined,
           shellApprovalThreshold: data.shell_approval_threshold,
           approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
           globalMaxTokens: data.global_max_output_tokens,
@@ -117,6 +119,7 @@ export function AgentSetupTab() {
               maxTokens: data.max_output_tokens,
               maxIterations: data.max_iterations,
               maxSessions: data.max_sessions,
+              temperature: data.temperature ?? undefined,
               shellApprovalThreshold: data.shell_approval_threshold,
               approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
               globalMaxTokens: data.global_max_output_tokens,
@@ -141,6 +144,7 @@ export function AgentSetupTab() {
       if (profile.maxTokens && profile.maxTokens > 0) body.max_output_tokens = profile.maxTokens;
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
       if (profile.maxSessions && profile.maxSessions > 0) body.max_sessions = profile.maxSessions;
+      if (profile.temperature !== undefined) body.temperature = profile.temperature;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
       if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
       const res = await fetch(
@@ -148,6 +152,33 @@ export function AgentSetupTab() {
         { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
       );
       if (!res.ok) console.warn("[AgentSetup] Config update failed:", res.status);
+
+      // Immediately sync the new temperature into the chat store so the
+      // ResultsPanel status tab shows the updated value right away,
+      // without waiting for the next WebSocket session_state_changed event
+      // (which may be delayed if the agent is mid-streaming).
+      if (selectedAgentId) {
+        const chatStore = useChatStore.getState();
+        const agentState = chatStore.agentStates[selectedAgentId];
+        if (agentState?.activeSessionId) {
+          const newTemp = profile.temperature ?? null;
+          useChatStore.setState({
+            agentStates: {
+              ...chatStore.agentStates,
+              [selectedAgentId]: {
+                ...agentState,
+                sessionStates: {
+                  ...agentState.sessionStates,
+                  [agentState.activeSessionId]: {
+                    ...(agentState.sessionStates[agentState.activeSessionId] ?? {}),
+                    temperature: newTemp,
+                  },
+                },
+              },
+            },
+          });
+        }
+      }
     } catch {
       // silently ignore network errors
     } finally {
@@ -478,6 +509,45 @@ export function AgentSetupTab() {
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.maxSessionsDesc")}
+        </p>
+      </div>
+
+      {/* Temperature slider */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.temperature")}
+        </label>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={0}
+            max={2}
+            step={0.05}
+            value={profile.temperature ?? 0.3}
+            onChange={(e) => {
+              setProfile(selectedAgentId, {
+                temperature: parseFloat(e.target.value),
+              });
+            }}
+            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
+              bg-zinc-200 dark:bg-zinc-700
+              accent-zinc-600 dark:accent-zinc-400"
+          />
+          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+            {profile.temperature !== undefined ? profile.temperature.toFixed(2) : "—"}
+          </span>
+          {profile.temperature !== undefined && (
+            <button
+              onClick={() => setProfile(selectedAgentId, { temperature: undefined })}
+              className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+              title={t("agentSetup.resetTemperature")}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.temperatureDesc")}
         </p>
       </div>
 

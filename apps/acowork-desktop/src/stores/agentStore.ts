@@ -28,6 +28,9 @@ export interface AgentProfileSettings {
   systemPrompt?: string;
   shellApprovalThreshold?: string;
   approvalTimeoutSecs?: number;
+  /** Per-agent LLM temperature override (0.0–2.0).
+   *  Undefined = use manifest default or system default (0.3). */
+  temperature?: number;
   globalMaxTokens?: number;
   activeModel?: string;
   activeProvider?: string;
@@ -90,6 +93,10 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     maxSessions: typeof s.maxSessions === "number" && s.maxSessions > 0 ? s.maxSessions : 0,
     systemPrompt: s.systemPrompt,
     shellApprovalThreshold: s.shellApprovalThreshold,
+    temperature:
+      typeof s.temperature === "number" && s.temperature >= 0 && s.temperature <= 2
+        ? s.temperature
+        : undefined,
     approvalTimeoutSecs:
       typeof s.approvalTimeoutSecs === "number" && s.approvalTimeoutSecs > 0
         ? s.approvalTimeoutSecs

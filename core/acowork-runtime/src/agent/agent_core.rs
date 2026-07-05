@@ -60,8 +60,13 @@ pub struct AgentCore {
     pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, String>>>,
     /// Provider→compact_model mapping from provider_list at AgentHello.
     pub(crate) provider_compact_models: HashMap<String, Option<String>>,
-    /// LLM temperature override (from Gateway config).
+    /// LLM temperature override (from Gateway config via agent_config.json).
+    /// Layer 1 in the resolution chain.
     pub(crate) temperature_override: Option<f32>,
+    /// LLM temperature from manifest.toml [llm].temperature (Layer 2).
+    /// Seeded at agent startup in cli.rs; independent of temperature_override
+    /// so the resolution chain is self-contained in AgentCore.
+    pub(crate) manifest_temperature: Option<f32>,
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -96,6 +101,11 @@ impl AgentCore {
         let shell_approval_threshold =
             ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
                 .unwrap_or_default();
+        let manifest_temperature = manifest.llm.temperature;
+        tracing::debug!(
+            ?manifest_temperature,
+            "AgentCore: seeding manifest_temperature from manifest [llm].temperature"
+        );
         Self {
             config,
             manifest,
@@ -108,6 +118,7 @@ impl AgentCore {
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
             provider_compact_models: HashMap::new(),
             temperature_override: None,
+            manifest_temperature,
             system_prompt_override: None,
             memory_store: None,
             memory_session: None,
@@ -467,6 +478,7 @@ impl Clone for AgentCore {
             provider_key_vault: self.provider_key_vault.clone(),
             provider_compact_models: self.provider_compact_models.clone(),
             temperature_override: self.temperature_override,
+            manifest_temperature: self.manifest_temperature,
             system_prompt_override: self.system_prompt_override.clone(),
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),

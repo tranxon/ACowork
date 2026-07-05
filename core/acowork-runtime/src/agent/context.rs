@@ -51,7 +51,8 @@ pub struct ContextBuilder {
     /// Anthropic thinking mode: "extended" or "adaptive".
     /// Resolved from ModelCapabilitiesInfo.thinking_mode in `build_chat_request()`.
     thinking_mode: Option<String>,
-    /// LLM temperature override. `None` means fall back to DEFAULT_TEMPERATURE.
+    /// LLM temperature override. `None` means fall through the per-agent chain:
+    /// `agent_config.json.temperature` (Layer 1) → `manifest.llm.temperature` (Layer 2) → `DEFAULT_TEMPERATURE` (Layer 3).
     /// Set per-session via `set_temperature()` from AgentLoop before each build.
     temperature: Option<f32>,
     /// Reusable token counter for system prompt estimation.

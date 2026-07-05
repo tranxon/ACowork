@@ -17,9 +17,16 @@ pub const DEFAULT_TOOL_HTTP_TIMEOUT: std::time::Duration = constants::TOOL_HTTP;
 /// Millisecond equivalent of [`DEFAULT_TOOL_HTTP_TIMEOUT`].
 pub const DEFAULT_TOOL_HTTP_TIMEOUT_MS: u64 = DEFAULT_TOOL_HTTP_TIMEOUT.as_millis() as u64;
 
-/// Default LLM temperature when no override is configured (session-level,
-/// agent-level, or runtime override). Applied uniformly across all sessions
-/// unless an explicit override sets a different value.
+/// Default LLM temperature applied as the final fallback in the per-agent
+/// resolution chain (Layer 3):
+/// `agent_config.json.temperature` (Layer 1) →
+/// `manifest.llm.temperature` (Layer 2) →
+/// **this constant** (Layer 3).
+///
+/// This is the hardcoded final layer when neither the runtime user override
+/// nor the package-level manifest default is set. Keep aligned with the
+/// `DEFAULT_TEMPERATURE` constant in `acowork-gateway/src/http/agent_config.rs`
+/// (the Gateway uses the same value when constructing `AgentConfigResponse`).
 pub const DEFAULT_TEMPERATURE: f32 = 0.3;
 
 /// Runtime configuration
