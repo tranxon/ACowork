@@ -372,6 +372,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 avatar,
                 builtin_avatar,
                 max_sessions,
+                context_window,
             } => {
                 let mcp_json: Vec<String> = mcp_servers
                     .iter()
@@ -392,6 +393,7 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         avatar: avatar.clone(),
                         builtin_avatar: builtin_avatar.clone(),
                         max_sessions: max_sessions.map(|v| v as u64),
+                        context_window: *context_window,
                     },
                 ))
             }
@@ -648,21 +650,22 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     log_file_count: *log_file_count,
                 }),
             ),
-            protocol::GatewayResponse::RuntimeConfigUpdate {
-                max_output_tokens,
-                max_iterations,
-                temperature,
-                system_prompt_override,
-                shell_approval_threshold,
-                mcp_servers,
-                model,
-                provider,
-                search_config_json,
-                embed_config_json,
-                avatar,
-                builtin_avatar,
-                max_sessions,
-            } => {
+        protocol::GatewayResponse::RuntimeConfigUpdate {
+            max_output_tokens,
+            max_iterations,
+            temperature,
+            system_prompt_override,
+            shell_approval_threshold,
+            mcp_servers,
+            model,
+            provider,
+            search_config_json,
+            embed_config_json,
+            avatar,
+            builtin_avatar,
+            max_sessions,
+            context_window,
+        } => {
                 let mcp_servers_set = mcp_servers.is_some();
                 let system_prompt_set = system_prompt_override.is_some();
                 let mcp_servers_json: Vec<String> = mcp_servers
@@ -696,9 +699,10 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         builtin_avatar: builtin_avatar.clone(),
                         avatar_set,
                         builtin_avatar_set,
-                        max_sessions: max_sessions.map(|v| v as u64),
-                        max_sessions_set: max_sessions.is_some(),
-                    },
+                    max_sessions: max_sessions.map(|v| v as u64),
+                    max_sessions_set: max_sessions.is_some(),
+                    context_window: *context_window,
+                },
                 ))
             }
             protocol::GatewayResponse::QueryConfig {

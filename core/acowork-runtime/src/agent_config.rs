@@ -90,6 +90,19 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 
+    /// Per-agent context window size limit in tokens.
+    ///
+    /// Resolution chain at runtime (Layer 1 = highest priority):
+    /// 1. **this field** — user's agent-level setting (set via Agent Setup panel)
+    /// 2. `manifest.llm.context_window` — package author default
+    /// 3. `crate::config::DEFAULT_CONTEXT_WINDOW` — hardcoded final fallback (200K)
+    ///
+    /// `None` means "I don't have an opinion" — fall through to the next level.
+    /// `Some(0)` means "no limit" — use model's full context window.
+    /// The user can clear this value in the UI to revert to the manifest default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+
     /// System prompt override (None = use manifest-compiled prompt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_override: Option<String>,
@@ -695,5 +708,56 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let merged = load_merged_mcp_configs(dir.path());
         assert!(merged.is_empty());
+    }
+
+    // ── AgentConfig context_window serialization (ADR-026) ────────────
+
+    #[test]
+    fn agent_config_context_window_round_trip() {
+        let cfg = AgentConfig {
+            context_window: Some(150_000),
+            ..AgentConfig::default()
+        };
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+        assert!(json.contains("context_window"), "JSON should contain context_window: {}", json);
+
+        let restored: AgentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.context_window, Some(150_000));
+    }
+
+    #[test]
+    fn agent_config_context_window_none_omitted() {
+        let cfg = AgentConfig::default();
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+        assert!(!json.contains("context_window"), "context_window=None should be omitted from JSON: {}", json);
+    }
+
+    #[test]
+    fn agent_config_context_window_zero_preserved() {
+        // 0 = "no limit" — must be preserved, not treated as None
+        let cfg = AgentConfig {
+            context_window: Some(0),
+            ..AgentConfig::default()
+        };
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+        assert!(json.contains("context_window"), "context_window=0 should be serialized: {}", json);
+
+        let restored: AgentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.context_window, Some(0));
+    }
+
+    #[test]
+    fn agent_config_context_window_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AgentConfig {
+            context_window: Some(200_000),
+            temperature: Some(0.5),
+            ..AgentConfig::default()
+        };
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        let loaded = load_agent_config(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.context_window, Some(200_000));
+        assert_eq!(loaded.temperature, Some(0.5));
     }
 }

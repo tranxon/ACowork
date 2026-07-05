@@ -94,6 +94,7 @@ pub struct RuntimeConfigOverrides {
     pub max_output_tokens: Option<u64>,
     pub max_iterations: Option<u32>,
     pub temperature: Option<f32>,
+    pub context_window: Option<u64>,
     pub system_prompt_override: Option<String>,
     pub shell_approval_threshold: Option<String>,
 }
@@ -104,6 +105,7 @@ impl RuntimeConfigOverrides {
         self.max_output_tokens.is_none()
             && self.max_iterations.is_none()
             && self.temperature.is_none()
+            && self.context_window.is_none()
             && self.system_prompt_override.is_none()
             && self.shell_approval_threshold.is_none()
     }
@@ -115,6 +117,7 @@ impl RuntimeConfigOverrides {
         max_output_tokens: Option<u64>,
         max_iterations: Option<u32>,
         temperature: Option<f32>,
+        context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
     ) {
@@ -126,6 +129,9 @@ impl RuntimeConfigOverrides {
         }
         if temperature.is_some() {
             self.temperature = temperature;
+        }
+        if context_window.is_some() {
+            self.context_window = context_window;
         }
         if system_prompt_override.is_some() {
             self.system_prompt_override = system_prompt_override;
@@ -967,6 +973,7 @@ impl SessionManager {
         max_output_tokens: Option<u64>,
         max_iterations: Option<u32>,
         temperature: Option<f32>,
+        context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
     ) -> Vec<String> {
@@ -974,6 +981,7 @@ impl SessionManager {
             max_output_tokens,
             max_iterations,
             temperature,
+            context_window,
             system_prompt_override.clone(),
             shell_approval_threshold.clone(),
         );
@@ -982,6 +990,7 @@ impl SessionManager {
             max_output_tokens,
             max_iterations,
             temperature,
+            context_window,
             system_prompt_override: system_prompt_override.clone(),
             shell_approval_threshold: shell_approval_threshold.clone(),
         });
@@ -994,6 +1003,7 @@ impl SessionManager {
             max_output_tokens,
             max_iterations,
             temperature,
+            context_window,
             system_prompt_override,
             shell_approval_threshold,
         };
@@ -2105,16 +2115,16 @@ mod tests {
     #[test]
     fn test_overrides_merge() {
         let mut ov = RuntimeConfigOverrides::default();
-        ov.merge(Some(100), None, None, None, None);
+        ov.merge(Some(100), None, None, None, None, None);
         assert!(!ov.is_empty());
         assert_eq!(ov.max_output_tokens, Some(100));
 
         // Re-merge with Some replaces
-        ov.merge(Some(200), None, None, None, None);
+        ov.merge(Some(200), None, None, None, None, None);
         assert_eq!(ov.max_output_tokens, Some(200));
 
         // None preserves
-        ov.merge(None, None, None, None, None);
+        ov.merge(None, None, None, None, None, None);
         assert_eq!(ov.max_output_tokens, Some(200));
     }
 

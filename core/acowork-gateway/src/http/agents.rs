@@ -773,6 +773,7 @@ pub async fn update_avatar_config(
                         avatar: avatar_val,
                         builtin_avatar: builtin_val,
                         max_sessions: None,
+                        context_window: None,
                     })
                     .await;
 
@@ -1040,6 +1041,7 @@ pub async fn delete_avatar_file(
                             avatar: Some(String::new()), // empty = clear
                             builtin_avatar: None,
                             max_sessions: None,
+                            context_window: None,
                         })
                         .await;
                 }
@@ -1851,7 +1853,7 @@ pub async fn get_agent_config(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentConfigResponse>, (StatusCode, Json<ApiError>)> {
-    let global_max_output_tokens = {
+    let (global_max_output_tokens, manifest_context_window) = {
         let gw = state.gateway_state.read().await;
         if !gw.installed_agents.contains_key(&agent_id) {
             return Err(ApiError::not_found(&format!(
@@ -1873,10 +1875,16 @@ pub async fn get_agent_config(
                 agent_id
             )));
         }
-        gw.config
+        let global_limit = gw
+            .config
             .as_ref()
             .map(|c| c.max_output_tokens_limit)
-            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS)
+            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS);
+        let manifest_cw = gw
+            .installed_agents
+            .get(&agent_id)
+            .and_then(|info| info.manifest.llm.context_window);
+        (global_limit, manifest_cw)
     };
 
     // Query Runtime workspace config via IPC (QueryConfig → ConfigSnapshot roundtrip).
@@ -1891,6 +1899,7 @@ pub async fn get_agent_config(
         mcp_servers,
         search_config_json,
         max_sessions,
+        agent_cfg_context_window,
     ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
         let query = acowork_core::proto::server_message::Payload::QueryConfig(
             acowork_core::proto::QueryConfig {
@@ -1913,15 +1922,16 @@ pub async fn get_agent_config(
                         snap.mcp_servers_json,
                         snap.search_config_json,
                         snap.max_sessions.map(|v| v as usize),
+                        snap.context_window,
                     )
                 } else {
-                    (None, None, None, None, None, None, None, vec![], None, None)
+                    (None, None, None, None, None, None, None, vec![], None, None, None)
                 }
             }
-            None => (None, None, None, None, None, None, None, vec![], None, None),
+            None => (None, None, None, None, None, None, None, vec![], None, None, None),
         }
     } else {
-        (None, None, None, None, None, None, None, vec![], None, None)
+        (None, None, None, None, None, None, None, vec![], None, None, None)
     };
 
     // Build the effective config from ConfigSnapshot data
@@ -1934,11 +1944,24 @@ pub async fn get_agent_config(
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok());
 
+    // Compute context window effective value and source.
+    // Resolution chain: agent_config.json → manifest → DEFAULT_CONTEXT_WINDOW.
+    let (context_window, context_window_source) =
+        if let Some(cw) = agent_cfg_context_window {
+            (Some(cw), Some("config".to_string()))
+        } else if let Some(mcw) = manifest_context_window.filter(|&v| v > 0) {
+            (Some(mcw), Some("manifest".to_string()))
+        } else {
+            (Some(agent_config::DEFAULT_CONTEXT_WINDOW), Some("default".to_string()))
+        };
+
     let effective = AgentConfigResponse {
         agent_id,
         max_output_tokens,
         max_iterations,
         temperature,
+        temperature_source: None,
+        manifest_temperature: None,
         system_prompt: None,
         // Use model snap fields for active model/provider in response
         model,
@@ -1949,6 +1972,9 @@ pub async fn get_agent_config(
         search_config,
         global_max_output_tokens,
         max_sessions,
+        context_window,
+        context_window_source,
+        manifest_context_window,
     };
 
     Ok(Json(effective))
@@ -2021,6 +2047,7 @@ pub async fn update_agent_config(
                     avatar: None,
                     builtin_avatar: None,
                     max_sessions: req.max_sessions,
+                    context_window: req.context_window,
                 })
                 .await;
             if !push_result {
@@ -2057,6 +2084,8 @@ pub async fn update_agent_config(
         max_output_tokens: req.max_output_tokens,
         max_iterations: req.max_iterations,
         temperature: req.temperature,
+        temperature_source: None,
+        manifest_temperature: None,
         system_prompt: None,
         system_prompt_override: req.system_prompt_override,
         shell_approval_threshold: req_shell_approval_threshold
@@ -2067,6 +2096,9 @@ pub async fn update_agent_config(
         search_config: None,
         global_max_output_tokens,
         max_sessions: req.max_sessions,
+        context_window: req.context_window,
+        context_window_source: req.context_window.map(|_| "config".to_string()),
+        manifest_context_window: None,
     };
 
     Ok(Json(effective))
@@ -2214,7 +2246,7 @@ pub async fn update_agent_mcp_servers(
                 agent_id = %agent_id,
                 conn_id = %conn_id,
                 mcp_server_count = resolved_servers.len(),
-                "Pushing RuntimeConfigUpdate (MCP) to agent"
+                    "Pushing RuntimeConfigUpdate (MCP) to agent"
             );
             let push_result = session
                 .push_message(GatewayResponse::RuntimeConfigUpdate {
@@ -2235,6 +2267,7 @@ pub async fn update_agent_mcp_servers(
                     avatar: None,
                     builtin_avatar: None,
                     max_sessions: None,
+                    context_window: None,
                 })
                 .await;
             if !push_result {
@@ -2435,6 +2468,7 @@ pub async fn update_agent_search_config(
                     avatar: None,
                     builtin_avatar: None,
                     max_sessions: None,
+                    context_window: None,
                 })
                 .await;
             if !push_result {

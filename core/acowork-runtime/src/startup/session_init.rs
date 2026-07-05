@@ -179,6 +179,10 @@ pub(crate) async fn phase_b_init_session(
         c.memory_session = Some(ctx.memory_session.clone());
         c.embedding_provider = Some(ctx.emb_provider.clone());
         c.init_memory_store(work_dir_path);
+        // Propagate per-agent context_window cap from agent_config.json
+        // (Layer 1 in the resolution chain). None means fall through to
+        // manifest_context_window → DEFAULT_CONTEXT_WINDOW.
+        c.context_window_override = agent_cfg.context_window;
     }
 
     // ── Step 9: Create SessionManager ───────────────────────────────
@@ -231,12 +235,14 @@ pub(crate) async fn phase_b_init_session(
             seeded.avatar = ctx.loaded.manifest.avatar.clone();
             seeded.builtin_avatar = ctx.loaded.manifest.builtin_avatar.clone();
             seeded.temperature = ctx.loaded.manifest.llm.temperature;
+            seeded.context_window = ctx.loaded.manifest.llm.context_window;
             let _ = crate::agent_config::save_agent_config(work_dir_path, &seeded);
         }
 
         let has_overrides = agent_cfg.max_output_tokens.is_some()
             || agent_cfg.max_iterations.is_some()
             || agent_cfg.temperature.is_some()
+            || agent_cfg.context_window.is_some()
             || agent_cfg.system_prompt_override.is_some()
             || agent_cfg.shell_approval_threshold.is_some();
         if has_overrides {
@@ -250,6 +256,7 @@ pub(crate) async fn phase_b_init_session(
                 agent_cfg.max_output_tokens,
                 agent_cfg.max_iterations,
                 agent_cfg.temperature,
+                agent_cfg.context_window,
                 agent_cfg.system_prompt_override.clone(),
                 agent_cfg.shell_approval_threshold.clone(),
             );

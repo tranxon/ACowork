@@ -782,11 +782,11 @@ mod tests {
             total_tokens: 46_200,
             ..Default::default()
         };
-        let fresh = compute_context_usage(&caps, &usage, max_output_limit);
+        let fresh = compute_context_usage(&caps, &usage, max_output_limit, None);
 
         // Via build_context_usage_from_persisted with same numbers
         let persisted =
-            build_context_usage_from_persisted(&caps, 45_000, 1_200, max_output_limit);
+            build_context_usage_from_persisted(&caps, 45_000, 1_200, max_output_limit, None);
 
         assert_eq!(fresh.context_window, persisted.context_window);
         assert_eq!(fresh.input_tokens, persisted.input_tokens);
@@ -801,11 +801,59 @@ mod tests {
     fn test_build_context_usage_from_persisted_zero_tokens() {
         // New session with no token data yet → should produce 0 input/output
         let caps = test_caps(200_000, 8_192);
-        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768);
+        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768, None);
         assert_eq!(info.input_tokens, 0);
         assert_eq!(info.output_tokens, 0);
         assert_eq!(info.total_tokens, 0);
         assert_eq!(info.usage_percent, 0);
+    }
+
+    #[test]
+    fn test_context_usage_with_override_caps_window() {
+        // Model has 200K window. User overrides to 100K.
+        let caps = test_caps(200_000, 16_384);
+        let usage = acowork_core::providers::traits::UsageInfo {
+            prompt_tokens: 60_000,
+            completion_tokens: 5_000,
+            total_tokens: 65_000,
+            ..Default::default()
+        };
+        let info = compute_context_usage(&caps, &usage, 32_768, Some(100_000));
+        // effective_window = min(100_000, 200_000) = 100_000
+        assert_eq!(info.context_window, 100_000);
+        // effective_usable = min(usable, effective_window)
+        // usable = 200_000 - 16_384 = 183_616 (no max_input_tokens)
+        // effective_usable = min(183_616, 100_000) = 100_000
+        assert_eq!(info.usable_context, 100_000);
+        // percent = 65_000 / 100_000 * 100 = 65%
+        assert_eq!(info.usage_percent, 65);
+    }
+
+    #[test]
+    fn test_context_usage_with_zero_override_uses_model_window() {
+        // Some(0) = "no limit" → use model's full window
+        let caps = test_caps(128_000, 8_192);
+        let usage = acowork_core::providers::traits::UsageInfo {
+            prompt_tokens: 50_000,
+            completion_tokens: 2_000,
+            total_tokens: 52_000,
+            ..Default::default()
+        };
+        let info = compute_context_usage(&caps, &usage, 32_768, Some(0));
+        assert_eq!(info.context_window, 128_000);
+    }
+
+    #[test]
+    fn test_context_usage_none_override_uses_model_window() {
+        let caps = test_caps(128_000, 8_192);
+        let usage = acowork_core::providers::traits::UsageInfo {
+            prompt_tokens: 30_000,
+            completion_tokens: 1_000,
+            total_tokens: 31_000,
+            ..Default::default()
+        };
+        let info = compute_context_usage(&caps, &usage, 32_768, None);
+        assert_eq!(info.context_window, 128_000);
     }
 }
 
@@ -859,25 +907,41 @@ pub fn count_chat_request_chars(request: &ChatRequest) -> usize {
 /// Usable context is derived from [`ModelCapabilitiesInfo::effective_input_budget`],
 /// which uses `max_input_tokens` when available, or reserves output space capped
 /// by `max_output_tokens_limit` (default 32K) otherwise.
+///
+/// `context_window_cap` is the per-agent context window override (ADR-026):
+/// - `None` — not set, use model's full `context_window`.
+/// - `Some(0)` — "no limit" (user explicitly chose unlimited), use model's full.
+/// - `Some(n)` where `n > 0` — cap the effective window at `min(n, model_window)`.
+///
+/// Both `context_window` and `usable_context` in the output reflect the
+/// effective (capped) values, so the frontend status panel and context-usage
+/// popup show numbers consistent with the user's per-agent setting.
 pub fn compute_context_usage(
     caps: &ModelCapabilitiesInfo,
     usage: &acowork_core::providers::traits::UsageInfo,
     max_output_tokens_limit: u64,
+    context_window_cap: Option<u64>,
 ) -> acowork_core::protocol::ContextUsageInfo {
+    let model_window = caps.context_window;
+    let effective_window = match context_window_cap {
+        Some(0) | None => model_window,
+        Some(cap) => cap.min(model_window),
+    };
     let usable = caps.effective_input_budget(max_output_tokens_limit);
+    let effective_usable = usable.min(effective_window);
     let total = usage.prompt_tokens + usage.completion_tokens;
-    let percent = if usable > 0 {
-        ((total as f64 / usable as f64) * 100.0).min(100.0) as u8
+    let percent = if effective_usable > 0 {
+        ((total as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
     } else {
         0
     };
     acowork_core::protocol::ContextUsageInfo {
-        context_window: caps.context_window,
+        context_window: effective_window,
         input_tokens: usage.prompt_tokens,
         output_tokens: usage.completion_tokens,
         total_tokens: total,
         max_input_tokens: caps.max_input_tokens,
-        usable_context: usable,
+        usable_context: effective_usable,
         usage_percent: percent,
     }
 }
@@ -892,11 +956,14 @@ pub fn compute_context_usage(
 /// window-derived fields (`context_window`, `usable_context`, `usage_percent`)
 /// are model-dependent and become stale if the user switched models between
 /// sessions.
+///
+/// `context_window_cap` mirrors the same parameter on [`compute_context_usage`].
 pub fn build_context_usage_from_persisted(
     caps: &ModelCapabilitiesInfo,
     last_input_tokens: u64,
     last_output_tokens: u64,
     max_output_tokens_limit: u64,
+    context_window_cap: Option<u64>,
 ) -> acowork_core::protocol::ContextUsageInfo {
     let usage = acowork_core::providers::traits::UsageInfo {
         prompt_tokens: last_input_tokens,
@@ -904,5 +971,5 @@ pub fn build_context_usage_from_persisted(
         total_tokens: last_input_tokens + last_output_tokens,
         ..Default::default()
     };
-    compute_context_usage(caps, &usage, max_output_tokens_limit)
+    compute_context_usage(caps, &usage, max_output_tokens_limit, context_window_cap)
 }

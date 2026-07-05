@@ -62,6 +62,7 @@ pub enum UserOp {
         max_output_tokens: Option<u64>,
         max_iterations: Option<u32>,
         temperature: Option<f32>,
+        context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
     },

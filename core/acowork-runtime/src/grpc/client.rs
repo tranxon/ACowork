@@ -1124,6 +1124,8 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 } else {
                     None
                 },
+                // ADR-026: per-agent context window cap
+                context_window: rcu.context_window,
             }
         }
         // Response messages (request_id > 0) — included for robustness

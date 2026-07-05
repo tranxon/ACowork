@@ -30,6 +30,24 @@ pub struct AgentConfigResponse {
     /// Effective temperature
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Source of the effective temperature value:
+    /// "config" | "manifest" | "default"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_source: Option<String>,
+    /// The manifest-level temperature — for frontend placeholder display
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_temperature: Option<f32>,
+    /// Effective context window cap (tokens). 0 = no limit.
+    /// Resolved from: agent_config.json → manifest.llm.context_window → DEFAULT_CONTEXT_WINDOW.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Source of the effective context window value:
+    /// "config" | "manifest" | "default"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_source: Option<String>,
+    /// The manifest-level context window cap — for frontend placeholder display
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_context_window: Option<u64>,
     /// The manifest-compiled system prompt (read-only, loaded by caller)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -76,6 +94,9 @@ pub struct UpdateAgentConfigRequest {
     /// ADR-024: max sessions limit per-agent (0 = use default).
     #[serde(default)]
     pub max_sessions: Option<usize>,
+    /// ADR-026: Per-agent context window cap (0 = no limit).
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 /// Default global values used as fallback when no override exists.
@@ -87,6 +108,10 @@ pub const DEFAULT_MAX_ITERATIONS: u32 = 200;
 /// so the Gateway HTTP API and Runtime resolve to the same value when both
 /// manifest and override are absent.
 pub const DEFAULT_TEMPERATURE: f32 = 0.3;
+/// Default context window cap (tokens) — final fallback in the per-agent
+/// chain: agent_config.json → manifest.llm.context_window → here.
+/// **Keep aligned** with `acowork_runtime::config::DEFAULT_CONTEXT_WINDOW`.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 pub const DEFAULT_SHELL_APPROVAL_THRESHOLD: ShellApprovalThreshold = ShellApprovalThreshold::Medium;
 
 // ── Avatar config DTOs (ADR-017) ────────────────────────────────────────

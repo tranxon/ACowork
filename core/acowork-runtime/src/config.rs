@@ -29,6 +29,15 @@ pub const DEFAULT_TOOL_HTTP_TIMEOUT_MS: u64 = DEFAULT_TOOL_HTTP_TIMEOUT.as_milli
 /// (the Gateway uses the same value when constructing `AgentConfigResponse`).
 pub const DEFAULT_TEMPERATURE: f32 = 0.3;
 
+/// Default context window cap for per-agent resolution chain.
+///
+/// 200K tokens covers the majority of current flagship models
+/// (GPT-4o 128K, Claude Sonnet 200K, DeepSeek-V3 128K).
+/// This is the hardcoded final fallback when neither the user's
+/// agent_config.json override nor the package-level manifest default is set.
+/// **Keep aligned** with `acowork_gateway::http::agent_config::DEFAULT_CONTEXT_WINDOW`.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+
 /// Runtime configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {

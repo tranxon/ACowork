@@ -31,6 +31,9 @@ export interface AgentProfileSettings {
   /** Per-agent LLM temperature override (0.0–2.0).
    *  Undefined = use manifest default or system default (0.3). */
   temperature?: number;
+  /** Per-agent context window cap in tokens (0 = no limit).
+   *  Undefined = use manifest default or system default (200K). */
+  contextWindow?: number;
   globalMaxTokens?: number;
   activeModel?: string;
   activeProvider?: string;
@@ -96,6 +99,10 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     temperature:
       typeof s.temperature === "number" && s.temperature >= 0 && s.temperature <= 2
         ? s.temperature
+        : undefined,
+    contextWindow:
+      typeof s.contextWindow === "number" && s.contextWindow >= 0
+        ? s.contextWindow
         : undefined,
     approvalTimeoutSecs:
       typeof s.approvalTimeoutSecs === "number" && s.approvalTimeoutSecs > 0

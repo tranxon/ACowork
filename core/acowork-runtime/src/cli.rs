@@ -679,6 +679,7 @@ pub(crate) async fn run_gateway_loop(
                                         avatar: agent_cfg.avatar.clone(),
                                         builtin_avatar: agent_cfg.builtin_avatar.clone(),
                                         max_sessions: agent_cfg.max_sessions.map(|v| v as u64),
+                                        context_window: agent_cfg.context_window,
                                     },
                                 );
                                 let response = proto::ClientMessage {
@@ -1781,6 +1782,7 @@ async fn process_gateway_recv(
                     avatar,
                     builtin_avatar,
                     max_sessions,
+                    context_window,
                 } => {
                     tracing::info!(
 
@@ -1788,6 +1790,7 @@ async fn process_gateway_recv(
                         max_iterations = ?max_iterations,
                         temperature = ?temperature,
                         shell_approval_threshold = ?shell_approval_threshold,
+                        context_window = ?context_window,
 
                         mcp_server_count = mcp_servers.as_ref().map(|s| s.len()),
                         has_embed_config = embed_config_json.is_some(),
@@ -1805,6 +1808,7 @@ async fn process_gateway_recv(
                         max_output_tokens,
                         max_iterations,
                         temperature,
+                        context_window,
                         system_prompt_override,
                         shell_approval_threshold,
                     );

@@ -91,6 +91,7 @@ export function AgentSetupTab() {
           maxIterations: data.max_iterations,
           maxSessions: data.max_sessions,
           temperature: data.temperature ?? undefined,
+          contextWindow: data.context_window ?? undefined,
           shellApprovalThreshold: data.shell_approval_threshold,
           approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
           globalMaxTokens: data.global_max_output_tokens,
@@ -120,6 +121,7 @@ export function AgentSetupTab() {
               maxIterations: data.max_iterations,
               maxSessions: data.max_sessions,
               temperature: data.temperature ?? undefined,
+              contextWindow: data.context_window ?? undefined,
               shellApprovalThreshold: data.shell_approval_threshold,
               approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
               globalMaxTokens: data.global_max_output_tokens,
@@ -145,6 +147,7 @@ export function AgentSetupTab() {
       if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
       if (profile.maxSessions && profile.maxSessions > 0) body.max_sessions = profile.maxSessions;
       if (profile.temperature !== undefined) body.temperature = profile.temperature;
+      if (profile.contextWindow !== undefined) body.context_window = profile.contextWindow;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
       if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
       const res = await fetch(
@@ -548,6 +551,51 @@ export function AgentSetupTab() {
         </div>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.temperatureDesc")}
+        </p>
+      </div>
+
+      {/* Context Window */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.contextWindow")}
+        </label>
+        <div className="flex items-center gap-3">
+          <StyledInput
+            type="number"
+            min={0}
+            max={1000000}
+            step={1000}
+            value={profile.contextWindow ?? ""}
+            placeholder={t("agentSetup.contextWindowPlaceholder")}
+            onChange={(e) => {
+              const raw = e.target.value;
+              if (raw === "" || raw === "0") {
+                // Empty or "0" = no limit (use manifest/default)
+                setProfile(selectedAgentId, { contextWindow: undefined });
+              } else {
+                const n = parseInt(raw, 10);
+                if (!isNaN(n) && n >= 0) {
+                  setProfile(selectedAgentId, { contextWindow: n });
+                }
+              }
+            }}
+            className="w-32 rounded-md bg-white dark:bg-zinc-800"
+          />
+          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+            {t("agentSetup.tokens")}
+          </span>
+          {profile.contextWindow !== undefined && (
+            <button
+              onClick={() => setProfile(selectedAgentId, { contextWindow: undefined })}
+              className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+              title={t("agentSetup.resetContextWindow")}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.contextWindowDesc")}
         </p>
       </div>
 

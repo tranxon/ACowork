@@ -480,7 +480,12 @@
     "reset": "Reset",
     "temperature": "Temperature",
     "temperatureDesc": "Controls LLM output randomness. Lower = more deterministic, higher = more creative. Range 0.0–2.0. Leave empty to use package default.",
-    "resetTemperature": "Clear temperature override, revert to package default"
+    "resetTemperature": "Clear temperature override, revert to package default",
+    "contextWindow": "Context Window",
+    "contextWindowDesc": "Max context tokens per request. 0 or empty = no limit (use model's full window). Set a value to cap token usage for this agent.",
+    "contextWindowPlaceholder": "200K (default)",
+    "resetContextWindow": "Clear context window override, revert to package default",
+    "tokens": "tokens"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",

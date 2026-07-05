@@ -68,6 +68,7 @@ pub enum SessionMessage {
         max_output_tokens: Option<u64>,
         max_iterations: Option<u32>,
         temperature: Option<f32>,
+        context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
     },
@@ -162,6 +163,7 @@ impl std::fmt::Debug for SessionMessage {
                 max_output_tokens,
                 max_iterations,
                 temperature,
+                context_window,
                 system_prompt_override,
                 shell_approval_threshold,
             } => f
@@ -169,6 +171,7 @@ impl std::fmt::Debug for SessionMessage {
                 .field("max_output_tokens", max_output_tokens)
                 .field("max_iterations", max_iterations)
                 .field("temperature", temperature)
+                .field("context_window", context_window)
                 .field("has_system_prompt", &system_prompt_override.is_some())
                 .field("shell_approval_threshold", shell_approval_threshold)
                 .finish(),
@@ -474,6 +477,7 @@ impl SessionTask {
             runtime_overrides.max_output_tokens,
             runtime_overrides.max_iterations,
             runtime_overrides.temperature,
+            runtime_overrides.context_window,
             runtime_overrides.system_prompt_override,
             runtime_overrides.shell_approval_threshold,
         );
@@ -596,6 +600,7 @@ impl SessionTask {
                     input,
                     output,
                     max_output,
+                    agent_loop.core.context_window_override,
                 );
                 if let Some(ref tx) = chunk_tx {
                     let _ = tx
@@ -1161,6 +1166,7 @@ impl SessionTask {
                     max_output_tokens,
                     max_iterations,
                     temperature,
+                    context_window,
                     system_prompt_override,
                     shell_approval_threshold,
                 }) => {
@@ -1169,12 +1175,14 @@ impl SessionTask {
                         max_output_tokens = ?max_output_tokens,
                         max_iterations = ?max_iterations,
                         temperature = ?temperature,
+                        context_window = ?context_window,
                         "SessionTask: applying runtime config overrides"
                     );
                     agent_loop.apply_runtime_config(
                         max_output_tokens,
                         max_iterations,
                         temperature,
+                        context_window,
                         system_prompt_override,
                         shell_approval_threshold,
                     );

@@ -43,6 +43,7 @@ impl AgentLoop {
         max_output_tokens: Option<u64>,
         max_iterations: Option<u32>,
         temperature: Option<f32>,
+        context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
     ) {
@@ -50,6 +51,7 @@ impl AgentLoop {
             max_output_tokens,
             max_iterations,
             temperature,
+            context_window,
             system_prompt_override,
             shell_approval_threshold,
         );
@@ -61,11 +63,53 @@ impl AgentLoop {
         if temperature.is_some() {
             self.session.set_temperature(temperature);
         }
+
+        // If context_window changed, push updated context_usage immediately
+        // so the frontend status panel and context-usage popup reflect the
+        // new cap without waiting for the next LLM response.
+        if context_window.is_some() {
+            let model_name = self.resolve_current_model(None);
+            if let Some(caps) = self.core.get_model_capabilities(&model_name) {
+                let max_output = self.core.max_output_tokens_limit_for_model(&model_name);
+                let total_tokens = self.session.history.token_count();
+                let effective_window = match self.core.context_window_override {
+                    Some(0) | None => caps.context_window,
+                    Some(cap) => cap.min(caps.context_window),
+                };
+                let usable = caps.effective_input_budget(max_output);
+                let effective_usable = usable.min(effective_window);
+                let percent = if effective_usable > 0 {
+                    ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+                } else {
+                    0
+                };
+                let ctx_info = acowork_core::protocol::ContextUsageInfo {
+                    context_window: effective_window,
+                    input_tokens: total_tokens,
+                    output_tokens: 0,
+                    total_tokens,
+                    max_input_tokens: caps.max_input_tokens,
+                    usable_context: effective_usable,
+                    usage_percent: percent,
+                };
+                tracing::info!(
+                    context_window = effective_window,
+                    total_tokens,
+                    usage_percent = percent,
+                    "Pushing immediate context_usage after context_window config change"
+                );
+                let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
+            }
+        }
     }
 
     /// Get the context window budget for history trimming.
-    /// Uses Gateway model capabilities (context_window) if available,
-    /// otherwise falls back to config.history_max_tokens.
+    ///
+    /// Resolves the effective budget through a per-agent cap chain
+    /// (agent_config.json → manifest → DEFAULT_CONTEXT_WINDOW) then
+    /// clamps to the model's actual context window capacity.
+    /// Falls back to config.history_max_tokens when model capabilities
+    /// are unavailable.
     pub(crate) fn context_trim_budget(&self, model_name: &str) -> u64 {
         self.core.context_trim_budget(model_name)
     }
@@ -330,19 +374,24 @@ impl AgentLoop {
             if let Some(caps) = caps {
                 let max_output_limit = self.core.max_output_tokens_limit_for_model(model_name);
                 let usable = caps.effective_input_budget(max_output_limit);
+                let effective_window = match self.core.context_window_override {
+                    Some(0) | None => caps.context_window,
+                    Some(cap) => cap.min(caps.context_window),
+                };
+                let effective_usable = usable.min(effective_window);
                 let total_tokens = self.session.history.token_count();
-                let usage_percent = if usable > 0 {
-                    ((total_tokens as f64 / usable as f64) * 100.0).min(100.0) as u8
+                let usage_percent = if effective_usable > 0 {
+                    ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
                 } else {
                     0
                 };
                 let ctx_info = acowork_core::protocol::ContextUsageInfo {
-                    context_window: caps.context_window,
+                    context_window: effective_window,
                     input_tokens: total_tokens,
                     output_tokens: 0,
                     total_tokens,
                     max_input_tokens: caps.max_input_tokens,
-                    usable_context: usable,
+                    usable_context: effective_usable,
                     usage_percent,
                 };
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
@@ -593,21 +642,31 @@ impl AgentLoop {
             );
             if let Some(caps) = model_caps {
                 let ctx_usage = if prompt_tokens_reliable {
-                    crate::agent::context::compute_context_usage(&caps, usage, max_output_limit)
+                    crate::agent::context::compute_context_usage(
+                        &caps,
+                        usage,
+                        max_output_limit,
+                        self.core.context_window_override,
+                    )
                 } else {
                     let usable = caps.effective_input_budget(max_output_limit);
-                    let percent = if usable > 0 {
-                        ((local_estimate as f64 / usable as f64) * 100.0).min(100.0) as u8
+                    let effective_window = match self.core.context_window_override {
+                        Some(0) | None => caps.context_window,
+                        Some(cap) => cap.min(caps.context_window),
+                    };
+                    let effective_usable = usable.min(effective_window);
+                    let percent = if effective_usable > 0 {
+                        ((local_estimate as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
                     } else {
                         0
                     };
                     acowork_core::protocol::ContextUsageInfo {
-                        context_window: caps.context_window,
+                        context_window: effective_window,
                         input_tokens: local_estimate,
                         output_tokens: usage.completion_tokens,
                         total_tokens: local_estimate + usage.completion_tokens,
                         max_input_tokens: caps.max_input_tokens,
-                        usable_context: usable,
+                        usable_context: effective_usable,
                         usage_percent: percent,
                     }
                 };

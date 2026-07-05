@@ -226,6 +226,8 @@ message ConfigSnapshot {
   optional string builtin_avatar = 14;
   // ADR-024: max sessions limit (from agent_config.json)
   optional uint64 max_sessions = 28;
+  // ADR-026: per-agent context window cap (0 = no limit)
+  optional uint64 context_window = 29;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
@@ -273,6 +275,8 @@ message RuntimeConfigUpdate      {
     // ADR-024: max sessions limit per-agent (None = don't change, Some(0) = use default)
     optional uint64 max_sessions = 19;
     bool max_sessions_set = 20;
+    // ADR-026: per-agent context window cap (0 = no limit)
+    optional uint64 context_window = 21;
 }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }

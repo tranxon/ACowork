@@ -115,6 +115,7 @@ impl AgentLoop {
                 max_output_tokens,
                 max_iterations,
                 temperature,
+                context_window,
                 system_prompt_override,
                 shell_approval_threshold,
             } => {
@@ -122,6 +123,7 @@ impl AgentLoop {
                     max_output_tokens,
                     max_iterations,
                     temperature,
+                    context_window,
                     system_prompt_override = system_prompt_override.as_deref(),
                     shell_approval_threshold = shell_approval_threshold.as_deref(),
                     "UserOp: applying runtime config immediately in AgentLoop"
@@ -130,6 +132,7 @@ impl AgentLoop {
                     *max_output_tokens,
                     *max_iterations,
                     *temperature,
+                    *context_window,
                     system_prompt_override.clone(),
                     shell_approval_threshold.clone(),
                 );

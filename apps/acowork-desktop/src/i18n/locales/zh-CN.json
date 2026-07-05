@@ -378,7 +378,12 @@
     "reset": "重置",
     "temperature": "温度",
     "temperatureDesc": "控制 LLM 输出的随机性。降低使输出更确定，升高使更富创造性。范围 0.0–2.0，留空使用包默认值。",
-    "resetTemperature": "清除温度设置，使用包默认值"
+    "resetTemperature": "清除温度设置，使用包默认值",
+    "contextWindow": "上下文窗口",
+    "contextWindowDesc": "每次请求的最大上下文 token 数。设为 0 或留空表示不限制（使用模型全窗口）。设定数值可为该 Agent 限制tokens用量。",
+    "contextWindowPlaceholder": "200K（默认）",
+    "resetContextWindow": "清除上下文窗口设置，使用包默认值",
+    "tokens": "tokens"
   },
   "harness": {
     "tabProviders": "模型服务商",

@@ -263,6 +263,7 @@ impl GlobalResourcePusher {
                         avatar: None,
                         builtin_avatar: None,
                         max_sessions: None,
+                        context_window: None,
                     })
                     .await;
                 if ok {
@@ -407,6 +408,7 @@ impl GlobalResourcePusher {
                         avatar: None,
                         builtin_avatar: None,
                         max_sessions: None,
+                        context_window: None,
                     })
                     .await;
 

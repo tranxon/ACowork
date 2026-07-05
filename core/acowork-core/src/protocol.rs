@@ -685,6 +685,9 @@ pub enum GatewayRequest {
         /// ADR-024: max sessions limit (from agent_config.json)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_sessions: Option<usize>,
+        /// ADR-026: Per-agent context window cap in tokens (0 = no limit).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1044,6 +1047,9 @@ pub enum GatewayResponse {
         /// Some(n) = set to n, None = don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_sessions: Option<usize>,
+        /// ADR-026: Per-agent context window cap in tokens (0 = no limit).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     /// Query config request (Gateway → Runtime)
     ///

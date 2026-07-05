@@ -67,6 +67,13 @@ pub struct AgentCore {
     /// Seeded at agent startup in cli.rs; independent of temperature_override
     /// so the resolution chain is self-contained in AgentCore.
     pub(crate) manifest_temperature: Option<f32>,
+    /// Per-agent context window cap (from agent_config.json, set via Agent Setup panel).
+    /// Layer 1 in the resolution chain. 0 means "no limit".
+    pub(crate) context_window_override: Option<u64>,
+    /// Context window cap from manifest.toml [llm].context_window (Layer 2).
+    /// Seeded at agent startup in cli.rs; independent of context_window_override
+    /// so the resolution chain is self-contained in AgentCore.
+    pub(crate) manifest_context_window: Option<u64>,
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -102,9 +109,11 @@ impl AgentCore {
             ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
                 .unwrap_or_default();
         let manifest_temperature = manifest.llm.temperature;
+        let manifest_context_window = manifest.llm.context_window;
         tracing::debug!(
             ?manifest_temperature,
-            "AgentCore: seeding manifest_temperature from manifest [llm].temperature"
+            ?manifest_context_window,
+            "AgentCore: seeding manifest_temperature and manifest_context_window from manifest [llm]"
         );
         Self {
             config,
@@ -119,6 +128,8 @@ impl AgentCore {
             provider_compact_models: HashMap::new(),
             temperature_override: None,
             manifest_temperature,
+            context_window_override: None,
+            manifest_context_window,
             system_prompt_override: None,
             memory_store: None,
             memory_session: None,
@@ -251,6 +262,7 @@ impl AgentCore {
         max_output_tokens: Option<u64>,
         max_iterations: Option<u32>,
         temperature: Option<f32>,
+        context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
     ) {
@@ -265,6 +277,10 @@ impl AgentCore {
         if let Some(temp) = temperature {
             tracing::info!(old = ?self.temperature_override, new = temp, "runtime config: temperature updated");
             self.temperature_override = Some(temp);
+        }
+        if let Some(cw) = context_window {
+            tracing::info!(old = ?self.context_window_override, new = cw, "runtime config: context_window updated");
+            self.context_window_override = Some(cw);
         }
         if system_prompt_override.is_some() {
             tracing::info!(has_override = system_prompt_override.as_ref().map(|s| !s.is_empty()).unwrap_or(false), "runtime config: system_prompt_override updated");
@@ -449,17 +465,59 @@ impl AgentCore {
     pub fn set_approval_gate(&mut self, gate: Arc<dyn ApprovalGate>) { self.approval_gate = Some(gate); }
     pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold { &self.shell_approval_threshold }
 
+    /// Resolve the effective context window budget for history trimming.
+    ///
+    /// Resolution chain for the user-configured cap:
+    ///   1. agent_config.json.context_window (Layer 1)
+    ///   2. manifest.llm.context_window (Layer 2)
+    ///   3. DEFAULT_CONTEXT_WINDOW (Layer 3, 200K)
+    ///
+    /// The resolved cap is then clamped to the model's actual context window:
+    ///   effective = min(resolved_cap, model.effective_input_budget)
+    ///
+    /// When resolved_cap == 0, no cap is applied (use model's full capacity).
     pub fn context_trim_budget(&self, model_name: &str) -> u64 {
         let max_output_limit = self.max_output_tokens_limit_for_model(model_name);
+        let resolved_cap = self
+            .context_window_override
+            .or(self.manifest_context_window)
+            .unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW);
+
         self.get_model_capabilities(model_name)
             .map(|caps| {
-                let usable = caps.effective_input_budget(max_output_limit);
-                tracing::debug!(model = %model_name, context_window = caps.context_window, max_input_tokens = ?caps.max_input_tokens, max_output_tokens_limit = max_output_limit, effective_input_budget = usable, "Computed usable context budget from model capabilities");
-                usable
+                let model_budget = caps.effective_input_budget(max_output_limit);
+                let effective = if resolved_cap == 0 {
+                    // No user-imposed cap — use model's full capacity
+                    model_budget
+                } else {
+                    std::cmp::min(resolved_cap, model_budget)
+                };
+                tracing::debug!(
+                    model = %model_name,
+                    context_window = caps.context_window,
+                    max_input_tokens = ?caps.max_input_tokens,
+                    max_output_tokens_limit = max_output_limit,
+                    resolved_cap,
+                    model_budget,
+                    effective,
+                    "Computed usable context budget (capped by per-agent context_window)"
+                );
+                effective
             })
             .unwrap_or_else(|| {
-                tracing::debug!(model = %model_name, "No model capabilities for '{}', using config.history_max_tokens as fallback.", model_name);
-                self.config.history_max_tokens
+                let fallback = if resolved_cap == 0 {
+                    self.config.history_max_tokens
+                } else {
+                    std::cmp::min(resolved_cap, self.config.history_max_tokens)
+                };
+                tracing::debug!(
+                    model = %model_name,
+                    resolved_cap,
+                    fallback,
+                    "No model capabilities for '{}', using capped history_max_tokens as fallback",
+                    model_name
+                );
+                fallback
             })
     }
 }
@@ -479,6 +537,8 @@ impl Clone for AgentCore {
             provider_compact_models: self.provider_compact_models.clone(),
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
+            context_window_override: self.context_window_override,
+            manifest_context_window: self.manifest_context_window,
             system_prompt_override: self.system_prompt_override.clone(),
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),
@@ -490,5 +550,360 @@ impl Clone for AgentCore {
             consolidation_scheduler: self.consolidation_scheduler.clone(),
             consolidation_bg_task: None, // sessions don't own bg task
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry};
+    use acowork_core::providers::mock::MockProvider;
+    use crate::config::RuntimeConfig;
+
+    /// Build a minimal AgentCore for testing context_trim_budget.
+    fn make_core(
+        context_window_override: Option<u64>,
+        manifest_context_window: Option<u64>,
+        model_caps: Option<ModelCapabilitiesInfo>,
+        history_max_tokens: u64,
+    ) -> AgentCore {
+        let config = RuntimeConfig {
+            history_max_tokens,
+            ..RuntimeConfig::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.cw"
+            version = "1.0.0"
+            name = "Test CW"
+            description = "Context window test agent"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(MockProvider::single_text("test"));
+
+        let mut core = AgentCore::new(config, manifest, provider, vec![]);
+        core.context_window_override = context_window_override;
+        core.manifest_context_window = manifest_context_window;
+
+        if let Some(caps) = model_caps {
+            let model = ProviderListItem {
+                id: "test-provider".into(),
+                base_url: "http://localhost".into(),
+                protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                models: vec![ProviderModelEntry {
+                    id: "test-model".into(),
+                    capabilities: caps,
+                    max_output_tokens_limit: 32_768,
+                }],
+                compact_model: None,
+                custom: false,
+            };
+            let mut list = core.global_provider_list.write().unwrap();
+            *list = vec![model];
+        }
+        core
+    }
+
+    fn test_model_caps(context_window: u64, max_output_tokens: u64) -> ModelCapabilitiesInfo {
+        ModelCapabilitiesInfo {
+            context_window,
+            max_output_tokens,
+            max_input_tokens: None,
+            supports_tool_calling: true,
+            supports_reasoning: None,
+            supports_attachment: None,
+            supports_temperature: None,
+            cost: None,
+            modalities: None,
+            name: None,
+            family: None,
+            knowledge_cutoff: None,
+            default_reasoning_effort: None,
+            thinking_mode: None,
+        }
+    }
+
+    // ── Resolution chain tests ──────────────────────────────────────
+
+    #[test]
+    fn test_resolution_chain_config_wins_over_manifest() {
+        // Layer 1: config=100K, Layer 2: manifest=64K → should use 100K
+        // Model: 200K, so min(100K, 200K-reserve) = 100K - 32768 = 67232
+        let core = make_core(
+            Some(100_000),
+            Some(64_000),
+            Some(test_model_caps(200_000, 16_384)),
+            128_000,
+        );
+        // effective_input_budget: min(200K, 200K-16K=184K) given max_output_limit=32K
+        // Actually effective_input_budget = context_window - min(max_output_tokens, max_output_tokens_limit)
+        // = 200_000 - min(16_384, 32_768) = 200_000 - 16_384 = 183_616
+        // min(100_000, 183_616) = 100_000
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 100_000);
+    }
+
+    #[test]
+    fn test_resolution_chain_manifest_over_default() {
+        // Layer 1: None, Layer 2: 64K → should use 64K
+        let core = make_core(
+            None,
+            Some(64_000),
+            Some(test_model_caps(200_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 64_000);
+    }
+
+    #[test]
+    fn test_resolution_chain_falls_back_to_default() {
+        // Both None → should use DEFAULT_CONTEXT_WINDOW (200K)
+        // Model is also 200K, so min(200K, 200K-16K) = 184K?
+        // Actually: min(200_000, 183_616) = 183_616
+        let core = make_core(
+            None,
+            None,
+            Some(test_model_caps(200_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        // DEFAULT_CONTEXT_WINDOW=200K > model_budget=183_616 → min = 183_616
+        assert_eq!(budget, 183_616);
+    }
+
+    #[test]
+    fn test_resolution_chain_default_smaller_than_model() {
+        // Both None, model=1M → default 200K caps it
+        let core = make_core(
+            None,
+            None,
+            Some(test_model_caps(1_000_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        // DEFAULT_CONTEXT_WINDOW=200K < model_budget=983_616 → min = 200_000
+        assert_eq!(budget, 200_000);
+    }
+
+    // ── Zero = no limit tests ───────────────────────────────────────
+
+    #[test]
+    fn test_zero_cap_means_no_user_limit() {
+        // config=0 → no cap → use model's full budget
+        let core = make_core(
+            Some(0),
+            None,
+            Some(test_model_caps(500_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        // model_budget = 500_000 - 16_384 = 483_616
+        assert_eq!(budget, 483_616);
+    }
+
+    #[test]
+    fn test_zero_cap_with_small_model() {
+        // config=0, small model → use model's budget (no user cap)
+        let core = make_core(
+            Some(0),
+            None,
+            Some(test_model_caps(32_000, 4_096)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        // model_budget = 32_000 - 4_096 = 27_904
+        assert_eq!(budget, 27_904);
+    }
+
+    // ── min(user_cap, model_budget) tests ──────────────────────────
+
+    #[test]
+    fn test_user_cap_smaller_than_model() {
+        // User sets 50K, model has 200K → use 50K
+        let core = make_core(
+            Some(50_000),
+            None,
+            Some(test_model_caps(200_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 50_000);
+    }
+
+    #[test]
+    fn test_model_smaller_than_user_cap() {
+        // User sets 500K, model has 128K → use model's budget
+        let core = make_core(
+            Some(500_000),
+            None,
+            Some(test_model_caps(128_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        // model_budget = 128_000 - 16_384 = 111_616
+        assert_eq!(budget, 111_616);
+    }
+
+    #[test]
+    fn test_user_cap_exactly_equals_model_budget() {
+        // User sets 183_616 (200K-16K-384), model has 200K → min == user_cap
+        // but user_cap = 183_616 and model_budget = 200_000 - 16_384 = 183_616
+        // min(183_616, 183_616) = 183_616
+        let core = make_core(
+            Some(183_616),
+            None,
+            Some(test_model_caps(200_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 183_616);
+    }
+
+    // ── No model capabilities fallback tests ────────────────────────
+
+    #[test]
+    fn test_no_model_caps_falls_back_to_history_max_tokens() {
+        // No model capabilities → use history_max_tokens capped by user setting
+        let core = make_core(
+            Some(80_000),
+            None,
+            None,
+            64_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        // user_cap=80K, history_max_tokens=64K → min(80K, 64K) = 64K
+        assert_eq!(budget, 64_000);
+    }
+
+    #[test]
+    fn test_no_model_caps_zero_user_cap() {
+        // No model capabilities + user_cap=0 → use history_max_tokens directly
+        let core = make_core(
+            Some(0),
+            None,
+            None,
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 128_000);
+    }
+
+    #[test]
+    fn test_no_model_caps_default_fallback() {
+        // No model capabilities, no user cap → min(DEFAULT_CONTEXT_WINDOW=200K, history=128K) = 128K
+        let core = make_core(
+            None,
+            None,
+            None,
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 128_000);
+    }
+
+    // ── Manifest layer tests ────────────────────────────────────────
+
+    #[test]
+    fn test_manifest_context_window_is_honored() {
+        // Config=None, Manifest=150K, Model=200K → min(150K, 183K) = 150K
+        let core = make_core(
+            None,
+            Some(150_000),
+            Some(test_model_caps(200_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 150_000);
+    }
+
+    #[test]
+    fn test_manifest_context_window_capped_by_model() {
+        // Config=None, Manifest=300K, Model=128K → min(300K, 111K) = 111K
+        let core = make_core(
+            None,
+            Some(300_000),
+            Some(test_model_caps(128_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 111_616);
+    }
+
+    #[test]
+    fn test_manifest_zero_means_no_limit() {
+        // Config=None, Manifest=0 → manifest says "no limit" → model full capacity
+        // Model=500K → 500_000 - 16_384 = 483_616
+        let core = make_core(
+            None,
+            Some(0),
+            Some(test_model_caps(500_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 483_616);
+    }
+
+    // ── Edge case tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_user_cap_of_one_token() {
+        // Extreme: user sets 1 token
+        let core = make_core(
+            Some(1),
+            None,
+            Some(test_model_caps(128_000, 16_384)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        assert_eq!(budget, 1);
+    }
+
+    #[test]
+    fn test_model_budget_zero_edge_case() {
+        // Model with 0 context_window (invalid but defensive)
+        let core = make_core(
+            Some(100_000),
+            None,
+            Some(test_model_caps(0, 0)),
+            128_000,
+        );
+        let budget = core.context_trim_budget("test-model");
+        // effective_input_budget: 0 - 0 = 0; min(100K, 0) = 0
+        assert_eq!(budget, 0);
+    }
+
+    // ── max_output_tokens_limit interaction ──────────────────────────
+
+    #[test]
+    fn test_max_output_tokens_limit_affects_model_budget() {
+        // Model: 200K, max_output=16K, limit=8K → effective_input = 200K - min(16K, 8K) = 192K
+        // User cap=100K → min(100K, 192K) = 100K
+        let core = make_core(
+            Some(100_000),
+            None,
+            Some(test_model_caps(200_000, 16_384)),
+            128_000,
+        );
+        // Override max_output_tokens_limit for the model to 8K
+        {
+            let mut list = core.global_provider_list.write().unwrap();
+            for p in list.iter_mut() {
+                for m in p.models.iter_mut() {
+                    m.max_output_tokens_limit = 8_192;
+                }
+            }
+        }
+        let budget = core.context_trim_budget("test-model");
+        // model_budget = 200_000 - min(16_384, 8_192) = 200_000 - 8_192 = 191_808
+        // min(100_000, 191_808) = 100_000
+        assert_eq!(budget, 100_000);
     }
 }

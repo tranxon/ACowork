@@ -224,6 +224,13 @@ pub struct LlmConfig {
     /// When `None`, falls through to the next level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Per-agent context window size limit in tokens.
+    /// 0 means "no limit" (use model's full context window).
+    /// Resolution chain at runtime:
+    /// agent_config.json → this manifest value → DEFAULT_CONTEXT_WINDOW (200K).
+    /// When `None`, falls through to the next level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     /// Fallback providers in priority order
     #[serde(default)]
     pub fallback_providers: Vec<String>,
