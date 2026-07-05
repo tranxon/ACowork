@@ -378,22 +378,60 @@ pub fn run() {
             // `UnderWindowBackground` (macOS 10.14+) provides frosted-glass
             // translucency that shows desktop content behind the window.
             //
-            // `color` provides a subtle neutral tint that blends with the
-            // vibrancy backdrop, reducing the jarring transparency gap when
-            // the window is resized and WKWebView content lags behind.
+            // The call is dispatched asynchronously with a short delay
+            // because `set_effects` internally uses `run_on_main_thread`,
+            // and during setup() the NSView hierarchy may not be fully
+            // laid out yet.  We retry up to 3 times and log the outcome
+            // so vibrancy failures are visible in the dev console instead
+            // of being silently swallowed by `let _ =`.
             #[cfg(target_os = "macos")]
             {
-                use tauri::utils::config::WindowEffectsConfig;
-                use tauri::window::EffectState;
+                let main_window = app
+                    .get_webview_window("main")
+                    .expect("no main window")
+                    .clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri::utils::config::WindowEffectsConfig;
+                    use tauri::window::EffectState;
 
-                let main_window = app.get_webview_window("main").expect("no main window");
-                let effects = WindowEffectsConfig {
-                    effects: vec![tauri::window::Effect::UnderWindowBackground],
-                    state: Some(EffectState::Active),
-                    radius: None,
-                    color: Some((128, 128, 128, 30).into()),
-                };
-                let _ = main_window.set_effects(effects);
+                    let effects = WindowEffectsConfig {
+                        effects: vec![tauri::window::Effect::UnderWindowBackground],
+                        state: Some(EffectState::Active),
+                        radius: None,
+                        color: Some((128, 128, 128, 30).into()),
+                    };
+
+                    // Give the NSView hierarchy 500 ms to settle before
+                    // the first attempt, then retry every 500 ms.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    for attempt in 1..=3 {
+                        match main_window.set_effects(effects.clone()) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[vibrancy] macOS UnderWindowBackground applied \
+                                     (attempt {attempt}/3)"
+                                );
+                                return;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[vibrancy] set_effects attempt {attempt}/3 failed: {e}"
+                                );
+                                if attempt < 3 {
+                                    tokio::time::sleep(
+                                        std::time::Duration::from_millis(500),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "[vibrancy] WARNING: failed to apply macOS vibrancy \
+                         after 3 attempts — window will be plain transparent \
+                         (no frosted glass)"
+                    );
+                });
             }
 
             // ── Windows acrylic blur ──────────────────────────────────────

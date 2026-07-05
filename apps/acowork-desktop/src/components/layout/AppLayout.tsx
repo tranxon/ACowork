@@ -127,11 +127,20 @@ export function AppLayout() {
   });
   const { t } = useTranslation();
 
-  // ── Glass background color ───────────────────────────────────────
+  // ── Glass tint color ──────────────────────────────────────────────
   // Read both `theme` and `osTheme` from the store. The store keeps
   // `osTheme` in sync with macOS appearance via a matchMedia listener
   // (see settingsStore.ts), so re-renders here happen automatically when
   // the user switches dark/light while the app is running.
+  //
+  // The blur itself is rendered by the OS-native effect layer
+  // (NSVisualEffectView on macOS, DWM Acrylic on Windows — configured via
+  // `set_effects` in src-tauri/src/lib.rs).  This layer only paints the
+  // tint; when opacity=0, glassBg becomes rgba(...,0) and the native
+  // vibrancy shows through.  Do NOT add `backdrop-filter: blur(...)` here:
+  // it operates within the CSS stacking context and would blur whatever
+  // sits behind this div (i.e. the html placeholder color), not the
+  // native layer below the WKWebView.
   const { opacity, theme, osTheme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
   const glassBg = isDark ? `rgba(41,42,44,${opacity})` : `rgba(226,227,233,${opacity})`;
@@ -421,7 +430,7 @@ export function AppLayout() {
   }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightWidth, resultsCollapsed]);
 
   return (
-    <div className="flex h-full w-full flex-col backdrop-blur-sm" style={{ backgroundColor: glassBg } as React.CSSProperties}>
+    <div className="flex h-full w-full flex-col" style={{ backgroundColor: glassBg } as React.CSSProperties}>
       {/* Custom title bar — on macOS, sits under the native traffic lights
           (titleBarStyle:"Overlay"). On Windows/Linux, decorations are
           disabled in Rust setup() so this is the only title bar. */}

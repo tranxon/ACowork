@@ -193,15 +193,21 @@
 
 /* Base styles */
 
-/* Theme-matched background on <html> prevents jarring transparency gaps
-   during window resize.  When the user drags a resize handle, DWM recomposes
-   the acrylic/vibrancy backdrop at the new size *before* WebView2 finishes
-   re-layout of the React content tree.  A solid html background fills the
-   new region immediately in the same color as the final content, so the
-   transition is imperceptible.  The `!important` overrides any framework
-   resets that might try to set a different background. */
+/* Root layer background — fully transparent.
+   The frosted-glass blur is rendered by the OS-native layer below
+   the WKWebView (NSVisualEffectView on macOS, DWM Acrylic on Windows,
+   applied via `set_effects` in src-tauri/src/lib.rs).  The WebView
+   itself stays transparent so that native vibrancy can show through.
+
+   The tint is applied by the AppLayout root <div> via inline
+   `backgroundColor: rgba(...,opacity)`.  When opacity=1 the div is
+   opaque and covers this transparent layer; when opacity=0 the div is
+   also transparent and the native vibrancy shows through directly.
+
+   Do NOT set an opaque background on html/body — it would mask the
+   native vibrancy layer and defeat the entire frosted-glass setup. */
 html {
-  background-color: var(--color-bg) !important;
+  background-color: transparent;
 }
 
 body {
@@ -209,7 +215,7 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size: var(--text-base);
   color: var(--color-text);
-  background-color: var(--color-bg) !important;
+  background-color: transparent;
   overflow: hidden;
   user-select: none;
 }

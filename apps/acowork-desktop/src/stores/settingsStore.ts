@@ -70,7 +70,13 @@ function applyContentWidth(width: number) {
   document.documentElement.style.setProperty("--content-max-width", `${width}%`);
 }
 
-/** Apply opacity to CSS custom property on root */
+/** Apply user-controlled opacity to the DOM.
+ *
+ * Writes the raw 0..1 value to `--app-opacity` on `:root` for any
+ * component that wants to bind to it.  The actual visual tint is
+ * applied by AppLayout's `glassBg` (rgba with this alpha), not by
+ * this variable — the html/body layers are intentionally transparent
+ * so the OS-native vibrancy shows through. */
 function applyOpacity(opacity: number) {
   document.documentElement.style.setProperty("--app-opacity", String(opacity));
 }
