@@ -1265,9 +1265,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (incremental) {
           const ss = getSessionState(state, agentId, sessionId);
 
-          // ADR-025: No dedup needed — the backend delivery cursor
-          // guarantees no duplicate messages.  Append directly.
-          let messages = [...ss.messages, ...converted];
+          // ADR-025: The backend delivery cursor guarantees no duplicate
+          // messages across polls. However, the frontend may have already
+          // optimistically rendered a user message (sendMessage) that the
+          // backend returns via the first incremental poll. Filter by ID to
+          // prevent duplicates.
+          const existingIds = new Set(ss.messages.map((m) => m.id));
+          let messages = [...ss.messages, ...converted.filter((m) => !existingIds.has(m.id))];
           const streaming = data.streaming;
 
           // ADR-022 §6.1: JSONL line order is the ONLY display order. The

@@ -423,6 +423,14 @@ impl ConversationSession {
 
         // ADR-024: no JSONL header, meta_end is always 0.
 
+        // Initialize committed_lines to the actual number of existing lines in
+        // the JSONL file. Without this, the counter stays at 0 (the value
+        // passed by callers like ensure_session_in_memory), which causes the
+        // delivery cursor (ADR-025) to be reset to {0, 0} during full-load —
+        // and the first incremental poll re-delivers all historical messages.
+        let existing_lines = count_jsonl_lines(&file_path).unwrap_or(0);
+        committed_lines.store(existing_lines, Ordering::Relaxed);
+
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
         let writer = ConversationWriter::new(file, rx, committed_lines);
         std::thread::spawn(move || writer.run());
