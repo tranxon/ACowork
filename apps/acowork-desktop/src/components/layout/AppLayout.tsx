@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
@@ -143,17 +144,13 @@ export function AppLayout() {
   // native layer below the WKWebView.
   //
   // NOTE: macOS NSVisualEffectView with UnderWindowBackground material
-  // has an inherently dark tint in both Light and Dark modes (Apple's
-  // design decision for readability over blurred desktop content).  When
-  // the user slides opacity to 0 in Light mode, the CSS layer becomes
-  // transparent and exposes this dark native tint — making Light mode
-  // look indistinguishable from Dark mode.  To compensate, we enforce a
-  // minimum opacity floor (LIGHT_OPACITY_FLOOR = 0.18) in Light mode so
-  // there is always enough white CSS tint to lift the overall appearance.
-  // Dark mode is unaffected because the native dark tint is already
-  // appropriate there.
+  // is always light (Apple's design), which washes out dark mode when
+  // the CSS tint-layer opacity is low.  We therefore swap the native
+  // effect material to match the theme — see the `set_window_effect`
+  // effect below.  Light mode keeps UnderWindowBackground (light tint);
+  // dark mode switches to Effect::Dark (dark tint).
   //
-  // Windows DWM Acrylic does NOT have this dark tint issue — it
+  // Windows DWM Acrylic does NOT have this issue — it
   // faithfully blurs the desktop content in both light and dark modes.
   // Applying the floor on Windows would make the glass effect
   // unnecessarily opaque, so we skip it on non-macOS platforms.
@@ -168,6 +165,18 @@ export function AppLayout() {
   const glassBg = isDark
     ? `rgba(41,42,44,${opacity})`
     : `rgba(226,227,233,${lightOpacity})`;
+
+  // ── Sync macOS native visual-effect material with theme ────────────
+  // UnderWindowBackground (current startup default) is always light on
+  // macOS, which washes out dark mode when CSS opacity is low.  We swap
+  // to Effect::Dark for dark mode so the native layer is dark too.
+  // Non-macOS: no-op.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !/Mac/i.test(navigator.userAgent)) return;
+    invoke("set_window_effect", { isDark }).catch((e: unknown) =>
+      console.warn("[vibrancy] set_window_effect failed:", e)
+    );
+  }, [isDark]);
 
   // ── Switch to debug tab when entering debug mode ─────────────────
   const prevIsDebugMode = useRef(isDebugMode);

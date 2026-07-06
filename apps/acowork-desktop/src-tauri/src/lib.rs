@@ -364,6 +364,7 @@ pub fn run() {
             commands::gateway::stop_local_gateway,
             commands::gateway::get_local_gateway_status,
             commands::gateway::ensure_system_agent,
+            commands::effects::set_window_effect,
         ])
         .setup(|app| {
             tray::setup(app)?;
