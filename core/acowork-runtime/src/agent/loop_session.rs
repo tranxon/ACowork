@@ -217,6 +217,11 @@ impl super::loop_::AgentLoop {
                 let provider = self.core.provider.clone();
                 let memory_store = self.core.memory_store().cloned();
                 let emb_provider = self.core.embedding_provider.clone();
+                // ADR-027: clone ConversationSession so the spawned task can
+                // record raw Provider usage from the tail-distillation call
+                // into the session token accumulator — independent of the
+                // parent's `.close()` call below.
+                let conversation_clone = self.session.conversation.clone();
                 // Build combined text for model-aware token counting via the unified API.
                 let combined_text: String =
                     tail_messages.iter().fold(String::new(), |mut acc, m| {
@@ -251,7 +256,12 @@ impl super::loop_::AgentLoop {
                     )
                     .await
                     {
-                        Ok(summary) => {
+                        Ok((summary, usage)) => {
+                            // ADR-027: record raw Provider usage from tail
+                            // distillation into session token accumulator.
+                            if let Some(ref conv) = conversation_clone {
+                                conv.accumulate_llm_usage(&usage);
+                            }
                             crate::episode_distill::EpisodeDistiller::write_summary_to_grafeo(
                                 &summary,
                                 &session_id,

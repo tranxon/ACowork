@@ -537,6 +537,7 @@ impl AgentLoop {
                     let provider = self.core.provider.clone();
                     let compact_model = self.resolve_distill_model(title_input);
                     let session_core_title = self.session_core.title.clone();
+                    let conversation_clone = self.session.conversation.clone();
                     let fallback_msg = if title_input.is_empty() {
                         // User only uploaded files (no text). Extract filenames
                         // from <attached_document> tags as a meaningful fallback
@@ -564,7 +565,12 @@ impl AgentLoop {
                         )
                         .await
                         {
-                            Ok(title) => {
+                            Ok((title, usage)) => {
+                                // ADR-027: record raw Provider usage from
+                                // title-generation call.
+                                if let Some(ref conv) = conversation_clone {
+                                    conv.accumulate_llm_usage(&usage);
+                                }
                                 let trimmed: String = title.chars().take(30).collect();
                                 *session_core_title.write().unwrap() = Some(trimmed);
                             }

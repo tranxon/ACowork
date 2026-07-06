@@ -460,15 +460,21 @@ pub struct UserProfileListFile {
 
 /// Context usage info reported by Runtime to Gateway after each LLM call.
 /// Forwarded to Desktop App via WebSocket for UI display.
+///
+/// Per-turn fields (`input_tokens`, `output_tokens`, `total_tokens`) reflect the
+/// most recent LLM call only. Cumulative session fields
+/// (`total_input_tokens`, `total_output_tokens`) accumulate across all LLM
+/// calls in the session — they are sourced from `SessionTokens` and are
+/// `None` until the first LLM call has been recorded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextUsageInfo {
     /// Context window limit (from model capabilities)
     pub context_window: u64,
-    /// Current input tokens used (prompt_tokens from API response)
+    /// Current input tokens used (prompt_tokens from API response, last turn)
     pub input_tokens: u64,
-    /// Current output tokens generated (completion_tokens)
+    /// Current output tokens generated (completion_tokens, last turn)
     pub output_tokens: u64,
-    /// Total tokens (input + output)
+    /// Total tokens of the last turn (input + output)
     pub total_tokens: u64,
     /// Max input tokens (from models.dev limit.input, if available)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -477,6 +483,14 @@ pub struct ContextUsageInfo {
     pub usable_context: u64,
     /// Usage percentage (0-100)
     pub usage_percent: u8,
+    /// Cumulative input tokens across all LLM calls in this session.
+    /// `None` until the first LLM call has been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_input_tokens: Option<u64>,
+    /// Cumulative output tokens across all LLM calls in this session.
+    /// `None` until the first LLM call has been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_output_tokens: Option<u64>,
 }
 
 /// LLM API protocol type, derived from models.dev npm field.

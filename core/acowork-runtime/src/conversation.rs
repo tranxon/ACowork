@@ -15,15 +15,42 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::error::Result;
+use acowork_core::providers::traits::UsageInfo;
 
 /// Format version for the JSONL conversation file.
 ///
-/// v2 (current): adds optional `kind` field to ConversationEntry.
-///   `kind="compaction"` marks an LLM-driven compaction event whose `content`
-///   is the summary text and whose `metadata` is a `CompactionEventMeta`.
-///   When `kind` is absent or `"message"`, the entry is a regular
-///   conversation message (role-based).
-const CONVERSATION_FORMAT_VERSION: u32 = 2;
+/// v3 (current): replaces `last_input_tokens` / `last_output_tokens` with a
+///   structured `tokens` field on `SessionMeta`. See ADR-027.
+const CONVERSATION_FORMAT_VERSION: u32 = 3;
+
+/// Snapshot + cumulative token counts for a session.
+///
+/// Persisted in `SessionMeta.tokens` so the frontend can restore the
+/// "context usage" indicator after a session resume, and so future rounds
+/// have an authoritative cost record.
+///
+/// All four fields are **raw Provider-reported values** (or
+/// `UsageInfo::default()` zeros when the Provider didn't return usage).
+/// No local-tokenizer estimates are stored here — see ADR-027 for the
+/// "宁可 miss 也不估计" policy.
+///
+/// - `last_input` / `last_output` — usage from the most recent LLM call.
+///   Raw values are recorded verbatim, including zero, so the snapshot
+///   faithfully reflects what the Provider returned (e.g. when
+///   `prompt_tokens_reliable == false`).
+/// - `total_input` / `total_output` — saturated sums across every LLM call
+///   in this session. Only **reliable** calls (where the Provider returned
+///   a positive count) are accumulated; calls with `prompt_tokens == 0`
+///   are skipped on the input side so a Provider fallback does not
+///   silently overwrite an accumulated cost.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SessionTokens {
+    pub last_input: u64,
+    pub last_output: u64,
+    pub total_input: u64,
+    pub total_output: u64,
+}
 
 /// Entry kind discriminator for `ConversationEntry.kind`.
 pub const ENTRY_KIND_COMPACTION: &str = "compaction";
@@ -109,10 +136,10 @@ pub struct SessionMeta {
     // ── Runtime statistics (updated by AgentLoop) ──
     pub message_count: u64,
     pub last_active_at: String,
+    /// ADR-027: snapshot + cumulative token counts (raw Provider values).
+    /// `None` until the first LLM call has been recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_output_tokens: Option<u64>,
+    pub tokens: Option<SessionTokens>,
 
     // ── Compaction ──
     /// Absolute byte offset of the most recent compaction marker.
@@ -278,11 +305,9 @@ pub struct ConversationSession {
     reasoning_effort: std::sync::Mutex<Option<String>>,
     /// Per-session temperature override, persisted in meta file.
     temperature: std::sync::Mutex<Option<f32>>,
-    /// Last observed (input_tokens, output_tokens) from an LLM response.
-    /// Persisted into meta file so the UI can restore the
-    /// "context usage" indicator after a session resume.
-    /// `None` means no LLM call has been made (or persisted) yet.
-    last_tokens: std::sync::Mutex<Option<(u64, u64)>>,
+    /// ADR-027: snapshot + cumulative token counts (raw Provider values).
+    /// `None` means no LLM call has been recorded yet.
+    tokens: std::sync::Mutex<Option<SessionTokens>>,
     /// Running message count, incremented on every `append_message`.
     message_count: AtomicU64,
     /// Last time the meta file was written from `append_message`.
@@ -306,12 +331,7 @@ impl ConversationSession {
     /// Build a complete `SessionMeta` from the current in-memory state.
     fn build_meta(&self) -> SessionMeta {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let (input_tokens, output_tokens) = self
-            .last_tokens
-            .lock()
-            .ok()
-            .and_then(|t| *t)
-            .unwrap_or((0, 0));
+        let tokens = self.tokens.lock().ok().and_then(|t| t.clone());
         SessionMeta {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -325,8 +345,7 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
-            last_input_tokens: if input_tokens > 0 { Some(input_tokens) } else { None },
-            last_output_tokens: if output_tokens > 0 { Some(output_tokens) } else { None },
+            tokens,
             last_compaction_offset: None,
             corrupted: false,
         }
@@ -383,7 +402,7 @@ impl ConversationSession {
             provider: std::sync::Mutex::new(config.provider),
             reasoning_effort: std::sync::Mutex::new(None),
             temperature: std::sync::Mutex::new(None),
-            last_tokens: std::sync::Mutex::new(None),
+            tokens: std::sync::Mutex::new(None),
             message_count: AtomicU64::new(0),
             last_meta_write: std::sync::Mutex::new(Instant::now()),
             sender: tx,
@@ -446,14 +465,7 @@ impl ConversationSession {
             provider: std::sync::Mutex::new(meta.provider),
             reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
             temperature: std::sync::Mutex::new(meta.temperature),
-            last_tokens: std::sync::Mutex::new(
-                match (meta.last_input_tokens, meta.last_output_tokens) {
-                    (Some(i), Some(o)) => Some((i, o)),
-                    (Some(i), None) => Some((i, 0)),
-                    (None, Some(o)) => Some((0, o)),
-                    (None, None) => None,
-                },
-            ),
+            tokens: std::sync::Mutex::new(meta.tokens.clone()),
             message_count: AtomicU64::new(meta.message_count),
             last_meta_write: std::sync::Mutex::new(Instant::now()),
             sender: tx,
@@ -728,35 +740,114 @@ impl ConversationSession {
         );
     }
 
-    /// Return the last persisted (input_tokens, output_tokens) pair, if any.
+    /// Return the full [`SessionTokens`] (last + totals), if any LLM call
+    /// has been recorded yet.
     ///
     /// Used on resume to seed the frontend "context usage" indicator with
-    /// the same `prompt_tokens`/`completion_tokens` that the most recent LLM
-    /// response reported. Window-derived fields (`context_window`,
-    /// `usable_context`, `usage_percent`) are recomputed at resume time
-    /// from the *current* model capabilities — this getter only returns the
-    /// raw API-fact values.
-    pub fn last_tokens(&self) -> Option<(u64, u64)> {
-        self.last_tokens.lock().ok().and_then(|t| *t)
+    /// the same raw `prompt_tokens`/`completion_tokens` that the most
+    /// recent LLM response reported. Window-derived fields
+    /// (`context_window`, `usable_context`, `usage_percent`) are
+    /// recomputed at resume time from the *current* model capabilities —
+    /// this getter only returns the raw API-fact values.
+    pub fn tokens(&self) -> Option<SessionTokens> {
+        self.tokens.lock().ok().and_then(|t| t.clone())
     }
 
-    /// Persist the most recent LLM `usage` (input/output tokens) to meta
-    /// file so the context-usage indicator survives a session resume.
+    /// Persist a single LLM call's raw `usage` into the session token
+    /// accumulator (ADR-027).
     ///
-    /// Called from the agent loop right after a `ContextUsage` chunk is
-    /// emitted.
-    pub fn update_last_tokens(&self, input_tokens: u64, output_tokens: u64) {
-        if let Ok(mut t) = self.last_tokens.lock() {
-            *t = Some((input_tokens, output_tokens));
+    /// Semantics:
+    /// - `last_input` / `last_output` are **always** overwritten with the
+    ///   raw Provider values, including zero. This makes the snapshot
+    ///   honestly reflect what the Provider returned (e.g. when
+    ///   `prompt_tokens_reliable == false` and the local tokenizer
+    ///   fallback would have produced a different number).
+    /// - `total_input` only accumulates when `usage.prompt_tokens > 0`;
+    ///   a Provider fallback does not silently pollute the running sum.
+    /// - `total_output` always accumulates (Providers report completion
+    ///   counts more reliably than prompt counts, and a zero here is
+    ///   usually a true zero — e.g. an aborted streaming response).
+    ///
+    /// `last_active_at` is bumped and the meta file is rewritten on every
+    /// call. Callers should invoke this once per LLM round-trip, not on
+    /// every streaming event.
+    pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
+        if let Ok(mut guard) = self.tokens.lock() {
+            let total_input = if usage.prompt_tokens > 0 {
+                guard
+                    .as_ref()
+                    .map(|t| t.total_input)
+                    .unwrap_or(0)
+                    .saturating_add(usage.prompt_tokens)
+            } else {
+                guard.as_ref().map(|t| t.total_input).unwrap_or(0)
+            };
+            let total_output = guard
+                .as_ref()
+                .map(|t| t.total_output)
+                .unwrap_or(0)
+                .saturating_add(usage.completion_tokens);
+            *guard = Some(SessionTokens {
+                last_input: usage.prompt_tokens,
+                last_output: usage.completion_tokens,
+                total_input,
+                total_output,
+            });
         }
         self.write_meta();
     }
 }
 
-// Safety: ConversationSession only contains String and UnboundedSender,
-// both of which are Send + Sync.
-unsafe impl Send for ConversationSession {}
-unsafe impl Sync for ConversationSession {}
+// Send + Sync are auto-derived: all fields (String, Mutex<X: Send>,
+// AtomicBool/AtomicU64, Instant, UnboundedSender, PathBuf) are Send + Sync.
+
+/// Manual `Clone` so the struct can be cheaply captured into a spawned task
+/// (e.g. session-end distillation that needs to call
+/// [`Self::accumulate_llm_usage`] after the parent has already `.close()`d).
+///
+/// Each clone gets fresh `Mutex` / `Atomic` guards holding the same inner
+/// value at the moment of cloning; later mutations on one clone are not
+/// observed by another clone (the clone is a logical snapshot for read-only
+/// purposes — callers must not mutate shared state from two clones
+/// concurrently). The writer-thread channel sender is shared so any clone
+/// can still append JSONL entries until the writer thread receives
+/// `Shutdown`.
+impl Clone for ConversationSession {
+    fn clone(&self) -> Self {
+        Self {
+            session_id: self.session_id.clone(),
+            agent_id: self.agent_id.clone(),
+            created_at: self.created_at.clone(),
+            title_set: AtomicBool::new(self.title_set.load(Ordering::Relaxed)),
+            current_title: std::sync::Mutex::new(
+                self.current_title.lock().ok().and_then(|t| t.clone()),
+            ),
+            workspace_id: std::sync::Mutex::new(
+                self.workspace_id.lock().ok().and_then(|w| w.clone()),
+            ),
+            model: std::sync::Mutex::new(self.model.lock().ok().and_then(|m| m.clone())),
+            provider: std::sync::Mutex::new(
+                self.provider.lock().ok().and_then(|p| p.clone()),
+            ),
+            reasoning_effort: std::sync::Mutex::new(
+                self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            ),
+            temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
+            tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
+            message_count: AtomicU64::new(self.message_count.load(Ordering::Relaxed)),
+            last_meta_write: std::sync::Mutex::new(
+                self.last_meta_write
+                    .lock()
+                    .ok()
+                    .map(|i| *i)
+                    .unwrap_or_else(Instant::now),
+            ),
+            sender: self.sender.clone(),
+            session_file_path: self.session_file_path.clone(),
+            conversations_dir: self.conversations_dir.clone(),
+        }
+    }
+}
 
 impl Drop for ConversationSession {
     fn drop(&mut self) {
@@ -2029,8 +2120,7 @@ mod tests {
                 temperature: None,
                 message_count: 0,
                 last_active_at: ts.clone(),
-                last_input_tokens: None,
-                last_output_tokens: None,
+                tokens: None,
                 last_compaction_offset: None,
                 corrupted: false,
             };
@@ -2205,8 +2295,7 @@ mod tests {
             temperature: None,
             message_count: 0,
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            last_input_tokens: None,
-            last_output_tokens: None,
+            tokens: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -2257,6 +2346,166 @@ mod tests {
         assert_eq!(meta.session_id, "test");
     }
 
+    // ── ADR-027: SessionTokens accumulation tests ─────────────────
+
+    #[test]
+    fn test_accumulate_llm_usage_basic() {
+        // Two reliable calls accumulate correctly.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let session =
+                ConversationSession::new(&dir, "tok_acc_basic", cfg, 0, committed).unwrap();
+
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 1_000,
+                completion_tokens: 200,
+                ..Default::default()
+            });
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 3_500,
+                completion_tokens: 450,
+                ..Default::default()
+            });
+
+            let tokens = session.tokens().expect("tokens should be set");
+            assert_eq!(tokens.last_input, 3_500, "last_input is the most recent raw value");
+            assert_eq!(tokens.last_output, 450);
+            assert_eq!(tokens.total_input, 4_500);
+            assert_eq!(tokens.total_output, 650);
+        });
+    }
+
+    #[test]
+    fn test_accumulate_llm_usage_skips_input_when_zero() {
+        // Provider fallback (prompt_tokens == 0) must NOT pollute total_input
+        // but MUST still record last_input as raw zero (ADR-027 honesty).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let session =
+                ConversationSession::new(&dir, "tok_acc_zero", cfg, 0, committed).unwrap();
+
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 1_000,
+                completion_tokens: 100,
+                ..Default::default()
+            });
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 0, // Provider fallback
+                completion_tokens: 50,
+                ..Default::default()
+            });
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 2_000,
+                completion_tokens: 80,
+                ..Default::default()
+            });
+
+            let tokens = session.tokens().expect("tokens should be set");
+            assert_eq!(
+                tokens.last_input, 2_000,
+                "last_input reflects the most recent raw Provider value"
+            );
+            assert_eq!(
+                tokens.total_input, 3_000,
+                "total_input skipped the prompt_tokens=0 call (1000 + 2000)"
+            );
+            assert_eq!(
+                tokens.total_output, 230,
+                "total_output accumulates every call (100 + 50 + 80)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_accumulate_llm_usage_saturating_overflow() {
+        // saturating_add guards against pathological Provider counters.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let session =
+                ConversationSession::new(&dir, "tok_acc_overflow", cfg, 0, committed).unwrap();
+
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: u64::MAX,
+                completion_tokens: u64::MAX,
+                ..Default::default()
+            });
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                ..Default::default()
+            });
+
+            let tokens = session.tokens().expect("tokens should be set");
+            assert_eq!(
+                tokens.last_input, 1,
+                "last_input is the most recent raw value, not the sum"
+            );
+            assert_eq!(
+                tokens.total_input, u64::MAX,
+                "saturating_add caps total_input at u64::MAX"
+            );
+            assert_eq!(tokens.total_output, u64::MAX);
+        });
+    }
+
+    #[test]
+    fn test_session_tokens_serde_roundtrip() {
+        let t = SessionTokens {
+            last_input: 100,
+            last_output: 20,
+            total_input: 500,
+            total_output: 80,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let parsed: SessionTokens = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, t);
+    }
+
+    #[test]
+    fn test_session_tokens_default_is_all_zero() {
+        let t = SessionTokens::default();
+        assert_eq!(t.last_input, 0);
+        assert_eq!(t.last_output, 0);
+        assert_eq!(t.total_input, 0);
+        assert_eq!(t.total_output, 0);
+    }
+
+    #[test]
+    fn test_session_meta_tokens_field_default_to_none() {
+        // ADR-027: backward compatibility — pre-ADR-027 meta files have no
+        // `tokens` field; they should deserialize with `tokens: None`.
+        let old_json = r#"{"version":2,"session_id":"pre027","agent_id":"com.test","created_at":"2026-01-01T00:00:00Z","last_active_at":"2026-01-01T00:00:00Z","message_count":0,"corrupted":false}"#;
+        let meta: SessionMeta = serde_json::from_str(old_json).unwrap();
+        assert_eq!(meta.tokens, None);
+    }
+
     #[test]
     fn test_session_meta_serde_roundtrip() {
         // ADR-024: full round-trip with SessionMeta fields.
@@ -2273,15 +2522,26 @@ mod tests {
             temperature: Some(0.7),
             message_count: 5,
             last_active_at: "2026-01-01T00:00:00Z".to_string(),
-            last_input_tokens: Some(45_000),
-            last_output_tokens: Some(1_200),
+            tokens: Some(SessionTokens {
+                last_input: 45_000,
+                last_output: 1_200,
+                total_input: 120_000,
+                total_output: 3_400,
+            }),
             last_compaction_offset: None,
             corrupted: false,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.last_input_tokens, Some(45_000));
-        assert_eq!(parsed.last_output_tokens, Some(1_200));
+        assert_eq!(
+            parsed.tokens,
+            Some(SessionTokens {
+                last_input: 45_000,
+                last_output: 1_200,
+                total_input: 120_000,
+                total_output: 3_400,
+            })
+        );
         assert_eq!(parsed.last_compaction_offset, None);
         assert_eq!(parsed.version, CONVERSATION_FORMAT_VERSION);
         assert_eq!(parsed.model.as_deref(), Some("gpt-4"));
@@ -2292,8 +2552,7 @@ mod tests {
         // ADR-024: old JSON without optional fields defaults correctly.
         let old_json = r#"{"version":2,"session_id":"old","agent_id":"com.test","created_at":"2026-01-01T00:00:00Z","last_active_at":"2026-01-01T00:00:00Z","message_count":0,"corrupted":false}"#;
         let meta: SessionMeta = serde_json::from_str(old_json).unwrap();
-        assert_eq!(meta.last_input_tokens, None, "should default to None");
-        assert_eq!(meta.last_output_tokens, None, "should default to None");
+        assert_eq!(meta.tokens, None, "old JSON without tokens field should default to None");
         assert_eq!(meta.model, None);
         assert_eq!(meta.provider, None);
     }

@@ -585,10 +585,16 @@ impl SessionTask {
 
         // Emit initial context-usage indicator for resumed sessions so the
         // frontend can show input/output token counts without waiting for
-        // the first LLM round. Only fires when persisted last_tokens exist
-        // and model capabilities are available.
+        // the first LLM round. Only fires when persisted SessionTokens
+        // exist and model capabilities are available.
+        //
+        // ADR-027: `tokens.last_input` / `tokens.last_output` are now the
+        // raw Provider-reported values (possibly zero from a fallback).
+        // They are passed through to `build_context_usage_from_persisted`
+        // which derives the display percentage locally — the snapshot is
+        // honest about what the last LLM call actually reported.
         if let Some(ref conv) = agent_loop.session.conversation
-            && let Some((input, output)) = conv.last_tokens()
+            && let Some(persisted) = conv.tokens()
         {
             let model_name = agent_loop
                 .session
@@ -599,12 +605,18 @@ impl SessionTask {
                 let max_output = agent_loop
                     .core
                     .max_output_tokens_limit_for_model(model_name);
+                // Pass the full SessionTokens so the cumulative
+                // total_input_tokens / total_output_tokens fields are
+                // populated in the resulting ContextUsageInfo. This lets
+                // the frontend status panel show session-level cumulative
+                // totals on resume, not just per-turn last values.
                 let ctx = crate::agent::context::build_context_usage_from_persisted(
                     &caps,
-                    input,
-                    output,
+                    persisted.last_input,
+                    persisted.last_output,
                     max_output,
                     agent_loop.core.context_window_override,
+                    Some(&persisted),
                 );
                 if let Some(ref tx) = chunk_tx {
                     let _ = tx

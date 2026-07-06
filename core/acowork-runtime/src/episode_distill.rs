@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
-use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
+use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider, UsageInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::loop_session::strip_think_block;
@@ -178,13 +178,16 @@ impl EpisodeDistiller {
     /// the summary in the user's preferred language (see
     /// [`crate::prompt::build_compaction_system_prompt`]). Pass `None` when
     /// the session has no user profile yet (default → English summary).
+    ///
+    /// Returns `(summary, usage)` per ADR-027 so callers can record raw
+    /// Provider usage in [`crate::conversation::SessionTokens`].
     pub async fn compact_full_context(
         messages: &[ChatMessage],
         provider: &dyn Provider,
         model_name: &str,
         distill_max_tokens: u32,
         identity_context: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<(String, UsageInfo)> {
         let messages_text = format_messages(messages);
         if messages_text.is_empty() {
             return Err(RuntimeError::Tool(
@@ -201,13 +204,16 @@ impl EpisodeDistiller {
     /// when the caller already has the exact message range. `identity_context` is
     /// threaded through for the same language-aware reason as in
     /// [`Self::compact_full_context`].
+    ///
+    /// Returns `(summary, usage)` per ADR-027 so callers can record raw
+    /// Provider usage in [`crate::conversation::SessionTokens`].
     pub async fn compact_messages(
         messages: &[ChatMessage],
         provider: &dyn Provider,
         model_name: &str,
         distill_max_tokens: u32,
         identity_context: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<(String, UsageInfo)> {
         Self::compact_full_context(
             messages,
             provider,
@@ -222,12 +228,16 @@ impl EpisodeDistiller {
     ///
     /// Reads the JSONL file and produces a session-level natural-language summary.
     /// If the session content is shorter than `min_distill_chars`, the raw text is
-    /// used directly as summary — no LLM call is made.
+    /// used directly as summary — no LLM call is made (and `usage` in the
+    /// returned tuple is `UsageInfo::default()`).
     ///
     /// `identity_context` is threaded into the system prompt when an LLM call
     /// is made so the summary lands in the user's preferred language. When the
     /// raw-text fallback path is taken, no LLM is invoked and identity is not
     /// consulted (the raw conversation text is used as-is).
+    ///
+    /// Returns `(episode, usage)` per ADR-027 so callers can record raw
+    /// Provider usage in [`crate::conversation::SessionTokens`].
     pub async fn distill_on_session_end(
         session_path: &Path,
         session_id: &str,
@@ -236,7 +246,7 @@ impl EpisodeDistiller {
         min_distill_chars: usize,
         distill_max_tokens: u32,
         identity_context: Option<&str>,
-    ) -> Result<DistilledEpisode> {
+    ) -> Result<(DistilledEpisode, UsageInfo)> {
         let messages_text = read_jsonl_content(session_path)?;
         if messages_text.is_empty() {
             return Err(RuntimeError::Tool(
@@ -244,13 +254,13 @@ impl EpisodeDistiller {
             ));
         }
 
-        let summary = if messages_text.len() < min_distill_chars {
+        let (summary, usage) = if messages_text.len() < min_distill_chars {
             tracing::debug!(
                 len = messages_text.len(),
                 threshold = min_distill_chars,
                 "Session content is short — using raw text as summary, skipping LLM"
             );
-            messages_text
+            (messages_text, UsageInfo::default())
         } else {
             let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
             compact_with_llm(
@@ -264,14 +274,17 @@ impl EpisodeDistiller {
             .await?
         };
 
-        Ok(DistilledEpisode {
-            session_id: session_id.to_string(),
-            summary,
-            source_session_id: session_id.to_string(),
-            consolidated: false,
-            entities: Vec::new(),
-            triples: Vec::new(),
-        })
+        Ok((
+            DistilledEpisode {
+                session_id: session_id.to_string(),
+                summary,
+                source_session_id: session_id.to_string(),
+                consolidated: false,
+                entities: Vec::new(),
+                triples: Vec::new(),
+            },
+            usage,
+        ))
     }
 
     /// Write a natural-language summary directly to Grafeo as an episodic memory.
@@ -428,6 +441,12 @@ fn read_jsonl_content(path: &Path) -> Result<String> {
 /// `system_prompt` is passed through to
 /// [`crate::prompt::build_compaction_system_prompt`] together with
 /// `identity_context` so the summary lands in the user's preferred language.
+///
+/// Returns `(summary, usage)` so the caller can record raw Provider usage
+/// in the session's [`SessionTokens`] accumulator (ADR-027). `usage` is the
+/// raw `UsageInfo` from the response, or `UsageInfo::default()` if the
+/// Provider did not return one — callers must check `usage.prompt_tokens > 0`
+/// before treating the values as a real cost record.
 pub(crate) async fn compact_with_llm(
     prompt: &str,
     provider: &dyn Provider,
@@ -435,7 +454,7 @@ pub(crate) async fn compact_with_llm(
     max_tokens: u32,
     identity_context: Option<&str>,
     system_prompt: &str,
-) -> Result<String> {
+) -> Result<(String, UsageInfo)> {
     let system_prompt = crate::prompt::build_compaction_system_prompt(
         system_prompt,
         identity_context,
@@ -467,6 +486,11 @@ pub(crate) async fn compact_with_llm(
         .await
         .map_err(RuntimeError::Core)?;
 
+    // ADR-027: capture raw Provider usage for session token accounting.
+    // Providers that omit usage (e.g. some local mocks) yield
+    // `UsageInfo::default()` — callers can detect this by `prompt_tokens == 0`.
+    let usage = response.usage.unwrap_or_default();
+
     // Strip any thinking/reasoning blocks that may have leaked into content.
     // NEVER fall back to reasoning_content — it is the model's internal
     // monologue, not a useful summary.
@@ -482,7 +506,7 @@ pub(crate) async fn compact_with_llm(
             "Compact model returned empty response{hint}"
         )));
     }
-    Ok(summary)
+    Ok((summary, usage))
 }
 
 /// Generate a session title from the first user message using the compact model.
@@ -494,12 +518,16 @@ pub(crate) async fn compact_with_llm(
 ///
 /// `prompt` should be [`crate::prompt::TITLE_PROMPT`] with `{language}` and
 /// `{user_message}` already resolved by the caller.
+///
+/// Returns `(title, usage)` so the caller can record raw Provider usage in
+/// the session's [`SessionTokens`] accumulator (ADR-027). `usage` is the
+/// raw `UsageInfo` from the response, or `UsageInfo::default()` if absent.
 pub async fn compact_session_title_with_llm(
     prompt: &str,
     provider: &dyn Provider,
     model_name: &str,
     max_tokens: u32,
-) -> Result<String> {
+) -> Result<(String, UsageInfo)> {
     // Explicitly disable deep thinking for title generation.
     // Reasoning models (DeepSeek, o-series) may otherwise put the entire
     // response in reasoning_content, leaving content empty — and
@@ -521,6 +549,9 @@ pub async fn compact_session_title_with_llm(
         .await
         .map_err(RuntimeError::Core)?;
 
+    // ADR-027: capture raw Provider usage for session token accounting.
+    let usage = response.usage.unwrap_or_default();
+
     // Never fall back to reasoning_content — it is the model's internal
     // monologue and unsuitable as a user-facing title.
     const MAX_RAW_LEN: usize = 500;
@@ -536,7 +567,7 @@ pub async fn compact_session_title_with_llm(
             "Title model returned empty response{hint}"
         )));
     }
-    Ok(title)
+    Ok((title, usage))
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +577,132 @@ pub async fn compact_session_title_with_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acowork_core::providers::traits::ChatResponse;
+
+    /// Minimal stub Provider that returns a canned `ChatResponse`.
+    ///
+    /// Used to verify that `compact_with_llm` / `compact_session_title_with_llm`
+    /// correctly thread `UsageInfo` through their return tuple (ADR-027).
+    struct StubProvider {
+        content: String,
+        usage: Option<UsageInfo>,
+    }
+
+    impl StubProvider {
+        fn new(content: &str) -> Self {
+            Self {
+                content: content.to_string(),
+                usage: None,
+            }
+        }
+        fn with_usage(content: &str, usage: UsageInfo) -> Self {
+            Self {
+                content: content.to_string(),
+                usage: Some(usage),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for StubProvider {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn chat(
+            &self,
+            _request: ChatRequest,
+        ) -> std::result::Result<ChatResponse, acowork_core::AcoworkError> {
+            Ok(ChatResponse {
+                content: self.content.clone(),
+                usage: self.usage.clone(),
+                ..Default::default()
+            })
+        }
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> std::result::Result<
+            Box<dyn futures_core::Stream<Item = acowork_core::providers::traits::StreamEvent> + Send>,
+            acowork_core::AcoworkError,
+        > {
+            Err(acowork_core::AcoworkError::Unknown(
+                "streaming not supported in stub".to_string(),
+            ))
+        }
+        async fn chat_token_count(
+            &self,
+            _messages: &[acowork_core::providers::traits::ChatMessage],
+        ) -> std::result::Result<u64, acowork_core::AcoworkError> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compact_with_llm_returns_usage_tuple_when_provider_supplies_it() {
+        // ADR-027: Provider returning usage must thread through (String, UsageInfo).
+        let provider = StubProvider::with_usage(
+            "summary text",
+            UsageInfo {
+                prompt_tokens: 4_000,
+                completion_tokens: 800,
+                total_tokens: 4_800,
+                ..Default::default()
+            },
+        );
+        let result = compact_with_llm(
+            "ignored",
+            &provider,
+            "model",
+            1024,
+            None,
+            crate::prompt::COMPACTION_SYSTEM_PROMPT,
+        )
+        .await;
+        let (summary, usage) = result.expect("compact_with_llm should succeed");
+        assert_eq!(summary, "summary text");
+        assert_eq!(usage.prompt_tokens, 4_000);
+        assert_eq!(usage.completion_tokens, 800);
+        assert_eq!(usage.total_tokens, 4_800);
+    }
+
+    #[tokio::test]
+    async fn test_compact_with_llm_returns_zero_usage_when_provider_omits_it() {
+        // ADR-027 "宁可 miss 也不估计": when Provider returns no usage,
+        // the second tuple element is UsageInfo::default() (all zeros).
+        let provider = StubProvider::new("summary text");
+        let result = compact_with_llm(
+            "ignored",
+            &provider,
+            "model",
+            1024,
+            None,
+            crate::prompt::COMPACTION_SYSTEM_PROMPT,
+        )
+        .await;
+        let (_summary, usage) = result.expect("compact_with_llm should succeed");
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn test_compact_session_title_with_llm_returns_usage_tuple() {
+        // Title generation also returns (title, usage) per ADR-027.
+        let provider = StubProvider::with_usage(
+            "Rust async ownership",
+            UsageInfo {
+                prompt_tokens: 200,
+                completion_tokens: 10,
+                total_tokens: 210,
+                ..Default::default()
+            },
+        );
+        let result =
+            compact_session_title_with_llm("ignored", &provider, "model", 64).await;
+        let (title, usage) = result.expect("title generation should succeed");
+        assert_eq!(title, "Rust async ownership");
+        assert_eq!(usage.prompt_tokens, 200);
+        assert_eq!(usage.completion_tokens, 10);
+    }
 
     #[test]
     fn test_select_cheapest_model_empty() {

@@ -137,6 +137,10 @@ pub async fn dispatch_grpc_request(
                     max_input_tokens: None,
                     usable_context: 0,
                     usage_percent: 0,
+                    // Cumulative session totals are absent when the runtime
+                    // sends a malformed payload; leave them as None.
+                    total_input_tokens: None,
+                    total_output_tokens: None,
                 },
             };
             let agent_id = req.agent_id;

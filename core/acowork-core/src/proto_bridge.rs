@@ -54,6 +54,8 @@ impl From<&protocol::ContextUsageInfo> for proto::ContextUsageInfo {
             max_input_tokens: c.max_input_tokens.unwrap_or(0),
             usable_context: c.usable_context,
             usage_percent: c.usage_percent as u32,
+            total_input_tokens: c.total_input_tokens,
+            total_output_tokens: c.total_output_tokens,
         }
     }
 }
@@ -72,6 +74,8 @@ impl From<proto::ContextUsageInfo> for protocol::ContextUsageInfo {
             },
             usable_context: c.usable_context,
             usage_percent: c.usage_percent as u8,
+            total_input_tokens: c.total_input_tokens,
+            total_output_tokens: c.total_output_tokens,
         }
     }
 }
@@ -833,6 +837,9 @@ mod tests {
             max_input_tokens: Some(120000),
             usable_context: 96000,
             usage_percent: 42,
+            // Cumulative session totals — None for a session with no recorded usage.
+            total_input_tokens: None,
+            total_output_tokens: None,
         };
 
         let proto_msg: proto::ContextUsageInfo = (&original).into();
@@ -845,6 +852,72 @@ mod tests {
         assert_eq!(restored.max_input_tokens, original.max_input_tokens);
         assert_eq!(restored.usable_context, original.usable_context);
         assert_eq!(restored.usage_percent, original.usage_percent);
+        assert_eq!(restored.total_input_tokens, original.total_input_tokens);
+        assert_eq!(restored.total_output_tokens, original.total_output_tokens);
+    }
+
+    #[test]
+    fn test_context_usage_info_roundtrip_with_cumulative_totals() {
+        // Cumulative session totals (Some) must round-trip cleanly. This is
+        // the "session in progress" state — per-turn fields populated from
+        // the most recent LLM call AND cumulative fields populated from
+        // SessionTokens.
+        let original = protocol::ContextUsageInfo {
+            context_window: 128000,
+            input_tokens: 45000,
+            output_tokens: 1200,
+            total_tokens: 46200,
+            max_input_tokens: Some(120000),
+            usable_context: 96000,
+            usage_percent: 38,
+            total_input_tokens: Some(120_000),
+            total_output_tokens: Some(3_400),
+        };
+
+        let proto_msg: proto::ContextUsageInfo = (&original).into();
+        let restored: protocol::ContextUsageInfo = proto_msg.into();
+
+        assert_eq!(restored.total_input_tokens, Some(120_000));
+        assert_eq!(restored.total_output_tokens, Some(3_400));
+        // Per-turn fields stay distinct from cumulative fields.
+        assert_eq!(restored.input_tokens, 45000);
+        assert_eq!(restored.output_tokens, 1200);
+        assert_ne!(
+            restored.total_input_tokens.unwrap(),
+            restored.input_tokens,
+            "cumulative total_input_tokens must not equal per-turn input_tokens",
+        );
+    }
+
+    #[test]
+    fn test_context_usage_info_backward_compat_without_cumulative_totals() {
+        // Older Runtime that does NOT populate the new optional fields must
+        // still deserialize cleanly into the protocol struct (fields default
+        // to None). Simulate by serializing a struct with None and verifying
+        // the JSON omits the keys (skip_serializing_if works) and that the
+        // round-trip yields None.
+        let original = protocol::ContextUsageInfo {
+            context_window: 200_000,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            max_input_tokens: None,
+            usable_context: 192_000,
+            usage_percent: 0,
+            total_input_tokens: None,
+            total_output_tokens: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            !json.contains("total_input_tokens"),
+            "None cumulative fields must be omitted from JSON for backward compat: {json}",
+        );
+        assert!(!json.contains("total_output_tokens"));
+
+        // Round-trip back: optional fields still None.
+        let restored: protocol::ContextUsageInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.total_input_tokens, None);
+        assert_eq!(restored.total_output_tokens, None);
     }
 
     #[test]

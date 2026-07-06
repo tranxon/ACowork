@@ -660,13 +660,16 @@ impl HistoryManager {
     /// When `Some`, it is embedded into the system prompt so the LLM writes
     /// the summary in the user's preferred language. Pass `None` when the
     /// session has no user profile yet (default → English summary).
+    ///
+    /// Returns `(summary, usage)` per ADR-027 so callers can record raw
+    /// Provider usage in [`crate::conversation::SessionTokens`].
     pub async fn compact_via_llm(
         &self,
         provider: &dyn Provider,
         model_name: &str,
         system_prompt: &str,
         identity_context: Option<&str>,
-    ) -> std::result::Result<String, RuntimeError> {
+    ) -> std::result::Result<(String, acowork_core::providers::traits::UsageInfo), RuntimeError> {
         let messages_text = crate::episode_distill::format_messages(&self.messages);
         if messages_text.is_empty() {
             return Err(RuntimeError::Tool(

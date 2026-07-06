@@ -784,9 +784,15 @@ mod tests {
         };
         let fresh = compute_context_usage(&caps, &usage, max_output_limit, None);
 
-        // Via build_context_usage_from_persisted with same numbers
-        let persisted =
-            build_context_usage_from_persisted(&caps, 45_000, 1_200, max_output_limit, None);
+        // Via build_context_usage_from_persisted with same numbers (no cumulative)
+        let persisted = build_context_usage_from_persisted(
+            &caps,
+            45_000,
+            1_200,
+            max_output_limit,
+            None,
+            None,
+        );
 
         assert_eq!(fresh.context_window, persisted.context_window);
         assert_eq!(fresh.input_tokens, persisted.input_tokens);
@@ -795,17 +801,66 @@ mod tests {
         assert_eq!(fresh.max_input_tokens, persisted.max_input_tokens);
         assert_eq!(fresh.usable_context, persisted.usable_context);
         assert_eq!(fresh.usage_percent, persisted.usage_percent);
+        // Without cumulative tokens supplied, the new fields stay None.
+        assert_eq!(persisted.total_input_tokens, None);
+        assert_eq!(persisted.total_output_tokens, None);
     }
 
     #[test]
     fn test_build_context_usage_from_persisted_zero_tokens() {
         // New session with no token data yet → should produce 0 input/output
         let caps = test_caps(200_000, 8_192);
-        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768, None);
+        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768, None, None);
         assert_eq!(info.input_tokens, 0);
         assert_eq!(info.output_tokens, 0);
         assert_eq!(info.total_tokens, 0);
         assert_eq!(info.usage_percent, 0);
+        assert_eq!(info.total_input_tokens, None);
+        assert_eq!(info.total_output_tokens, None);
+    }
+
+    #[test]
+    fn test_build_context_usage_from_persisted_populates_cumulative_totals() {
+        // When SessionTokens is supplied, the resulting ContextUsageInfo must
+        // carry the cumulative total_input_tokens / total_output_tokens.
+        // This is the path used by session_task.rs on resume to give the
+        // frontend both per-turn (last) and cumulative (total) figures.
+        use crate::conversation::SessionTokens;
+
+        let caps = test_caps(128_000, 16_384);
+        let cumulative = SessionTokens {
+            last_input: 45_000,
+            last_output: 1_200,
+            total_input: 250_000,
+            total_output: 7_500,
+        };
+
+        let info = build_context_usage_from_persisted(
+            &caps,
+            cumulative.last_input,
+            cumulative.last_output,
+            32_768,
+            None,
+            Some(&cumulative),
+        );
+
+        // Per-turn fields populated from last_input/last_output scalars.
+        assert_eq!(info.input_tokens, 45_000);
+        assert_eq!(info.output_tokens, 1_200);
+        assert_eq!(info.total_tokens, 46_200);
+
+        // Cumulative fields populated from SessionTokens.total_*.
+        assert_eq!(info.total_input_tokens, Some(250_000));
+        assert_eq!(info.total_output_tokens, Some(7_500));
+
+        // Cumulative totals must be distinct from per-turn values (the
+        // whole point of having both sets of fields).
+        assert_ne!(
+            info.total_input_tokens.unwrap(),
+            info.input_tokens,
+            "cumulative total_input_tokens must NOT equal per-turn input_tokens",
+        );
+        assert!(info.total_input_tokens.unwrap() > info.input_tokens);
     }
 
     #[test]
@@ -943,6 +998,14 @@ pub fn compute_context_usage(
         max_input_tokens: caps.max_input_tokens,
         usable_context: effective_usable,
         usage_percent: percent,
+        // compute_context_usage only sees per-turn UsageInfo. Cumulative
+        // session totals (total_input_tokens / total_output_tokens) must
+        // be patched by the caller after consulting SessionTokens. They
+        // default to None here so per-turn callers (e.g. loop_context.rs
+        // fallback path) don't accidentally surface a stale cumulative
+        // figure from a previous round.
+        total_input_tokens: None,
+        total_output_tokens: None,
     }
 }
 
@@ -958,18 +1021,32 @@ pub fn compute_context_usage(
 /// sessions.
 ///
 /// `context_window_cap` mirrors the same parameter on [`compute_context_usage`].
+///
+/// `cumulative_tokens` optionally carries the full [`crate::conversation::SessionTokens`]
+/// so the cumulative `total_input_tokens` / `total_output_tokens` fields can be
+/// populated on the resulting [`ContextUsageInfo`]. Pass `None` when only the
+/// last-turn snapshot is available (e.g. unit tests exercising the legacy
+/// scalar path).
 pub fn build_context_usage_from_persisted(
     caps: &ModelCapabilitiesInfo,
     last_input_tokens: u64,
     last_output_tokens: u64,
     max_output_tokens_limit: u64,
     context_window_cap: Option<u64>,
+    cumulative_tokens: Option<&crate::conversation::SessionTokens>,
 ) -> acowork_core::protocol::ContextUsageInfo {
-    let usage = acowork_core::providers::traits::UsageInfo {
-        prompt_tokens: last_input_tokens,
-        completion_tokens: last_output_tokens,
-        total_tokens: last_input_tokens + last_output_tokens,
-        ..Default::default()
+    let mut info = {
+        let usage = acowork_core::providers::traits::UsageInfo {
+            prompt_tokens: last_input_tokens,
+            completion_tokens: last_output_tokens,
+            total_tokens: last_input_tokens + last_output_tokens,
+            ..Default::default()
+        };
+        compute_context_usage(caps, &usage, max_output_tokens_limit, context_window_cap)
     };
-    compute_context_usage(caps, &usage, max_output_tokens_limit, context_window_cap)
+    if let Some(t) = cumulative_tokens {
+        info.total_input_tokens = Some(t.total_input);
+        info.total_output_tokens = Some(t.total_output);
+    }
+    info
 }

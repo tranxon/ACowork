@@ -335,15 +335,23 @@ export interface TokenUsage {
   total_tokens: number;
 }
 
-/** Context usage info reported by Runtime, forwarded via Gateway WebSocket */
+/** Context usage info reported by Runtime, forwarded via Gateway WebSocket
+ *
+ *  Per-turn fields (`input_tokens`, `output_tokens`, `total_tokens`) reflect the
+ *  most recent LLM call only. Cumulative session fields
+ *  (`total_input_tokens`, `total_output_tokens`) accumulate across all LLM
+ *  calls in the session and are sourced from the runtime's SessionTokens.
+ *  They are `undefined` until the first LLM call has been recorded (e.g.
+ *  before any tool call has been made in a fresh session).
+ */
 export interface ContextUsageInfo {
   /** Context window limit (from model capabilities) */
   context_window: number;
-  /** Current input tokens used (prompt_tokens from API response) */
+  /** Current input tokens used (prompt_tokens from API response, last turn) */
   input_tokens: number;
-  /** Current output tokens generated (completion_tokens) */
+  /** Current output tokens generated (completion_tokens, last turn) */
   output_tokens: number;
-  /** Total tokens (input + output) */
+  /** Total tokens of the last turn (input + output) */
   total_tokens: number;
   /** Max input tokens (from models.dev limit.input, if available) */
   max_input_tokens?: number;
@@ -351,6 +359,12 @@ export interface ContextUsageInfo {
   usable_context: number;
   /** Usage percentage (0-100) */
   usage_percent: number;
+  /** Cumulative input tokens across all LLM calls in this session.
+   *  Undefined until the first LLM call has been recorded. */
+  total_input_tokens?: number;
+  /** Cumulative output tokens across all LLM calls in this session.
+   *  Undefined until the first LLM call has been recorded. */
+  total_output_tokens?: number;
 }
 
 /** Navigation view type */

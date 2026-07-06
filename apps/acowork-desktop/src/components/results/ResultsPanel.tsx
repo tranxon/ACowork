@@ -426,7 +426,19 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               {contextUsage && <div className="border-t border-zinc-100 dark:border-zinc-700/50 mb-2" />}
               <StatRow label={t("resultsPanel.promptTokens")} value={(tokenUsage?.prompt_tokens ?? contextUsage?.input_tokens)?.toLocaleString()} />
               <StatRow label={t("resultsPanel.completionTokens")} value={(tokenUsage?.completion_tokens ?? contextUsage?.output_tokens)?.toLocaleString()} />
-              <StatRow label={t("resultsPanel.totalTokens")} value={(tokenUsage?.total_tokens ?? contextUsage?.total_tokens)?.toLocaleString()} />
+              {/* Cumulative session totals — sourced from SessionTokens via the
+                  context_usage WebSocket event. Distinct from the per-turn
+                  Prompt / Completion rows above (which use the `last_` value
+                  from the most recent LLM call). Rendered only when the runtime
+                  has reported at least one LLM call for this session. */}
+              <StatRow
+                label={t("resultsPanel.totalInputTokens")}
+                value={contextUsage?.total_input_tokens?.toLocaleString()}
+              />
+              <StatRow
+                label={t("resultsPanel.totalOutputTokens")}
+                value={contextUsage?.total_output_tokens?.toLocaleString()}
+              />
               <StatRow label={t("resultsPanel.iterations")} value={iterations ? String(iterations) : undefined} />
               {sessionModel && (
                 <StatRow label={t("resultsPanel.labelModel")} value={sessionModel} />

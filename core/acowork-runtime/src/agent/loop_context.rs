@@ -85,6 +85,16 @@ impl AgentLoop {
                 } else {
                     0
                 };
+                // Pull cumulative session totals so the frontend status
+                // panel can render session-level Total Input / Total Output
+                // alongside per-turn input_tokens / output_tokens.
+                let (total_input, total_output) = self
+                    .session
+                    .conversation
+                    .as_ref()
+                    .and_then(|c| c.tokens())
+                    .map(|t| (Some(t.total_input), Some(t.total_output)))
+                    .unwrap_or((None, None));
                 let ctx_info = acowork_core::protocol::ContextUsageInfo {
                     context_window: effective_window,
                     input_tokens: total_tokens,
@@ -93,6 +103,8 @@ impl AgentLoop {
                     max_input_tokens: caps.max_input_tokens,
                     usable_context: effective_usable,
                     usage_percent: percent,
+                    total_input_tokens: total_input,
+                    total_output_tokens: total_output,
                 };
                 tracing::info!(
                     context_window = effective_window,
@@ -269,7 +281,12 @@ impl AgentLoop {
                 )
                 .await
             {
-                Ok(summary) => {
+                Ok((summary, usage)) => {
+                    // ADR-027: record raw Provider usage from compaction
+                    // call into the session token accumulator.
+                    if let Some(ref conversation) = self.session.conversation {
+                        conversation.accumulate_llm_usage(&usage);
+                    }
                     let stripped = crate::episode_distill::strip_metadata_blocks(&summary);
                     let removed = self
                         .session
@@ -387,6 +404,16 @@ impl AgentLoop {
                 } else {
                     0
                 };
+                // Pull cumulative session totals for the post-compaction
+                // snapshot so the frontend status panel can update both
+                // per-turn and cumulative fields in one push.
+                let (total_input, total_output) = self
+                    .session
+                    .conversation
+                    .as_ref()
+                    .and_then(|c| c.tokens())
+                    .map(|t| (Some(t.total_input), Some(t.total_output)))
+                    .unwrap_or((None, None));
                 let ctx_info = acowork_core::protocol::ContextUsageInfo {
                     context_window: effective_window,
                     input_tokens: total_tokens,
@@ -395,6 +422,8 @@ impl AgentLoop {
                     max_input_tokens: caps.max_input_tokens,
                     usable_context: effective_usable,
                     usage_percent,
+                    total_input_tokens: total_input,
+                    total_output_tokens: total_output,
                 };
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
@@ -670,6 +699,8 @@ impl AgentLoop {
                         max_input_tokens: caps.max_input_tokens,
                         usable_context: effective_usable,
                         usage_percent: percent,
+                        total_input_tokens: None,
+                        total_output_tokens: None,
                     }
                 };
                 tracing::debug!(
@@ -679,15 +710,30 @@ impl AgentLoop {
                     "ContextUsage: sending report"
                 );
 
-                // Persist the raw usage counts so the frontend context-usage
-                // indicator can be restored on session resume (loop-emit).
-                // Must happen BEFORE try_send_chunk moves ctx_usage, and uses
-                // ctx_usage.{input_tokens,output_tokens} (not usage.*) so the
-                // persisted value always matches what the frontend receives —
-                // even when prompt_tokens_reliable=false and input_tokens
-                // falls back to the local char-based estimate.
+                // Persist the raw Provider-reported usage counts so the
+                // frontend context-usage indicator can be restored on
+                // session resume. ADR-027 deliberately uses `usage.*`
+                // (raw Provider values) rather than `ctx_usage.*` so the
+                // persisted snapshot faithfully reflects what the Provider
+                // returned — even when `prompt_tokens_reliable == false`
+                // and the frontend display falls back to the local
+                // tokenizer estimate. The "宁可 miss 也不估计" policy
+                // prefers a raw zero over a local estimate in the
+                // accumulator.
+                //
+                // After accumulation, the SessionTokens cumulative totals
+                // (`total_input`, `total_output`) reflect this LLM call,
+                // so we patch the just-computed `ctx_usage` with them
+                // before pushing to the frontend. This lets the status
+                // panel show session-level cumulative figures alongside
+                // per-turn input_tokens / output_tokens.
+                let mut ctx_usage = ctx_usage;
                 if let Some(ref conv) = self.session.conversation {
-                    conv.update_last_tokens(ctx_usage.input_tokens, ctx_usage.output_tokens);
+                    conv.accumulate_llm_usage(usage);
+                    if let Some(t) = conv.tokens() {
+                        ctx_usage.total_input_tokens = Some(t.total_input);
+                        ctx_usage.total_output_tokens = Some(t.total_output);
+                    }
                 }
 
                 if !self
