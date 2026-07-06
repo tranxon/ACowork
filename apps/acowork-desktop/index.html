@@ -8,29 +8,22 @@
       // Detect system dark mode before React renders — prevents flash of wrong theme.
       // The window starts with visible:false (tauri.conf.json) and is shown only
       // after React renders, so there's no user-visible flash.
-      // Background-color is only set on non-macOS platforms as a resize-reflow
-      // placeholder — on macOS it would mask the NSVisualEffectView vibrancy
-      // layer that provides the frosted-glass effect.
       (function() {
         var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         if (isDark) {
           document.documentElement.classList.add('dark');
         }
-        // Only set solid background on non-macOS (Windows/Linux need it for
-        // DWM resize placeholder; macOS vibrancy requires transparent html).
-        if (!navigator.platform.includes('Mac')) {
-          document.documentElement.style.backgroundColor = isDark ? '#18181b' : '#FAFAFA';
-        }
       })();
     </script>
     <style>
-      /* Theme-matched background — prevents jarring transparent gap during
-         window resize on non-macOS.  On macOS the html stays transparent
-         so NSVisualEffectView vibrancy can show through. */
+      /* Keep html/body transparent so the OS-native blur layer
+         (DWM Acrylic on Windows, NSVisualEffectView on macOS) can
+         show through.  The resize-reflow placeholder is handled by
+         the Rust-side WindowEffectsConfig.color, not by CSS. */
       html, body {
         margin: 0;
         padding: 0;
-        background-color: inherit;
+        background-color: transparent;
       }
     </style>
   </head>

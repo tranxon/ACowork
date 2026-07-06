@@ -152,12 +152,22 @@ export function AppLayout() {
   // there is always enough white CSS tint to lift the overall appearance.
   // Dark mode is unaffected because the native dark tint is already
   // appropriate there.
+  //
+  // Windows DWM Acrylic does NOT have this dark tint issue — it
+  // faithfully blurs the desktop content in both light and dark modes.
+  // Applying the floor on Windows would make the glass effect
+  // unnecessarily opaque, so we skip it on non-macOS platforms.
+  const isMacOS =
+    typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
   const LIGHT_OPACITY_FLOOR = 0.18;
   const { opacity, theme, osTheme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
+  const lightOpacity = isMacOS
+    ? Math.max(opacity, LIGHT_OPACITY_FLOOR)
+    : opacity;
   const glassBg = isDark
     ? `rgba(41,42,44,${opacity})`
-    : `rgba(226,227,233,${Math.max(opacity, LIGHT_OPACITY_FLOOR)})`;
+    : `rgba(226,227,233,${lightOpacity})`;
 
   // ── Switch to debug tab when entering debug mode ─────────────────
   const prevIsDebugMode = useRef(isDebugMode);
