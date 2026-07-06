@@ -22,17 +22,29 @@ export interface PendingImage {
 }
 
 /**
- * All per-session mutable state that does NOT need to trigger React re-renders.
- * Stored in a single ref object; reset atomically on session change.
+ * Per-session mutable ref state. Stores values that need to persist across
+ * renders within a session but don't trigger re-renders when written.
+ *
+ * IMPORTANT: This ref only holds PER-SESSION state.  Per-user-intent UI
+ * state (such as scroll-pinned-to-bottom, which survives across session
+ * switches and is owned by ChatPanel via its own ref) MUST NOT live here.
+ *
+ * All fields are reset atomically when the active session changes within
+ * the same component instance, so per-session state never leaks across
+ * sessions.  A fresh component instance starts with default values
+ * (created by useRef(default)), so no reset is needed on first mount.
  */
 export interface SessionScope {
   // ── Scroll & Virtual ──
+  /** Captured scrollHeight before "load more" prepends messages upstream. */
   prevScrollHeight: number;
+  /** True while the load-more HTTP request is in flight. */
   isLoadingMore: boolean;
   /** Tracks which session ID is being initial-loaded (or "__init__" for agent init). */
   isInitialLoad: string | null;
+  /** True for the render immediately after the user sends a message. */
   userJustSent: boolean;
-  pinnedToBottom: boolean;
+  /** True while the LLM is in its "thinking" prelude (before any text streamed). */
   thinkingWasShowing: boolean;
   /** Previous display count for scroll-on-new-message logic. */
   prevDisplayCount: number;
@@ -48,7 +60,6 @@ export function createDefaultSessionScope(): SessionScope {
     isLoadingMore: false,
     isInitialLoad: null,
     userJustSent: false,
-    pinnedToBottom: false,
     thinkingWasShowing: false,
     prevDisplayCount: 0,
     prevStickyCount: 0,
@@ -87,14 +98,16 @@ export interface SessionScopeAPI {
 /**
  * Consolidates all per-session refs and state into a single hook.
  *
- * On session change (currentSessionId differs from previous render):
- *  - The entire SessionScope ref is replaced with a fresh default.
- *  - All state values are reset to their initial defaults.
- *  - The optional `onSessionChange` callback is invoked (e.g. for
- *    virtualizer.measure() to clear measurement cache).
- *
+ * On GENUINE SESSION CHANGE within the same component instance (current
+ * session ID differs from the previous render), the entire SessionScope
+ * ref is replaced with a fresh default and all state values are reset.
  * This eliminates the class of bugs where per-session refs/state leak
  * across session switches because individual variables were not reset.
+ *
+ * On FRESH MOUNT (first render of a new component instance), no reset
+ * is needed: scopeRef is already initialized to its default state by
+ * useRef(createDefaultSessionScope()), and useState values start at their
+ * initial defaults.
  */
 export function useSessionScope(
   currentSessionId: string | null,
@@ -114,24 +127,33 @@ export function useSessionScope(
 
   // ── Reset on session change ──
   useLayoutEffect(() => {
-    if (currentSessionId !== prevSessionRef.current) {
-      prevSessionRef.current = currentSessionId;
+    if (currentSessionId === prevSessionRef.current) return;
 
-      // Reset all ref-based state atomically
-      scopeRef.current = createDefaultSessionScope();
+    // Capture the previous value BEFORE overwriting so we can distinguish a
+    // fresh mount (prev was null) from a genuine session change (prev was a
+    // non-null session ID different from the new one).
+    const isFreshMount = prevSessionRef.current === null;
+    prevSessionRef.current = currentSessionId;
 
-      // Reset all state-based values
-      setInputValue("");
-      setPendingFiles([]);
-      setPendingImages([]);
-      setShowImageUnsupportedDialog(false);
-      setImageCapableModels([]);
-      setTodosCollapsed(false);
-      setShowScrollToBottom(false);
-
-      // Notify parent (e.g. to clear virtualizer measurement cache)
-      onSessionChange?.();
+    if (isFreshMount) {
+      // Fresh mount: scope is already in default state (useRef(default)) and
+      // useState values already hold their initial defaults.  No reset needed.
+      // (Per-user-intent scroll state such as pinnedToBottom is owned OUTSIDE
+      // this hook — by ChatPanel via its own ref — so it is not affected.)
+      return;
     }
+
+    // Genuine session change within the same component instance — reset all
+    // per-session state to clear leaks across sessions.
+    scopeRef.current = createDefaultSessionScope();
+    setInputValue("");
+    setPendingFiles([]);
+    setPendingImages([]);
+    setShowImageUnsupportedDialog(false);
+    setImageCapableModels([]);
+    setTodosCollapsed(false);
+    setShowScrollToBottom(false);
+    onSessionChange?.();
   }, [currentSessionId, onSessionChange]);
 
   return {

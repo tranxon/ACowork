@@ -364,6 +364,15 @@ export function ChatPanel() {
   const justMountedRef = useRef(true);
   /** Session key captured on unmount so chat navigation can restore the scroll position. */
   const scrollSnapshotKeyRef = useRef<string | null>(null);
+  /**
+   * "Pinned to bottom" UI preference — owned HERE (not in session.scope)
+   * because it is per-USER-INTENT, not per-session.  Owned by ChatPanel so
+   * it survives useSessionScope's session-change reset.  Shared with
+   * VirtualMessageList via prop, which writes to it on mount and reads it
+   * from the sticky-bottom effect.  handleScroll and scrollToBottom also
+   * write to it from user-initiated scroll/button actions.
+   */
+  const pinnedToBottomRef = useRef(false);
 
   const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
   scrollSnapshotKeyRef.current = currentScrollKey;
@@ -374,11 +383,21 @@ export function ChatPanel() {
   const scrollSnapshot = currentScrollKey
     ? chatScrollSnapshots.get(currentScrollKey)
     : undefined;
-  const initialScrollOffset = scrollSnapshot &&
+  // While streaming the message list grows continuously, so any saved
+  // scrollOffset is stale by definition — the same numeric offset points to
+  // different content (or no content at all) after even a few seconds of
+  // streaming.  Force a "Fresh session" scroll-to-bottom on remount whenever
+  // the session is actively streaming, regardless of what the snapshot says.
+  // This also defends against the snapshot having been written with
+  // pinnedToBottom=false (e.g. by a stale handleScroll read) which would
+  // otherwise land the user near the top of the conversation.
+  const initialScrollOffset = !sending && scrollSnapshot &&
     !scrollSnapshot.pinnedToBottom &&
     scrollSnapshot.scrollOffset > 0
     ? scrollSnapshot.scrollOffset
     : undefined;
+  // DIAGNOSTIC
+  console.log("[CP:snapshot-read]", { currentScrollKey, scrollSnapshot, sending, initialScrollOffset });
 
   // Group consecutive messages for display
   // - Consecutive think + tool_call + tool_result → explore_group (aggregated)
@@ -557,13 +576,21 @@ export function ChatPanel() {
       if (!key || !container) return;
 
       const distFromBottom = getDistanceFromBottom(container);
+      console.log("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, pinnedToBottomRef: pinnedToBottomRef.current, distFromBottom });
       chatScrollSnapshots.set(key, {
         scrollOffset: container.scrollTop,
         // Use a generous threshold (120px) for snapshot: if the user was only
         // slightly scrolled up, treat it as pinned so nav-back re-pins to bottom.
         // The real-time handleScroll below uses a strict 5px threshold, which is
         // too tight for snapshot — a 1-frame layout shift could set it to 6px.
-        pinnedToBottom: session.scope.current.pinnedToBottom || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
+        //
+        // During streaming we ALWAYS record pinnedToBottom=true, because the
+        // message list is growing on every poll and the saved scrollOffset
+        // would point to stale (or prepended) content after nav-back.  This
+        // also prevents the "nav-back lands on the top of the conversation"
+        // bug where a transient pinnedToBottom=false read would otherwise
+        // restore a small scrollOffset.
+        pinnedToBottom: sending || pinnedToBottomRef.current || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
       });
     };
   });
@@ -812,7 +839,7 @@ export function ChatPanel() {
   // Stable across renders: session.scope is a MutableRefObject,
   // messagesContainerRef is a RefObject — neither changes identity.
   const scrollToBottom = useCallback(() => {
-    session.scope.current.pinnedToBottom = true;
+    pinnedToBottomRef.current = true;
     const container = messagesContainerRef.current;
     if (container) {
       container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
@@ -837,7 +864,7 @@ export function ChatPanel() {
     // NOTE: This is intentionally narrower than the snapshot threshold (120px,
     // CHAT_BOTTOM_THRESHOLD_PX).  The snapshot needs tolerance for layout shift
     // across navigation; the live handler should be sensitive to user intent.
-    session.scope.current.pinnedToBottom = distFromBottom <= 5;
+    pinnedToBottomRef.current = distFromBottom <= 5;
 
     // Load more when scrolled to top
     const { isLoadingMore } = useChatStore.getState();
@@ -1265,6 +1292,7 @@ export function ChatPanel() {
               t={t}
               scrollContainerRef={messagesContainerRef}
               scope={session.scope}
+              pinnedToBottomRef={pinnedToBottomRef}
               isLoadingMore={isLoadingMore}
               isLoadingSession={isLoadingSession}
               loadError={loadError}

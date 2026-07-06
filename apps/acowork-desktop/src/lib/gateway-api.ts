@@ -18,6 +18,7 @@ import type {
   LspInstallScriptResponse,
   LspInstallRunResponse,
   LspServerStatusEntry,
+  LspServersConfig,
   LspServersWithStatus,
 } from "./types";
 import { getGatewayUrl } from "./config";
@@ -365,14 +366,42 @@ export async function getLspRelayUrl(
 // `getLspRelayUrl()`.
 
 /**
+ * Fetch the configured LSP server list without probing `PATH`.
+ *
+ * The relay handler reads from a process-lifetime `OnceLock`, so this
+ * endpoint is intentionally fast (no fork-exec, no PATH lookup). The
+ * harness UI uses it on initial load to render the language list
+ * **immediately**, then kicks off a separate `fetchLspStatus` /
+ * `fetchLspServersWithStatus` call to resolve per-language install
+ * badges incrementally.
+ *
+ * The returned `LspServersConfig` is the same shape as the `servers`
+ * field of `LspServersWithStatus`.
+ */
+export async function fetchLspServers(
+  relayUrl: string,
+): Promise<LspServersConfig> {
+  const resp = await fetch(`${relayUrl}/api/lsp/servers`);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch LSP servers: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/**
  * Fetch configured LSP servers together with per-language install status
  * in a single round-trip.
  *
- * This is the preferred initial-load / Refresh call: the UI gets the
- * server list and the install badges atomically, so it never renders
- * a row whose status has not yet been resolved. The backend runs the
- * PATH probes with bounded concurrency (4 in flight), keeping total
- * wall time roughly bounded by a single probe timeout (~2s worst case).
+ * Returns both the configured server list AND the per-language install
+ * status in one call. The backend runs the PATH probes with bounded
+ * concurrency (4 in flight), keeping total wall time roughly bounded
+ * by a single probe timeout (~2s worst case).
+ *
+ * **Not the preferred initial-load call** — the harness UI uses the
+ * two-step `fetchLspServers` + `fetchLspStatus` pair instead so the
+ * list renders immediately and badges resolve incrementally. This
+ * endpoint remains available for callers that want the combined payload
+ * (e.g. CLI tools, one-shot scripts).
  */
 export async function fetchLspServersWithStatus(
   relayUrl: string,

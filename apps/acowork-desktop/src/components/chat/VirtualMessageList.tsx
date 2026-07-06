@@ -47,8 +47,15 @@ interface VirtualMessageListProps {
   t: (key: string, params?: Record<string, unknown>) => string;
   /** Ref to the scroll container (owned by ChatPanel). */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
-  /** Per-session scope ref (for isLoadingMore, prevScrollHeight, etc.). */
+  /** Per-session scope ref (for isLoadingMore, prevScrollHeight, prevStickyCount, etc.). */
   scope: React.MutableRefObject<SessionScope>;
+  /**
+   * Ref to the "pinned-to-bottom" flag — a per-USER-INTENT UI preference
+   * (not per-session).  Owned by ChatPanel so it survives useSessionScope's
+   * session-change reset.  VirtualMessageList writes to it from its mount
+   * effect and reads it from the sticky-bottom effect.
+   */
+  pinnedToBottomRef: React.MutableRefObject<boolean>;
   /** Whether "load more" is in progress. */
   isLoadingMore: boolean;
   /** Whether the session is loading. */
@@ -95,6 +102,7 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
     t,
     scrollContainerRef,
     scope,
+    pinnedToBottomRef,
     isLoadingMore,
     isLoadingSession,
     loadError,
@@ -156,6 +164,8 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
   const didInitialScrollRef = useRef(false);
   useLayoutEffect(() => {
     const container = scrollContainerRef.current;
+    // DIAGNOSTIC
+    console.log("[VML:mount]", { virtualCount, initialScrollOffset, sending, hasContainer: !!container, containerScrollHeight: container?.scrollHeight });
 
     if (virtualCount === 0) {
       // ADR-026: Empty session on mount — still mark initialized so the
@@ -164,7 +174,7 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
       // guard (!didInitialScrollRef.current) always returns early, and new
       // streaming content never auto-scrolls into view.
       didInitialScrollRef.current = true;
-      scope.current.pinnedToBottom = true;
+      pinnedToBottomRef.current = true;
       scope.current.prevStickyCount = 0;
       return;
     }
@@ -177,16 +187,25 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
       // renders items at the correct offset from the first frame. Sync the
       // actual DOM scrollTop to match.
       container.scrollTop = initialScrollOffset;
-      scope.current.pinnedToBottom = false;
+      pinnedToBottomRef.current = false;
     } else {
       // Fresh session: scroll to bottom synchronously before paint.
       // Reset scrollTop to 0 first so a scroll event always fires.
       container.scrollTop = 0;
       virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-      scope.current.pinnedToBottom = true;
+      pinnedToBottomRef.current = true;
     }
 
     didInitialScrollRef.current = true;
+    // DIAGNOSTIC: log state after one frame
+    requestAnimationFrame(() => {
+      const c = scrollContainerRef.current;
+      console.log("[VML:mount+1f]", {
+        scrollTop: c?.scrollTop, scrollHeight: c?.scrollHeight, clientHeight: c?.clientHeight,
+        distFromBottom: c ? c.scrollHeight - c.scrollTop - c.clientHeight : null,
+        pinnedToBottomRef: pinnedToBottomRef.current, virtualCount,
+      });
+    });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Only run on mount — the parent's key={currentScrollKey} ensures this
   // component remounts on every session switch.
@@ -222,7 +241,7 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
     // streaming a single message grows continuously — checking only
     // countChanged would skip those growth events and the user would
     // gradually drift upward.
-    if (virtualCount > 0 && (countChanged || sizeChanged) && scope.current.pinnedToBottom) {
+    if (virtualCount > 0 && (countChanged || sizeChanged) && pinnedToBottomRef.current) {
       // Skip if the container is already within 1px of the bottom — avoids
       // racing with ChatPanel's smooth scrollToBottom that already set the
       // position via element.scrollTo({ behavior: "smooth" }).
@@ -233,7 +252,7 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
       }
       virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
     }
-  }, [totalSize, virtualCount, virtualizer, scope]);
+  }, [totalSize, virtualCount, virtualizer, scope, pinnedToBottomRef]);
 
   // ── Render ───────────────────────────────────────────────────────
   return (

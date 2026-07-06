@@ -4,6 +4,8 @@
 //! - `GET /health` — health check (acowork_core::health::HealthResponse)
 //! - `GET /events` — SSE event stream (heartbeat + state)
 //! - `GET /lsp/{language}` — WebSocket upgrade for LSP relay
+//! - `GET /api/lsp/servers` — list configured LSP servers (no PATH probe;
+//!   fast, used to render the harness list before status resolves)
 //! - `GET /api/lsp/servers-with-status` — list configured LSP servers
 //!   together with per-language install status (single round-trip)
 //! - `GET /api/lsp/status` — re-probe per-language install status
@@ -29,8 +31,8 @@ use acowork_core::event_bus::{BusEvent, EventBus};
 use acowork_core::health::HealthResponse;
 
 use crate::config::{
-    LspServerStatusEntry, LspServersWithStatus, compute_lsp_status, compute_lsp_status_concurrent,
-    lsp_servers_config, resolve_lsp_command,
+    LspServerStatusEntry, LspServersConfig, LspServersWithStatus, compute_lsp_status,
+    compute_lsp_status_concurrent, lsp_servers_config, resolve_lsp_command,
 };
 use crate::pool::LspPool;
 use crate::relay::lsp_relay;
@@ -125,6 +127,22 @@ async fn events(
 }
 
 // ── LSP server list ────────────────────────────────────────────────────
+
+/// `GET /api/lsp/servers` — list configured LSP servers without probing
+/// `PATH` for any of them.
+///
+/// The harness UI uses this on initial load (and on Refresh) to render
+/// the list of supported languages **immediately**, before the slower
+/// per-language install status resolves. Each row's status badge is
+/// shown as a neutral "pending" indicator until `/api/lsp/status` (or
+/// `/api/lsp/servers-with-status`) completes.
+///
+/// The endpoint is intentionally a pure memory read — `LspServersConfig`
+/// is loaded once at startup and stored in a `OnceLock`, so the response
+/// is bounded by JSON serialization of a small config (~tens of entries).
+async fn lsp_servers() -> Json<LspServersConfig> {
+    Json(lsp_servers_config().clone())
+}
 
 /// `GET /api/lsp/servers-with-status` — list configured LSP servers along
 /// with per-language installation status in a single round-trip.
@@ -242,6 +260,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health_check))
         .route("/events", get(events))
         .route("/lsp/{language}", get(lsp_handler))
+        .route("/api/lsp/servers", get(lsp_servers))
         .route("/api/lsp/servers-with-status", get(lsp_servers_with_status))
         .route("/api/lsp/status", get(lsp_status_list))
         .route(
@@ -319,6 +338,80 @@ mod tests {
         assert_eq!(json["process"], "acowork-lsp-relay");
         assert!(json["version"].is_string());
         assert!(json["details"]["language_count"].is_number());
+    }
+
+    // ── GET /api/lsp/servers ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn lsp_servers_returns_config_without_probing() {
+        let state = test_state();
+        let app = build_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/lsp/servers")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Response shape is the bare LspServersConfig — not the combined
+        // `LspServersWithStatus` envelope. This is what lets the harness
+        // UI render the list immediately without waiting for PATH probes.
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["version"], 1);
+        let servers = json["servers"].as_object().expect("servers must be an object");
+        assert!(
+            !servers.is_empty(),
+            "built-in defaults must contain at least one language"
+        );
+
+        // Sanity-check shape: every entry must expose the canonical
+        // LspServerEntry fields the UI consumes (description, candidates,
+        // install_hint, install_script).
+        for (lang, entry) in servers {
+            assert!(
+                entry["description"].is_string(),
+                "servers[{lang}].description must be a string"
+            );
+            assert!(
+                entry["candidates"].is_array(),
+                "servers[{lang}].candidates must be an array"
+            );
+            // install_hint / install_script are optional in the schema
+            // but when present must be strings — guard against malformed
+            // defaults slipping in.
+            if let Some(hint) = entry.get("install_hint") {
+                assert!(
+                    hint.is_string(),
+                    "servers[{lang}].install_hint must be a string when present"
+                );
+            }
+            if let Some(script) = entry.get("install_script") {
+                assert!(
+                    script.is_string(),
+                    "servers[{lang}].install_script must be a string when present"
+                );
+            }
+        }
+
+        // Endpoint must NOT block on PATH probes — bound the assertion
+        // generously (1s) to absorb CI scheduler noise. The handler is
+        // a pure memory read + JSON serialization of a small config,
+        // so the upper bound should be tens of milliseconds in practice.
+        let start = std::time::Instant::now();
+        let app2 = build_router(state);
+        let req2 = Request::builder()
+            .method("GET")
+            .uri("/api/lsp/servers")
+            .body(Body::empty())
+            .unwrap();
+        let _ = app2.oneshot(req2).await.unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "/api/lsp/servers must not block on PATH probes (took {:?})",
+            start.elapsed()
+        );
     }
 
     // ── GET /api/lsp/servers-with-status ────────────────────────────────

@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { fetchLspServersWithStatus, fetchLspStatus, fetchLspInstallScript, runLspInstall, getLspRelayUrl } from "../../lib/gateway-api";
+import { fetchLspServers, fetchLspStatus, fetchLspInstallScript, runLspInstall, getLspRelayUrl } from "../../lib/gateway-api";
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
@@ -52,14 +52,6 @@ export function LspTab() {
   /** LSP Relay base URL (e.g. "http://127.0.0.1:19878"), null when not available */
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
 
-  // Mirror `config` into a ref so `loadAll` can read the current server
-  // list without depending on it (and therefore without re-creating the
-  // callback and re-triggering the load effect on every config update).
-  const configRef = useRef<LspServersConfig | null>(null);
-  useEffect(() => {
-    configRef.current = config;
-  }, [config]);
-
   // Discover LSP Relay endpoint when Gateway is connected
   useEffect(() => {
     if (status !== "connected") {
@@ -82,14 +74,22 @@ export function LspTab() {
     setRefreshing(true);
     setError(null);
 
-    // Pre-flight: mark every currently-known language as "checking" so
-    // any visible badges immediately enter loading state instead of
-    // flashing stale "installed / not_installed" values while the
-    // backend re-probes PATH. On first load `config` is still null so
-    // this is a no-op (the list area shows "loading servers...").
-    const known = configRef.current;
-    if (known) {
-      const langs = Object.keys(known.servers);
+    try {
+      // Phase 1: fetch the configured server list. The endpoint reads
+      // from a process-lifetime cache, so it returns in milliseconds and
+      // does not probe PATH. Once `setConfig` fires, React renders the
+      // full list immediately — each row's badge falls back to
+      // "unknown" (neutral pending) via `healthStatus[lang] ?? "unknown"`
+      // in JSX, so the user never sees an empty list area.
+      const cfg = await fetchLspServers(relayUrl);
+      setConfig(cfg);
+
+      // Flip every row from the neutral "pending" badge to the amber
+      // "checking" badge so the user can see that the slow phase has
+      // started. React batches this setState with the `setConfig` call
+      // above, so the list and the "checking" badges appear together
+      // in a single paint.
+      const langs = Object.keys(cfg.servers);
       if (langs.length > 0) {
         setHealthStatus((prev) => {
           const next: Record<string, LspHealthStatus> = { ...prev };
@@ -99,30 +99,43 @@ export function LspTab() {
           return next;
         });
       }
-    }
 
-    try {
-      // Single round-trip: server list + per-language install status.
-      // The backend runs PATH probes with bounded concurrency so total
-      // wall time is capped regardless of language count.
-      const resp = await fetchLspServersWithStatus(relayUrl);
-      setConfig(resp.servers);
-      setHealthStatus((prev) => {
-        const next: Record<string, LspHealthStatus> = { ...prev };
-        for (const lang of Object.keys(resp.servers.servers)) {
-          const entry = resp.status[lang];
-          if (entry) {
-            next[lang] = entry.installed ? "installed" : "not_installed";
-          } else {
-            // Backend guarantees 1:1 keys; treat a missing status
-            // entry as "unknown" so the UI can render a defensive
-            // pending badge instead of leaving the row bare.
-            next[lang] = "unknown";
+      // Phase 2: probe PATH per language (slow, bounded concurrency on
+      // the server side). The list is already on screen; only badges
+      // need updating when the response arrives.
+      try {
+        const entries = await fetchLspStatus(relayUrl);
+        setHealthStatus((prev) => {
+          const next = { ...prev };
+          for (const entry of entries) {
+            next[entry.language] = entry.installed ? "installed" : "not_installed";
           }
-        }
-        return next;
-      });
+          return next;
+        });
+      } catch (statusErr) {
+        // Phase 1 succeeded but the status probe failed — the list is
+        // fine, so we don't surface a page-level error. Flip every row
+        // to "error" and stash the message so the row's error label
+        // explains what happened. The user can still hit Refresh.
+        const msg = statusErr instanceof Error ? statusErr.message : "Status check failed";
+        setHealthStatus((prev) => {
+          const next = { ...prev };
+          for (const lang of langs) {
+            next[lang] = "error";
+          }
+          return next;
+        });
+        setHealthErrors((prev) => {
+          const next = { ...prev };
+          for (const lang of langs) {
+            next[lang] = msg;
+          }
+          return next;
+        });
+      }
     } catch (e) {
+      // Phase 1 failed (very unlikely — handler is a pure memory read).
+      // Surface the error in the page-level ErrorBox.
       setError(e instanceof Error ? e.message : "Failed to load LSP servers");
     } finally {
       setRefreshing(false);
@@ -131,9 +144,9 @@ export function LspTab() {
 
   useEffect(() => {
     if (status === "connected" && relayUrl) {
-      // Single combined fetch (servers + status) replaces the previous
-      // two-parallel-request pattern. Eliminates the race window where
-      // the server list was visible but badges had not yet been resolved.
+      // Two-phase load (see `loadAll`): the list arrives almost
+      // immediately, then badges resolve incrementally as PATH probes
+      // complete on the server.
       void loadAll();
     }
   }, [status, relayUrl, loadAll]);

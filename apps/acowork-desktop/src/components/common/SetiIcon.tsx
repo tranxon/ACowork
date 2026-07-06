@@ -9,7 +9,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
  * ────────────────────────────────────────────────────────────────────── */
 
 const DARK_COLORS: Record<string, string> = {
-    rust: "#CE412B",
+    rust: "#A0A0A0",
     typescript: "#519ABA",
     react: "#61DAFB",
     javascript: "#CBBA61",
@@ -65,7 +65,7 @@ const DARK_COLORS: Record<string, string> = {
 };
 
 const LIGHT_COLORS: Record<string, string> = {
-    rust: "#CE412B",
+    rust: "#A0A0A0",
     typescript: "#3B7BA5",
     react: "#1A8FAD",
     javascript: "#A89A20",
