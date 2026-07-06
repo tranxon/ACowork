@@ -228,6 +228,8 @@ message ConfigSnapshot {
   optional uint64 max_sessions = 28;
   // ADR-026: per-agent context window cap (0 = no limit)
   optional uint64 context_window = 29;
+  // Per-agent approval timeout in seconds
+  optional uint64 approval_timeout_secs = 30;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
@@ -277,6 +279,8 @@ message RuntimeConfigUpdate      {
     bool max_sessions_set = 20;
     // ADR-026: per-agent context window cap (0 = no limit)
     optional uint64 context_window = 21;
+    // Per-agent approval timeout in seconds
+    optional uint64 approval_timeout_secs = 22;
 }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }

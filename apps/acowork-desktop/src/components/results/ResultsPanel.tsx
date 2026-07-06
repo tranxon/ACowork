@@ -510,7 +510,12 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
       </div>
 
       {/* ── Setup tab content ─────────────────────────────────────── */}
-      <div style={{ display: activeTab === "setup" ? "block" : "none" }}><AgentSetupTab /></div>
+      <div
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        style={{ display: activeTab === "setup" ? "flex" : "none" }}
+      >
+        <AgentSetupTab />
+      </div>
 
       {/* ── Tools tab content ─────────────────────────────────────── */}
       <div style={{ display: activeTab === "tools" ? "block" : "none" }}><ToolsTab /></div>

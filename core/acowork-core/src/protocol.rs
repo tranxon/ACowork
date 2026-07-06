@@ -688,6 +688,9 @@ pub enum GatewayRequest {
         /// ADR-026: Per-agent context window cap in tokens (0 = no limit).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Per-agent approval timeout in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_timeout_secs: Option<u64>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1050,6 +1053,9 @@ pub enum GatewayResponse {
         /// ADR-026: Per-agent context window cap in tokens (0 = no limit).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Per-agent approval timeout in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_timeout_secs: Option<u64>,
     },
     /// Query config request (Gateway → Runtime)
     ///

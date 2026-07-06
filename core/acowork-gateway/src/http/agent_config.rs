@@ -74,6 +74,9 @@ pub struct AgentConfigResponse {
     /// ADR-024: max sessions limit per-agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<usize>,
+    /// ADR-023: Approval timeout in seconds. None = use system default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_timeout_secs: Option<u64>,
 }
 
 /// PUT request body for updating agent config.
@@ -97,6 +100,9 @@ pub struct UpdateAgentConfigRequest {
     /// ADR-026: Per-agent context window cap (0 = no limit).
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// ADR-023: Approval timeout in seconds. None = use system default.
+    #[serde(default)]
+    pub approval_timeout_secs: Option<u64>,
 }
 
 /// Default global values used as fallback when no override exists.

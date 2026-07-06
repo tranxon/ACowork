@@ -74,6 +74,8 @@ pub struct AgentCore {
     /// Seeded at agent startup in cli.rs; independent of context_window_override
     /// so the resolution chain is self-contained in AgentCore.
     pub(crate) manifest_context_window: Option<u64>,
+    /// Approval timeout in seconds for loop approval. None = use system default (300).
+    pub(crate) approval_timeout_secs: Option<u64>,
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -130,6 +132,7 @@ impl AgentCore {
             manifest_temperature,
             context_window_override: None,
             manifest_context_window,
+            approval_timeout_secs: None,
             system_prompt_override: None,
             memory_store: None,
             memory_session: None,
@@ -265,6 +268,7 @@ impl AgentCore {
         context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
+        approval_timeout_secs: Option<u64>,
     ) {
         if let Some(limit) = max_output_tokens {
             tracing::info!(new = limit, "runtime config: max_output_tokens updated (all models)");
@@ -290,6 +294,10 @@ impl AgentCore {
             let new_threshold = ShellApprovalThreshold::from_str_loose(threshold).unwrap_or_default();
             tracing::info!(old = ?self.shell_approval_threshold, new = ?new_threshold, "runtime config: shell_approval_threshold updated");
             self.shell_approval_threshold = new_threshold;
+        }
+        if let Some(timeout) = approval_timeout_secs {
+            tracing::info!(old = ?self.approval_timeout_secs, new = timeout, "runtime config: approval_timeout_secs updated");
+            self.approval_timeout_secs = Some(timeout);
         }
     }
 
@@ -539,6 +547,7 @@ impl Clone for AgentCore {
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,
             manifest_context_window: self.manifest_context_window,
+            approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),

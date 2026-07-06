@@ -118,6 +118,7 @@ impl AgentLoop {
                 context_window,
                 system_prompt_override,
                 shell_approval_threshold,
+                approval_timeout_secs,
             } => {
                 tracing::info!(
                     max_output_tokens,
@@ -135,6 +136,7 @@ impl AgentLoop {
                     *context_window,
                     system_prompt_override.clone(),
                     shell_approval_threshold.clone(),
+                    *approval_timeout_secs,
                 );
                 // Push updated state to frontend immediately so the
                 // ResultsPanel temperature display reflects the new value

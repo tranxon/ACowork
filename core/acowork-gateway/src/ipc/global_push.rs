@@ -264,6 +264,7 @@ impl GlobalResourcePusher {
                         builtin_avatar: None,
                         max_sessions: None,
                         context_window: None,
+                        approval_timeout_secs: None,
                     })
                     .await;
                 if ok {
@@ -409,6 +410,7 @@ impl GlobalResourcePusher {
                         builtin_avatar: None,
                         max_sessions: None,
                         context_window: None,
+                        approval_timeout_secs: None,
                     })
                     .await;
 

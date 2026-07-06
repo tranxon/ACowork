@@ -486,9 +486,6 @@ export function AgentSetupTab() {
           placeholder={t("agentSetup.defaultIterations")}
           className="rounded-md bg-white dark:bg-zinc-800"
         />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.leaveEmptyDefault")}
-        </p>
       </div>
 
       {/* Max Sessions (ADR-024) */}
@@ -515,45 +512,6 @@ export function AgentSetupTab() {
         </p>
       </div>
 
-      {/* Temperature slider */}
-      <div className="mb-3 space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.temperature")}
-        </label>
-        <div className="flex items-center gap-3">
-          <input
-            type="range"
-            min={0}
-            max={2}
-            step={0.05}
-            value={profile.temperature ?? 0.3}
-            onChange={(e) => {
-              setProfile(selectedAgentId, {
-                temperature: parseFloat(e.target.value),
-              });
-            }}
-            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
-              bg-zinc-200 dark:bg-zinc-700
-              accent-zinc-600 dark:accent-zinc-400"
-          />
-          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
-            {profile.temperature !== undefined ? profile.temperature.toFixed(2) : "—"}
-          </span>
-          {profile.temperature !== undefined && (
-            <button
-              onClick={() => setProfile(selectedAgentId, { temperature: undefined })}
-              className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
-              title={t("agentSetup.resetTemperature")}
-            >
-              ✕
-            </button>
-          )}
-        </div>
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.temperatureDesc")}
-        </p>
-      </div>
-
       {/* Context Window */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
@@ -570,8 +528,8 @@ export function AgentSetupTab() {
             onChange={(e) => {
               const raw = e.target.value;
               if (raw === "" || raw === "0") {
-                // Empty or "0" = no limit (use manifest/default)
-                setProfile(selectedAgentId, { contextWindow: undefined });
+                // 0 = no limit (use model's full window)
+                setProfile(selectedAgentId, { contextWindow: 0 });
               } else {
                 const n = parseInt(raw, 10);
                 if (!isNaN(n) && n >= 0) {
@@ -584,18 +542,34 @@ export function AgentSetupTab() {
           <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
             {t("agentSetup.tokens")}
           </span>
-          {profile.contextWindow !== undefined && (
-            <button
-              onClick={() => setProfile(selectedAgentId, { contextWindow: undefined })}
-              className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
-              title={t("agentSetup.resetContextWindow")}
-            >
-              ✕
-            </button>
-          )}
         </div>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.contextWindowDesc")}
+        </p>
+      </div>
+
+      {/* Approval Timeout */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.approvalTimeout")}
+        </label>
+        <StyledInput
+          type="number"
+          min={0}
+          max={3600}
+          step={30}
+          value={profile.approvalTimeoutSecs && profile.approvalTimeoutSecs > 0 ? profile.approvalTimeoutSecs : ""}
+          onChange={(e) => {
+            const v = e.target.value;
+            setProfile(selectedAgentId, {
+              approvalTimeoutSecs: v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+            });
+          }}
+          placeholder="300 (5 min)"
+          className="rounded-md bg-white dark:bg-zinc-800"
+        />
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.approvalTimeoutDesc")}
         </p>
       </div>
 
@@ -630,28 +604,33 @@ export function AgentSetupTab() {
         </p>
       </div>
 
-      {/* Approval Timeout */}
+      {/* Temperature slider */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.approvalTimeout")}
+          {t("agentSetup.temperature")}
         </label>
-        <StyledInput
-          type="number"
-          min={0}
-          max={3600}
-          step={30}
-          value={profile.approvalTimeoutSecs && profile.approvalTimeoutSecs > 0 ? profile.approvalTimeoutSecs : ""}
-          onChange={(e) => {
-            const v = e.target.value;
-            setProfile(selectedAgentId, {
-              approvalTimeoutSecs: v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
-            });
-          }}
-          placeholder="300 (5 min)"
-          className="rounded-md bg-white dark:bg-zinc-800"
-        />
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={0}
+            max={2}
+            step={0.05}
+            value={profile.temperature ?? 0.3}
+            onChange={(e) => {
+              setProfile(selectedAgentId, {
+                temperature: parseFloat(e.target.value),
+              });
+            }}
+            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
+              bg-zinc-200 dark:bg-zinc-700
+              accent-zinc-600 dark:accent-zinc-400"
+          />
+          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+            {profile.temperature !== undefined ? profile.temperature.toFixed(2) : "—"}
+          </span>
+        </div>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.approvalTimeoutDesc")}
+          {t("agentSetup.temperatureDesc")}
         </p>
       </div>
 
@@ -687,3 +666,4 @@ export function AgentSetupTab() {
     </div>
   );
 }
+

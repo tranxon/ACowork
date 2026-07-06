@@ -127,6 +127,10 @@ pub struct AgentConfig {
     /// Builtin avatar icon ID (e.g. "icon-05"). Mutually exclusive with `avatar`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_avatar: Option<String>,
+
+    /// Approval timeout in seconds for loop approval. None = use system default (300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_timeout_secs: Option<u64>,
 }
 
 /// Resolve the effective avatar from agent config and manifest fallback.

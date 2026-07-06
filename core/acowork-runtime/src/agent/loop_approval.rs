@@ -91,6 +91,12 @@ impl AgentLoop {
     async fn await_approval_decision(&mut self, request_id: &str) -> ApprovalDecision {
         // Snapshot control_notify for the select! branch (conditional on DevMode).
         let ctrl_notify = self.core.debug_observer.control_notify().cloned();
+        let effective_timeout = self
+            .core
+            .approval_timeout_secs
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(APPROVAL_TIMEOUT);
+        let effective_timeout_secs = effective_timeout.as_secs();
         loop {
             tokio::select! {
                 // Primary: wait for the matching approval decision from inbound channel
@@ -213,11 +219,11 @@ impl AgentLoop {
                 }
                 // Timeout: auto-reject to prevent permanent deadlock when
                 // a concurrent approval request is orphaned.
-                _ = tokio::time::sleep(APPROVAL_TIMEOUT) => {
-                    let reason_msg = format!("tool approval timed out after {}s", APPROVAL_TIMEOUT_SECS);
+                _ = tokio::time::sleep(effective_timeout) => {
+                    let reason_msg = format!("tool approval timed out after {}s", effective_timeout_secs);
                     tracing::warn!(
                         request_id = %request_id,
-                        timeout_secs = APPROVAL_TIMEOUT_SECS,
+                        timeout_secs = effective_timeout_secs,
                         "Approval timed out, auto-rejecting"
                     );
                     return ApprovalDecision { approved: false, allow_all_session: false, reason: Some(reason_msg) };
@@ -236,9 +242,11 @@ impl AgentLoop {
         request_id: &str,
         timeout_seconds: Option<u32>,
     ) -> String {
-        let timeout_duration = std::time::Duration::from_secs(
-            timeout_seconds.unwrap_or(APPROVAL_TIMEOUT_SECS as u32) as u64,
-        );
+        let effective_timeout = timeout_seconds
+            .map(|t| t as u64)
+            .or(self.core.approval_timeout_secs)
+            .unwrap_or(APPROVAL_TIMEOUT_SECS);
+        let timeout_duration = std::time::Duration::from_secs(effective_timeout);
 
         let ctrl_notify = self.core.debug_observer.control_notify().cloned();
         let timeout_future = tokio::time::timeout(timeout_duration, async {
@@ -336,7 +344,7 @@ impl AgentLoop {
             Err(_elapsed) => {
                 tracing::warn!(
                     request_id = %request_id,
-                    timeout_secs = %timeout_seconds.unwrap_or(APPROVAL_TIMEOUT_SECS as u32),
+                    timeout_secs = %timeout_seconds.unwrap_or(effective_timeout as u32),
                     "Question answer timed out"
                 );
                 "[Timeout: user did not respond]".to_string()
@@ -346,6 +354,10 @@ impl AgentLoop {
 
     /// Send ToolApprovalNeeded chunk event to Gateway (via chunk channel).
     fn send_tool_approval_needed(&self, request_id: &str, req: &ApprovalRequest) {
+        let timeout = self
+            .core
+            .approval_timeout_secs
+            .unwrap_or(APPROVAL_TIMEOUT_SECS);
         let _ = self
             .session_core
             .try_send_chunk(ChunkEvent::ToolApprovalNeeded {
@@ -355,7 +367,7 @@ impl AgentLoop {
                 risk_level: req.risk_level.label().to_string(),
                 reason: req.reason.clone(),
                 tool_call_id: req.tool_call_id.clone(),
-                approval_timeout_secs: APPROVAL_TIMEOUT_SECS,
+                approval_timeout_secs: timeout,
             });
     }
 

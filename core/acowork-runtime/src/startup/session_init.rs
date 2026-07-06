@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use acowork_core::timeout_config::constants;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::session::{SessionManager, SessionManagerConfig};
 use crate::config::RuntimeConfig;
@@ -38,7 +39,7 @@ pub(crate) async fn phase_b_init_session(
     let committed_lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // ADR-024: load agent_config.json early so max_sessions override is available.
-    let agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
+    let mut agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
         .unwrap_or_default()
         .unwrap_or_default();
 
@@ -179,11 +180,112 @@ pub(crate) async fn phase_b_init_session(
         c.memory_session = Some(ctx.memory_session.clone());
         c.embedding_provider = Some(ctx.emb_provider.clone());
         c.init_memory_store(work_dir_path);
-        // Propagate per-agent context_window cap from agent_config.json
-        // (Layer 1 in the resolution chain). None means fall through to
-        // manifest_context_window → DEFAULT_CONTEXT_WINDOW.
-        c.context_window_override = agent_cfg.context_window;
+
+        // ── Resolve & persist agent_config.json defaults ─────────────
+        //
+        // agent_config.json is the single source of truth for the
+        // frontend setup panel.  Resolve any field still None through
+        // its fallback chain and persist the concrete value so the
+        // frontend always sees a value instead of "empty = use default".
+        //
+        // Fields intentionally NOT auto-resolved:
+        //   system_prompt_override — None = "use compiled manifest prompt"
+        //   max_output_tokens      — None = "use each model's native limit"
+        //   avatar / builtin_avatar — resolved via resolve_effective_avatar();
+        //     seeded from manifest on first start (package author's default),
+        //     then left alone (user may explicitly clear to fallback).
+        {
+            let mut updated = agent_cfg.clone();
+            let mut dirty = false;
+
+            // ── First-start avatar seeding ──────────────────────────
+            let is_first_start = !work_dir_path
+                .join("config")
+                .join("agent_config.json")
+                .exists();
+            if is_first_start {
+                if updated.avatar.is_none() {
+                    updated.avatar = ctx.loaded.manifest.avatar.clone();
+                    dirty = true;
+                }
+                if updated.builtin_avatar.is_none() {
+                    updated.builtin_avatar = ctx.loaded.manifest.builtin_avatar.clone();
+                    dirty = true;
+                }
+            }
+
+            // ── context_window: manifest.llm.context_window → 200K ──
+            // Note: manifest may set Some(0) meaning "no limit" (use
+            // model's full window).  We preserve that intent.
+            if updated.context_window.is_none() {
+                let manifest_cw = ctx.loaded.manifest.llm.context_window;
+                updated.context_window = Some(
+                    manifest_cw.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
+                );
+                dirty = true;
+            }
+            c.context_window_override = updated.context_window;
+
+            // ── temperature: manifest.llm.temperature → 0.3 ─────────
+            if updated.temperature.is_none() {
+                let manifest_temp = ctx.loaded.manifest.llm.temperature;
+                updated.temperature = Some(
+                    manifest_temp.unwrap_or(crate::config::DEFAULT_TEMPERATURE),
+                );
+                dirty = true;
+            }
+            c.temperature_override = updated.temperature;
+
+            // ── max_iterations: RuntimeConfig.max_iterations (200) ──
+            if updated.max_iterations.is_none() {
+                updated.max_iterations = Some(config.max_iterations);
+                dirty = true;
+            }
+
+            // ── max_sessions: RuntimeConfig.max_sessions (1000) ─────
+            if updated.max_sessions.is_none() {
+                updated.max_sessions = Some(config.max_sessions);
+                dirty = true;
+            }
+
+            // ── shell_approval_threshold: config default ("medium") ─
+            if updated.shell_approval_threshold.is_none() {
+                updated.shell_approval_threshold =
+                    Some(config.shell_approval_threshold.clone());
+                dirty = true;
+            }
+
+            // ── approval_timeout_secs: core constant (300) ──────────
+            if updated.approval_timeout_secs.is_none() {
+                updated.approval_timeout_secs = Some(constants::APPROVAL.as_secs());
+                dirty = true;
+            }
+            c.approval_timeout_secs = updated.approval_timeout_secs;
+
+            if dirty {
+                if let Err(e) =
+                    crate::agent_config::save_agent_config(work_dir_path, &updated)
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to persist resolved defaults to agent_config.json",
+                    );
+                } else {
+                    tracing::info!(
+                        "Resolved and persisted agent_config.json defaults",
+                    );
+                }
+            }
+        }
     }
+
+    // Reload agent_cfg from disk to pick up resolved defaults that were
+    // persisted inside the AgentCore init block above. The outer variable
+    // must be current so the has_overrides / apply_runtime_config_override
+    // section below sees every resolved field.
+    agent_cfg = crate::agent_config::load_agent_config(work_dir_path)
+        .unwrap_or_default()
+        .unwrap_or_default();
 
     // ── Step 9: Create SessionManager ───────────────────────────────
     let session_manager_config: SessionManagerConfig = build_session_manager_config(ctx, config);
@@ -222,29 +324,18 @@ pub(crate) async fn phase_b_init_session(
     // the shared WorkspaceResolver). No follow-up step required here.
 
     if ctx.hello_config.is_some() {
-        // agent_cfg loaded earlier for max_sessions override.
-
-        // Seed avatar fields from manifest.toml on first start so the
-        // effective avatar resolves to the package author's default.
-        let is_first_start = !work_dir_path
-            .join("config")
-            .join("agent_config.json")
-            .exists();
-        if is_first_start {
-            let mut seeded = agent_cfg.clone();
-            seeded.avatar = ctx.loaded.manifest.avatar.clone();
-            seeded.builtin_avatar = ctx.loaded.manifest.builtin_avatar.clone();
-            seeded.temperature = ctx.loaded.manifest.llm.temperature;
-            seeded.context_window = ctx.loaded.manifest.llm.context_window;
-            let _ = crate::agent_config::save_agent_config(work_dir_path, &seeded);
-        }
+        // agent_config.json defaults are resolved & persisted above
+        // (Step 9 — AgentCore init).  Apply any remaining overrides
+        // from the loaded config to the session manager so new
+        // sessions pick them up via runtime_overrides.
 
         let has_overrides = agent_cfg.max_output_tokens.is_some()
             || agent_cfg.max_iterations.is_some()
             || agent_cfg.temperature.is_some()
             || agent_cfg.context_window.is_some()
             || agent_cfg.system_prompt_override.is_some()
-            || agent_cfg.shell_approval_threshold.is_some();
+            || agent_cfg.shell_approval_threshold.is_some()
+            || agent_cfg.approval_timeout_secs.is_some();
         if has_overrides {
             tracing::info!(
                 max_output_tokens = ?agent_cfg.max_output_tokens,
@@ -259,6 +350,7 @@ pub(crate) async fn phase_b_init_session(
                 agent_cfg.context_window,
                 agent_cfg.system_prompt_override.clone(),
                 agent_cfg.shell_approval_threshold.clone(),
+                agent_cfg.approval_timeout_secs,
             );
         }
     }

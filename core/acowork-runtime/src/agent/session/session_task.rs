@@ -71,6 +71,7 @@ pub enum SessionMessage {
         context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
+        approval_timeout_secs: Option<u64>,
     },
     /// Update workspace context text
     UpdateWorkspaceContext { context_text: String },
@@ -166,6 +167,7 @@ impl std::fmt::Debug for SessionMessage {
                 context_window,
                 system_prompt_override,
                 shell_approval_threshold,
+                approval_timeout_secs,
             } => f
                 .debug_struct("UpdateRuntimeConfig")
                 .field("max_output_tokens", max_output_tokens)
@@ -174,6 +176,7 @@ impl std::fmt::Debug for SessionMessage {
                 .field("context_window", context_window)
                 .field("has_system_prompt", &system_prompt_override.is_some())
                 .field("shell_approval_threshold", shell_approval_threshold)
+                .field("approval_timeout_secs", approval_timeout_secs)
                 .finish(),
             SessionMessage::UpdateWorkspaceContext { context_text } => f
                 .debug_struct("UpdateWorkspaceContext")
@@ -480,6 +483,7 @@ impl SessionTask {
             runtime_overrides.context_window,
             runtime_overrides.system_prompt_override,
             runtime_overrides.shell_approval_threshold,
+            runtime_overrides.approval_timeout_secs,
         );
 
         // Sync temperature override
@@ -1169,6 +1173,7 @@ impl SessionTask {
                     context_window,
                     system_prompt_override,
                     shell_approval_threshold,
+                    approval_timeout_secs,
                 }) => {
                     tracing::info!(
                         session_id = %session_id,
@@ -1185,6 +1190,7 @@ impl SessionTask {
                         context_window,
                         system_prompt_override,
                         shell_approval_threshold,
+                        approval_timeout_secs,
                     );
                     // Push updated state to frontend immediately so the
                     // ResultsPanel temperature display reflects the new value

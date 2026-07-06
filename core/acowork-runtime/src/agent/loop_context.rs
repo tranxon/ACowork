@@ -46,6 +46,7 @@ impl AgentLoop {
         context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
+        approval_timeout_secs: Option<u64>,
     ) {
         self.core.apply_runtime_config(
             max_output_tokens,
@@ -54,6 +55,7 @@ impl AgentLoop {
             context_window,
             system_prompt_override,
             shell_approval_threshold,
+            approval_timeout_secs,
         );
         // Sync the session's cached temperature so emit_session_state()
         // reflects the new override immediately.  Without this,

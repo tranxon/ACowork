@@ -65,6 +65,7 @@ pub enum UserOp {
         context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
+        approval_timeout_secs: Option<u64>,
     },
 }
 

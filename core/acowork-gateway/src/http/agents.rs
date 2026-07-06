@@ -774,6 +774,7 @@ pub async fn update_avatar_config(
                         builtin_avatar: builtin_val,
                         max_sessions: None,
                         context_window: None,
+                        approval_timeout_secs: None,
                     })
                     .await;
 
@@ -1042,6 +1043,7 @@ pub async fn delete_avatar_file(
                             builtin_avatar: None,
                             max_sessions: None,
                             context_window: None,
+                            approval_timeout_secs: None,
                         })
                         .await;
                 }
@@ -1900,6 +1902,7 @@ pub async fn get_agent_config(
         search_config_json,
         max_sessions,
         agent_cfg_context_window,
+        agent_cfg_approval_timeout,
     ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
         let query = acowork_core::proto::server_message::Payload::QueryConfig(
             acowork_core::proto::QueryConfig {
@@ -1923,15 +1926,16 @@ pub async fn get_agent_config(
                         snap.search_config_json,
                         snap.max_sessions.map(|v| v as usize),
                         snap.context_window,
+                        snap.approval_timeout_secs,
                     )
                 } else {
-                    (None, None, None, None, None, None, None, vec![], None, None, None)
+                    (None, None, None, None, None, None, None, vec![], None, None, None, None)
                 }
             }
-            None => (None, None, None, None, None, None, None, vec![], None, None, None),
+            None => (None, None, None, None, None, None, None, vec![], None, None, None, None),
         }
     } else {
-        (None, None, None, None, None, None, None, vec![], None, None, None)
+        (None, None, None, None, None, None, None, vec![], None, None, None, None)
     };
 
     // Build the effective config from ConfigSnapshot data
@@ -1975,6 +1979,7 @@ pub async fn get_agent_config(
         context_window,
         context_window_source,
         manifest_context_window,
+        approval_timeout_secs: agent_cfg_approval_timeout,
     };
 
     Ok(Json(effective))
@@ -2048,6 +2053,7 @@ pub async fn update_agent_config(
                     builtin_avatar: None,
                     max_sessions: req.max_sessions,
                     context_window: req.context_window,
+                    approval_timeout_secs: req.approval_timeout_secs,
                 })
                 .await;
             if !push_result {
@@ -2099,6 +2105,7 @@ pub async fn update_agent_config(
         context_window: req.context_window,
         context_window_source: req.context_window.map(|_| "config".to_string()),
         manifest_context_window: None,
+        approval_timeout_secs: req.approval_timeout_secs,
     };
 
     Ok(Json(effective))
@@ -2268,6 +2275,7 @@ pub async fn update_agent_mcp_servers(
                     builtin_avatar: None,
                     max_sessions: None,
                     context_window: None,
+                    approval_timeout_secs: None,
                 })
                 .await;
             if !push_result {
@@ -2469,6 +2477,7 @@ pub async fn update_agent_search_config(
                     builtin_avatar: None,
                     max_sessions: None,
                     context_window: None,
+                    approval_timeout_secs: None,
                 })
                 .await;
             if !push_result {
