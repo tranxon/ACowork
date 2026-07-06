@@ -49,6 +49,15 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
   });
+  // ADR-028: fallback data source for the agent-total token display.
+  // The live `contextUsage` push is preferred; this fallback covers the
+  // gap between Runtime start and the first LLM call (when no
+  // `context_usage` event has fired yet for the active session, but the
+  // session-list scan has already stashed historical totals).
+  const agentTokenTotals = useAgentStore((s) => {
+    if (!selectedAgentId) return null;
+    return s.agents[selectedAgentId]?.agentTokenTotals ?? null;
+  });
   const sessionStatus: SessionStatus | null = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
@@ -503,6 +512,37 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   <div className="flex justify-between py-1">
                     <span className="text-zinc-500">{t("resultsPanel.sessions")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{openSessionCount}</span>
+                  </div>
+                  {/* ADR-028: agent-scoped cumulative totals across every LLM
+                      call made by this Runtime process for this agent. These
+                      are agent-level (not session-level) figures, so they
+                      live in the Agent Status panel rather than the session
+                      context panel above. Precedence:
+                        1. live `context_usage` WebSocket push
+                           (contextUsage?.agent_total_input_tokens) — most
+                           authoritative, updated on every LLM call;
+                        2. fallback stashed by
+                           `agentStore.agents[id].agentTokenTotals`,
+                           refreshed on every session-list fetch — covers
+                           the gap before the first LLM call lands, and
+                           remains usable even when no session is active. */}
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.agentTotalInputTokens")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {(
+                        contextUsage?.agent_total_input_tokens ??
+                        agentTokenTotals?.input
+                      )?.toLocaleString() ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.agentTotalOutputTokens")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {(
+                        contextUsage?.agent_total_output_tokens ??
+                        agentTokenTotals?.output
+                      )?.toLocaleString() ?? "—"}
+                    </span>
                   </div>
                 </>
               ) : (

@@ -2723,14 +2723,28 @@ async fn handle_list_sessions(
         .map(|v| v as u32);
     let conversations_dir = std::path::PathBuf::from(work_dir).join("conversations");
     let handle = crate::conversation::scan_sessions_async(conversations_dir, page, size);
-    let (sessions, total_count) = match handle.await {
+    let (sessions, total_count, agent_totals) = match handle.await {
         Ok(result) => result,
 
         Err(e) => {
             tracing::error!("Failed to scan sessions: {}", e);
-            (Vec::new(), 0)
+            (Vec::new(), 0, (0, 0))
         }
     };
+
+    // ADR-028: fold the on-disk scan totals into the AgentCore counters via
+    // atomic-max merge. This rebuilds the historical baseline after a
+    // process restart and reconciles any out-of-band writers that updated
+    // `SessionTokens` behind us. After the merge we read the live values
+    // back so the response payload always reflects the post-merge state
+    // (which may exceed the scanned value if fresh LLM calls raced the scan).
+    session_manager.core().merge_token_totals((
+        Some(agent_totals.0),
+        Some(agent_totals.1),
+    ));
+    let (agent_total_input_tokens, agent_total_output_tokens) =
+        session_manager.core().agent_token_totals();
+
     let page_size = size.unwrap_or(20) as usize;
     let total_pages = if total_count == 0 {
         1
@@ -2804,6 +2818,12 @@ async fn handle_list_sessions(
         "sessions": session_dtos,
         "total_count": total_count,
         "total_pages": total_pages,
+        // ADR-028: agent-scoped cumulative token totals, sourced from
+        // AgentCore after atomic-max merge with the on-disk scan. Acts
+        // as a fallback data source for the Desktop App's Results Panel
+        // before any per-session cumulative figure is available.
+        "agent_total_input_tokens": agent_total_input_tokens,
+        "agent_total_output_tokens": agent_total_output_tokens,
     });
     send_session_response(grpc_client, &request_id, data).await;
 }

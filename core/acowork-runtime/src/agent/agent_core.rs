@@ -13,9 +13,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem};
-use acowork_core::providers::traits::Provider;
+use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::tools::traits::Tool;
 use acowork_grafeo::consolidation::ConsolidationScheduler;
 use acowork_grafeo::grafeo::GrafeoStore;
@@ -96,6 +97,15 @@ pub struct AgentCore {
     pub(crate) consolidation_scheduler: Option<Arc<ConsolidationScheduler>>,
     /// P3: Background consolidation task handle.
     pub(crate) consolidation_bg_task: Option<ConsolidationBgTask>,
+    /// ADR-028: cumulative input tokens across every LLM call made by this
+    /// agent process. Sourced from `accumulate_llm_usage` on every LLM call
+    /// and from `merge_token_totals` on every `list_sessions` scan. Not
+    /// persisted; on process restart the next session-list scan rebuilds the
+    /// baseline via atomic-max merge with the on-disk `SessionTokens`.
+    pub(crate) agent_total_input_tokens: AtomicU64,
+    /// ADR-028: cumulative output tokens across every LLM call made by this
+    /// agent process. See [`Self::agent_total_input_tokens`] for semantics.
+    pub(crate) agent_total_output_tokens: AtomicU64,
 }
 
 impl AgentCore {
@@ -145,6 +155,10 @@ impl AgentCore {
             ))),
             consolidation_scheduler: None,
             consolidation_bg_task: None,
+            // ADR-028: counters start at 0; the next `list_sessions` scan
+            // rebuilds the baseline via `merge_token_totals`.
+            agent_total_input_tokens: AtomicU64::new(0),
+            agent_total_output_tokens: AtomicU64::new(0),
         }
     }
 
@@ -169,6 +183,85 @@ impl AgentCore {
     pub fn manifest(&self) -> &acowork_core::AgentManifest { &self.manifest }
     pub fn provider(&self) -> &Arc<dyn Provider> { &self.provider }
     pub fn tools(&self) -> &[Arc<dyn Tool>] { &self.tools }
+
+    // ── ADR-028: Agent-scoped cumulative token usage ───────────────────
+    //
+    // Counter semantics:
+    // - `accumulate_llm_usage` adds a fresh LLM call's token usage to the
+    //   in-process totals.
+    // - `merge_token_totals` performs an atomic-max merge with a scanned
+    //   total (summed from every on-disk `SessionMeta.tokens`). This both
+    //   (a) recovers the historical baseline on first session-list scan
+    //   after startup, and (b) reconciles any on-disk writers that updated
+    //   `SessionTokens` behind us (defence in depth).
+    // - `agent_token_totals` snapshots both counters for the
+    //   `ContextUsageInfo` push.
+    //
+    // Not persisted: a process restart zeroes the counters, and the
+    // next `list_sessions` fetch rebuilds the baseline via scan + merge.
+    // See ADR-028 §"Why no startup seed" for the rationale.
+
+    /// Add an LLM call's token usage to the running agent-scoped totals.
+    ///
+    /// Mirrors [`crate::conversation::ConversationSession::accumulate_llm_usage`]:
+    /// a zero-input call is still recorded (the LLM did happen), but its
+    /// `prompt_tokens` contribution is skipped to avoid masking a reliable
+    /// baseline with a Provider-fallback zero ("宁可 miss 也不估计").
+    pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
+        if usage.prompt_tokens > 0 {
+            self.agent_total_input_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.saturating_add(usage.prompt_tokens))
+                })
+                .ok();
+        }
+        self.agent_total_output_tokens
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some(cur.saturating_add(usage.completion_tokens))
+            })
+            .ok();
+    }
+
+    /// Atomically merge a freshly-scanned total into the in-process counter
+    /// using `max(counter, scanned)`.
+    ///
+    /// Idempotent: calling with the same `(in, out)` value repeatedly is a
+    /// no-op once the counter has been raised. Race-safe with concurrent
+    /// `accumulate_llm_usage` calls — whichever side sees the larger value
+    /// wins, so a slow scan followed by a fresh LLM call won't accidentally
+    /// downgrade the counter to the (stale) scan result.
+    ///
+    /// Pass `None` for either side if the scan yielded no data
+    /// (e.g. agents with no persisted sessions yet).
+    pub fn merge_token_totals(&self, scanned: (Option<u64>, Option<u64>)) {
+        if let Some(inp) = scanned.0 {
+            self.agent_total_input_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.max(inp))
+                })
+                .ok();
+        }
+        if let Some(out) = scanned.1 {
+            self.agent_total_output_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.max(out))
+                })
+                .ok();
+        }
+    }
+
+    /// Snapshot the current agent-scoped cumulative token totals.
+    ///
+    /// Returns `(input_tokens, output_tokens)`. Always present (zero is a
+    /// valid baseline before the first LLM call). Callers embed these in
+    /// `ContextUsageInfo` so the frontend can show a "agent-total" line in
+    /// the Results Panel before any per-session cumulative figure exists.
+    pub fn agent_token_totals(&self) -> (u64, u64) {
+        (
+            self.agent_total_input_tokens.load(Ordering::Acquire),
+            self.agent_total_output_tokens.load(Ordering::Acquire),
+        )
+    }
 
     pub fn gateway_model_capabilities(&self) -> HashMap<String, ModelCapabilitiesInfo> {
         let list = self.global_provider_list.read().unwrap();
@@ -558,6 +651,18 @@ impl Clone for AgentCore {
             metrics_aggregator: self.metrics_aggregator.clone(),
             consolidation_scheduler: self.consolidation_scheduler.clone(),
             consolidation_bg_task: None, // sessions don't own bg task
+            // ADR-028: agent-scoped counters are intentionally SHARED across
+            // clones. Cloning an `AtomicU64` snapshots the *current value*
+            // (good — every session sees the latest), and updates from any
+            // clone are visible to all other clones. This is exactly what we
+            // want: a session-task or distillation spawn should keep
+            // advancing the same agent-wide total.
+            agent_total_input_tokens: AtomicU64::new(
+                self.agent_total_input_tokens.load(Ordering::Acquire),
+            ),
+            agent_total_output_tokens: AtomicU64::new(
+                self.agent_total_output_tokens.load(Ordering::Acquire),
+            ),
         }
     }
 }

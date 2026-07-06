@@ -146,6 +146,12 @@ export interface AgentStorage {
   isLoading: boolean;
   /** Remembers the last active session per agent (survives remount) */
   rememberedSessionId: string | null;
+  /** ADR-028: agent-scoped cumulative token totals — fallback data source
+   *  for the Results Panel when the live `context_usage` WebSocket push
+   *  hasn't fired yet (e.g. fresh Runtime with no LLM calls, or session
+   *  not yet active). Refreshed on every successful session-list fetch.
+   *  `null` = not yet fetched / older Runtime without ADR-028. */
+  agentTokenTotals: { input: number; output: number } | null;
 }
 
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
@@ -159,6 +165,7 @@ function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentSto
     pagination: { ...DEFAULT_PAGINATION },
     isLoading: false,
     rememberedSessionId: null,
+    agentTokenTotals: null,
   };
 }
 
@@ -451,6 +458,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         sessions: SessionInfo[];
         total_count: number;
         total_pages: number;
+        // ADR-028: optional fallback data source for agent-scoped token
+        // totals. Absent on older Runtimes — both fields `undefined`.
+        agent_total_input_tokens?: number;
+        agent_total_output_tokens?: number;
       };
       const sessions = (data.sessions ?? []).sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -461,6 +472,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
 
       const title = sessions.length > 0 ? (sessions[0]?.title ?? "") : null;
+
+      // ADR-028: stash the agent-scoped totals as a fallback data source
+      // for the Results Panel. Both fields must be present and finite for
+      // the fallback to be usable; otherwise we leave the previous value
+      // (or `null` on first fetch) in place.
+      const agentTokenTotals =
+        typeof data.agent_total_input_tokens === "number" &&
+        typeof data.agent_total_output_tokens === "number"
+          ? { input: data.agent_total_input_tokens, output: data.agent_total_output_tokens }
+          : null;
 
       set((state) =>
         patchAgent(state, agentId, {
@@ -473,6 +494,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             totalCount: data.total_count ?? 0,
             pageSize,
           },
+          agentTokenTotals,
         }),
       );
 

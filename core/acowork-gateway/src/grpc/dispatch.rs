@@ -141,6 +141,10 @@ pub async fn dispatch_grpc_request(
                     // sends a malformed payload; leave them as None.
                     total_input_tokens: None,
                     total_output_tokens: None,
+                    // ADR-028: agent-scoped totals also absent in this
+                    // defensive default.
+                    agent_total_input_tokens: None,
+                    agent_total_output_tokens: None,
                 },
             };
             let agent_id = req.agent_id;

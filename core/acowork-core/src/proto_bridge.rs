@@ -56,6 +56,12 @@ impl From<&protocol::ContextUsageInfo> for proto::ContextUsageInfo {
             usage_percent: c.usage_percent as u32,
             total_input_tokens: c.total_input_tokens,
             total_output_tokens: c.total_output_tokens,
+            // ADR-028: forward the agent-scoped cumulative totals. Older
+            // Runtimes may leave these as None, in which case the proto's
+            // default (0) is fine — the bridge below treats `None` as
+            // "absent" so the session-list fallback path can fill it in.
+            agent_total_input_tokens: c.agent_total_input_tokens,
+            agent_total_output_tokens: c.agent_total_output_tokens,
         }
     }
 }
@@ -76,6 +82,10 @@ impl From<proto::ContextUsageInfo> for protocol::ContextUsageInfo {
             usage_percent: c.usage_percent as u8,
             total_input_tokens: c.total_input_tokens,
             total_output_tokens: c.total_output_tokens,
+            // ADR-028: agent-scoped totals are optional on both sides;
+            // `None` survives the round-trip (backward-compat).
+            agent_total_input_tokens: c.agent_total_input_tokens,
+            agent_total_output_tokens: c.agent_total_output_tokens,
         }
     }
 }
@@ -840,6 +850,9 @@ mod tests {
             // Cumulative session totals — None for a session with no recorded usage.
             total_input_tokens: None,
             total_output_tokens: None,
+            // ADR-028: agent-scoped totals also None (pre-ADR-028 runtime).
+            agent_total_input_tokens: None,
+            agent_total_output_tokens: None,
         };
 
         let proto_msg: proto::ContextUsageInfo = (&original).into();
@@ -854,6 +867,15 @@ mod tests {
         assert_eq!(restored.usage_percent, original.usage_percent);
         assert_eq!(restored.total_input_tokens, original.total_input_tokens);
         assert_eq!(restored.total_output_tokens, original.total_output_tokens);
+        // ADR-028: agent-total fields survive the round-trip too.
+        assert_eq!(
+            restored.agent_total_input_tokens,
+            original.agent_total_input_tokens
+        );
+        assert_eq!(
+            restored.agent_total_output_tokens,
+            original.agent_total_output_tokens
+        );
     }
 
     #[test]
@@ -872,6 +894,10 @@ mod tests {
             usage_percent: 38,
             total_input_tokens: Some(120_000),
             total_output_tokens: Some(3_400),
+            // ADR-028: agent-scoped totals are usually larger than the
+            // session-scoped ones (multi-session aggregate).
+            agent_total_input_tokens: Some(2_400_000),
+            agent_total_output_tokens: Some(48_000),
         };
 
         let proto_msg: proto::ContextUsageInfo = (&original).into();
@@ -879,6 +905,8 @@ mod tests {
 
         assert_eq!(restored.total_input_tokens, Some(120_000));
         assert_eq!(restored.total_output_tokens, Some(3_400));
+        assert_eq!(restored.agent_total_input_tokens, Some(2_400_000));
+        assert_eq!(restored.agent_total_output_tokens, Some(48_000));
         // Per-turn fields stay distinct from cumulative fields.
         assert_eq!(restored.input_tokens, 45000);
         assert_eq!(restored.output_tokens, 1200);
@@ -886,6 +914,13 @@ mod tests {
             restored.total_input_tokens.unwrap(),
             restored.input_tokens,
             "cumulative total_input_tokens must not equal per-turn input_tokens",
+        );
+        // ADR-028: agent totals must be >= session totals when both are
+        // populated — defensive check against accidental field swap.
+        assert!(
+            restored.agent_total_input_tokens.unwrap()
+                >= restored.total_input_tokens.unwrap(),
+            "agent_total_input_tokens must be >= session total_input_tokens",
         );
     }
 
@@ -906,6 +941,8 @@ mod tests {
             usage_percent: 0,
             total_input_tokens: None,
             total_output_tokens: None,
+            agent_total_input_tokens: None,
+            agent_total_output_tokens: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -913,11 +950,18 @@ mod tests {
             "None cumulative fields must be omitted from JSON for backward compat: {json}",
         );
         assert!(!json.contains("total_output_tokens"));
+        assert!(
+            !json.contains("agent_total_input_tokens"),
+            "ADR-028: agent-total fields must also be omitted when None: {json}",
+        );
+        assert!(!json.contains("agent_total_output_tokens"));
 
         // Round-trip back: optional fields still None.
         let restored: protocol::ContextUsageInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.total_input_tokens, None);
         assert_eq!(restored.total_output_tokens, None);
+        assert_eq!(restored.agent_total_input_tokens, None);
+        assert_eq!(restored.agent_total_output_tokens, None);
     }
 
     #[test]

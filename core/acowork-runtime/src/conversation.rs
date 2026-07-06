@@ -1473,14 +1473,43 @@ pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
 /// `SessionInfo` sorted by `last_active_at` descending (newest first).
 /// Falls back to a full directory scan + index rebuild if the index
 /// file is missing or corrupted.
+///
+/// ADR-028: in addition to the page slice, the join handle now also
+/// returns `(agent_total_input, agent_total_output)` summed across every
+/// session on disk (full-scan totals, not just the current page). The
+/// caller uses these to bootstrap [`AgentCore`]'s in-process counters
+/// via atomic-max merge, and to forward them to the Desktop App as a
+/// fallback data source for the agent-total token display.
 pub fn scan_sessions_async(
     conversations_dir: PathBuf,
     page: Option<u32>,
     size: Option<u32>,
-) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize)> {
+) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64))> {
     tokio::task::spawn_blocking(move || {
         // ADR-024: scan per-session meta files instead of index.json.
         let sessions = scan_sessions_from_meta(&conversations_dir);
+
+        // ADR-028: full-scan aggregate. Walk every meta file (not just
+        // the current page) so a single scan can rebuild the baseline
+        // even when `size` is small (e.g. title-only fetches). `None`
+        // sessions and sessions with `prompt_tokens == 0` (Provider
+        // fallback) are skipped on the input side; the output side is
+        // always accumulated (matches `ConversationSession::accumulate_llm_usage`).
+        let (agent_total_input, agent_total_output) = sessions
+            .iter()
+            .fold((0u64, 0u64), |(acc_in, acc_out), (_, meta)| {
+                let meta_in = meta
+                    .tokens
+                    .as_ref()
+                    .map(|t| t.total_input)
+                    .unwrap_or(0);
+                let meta_out = meta
+                    .tokens
+                    .as_ref()
+                    .map(|t| t.total_output)
+                    .unwrap_or(0);
+                (acc_in.saturating_add(meta_in), acc_out.saturating_add(meta_out))
+            });
 
         let total = sessions.len();
         let page = page.unwrap_or(1).max(1) as usize;
@@ -1502,7 +1531,7 @@ pub fn scan_sessions_async(
             })
             .collect();
 
-        (infos, total)
+        (infos, total, (agent_total_input, agent_total_output))
     })
 }
 
@@ -2313,7 +2342,7 @@ mod tests {
         std::fs::write(&meta_path2, serde_json::to_string(&corrupt_meta).unwrap()).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (sessions, _total) =
+        let (sessions, _total, _agent_totals) =
             rt.block_on(async { scan_sessions_async(conv_dir, None, None).await.unwrap() });
 
         assert_eq!(

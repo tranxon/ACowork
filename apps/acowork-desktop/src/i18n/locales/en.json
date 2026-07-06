@@ -685,6 +685,8 @@
     "completionTokens": "Completion tokens",
     "totalInputTokens": "Total input tokens",
     "totalOutputTokens": "Total output tokens",
+    "agentTotalInputTokens": "total input tokens",
+    "agentTotalOutputTokens": "total output tokens",
     "iterations": "Iterations",
     "agentStatus": "Agent Status",
     "running": "Running",

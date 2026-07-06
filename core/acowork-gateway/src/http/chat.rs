@@ -1162,6 +1162,17 @@ pub struct SessionsListResponse {
     pub total_count: usize,
     /// Total number of pages
     pub total_pages: usize,
+    /// ADR-028: agent-scoped cumulative input tokens (summed across every
+    /// on-disk session meta file). Acts as a fallback data source for the
+    /// Desktop App's "Agent total input tokens" row in the Results Panel
+    /// before the live `context_usage` WebSocket pushes start arriving.
+    /// Omitted from JSON when absent (older Runtime without ADR-028).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_total_input_tokens: Option<u64>,
+    /// ADR-028: agent-scoped cumulative output tokens. See
+    /// [`Self::agent_total_input_tokens`] for semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_total_output_tokens: Option<u64>,
 }
 
 /// Query parameters for session list pagination
@@ -1274,6 +1285,10 @@ pub async fn list_sessions(
                 sessions: vec![],
                 total_count: 0,
                 total_pages: 0,
+                // ADR-028: no Runtime → no fallback data; omit fields so
+                // older Desktop clients don't see stray zeros.
+                agent_total_input_tokens: None,
+                agent_total_output_tokens: None,
             }));
         }
     }
@@ -1311,11 +1326,22 @@ pub async fn list_sessions(
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or(1);
+    // ADR-028: agent-scoped cumulative totals (fallback for the
+    // context_usage live path). Provided by Runtime after atomic-max
+    // merge with the on-disk scan; missing on older Runtimes.
+    let agent_total_input_tokens = data
+        .get("agent_total_input_tokens")
+        .and_then(|v| v.as_u64());
+    let agent_total_output_tokens = data
+        .get("agent_total_output_tokens")
+        .and_then(|v| v.as_u64());
 
     Ok(Json(SessionsListResponse {
         sessions,
         total_count,
         total_pages,
+        agent_total_input_tokens,
+        agent_total_output_tokens,
     }))
 }
 

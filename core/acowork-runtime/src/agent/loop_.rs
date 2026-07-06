@@ -538,6 +538,10 @@ impl AgentLoop {
                     let compact_model = self.resolve_distill_model(title_input);
                     let session_core_title = self.session_core.title.clone();
                     let conversation_clone = self.session.conversation.clone();
+                    // ADR-028: clone the AgentCore so the spawned task can
+                    // feed the agent-scoped token counters for this
+                    // title-generation LLM call.
+                    let core_clone = self.core.clone();
                     let fallback_msg = if title_input.is_empty() {
                         // User only uploaded files (no text). Extract filenames
                         // from <attached_document> tags as a meaningful fallback
@@ -571,6 +575,10 @@ impl AgentLoop {
                                 if let Some(ref conv) = conversation_clone {
                                     conv.accumulate_llm_usage(&usage);
                                 }
+                                // ADR-028: also feed the agent-scoped
+                                // counters so the agent-total line in the
+                                // Results Panel accounts for this call.
+                                core_clone.accumulate_llm_usage(&usage);
                                 let trimmed: String = title.chars().take(30).collect();
                                 *session_core_title.write().unwrap() = Some(trimmed);
                             }

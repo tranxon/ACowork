@@ -555,6 +555,8 @@
     "completionTokens": "輸出 Token",
     "totalInputTokens": "總輸入 Token",
     "totalOutputTokens": "總輸出 Token",
+    "agentTotalInputTokens": "累計輸入 Token",
+    "agentTotalOutputTokens": "累計輸出 Token",
     "iterations": "迭代次數",
     "agentStatus": "Agent 狀態",
     "running": "執行中",

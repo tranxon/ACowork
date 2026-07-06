@@ -466,6 +466,15 @@ pub struct UserProfileListFile {
 /// (`total_input_tokens`, `total_output_tokens`) accumulate across all LLM
 /// calls in the session — they are sourced from `SessionTokens` and are
 /// `None` until the first LLM call has been recorded.
+///
+/// Cumulative agent fields (`agent_total_input_tokens`,
+/// `agent_total_output_tokens`) aggregate across **every LLM call made by
+/// this Runtime process for this agent** — they are sourced from
+/// [`crate::protocol`]'s agent-scoped counters and are populated on every
+/// push (live data source). The same figures also ride along in the
+/// `GET /api/agents/:id/sessions` response as a fallback for the case
+/// where the Runtime has just started and no LLM call has happened yet
+/// (in which case the counter is bootstrapped from the on-disk scan).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextUsageInfo {
     /// Context window limit (from model capabilities)
@@ -491,6 +500,17 @@ pub struct ContextUsageInfo {
     /// `None` until the first LLM call has been recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_output_tokens: Option<u64>,
+    /// ADR-028: cumulative input tokens across every LLM call made by this
+    /// Runtime process for this agent (live data source from AgentCore).
+    /// `None` if the Runtime is older than ADR-028 and never sets it; the
+    /// session-list response carries the fallback copy in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_total_input_tokens: Option<u64>,
+    /// ADR-028: cumulative output tokens across every LLM call made by this
+    /// Runtime process for this agent. See [`Self::agent_total_input_tokens`]
+    /// for semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_total_output_tokens: Option<u64>,
 }
 
 /// LLM API protocol type, derived from models.dev npm field.

@@ -343,6 +343,12 @@ export interface TokenUsage {
  *  calls in the session and are sourced from the runtime's SessionTokens.
  *  They are `undefined` until the first LLM call has been recorded (e.g.
  *  before any tool call has been made in a fresh session).
+ *
+ *  Cumulative agent fields (`agent_total_input_tokens`,
+ *  `agent_total_output_tokens`) aggregate across every LLM call made by the
+ *  Runtime process for this agent. They are the **live** data source — see
+ *  the `agentTokenTotals` field on `AgentStorage` for the fallback copy that
+ *  rides along in the `GET /api/agents/:id/sessions` response.
  */
 export interface ContextUsageInfo {
   /** Context window limit (from model capabilities) */
@@ -365,6 +371,13 @@ export interface ContextUsageInfo {
   /** Cumulative output tokens across all LLM calls in this session.
    *  Undefined until the first LLM call has been recorded. */
   total_output_tokens?: number;
+  /** ADR-028: cumulative input tokens across every LLM call made by this
+   *  Runtime process for this agent (live data source). Always `Some` from
+   *  ADR-028-aware Runtimes — `undefined` only on legacy clients. */
+  agent_total_input_tokens?: number;
+  /** ADR-028: cumulative output tokens across every LLM call made by this
+   *  Runtime process for this agent. See `agent_total_input_tokens`. */
+  agent_total_output_tokens?: number;
 }
 
 /** Navigation view type */

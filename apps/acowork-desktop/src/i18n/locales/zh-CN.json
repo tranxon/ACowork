@@ -567,6 +567,8 @@
     "completionTokens": "输出 Token",
     "totalInputTokens": "总输入 Token",
     "totalOutputTokens": "总输出 Token",
+    "agentTotalInputTokens": "累计输入 Token",
+    "agentTotalOutputTokens": "累计输出 Token",
     "iterations": "迭代次数",
     "agentStatus": "Agent 状态",
     "running": "运行中",

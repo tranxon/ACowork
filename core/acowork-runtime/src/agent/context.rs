@@ -1006,6 +1006,9 @@ pub fn compute_context_usage(
         // figure from a previous round.
         total_input_tokens: None,
         total_output_tokens: None,
+        // ADR-028: agent-scoped cumulative tokens (patched by caller).
+        agent_total_input_tokens: None,
+        agent_total_output_tokens: None,
     }
 }
 

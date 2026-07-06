@@ -1453,6 +1453,15 @@ After installation, ask the user to re-enable the MCP server.",
         self.core.manifest()
     }
 
+    /// ADR-028: access the shared [`AgentCore`] so callers (e.g. the
+    /// `list_sessions` HTTP handler) can update its agent-scoped token
+    /// counters after each on-disk session scan. Returning the underlying
+    /// `Arc` keeps the API surface minimal — callers may `merge_token_totals`
+    /// or `agent_token_totals()` without taking an extra lock.
+    pub fn core(&self) -> Arc<AgentCore> {
+        self.core.clone()
+    }
+
     /// ADR-021: Access the shared StreamingStateMap for incremental poll reads.
     ///
     /// Returns a reference to the `Arc<RwLock<HashMap<SessionId, StreamingLine>>>`

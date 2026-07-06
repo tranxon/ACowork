@@ -105,6 +105,9 @@ impl AgentLoop {
                     usage_percent: percent,
                     total_input_tokens: total_input,
                     total_output_tokens: total_output,
+                    // ADR-028: agent-scoped cumulative tokens (snapshot of AtomicU64 counters).
+                    agent_total_input_tokens: None,
+                    agent_total_output_tokens: None,
                 };
                 tracing::info!(
                     context_window = effective_window,
@@ -112,6 +115,11 @@ impl AgentLoop {
                     usage_percent = percent,
                     "Pushing immediate context_usage after context_window config change"
                 );
+                // ADR-028: snapshot the agent-scoped counters before pushing.
+                let mut ctx_info = ctx_info;
+                let (agent_in, agent_out) = self.core.agent_token_totals();
+                ctx_info.agent_total_input_tokens = Some(agent_in);
+                ctx_info.agent_total_output_tokens = Some(agent_out);
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
         }
@@ -287,6 +295,10 @@ impl AgentLoop {
                     if let Some(ref conversation) = self.session.conversation {
                         conversation.accumulate_llm_usage(&usage);
                     }
+                    // ADR-028: also feed the agent-scoped counters so the
+                    // agent-total line in Results Panel updates even if
+                    // the session's persisted meta is still on disk.
+                    self.core.accumulate_llm_usage(&usage);
                     let stripped = crate::episode_distill::strip_metadata_blocks(&summary);
                     let removed = self
                         .session
@@ -424,7 +436,15 @@ impl AgentLoop {
                     usage_percent,
                     total_input_tokens: total_input,
                     total_output_tokens: total_output,
+                    // ADR-028: agent-scoped cumulative tokens (snapshot of AtomicU64 counters).
+                    agent_total_input_tokens: None,
+                    agent_total_output_tokens: None,
                 };
+                // ADR-028: snapshot the agent-scoped counters before pushing.
+                let mut ctx_info = ctx_info;
+                let (agent_in, agent_out) = self.core.agent_token_totals();
+                ctx_info.agent_total_input_tokens = Some(agent_in);
+                ctx_info.agent_total_output_tokens = Some(agent_out);
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
         } else if usage_percent >= 95.0 {
@@ -701,6 +721,9 @@ impl AgentLoop {
                         usage_percent: percent,
                         total_input_tokens: None,
                         total_output_tokens: None,
+                        // ADR-028: agent-scoped cumulative tokens (snapshot of AtomicU64 counters).
+                        agent_total_input_tokens: None,
+                        agent_total_output_tokens: None,
                     }
                 };
                 tracing::debug!(
@@ -735,6 +758,15 @@ impl AgentLoop {
                         ctx_usage.total_output_tokens = Some(t.total_output);
                     }
                 }
+                // ADR-028: feed the agent-scoped counters and snapshot them
+                // into the push payload so the frontend's Results Panel can
+                // show a "Agent total" line. Live in this path is the
+                // primary data source; the session-list response carries a
+                // fallback copy (see `handle_list_sessions`).
+                self.core.accumulate_llm_usage(usage);
+                let (agent_in, agent_out) = self.core.agent_token_totals();
+                ctx_usage.agent_total_input_tokens = Some(agent_in);
+                ctx_usage.agent_total_output_tokens = Some(agent_out);
 
                 if !self
                     .session_core

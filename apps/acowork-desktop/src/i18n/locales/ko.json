@@ -555,6 +555,8 @@
     "completionTokens": "완료 토큰",
     "totalInputTokens": "누적 입력 토큰",
     "totalOutputTokens": "누적 출력 토큰",
+    "agentTotalInputTokens": "누적 입력 토큰",
+    "agentTotalOutputTokens": "누적 출력 토큰",
     "iterations": "반복 횟수",
     "agentStatus": "Agent 상태",
     "running": "실행 중",

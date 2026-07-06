@@ -222,6 +222,10 @@ impl super::loop_::AgentLoop {
                 // into the session token accumulator — independent of the
                 // parent's `.close()` call below.
                 let conversation_clone = self.session.conversation.clone();
+                // ADR-028: clone the AgentCore so the spawned task can also
+                // feed the agent-scoped token counters for this distillation
+                // LLM call.
+                let core_clone = self.core.clone();
                 // Build combined text for model-aware token counting via the unified API.
                 let combined_text: String =
                     tail_messages.iter().fold(String::new(), |mut acc, m| {
@@ -262,6 +266,10 @@ impl super::loop_::AgentLoop {
                             if let Some(ref conv) = conversation_clone {
                                 conv.accumulate_llm_usage(&usage);
                             }
+                            // ADR-028: also feed the agent-scoped counters
+                            // so the agent-total line in Results Panel
+                            // accounts for this distillation call.
+                            core_clone.accumulate_llm_usage(&usage);
                             crate::episode_distill::EpisodeDistiller::write_summary_to_grafeo(
                                 &summary,
                                 &session_id,

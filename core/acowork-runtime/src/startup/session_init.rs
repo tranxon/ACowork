@@ -124,7 +124,8 @@ pub(crate) async fn phase_b_init_session(
     let conversations_dir_clone = conversations_dir.clone();
     let _session_scan_handle = tokio::spawn(async move {
         let handle = crate::conversation::scan_sessions_async(conversations_dir_clone, None, None);
-        let (sessions, _) = handle.await.unwrap_or((Vec::new(), 0));
+        let (sessions, _, _agent_totals) =
+            handle.await.unwrap_or((Vec::new(), 0, (0, 0)));
         tracing::info!(count = sessions.len(), "Background session scan complete");
     });
 
