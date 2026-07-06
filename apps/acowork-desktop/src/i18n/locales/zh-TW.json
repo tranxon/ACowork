@@ -622,6 +622,7 @@
     "cancel": "取消",
     "discard": "放棄",
     "close": "關閉",
+    "refresh": "重新整理",
     "closeOthers": "關閉其他",
     "closeAll": "全部關閉",
     "batchCloseOthersConfirm": "其他 {{count}} 個分頁有未儲存的變更。放棄並關閉？",

@@ -635,6 +635,7 @@
     "cancel": "取消",
     "discard": "放弃",
     "close": "关闭",
+    "refresh": "刷新",
     "closeOthers": "关闭其他",
     "closeAll": "全部关闭",
     "batchCloseOthersConfirm": "其他 {{count}} 个标签有未保存的更改。放弃并关闭？",

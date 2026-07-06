@@ -713,6 +713,7 @@
     "cancel": "Cancel",
     "discard": "Discard",
     "close": "Close",
+    "refresh": "Refresh",
     "closeOthers": "Close Others",
     "closeAll": "Close All",
     "batchCloseOthersConfirm": "{{count}} other tab(s) have unsaved changes. Discard and close?",

@@ -10,7 +10,7 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useLspClientPool, type LspStatus } from "../../hooks/useLspClientPool";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
-import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle, Eye, Locate, XSquare, Files } from "lucide-react";
+import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle, Eye, Locate, RefreshCw, XSquare, Files } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -366,6 +366,7 @@ export function FileEditorPanel({ width }: { width: number }) {
     const closeFile = useFileEditorStore((s) => s.closeFile);
     const closeOthers = useFileEditorStore((s) => s.closeOthers);
     const closeAllFiles = useFileEditorStore((s) => s.closeAllFiles);
+    const refreshFile = useFileEditorStore((s) => s.refreshFile);
     const addAttachedContext = useChatStore((s) => s.addAttachedContext);
     const getActiveSessionId = useChatStore((s) => s.getActiveSessionId);
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
@@ -1176,6 +1177,54 @@ export function FileEditorPanel({ width }: { width: number }) {
         }
     }, [lspClient]);
 
+    // ── Tab right-click menu actions ──────────────────────────────────
+
+    /**
+     * Attach a workspace file (the one represented by the right-clicked tab) to
+     * the active chat session's attached-context list. Mirrors the workspace
+     * tree's "Add to Chat" handler so both surfaces share the same payload shape.
+     *
+     * URL-preview tabs (kind === "url") are skipped — they have no workspace
+     * relPath/absPath to attach.
+     */
+    const handleTabAddToChat = useCallback((file: OpenFile) => {
+        if (file.kind !== "file") return;
+        const agentId = selectedAgentId;
+        if (!agentId) return;
+        const sessionId = activeSessionId;
+        if (!sessionId) return;
+        // Resolve absolute path the same way as the floating selection addToChat.
+        const roots = useWorkspaceStore.getState().treeRoots;
+        const root = roots[`${agentId}:${file.workspaceId}`] ?? "";
+        const absPath = root ? `${root}/${file.relPath}` : file.relPath;
+        addAttachedContext(agentId, sessionId, {
+            id: `${agentId}:${file.relPath}`,
+            type: "file",
+            name: file.fileName,
+            absPath,
+        });
+        setTabContextMenu(null);
+    }, [selectedAgentId, activeSessionId, addAttachedContext]);
+
+    /**
+     * Re-fetch the right-clicked tab's content from Gateway, replacing both
+     * the displayed content and the originalContent baseline. This silently
+     * discards any local edits — for dirty files we ask for confirmation
+     * first (matching the FileTree delete-confirm fallback pattern) to avoid
+     * surprising the user.
+     */
+    const handleTabRefresh = useCallback(async (file: OpenFile) => {
+        if (file.kind !== "file" || file.loading) return;
+        setTabContextMenu(null);
+        if (file.dirty) {
+            const confirmed = window.confirm(
+                `This file has unsaved changes. Discard and reload from disk?`,
+            );
+            if (!confirmed) return;
+        }
+        await refreshFile(file.id);
+    }, [refreshFile]);
+
     const handleCloseTab = useCallback((file: OpenFile) => {
         setTabContextMenu(null);
         if (file.dirty) {
@@ -1538,8 +1587,37 @@ export function FileEditorPanel({ width }: { width: number }) {
                         if (!target) return null;
                         const canCloseOthers = openFiles.length > 1;
                         const canCloseAll = openFiles.length > 0;
+                        // Add to Chat / Refresh only apply to workspace files —
+                        // URL-preview tabs have no relPath/absPath to attach and
+                        // no Gateway endpoint to refetch.
+                        const showFileActions = target.kind === "file";
+                        const canAddToChat = showFileActions && !!selectedAgentId && !!activeSessionId;
+                        const canRefresh = showFileActions && !target.loading;
                         return (
                             <>
+                                {showFileActions && (
+                                    <>
+                                        <button
+                                            type="button"
+                                            onClick={() => canAddToChat && handleTabAddToChat(target)}
+                                            disabled={!canAddToChat}
+                                            className="context-menu-item"
+                                        >
+                                            <MessageSquarePlus className="context-menu-item__icon" />
+                                            {t("workspace.contextMenu.addToChat")}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => canRefresh && handleTabRefresh(target)}
+                                            disabled={!canRefresh}
+                                            className="context-menu-item"
+                                        >
+                                            <RefreshCw className="context-menu-item__icon" />
+                                            {t("fileEditor.refresh")}
+                                        </button>
+                                        <div className="context-menu-divider" />
+                                    </>
+                                )}
                                 <button
                                     type="button"
                                     onClick={() => handleCloseTab(target)}

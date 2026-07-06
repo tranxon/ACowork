@@ -622,6 +622,7 @@
     "cancel": "취소",
     "discard": "삭제",
     "close": "닫기",
+    "refresh": "새로고침",
     "closeOthers": "다른 탭 닫기",
     "closeAll": "모두 닫기",
     "batchCloseOthersConfirm": "다른 {{count}}개 탭에 저장되지 않은 변경사항이 있습니다. 삭제하고 닫으시겠습니까?",

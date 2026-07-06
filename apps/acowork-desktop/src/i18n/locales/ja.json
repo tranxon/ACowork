@@ -624,6 +624,7 @@
     "cancel": "キャンセル",
     "discard": "破棄",
     "close": "閉じる",
+    "refresh": "更新",
     "closeOthers": "その他を閉じる",
     "closeAll": "すべて閉じる",
     "batchCloseOthersConfirm": "他の {{count}} 個のタブに未保存の変更があります。破棄して閉じますか？",

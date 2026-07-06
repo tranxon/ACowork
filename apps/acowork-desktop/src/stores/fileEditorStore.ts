@@ -125,6 +125,10 @@ interface FileEditorState {
     updateContent: (fileId: string, content: string) => void;
     /** Save file content to Gateway */
     saveFile: (fileId: string) => Promise<void>;
+    /** Re-fetch file content from disk and replace both content and originalContent.
+     *  Resets dirty=false. URL-preview tabs (kind === "url") are skipped.
+     *  No-op while a refresh is already in flight for this file. */
+    refreshFile: (fileId: string) => Promise<void>;
     /** Close all open files. If `force` is false and any file is dirty,
      *  no files are closed and the function returns `false`. */
     closeAllFiles: (force?: boolean) => boolean;
@@ -132,6 +136,21 @@ interface FileEditorState {
 
 function getGatewayUrl(): string {
     return useSettingsStore.getState().gatewayUrl || DEFAULT_GATEWAY_URL;
+}
+
+/**
+ * Build the Gateway endpoint URL for a workspace file (read/write).
+ * Centralised so all callers (openFile, openPreview, saveFile, refreshFile)
+ * stay in sync on workspace_id handling and the `path` query param.
+ */
+function buildFileUrl(agentId: string, workspaceId: string, relPath: string): string {
+    const baseUrl = getGatewayUrl();
+    const params = new URLSearchParams();
+    if (workspaceId && workspaceId !== "__agent_home__") {
+        params.set("workspace_id", workspaceId);
+    }
+    params.set("path", relPath);
+    return `${baseUrl}/api/agents/${agentId}/workspaces/file?${params.toString()}`;
 }
 
 function detectLanguage(fileName: string): string {
@@ -197,13 +216,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
 
         // Fetch content from Gateway
         try {
-            const baseUrl = getGatewayUrl();
-            const params = new URLSearchParams();
-            if (workspaceId && workspaceId !== "__agent_home__") {
-                params.set("workspace_id", workspaceId);
-            }
-            params.set("path", relPath);
-            const url = `${baseUrl}/api/agents/${agentId}/workspaces/file?${params.toString()}`;
+            const url = buildFileUrl(agentId, workspaceId, relPath);
             const resp = await fetch(url);
             if (!resp.ok) {
                 console.error("[FileEditorStore] read_file failed:", resp.status);
@@ -272,13 +285,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
 
         // Fetch content from Gateway
         try {
-            const baseUrl = getGatewayUrl();
-            const params = new URLSearchParams();
-            if (workspaceId && workspaceId !== "__agent_home__") {
-                params.set("workspace_id", workspaceId);
-            }
-            params.set("path", relPath);
-            const url = `${baseUrl}/api/agents/${agentId}/workspaces/file?${params.toString()}`;
+            const url = buildFileUrl(agentId, workspaceId, relPath);
             const resp = await fetch(url);
             if (!resp.ok) {
                 console.error("[FileEditorStore] openPreview read failed:", resp.status);
@@ -401,13 +408,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }));
 
         try {
-            const baseUrl = getGatewayUrl();
-            const params = new URLSearchParams();
-            if (file.workspaceId && file.workspaceId !== "__agent_home__") {
-                params.set("workspace_id", file.workspaceId);
-            }
-            params.set("path", file.relPath);
-            const url = `${baseUrl}/api/agents/${file.agentId}/workspaces/file?${params.toString()}`;
+            const url = buildFileUrl(file.agentId, file.workspaceId, file.relPath);
             const resp = await fetch(url, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -429,6 +430,59 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId ? { ...f, saving: false } : f,
+                ),
+            }));
+        }
+    },
+
+    refreshFile: async (fileId: string) => {
+        const file = get().openFiles.find((f) => f.id === fileId);
+        if (!file) return;
+        // Only workspace files have a Gateway file endpoint to refresh against.
+        if (file.kind !== "file") return;
+        // Skip if a load is already running (avoids interleaved responses
+        // clobbering the in-flight state).
+        if (file.loading) return;
+
+        set((state) => ({
+            openFiles: state.openFiles.map((f) =>
+                f.id === fileId ? { ...f, loading: true } : f,
+            ),
+        }));
+
+        try {
+            const url = buildFileUrl(file.agentId, file.workspaceId, file.relPath);
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                console.error("[FileEditorStore] refreshFile failed:", resp.status);
+                set((state) => ({
+                    openFiles: state.openFiles.map((f) =>
+                        f.id === fileId ? { ...f, loading: false } : f,
+                    ),
+                }));
+                return;
+            }
+            const data = (await resp.json()) as { content: string; size: number; mimeType: string };
+            set((state) => ({
+                openFiles: state.openFiles.map((f) =>
+                    f.id === fileId
+                        ? {
+                            ...f,
+                            content: data.content,
+                            originalContent: data.content,
+                            mimeType: data.mimeType,
+                            loading: false,
+                            // Resetting both content and originalContent means dirty must be false.
+                            dirty: false,
+                        }
+                        : f,
+                ),
+            }));
+        } catch (e) {
+            console.error("[FileEditorStore] refreshFile error:", e);
+            set((state) => ({
+                openFiles: state.openFiles.map((f) =>
+                    f.id === fileId ? { ...f, loading: false } : f,
                 ),
             }));
         }
