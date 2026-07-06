@@ -97,6 +97,7 @@ pub struct RuntimeConfigOverrides {
     pub context_window: Option<u64>,
     pub system_prompt_override: Option<String>,
     pub shell_approval_threshold: Option<String>,
+    pub approval_timeout_secs: Option<u64>,
 }
 
 impl RuntimeConfigOverrides {
@@ -108,6 +109,7 @@ impl RuntimeConfigOverrides {
             && self.context_window.is_none()
             && self.system_prompt_override.is_none()
             && self.shell_approval_threshold.is_none()
+            && self.approval_timeout_secs.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -120,6 +122,7 @@ impl RuntimeConfigOverrides {
         context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
+        approval_timeout_secs: Option<u64>,
     ) {
         if max_output_tokens.is_some() {
             self.max_output_tokens = max_output_tokens;
@@ -138,6 +141,9 @@ impl RuntimeConfigOverrides {
         }
         if shell_approval_threshold.is_some() {
             self.shell_approval_threshold = shell_approval_threshold;
+        }
+        if approval_timeout_secs.is_some() {
+            self.approval_timeout_secs = approval_timeout_secs;
         }
     }
 }
@@ -976,6 +982,7 @@ impl SessionManager {
         context_window: Option<u64>,
         system_prompt_override: Option<String>,
         shell_approval_threshold: Option<String>,
+        approval_timeout_secs: Option<u64>,
     ) -> Vec<String> {
         self.runtime_overrides.merge(
             max_output_tokens,
@@ -984,6 +991,7 @@ impl SessionManager {
             context_window,
             system_prompt_override.clone(),
             shell_approval_threshold.clone(),
+            approval_timeout_secs,
         );
         // ── 1. Broadcast to SessionTask channels (for tool definitions etc.) ──
         let sessions = self.broadcast(SessionMessage::UpdateRuntimeConfig {
@@ -993,6 +1001,7 @@ impl SessionManager {
             context_window,
             system_prompt_override: system_prompt_override.clone(),
             shell_approval_threshold: shell_approval_threshold.clone(),
+            approval_timeout_secs,
         });
 
         // ── 2. Also deliver via send_inbound() fast channel ──
@@ -1006,6 +1015,7 @@ impl SessionManager {
             context_window,
             system_prompt_override,
             shell_approval_threshold,
+            approval_timeout_secs,
         };
         let inbound_msg = InboundMessage::UserOperation(user_op);
         for (session_id, handle) in &self.sessions {
@@ -2115,16 +2125,16 @@ mod tests {
     #[test]
     fn test_overrides_merge() {
         let mut ov = RuntimeConfigOverrides::default();
-        ov.merge(Some(100), None, None, None, None, None);
+        ov.merge(Some(100), None, None, None, None, None, None);
         assert!(!ov.is_empty());
         assert_eq!(ov.max_output_tokens, Some(100));
 
         // Re-merge with Some replaces
-        ov.merge(Some(200), None, None, None, None, None);
+        ov.merge(Some(200), None, None, None, None, None, None);
         assert_eq!(ov.max_output_tokens, Some(200));
 
         // None preserves
-        ov.merge(None, None, None, None, None, None);
+        ov.merge(None, None, None, None, None, None, None);
         assert_eq!(ov.max_output_tokens, Some(200));
     }
 

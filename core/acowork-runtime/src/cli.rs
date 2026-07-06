@@ -680,6 +680,7 @@ pub(crate) async fn run_gateway_loop(
                                         builtin_avatar: agent_cfg.builtin_avatar.clone(),
                                         max_sessions: agent_cfg.max_sessions.map(|v| v as u64),
                                         context_window: agent_cfg.context_window,
+                                        approval_timeout_secs: agent_cfg.approval_timeout_secs,
                                     },
                                 );
                                 let response = proto::ClientMessage {
@@ -1783,6 +1784,7 @@ async fn process_gateway_recv(
                     builtin_avatar,
                     max_sessions,
                     context_window,
+                    approval_timeout_secs,
                 } => {
                     tracing::info!(
 
@@ -1811,6 +1813,7 @@ async fn process_gateway_recv(
                         context_window,
                         system_prompt_override,
                         shell_approval_threshold,
+                        approval_timeout_secs,
                     );
 
                     // Handle MCP server config changes: connect, disconnect, or reconnect.
@@ -1954,6 +1957,8 @@ async fn process_gateway_recv(
                         agent_cfg.temperature = overrides.temperature;
                         agent_cfg.system_prompt_override = overrides.system_prompt_override.clone();
                         agent_cfg.shell_approval_threshold = overrides.shell_approval_threshold.clone();
+                        agent_cfg.context_window = overrides.context_window;
+                        agent_cfg.approval_timeout_secs = overrides.approval_timeout_secs;
                         // ADR-017: Apply avatar config from RuntimeConfigUpdate.
                         // Some("path") = set, Some("") = clear, None = don't change.
                         if let Some(ref av) = avatar {
