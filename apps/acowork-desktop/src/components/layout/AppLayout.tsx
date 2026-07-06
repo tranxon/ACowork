@@ -150,6 +150,18 @@ export function AppLayout() {
   // effect below.  Light mode keeps UnderWindowBackground (light tint);
   // dark mode switches to Effect::Dark (dark tint).
   //
+  // Even with Effect::Dark the native NSVisualEffectView is still a
+  // translucent material that blends with desktop wallpaper.  When the
+  // opacity slider is dragged to 0 the CSS tint layer disappears,
+  // exposing whatever sits behind the window.  On a light desktop
+  // wallpaper this makes the window appear whitish in dark mode.
+  //
+  // The set_window_effect command applies a native color tint as the
+  // first line of defense.  As a second layer we also enforce minimum
+  // CSS opacity floors for both light and dark modes on macOS so there
+  // is always enough tint to keep the visual appearance consistent
+  // regardless of desktop content.
+  //
   // Windows DWM Acrylic does NOT have this issue — it
   // faithfully blurs the desktop content in both light and dark modes.
   // Applying the floor on Windows would make the glass effect
@@ -157,25 +169,45 @@ export function AppLayout() {
   const isMacOS =
     typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
   const LIGHT_OPACITY_FLOOR = 0.18;
+  const DARK_OPACITY_FLOOR = 0.10;
   const { opacity, theme, osTheme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
   const lightOpacity = isMacOS
     ? Math.max(opacity, LIGHT_OPACITY_FLOOR)
     : opacity;
+  const darkOpacity = isMacOS
+    ? Math.max(opacity, DARK_OPACITY_FLOOR)
+    : opacity;
   const glassBg = isDark
-    ? `rgba(41,42,44,${opacity})`
+    ? `rgba(41,42,44,${darkOpacity})`
     : `rgba(226,227,233,${lightOpacity})`;
 
   // ── Sync macOS native visual-effect material with theme ────────────
-  // UnderWindowBackground (current startup default) is always light on
-  // macOS, which washes out dark mode when CSS opacity is low.  We swap
-  // to Effect::Dark for dark mode so the native layer is dark too.
+  // The Rust setup() no longer applies an initial effect (to avoid
+  // a race where its delayed retry loop clobbers this theme-aware
+  // call).  This effect is the sole owner of the native material.
+  // We retry up to 3 times with exponential backoff in case the
+  // NSView hierarchy isn't ready yet when React first mounts.
   // Non-macOS: no-op.
   useEffect(() => {
     if (typeof navigator === "undefined" || !/Mac/i.test(navigator.userAgent)) return;
-    invoke("set_window_effect", { isDark }).catch((e: unknown) =>
-      console.warn("[vibrancy] set_window_effect failed:", e)
-    );
+
+    let cancelled = false;
+    const tryApply = async (attempt: number) => {
+      try {
+        await invoke("set_window_effect", { isDark });
+        console.log(`[vibrancy] set_window_effect(isDark=${isDark}) succeeded (attempt ${attempt})`);
+      } catch (e: unknown) {
+        console.warn(`[vibrancy] set_window_effect attempt ${attempt} failed:`, e);
+        if (!cancelled && attempt < 3) {
+          const delay = 200 * Math.pow(2, attempt - 1); // 200, 400, 800 ms
+          setTimeout(() => tryApply(attempt + 1), delay);
+        }
+      }
+    };
+    tryApply(1);
+
+    return () => { cancelled = true; };
   }, [isDark]);
 
   // ── Switch to debug tab when entering debug mode ─────────────────

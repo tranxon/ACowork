@@ -9,13 +9,25 @@
 //! the theme changes, so light mode gets an always-light material and
 //! dark mode gets an always-dark material.
 
+use tauri::Manager;
+
 /// Set the macOS NSVisualEffectView material based on the current theme.
 ///
 /// * `is_dark` — whether the effective theme is dark
 ///
 /// Mapping:
-/// - `is_dark = true`  → `Effect::Dark`    (always dark tint)
-/// - `is_dark = false` → `Effect::UnderWindowBackground` (always light tint)
+/// - `is_dark = true`  → `Effect::Dark` + dark color tint
+/// - `is_dark = false` → `Effect::UnderWindowBackground` + neutral color tint
+///
+/// Even with `Effect::Dark` the native NSVisualEffectView remains
+/// translucent and blends with the desktop wallpaper.  When CSS opacity
+/// is dragged to 0 the CSS tint layer becomes transparent, exposing the
+/// desktop content through the blurred material.  On a light desktop
+/// wallpaper this makes the window appear whitish despite dark mode.
+///
+/// The per-theme `color` provides a base tint at the native layer so
+/// the window stays visually dark/light regardless of desktop content,
+/// even at zero CSS opacity.
 ///
 /// On non-macOS platforms this is a no-op.
 #[tauri::command]
@@ -26,17 +38,22 @@ pub fn set_window_effect(app: tauri::AppHandle, is_dark: bool) -> Result<(), Str
         use tauri::utils::config::WindowEffectsConfig;
         use tauri::window::{Effect, EffectState};
 
-        let material = if is_dark {
-            Effect::Dark
+        let (material, color) = if is_dark {
+            // Effect::Dark (NSVisualEffectMaterialDark) + a semi-transparent
+            // black tint so the window stays dark even when CSS opacity=0
+            // and the desktop wallpaper is light.
+            (Effect::Dark, Some((0, 0, 0, 40).into()))
         } else {
-            Effect::UnderWindowBackground
+            // UnderWindowBackground (NSVisualEffectMaterialUnderWindowBackground)
+            // + a subtle neutral tint matching the initial setup in lib.rs.
+            (Effect::UnderWindowBackground, Some((128, 128, 128, 30).into()))
         };
 
         let effects = WindowEffectsConfig {
             effects: vec![material],
             state: Some(EffectState::Active),
             radius: None,
-            color: None,
+            color,
         };
 
         if let Some(window) = app.get_webview_window("main") {
